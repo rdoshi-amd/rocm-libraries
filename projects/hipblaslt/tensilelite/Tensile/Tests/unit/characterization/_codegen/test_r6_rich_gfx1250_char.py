@@ -32,10 +32,11 @@ Pure-assert test; no syrupy snapshot required.
 """
 
 import os
+import re
 
 import pytest
 
-from config_harness import emit_kernels_from_config
+from config_harness import emit_kernels_from_config, solutions_from_config
 
 pytestmark = pytest.mark.unit
 
@@ -121,3 +122,169 @@ def test_r6_rich_gfx1250_bias_and_scale_present():
         "Expected at least one kernel to reference bias "
         "(KWA 14760-14960) — check UseBias=1, BiasSrc=D"
     )
+
+
+def test_r6_rich_gfx1250_device_scalar_alpha_dispatch_present():
+    """Device scalar mode schedules its value load before the common Alpha consumer."""
+    results = emit_kernels_from_config(_CONFIG, limit=8, arch=_ARCH)
+    assert len(results) >= 1, "Need at least one kernel to check scalar-alpha dispatch"
+    for base, src, err in results:
+        assert err == 0, f"Kernel {base!r} emitted with err={err}, expected 0"
+        assert "_SB_" in base, f"Kernel {base!r} is not the expected strided-batched path"
+        assert "device scalar alpha bit" in src
+        assert "save scalar alpha in ArgType bit 9" in src
+        assert "load device scalar alpha pointer" in src
+        assert "replace inline alpha with ScaleAlphaVec[0]" in src
+        assert "uniform alpha path; stage ScaleAlphaVec identity" not in src
+        assert "device scalar drains remaining epilogue LDS reads" not in src
+        assert "label_DeviceScalarEpilogueLdsReady" not in src
+        assert "broadcast ScaleAlphaVec[0]" not in src
+        assert "device scalar skips vector load" in src
+        assert "device scalar skips ScaleAlphaVec LDS store" in src
+        assert "device scalar skips ScaleAlphaVec LDS load" in src
+        assert "device scalar skips vector alpha preparation" in src
+        assert "wait for ScaleAlphaVec LDS preparation" in src
+        assert "ScaleAlphaVec[0] is already applied through Alpha" not in src
+        assert "label_DeviceScalarScaleAlphaDone" not in src
+        assert "label_DeviceScalarStoreWait" not in src
+        assert "ScaleAlpha offset mask" not in src
+
+        global_guard = src.index("device scalar skips vector load")
+        vector_load = src.index("Load ScaleAlphaVec", global_guard)
+        global_done = src.index("label_ScaleAlphaVecReady", vector_load)
+        assert global_guard < vector_load < global_done
+
+        store_guard = src.index("device scalar skips ScaleAlphaVec LDS store")
+        lds_store = src.index("store scaleAlpha", store_guard)
+        store_done = src.index("label_DeviceScalarScaleAlphaStoreDone", lds_store)
+        assert store_guard < lds_store < store_done
+
+        load_guard = src.index("device scalar skips ScaleAlphaVec LDS load")
+        lds_load = src.index("load scaleAlpha", load_guard)
+        load_done = src.index("label_DeviceScalarScaleAlphaLoadDone", lds_load)
+        assert load_guard < lds_load < load_done
+
+        preparation_guard = src.index(
+            "device scalar skips vector alpha preparation"
+        )
+        preparation_wait = src.index(
+            "wait for ScaleAlphaVec LDS preparation", preparation_guard
+        )
+        guarded_multiply = src.index("*= ScaleAlphaVec", preparation_wait)
+        preparation_done = src.index(
+            "label_DeviceScalarAlphaPreparationDone", guarded_multiply
+        )
+        assert preparation_guard < preparation_wait < guarded_multiply
+        assert guarded_multiply < preparation_done
+
+        alpha_load_marker = "replace inline alpha with ScaleAlphaVec[0]"
+        late_wait_marker = "wait for scheduled device scalar alpha"
+        alpha_consumer_marker = "Short circuit condition if Alpha == 0"
+        alpha_loads = [
+            match.start() for match in re.finditer(re.escape(alpha_load_marker), src)
+        ]
+        late_waits = [
+            match.start() for match in re.finditer(re.escape(late_wait_marker), src)
+        ]
+
+        assert alpha_loads, f"Kernel {base!r} has no device scalar-alpha value load"
+        assert len(late_waits) == 1, (
+            f"Kernel {base!r} must share exactly one scheduled scalar-alpha wait, "
+            f"found {len(late_waits)}"
+        )
+        late_wait = late_waits[0]
+        assert all(alpha_load < late_wait for alpha_load in alpha_loads), (
+            f"Kernel {base!r} must issue every device scalar-alpha value load "
+            "before the shared scheduled wait"
+        )
+
+        # Both routed/non-routed prologue clones issue the value load before
+        # reaching a common late wait. Ensure the latest clone still leaves
+        # real, alpha-independent setup work in that latency-hiding window.
+        for alpha_load in alpha_loads:
+            load_block_end = src.index("label_DeviceScalarAlphaDone", alpha_load)
+            assert "wait for device scalar alpha" not in src[
+                alpha_load + len(alpha_load_marker):load_block_end
+            ], f"Kernel {base!r} still waits immediately after a device scalar-alpha load"
+
+            scheduling_window = src[alpha_load + len(alpha_load_marker):late_wait]
+            independent_instructions = [
+                line.strip()
+                for line in scheduling_window.splitlines()
+                if re.match(r"^(?:s|v)_[a-z0-9_]+\b", line.strip())
+                and not line.strip().startswith(
+                    ("s_wait_", "s_bitcmp1_", "s_cbranch_")
+                )
+                and "sgprAlpha" not in line
+            ]
+            assert independent_instructions, (
+                f"Kernel {base!r} has no independent prologue instruction between "
+                "a device scalar-alpha load and its scheduled wait"
+            )
+
+        alpha_consumer = src.index(alpha_consumer_marker)
+        assert late_wait < alpha_consumer, (
+            f"Kernel {base!r} must complete the scheduled scalar-alpha load "
+            "before the common Alpha==0 shortcut"
+        )
+
+        # The same generated kernel also handles vector alpha. Its late wait
+        # must remain behind the runtime ArgType[9] guard so vector mode does
+        # not drain unrelated scalar-memory traffic.
+        late_wait_window = src[max(alpha_loads):alpha_consumer]
+        assert re.search(
+            r"s_bitcmp1_b32[^\n]*, 9[^\n]*device scalar alpha\?\n"
+            r"s_cbranch_scc0[^\n]*label_DeviceScalarAlphaReady[^\n]*"
+            r"vector alpha has no scheduled scalar load\n"
+            r"s_wait_kmcnt 0[^\n]*wait for scheduled device scalar alpha",
+            late_wait_window,
+        ), f"Kernel {base!r} is missing the vector-mode guard around the late wait"
+
+        if "skip buffer deref is size of summation is 0" in src:
+            assert all(
+                alpha_load < src.index("skip buffer deref is size of summation is 0")
+                for alpha_load in alpha_loads
+            )
+
+
+def test_r6_rich_gfx1250_conversion_uses_scalar_alpha_element_zero():
+    """Post-GSU conversion replaces inline alpha with the device scalar."""
+    from Tensile.KernelHelperNaming import initConversionKernelObjects
+    from Tensile.TensileCreateLibrary.Run import generateKernelObjectsFromSolutions
+    import codegen_harness as _ch
+
+    sols = solutions_from_config(_CONFIG, arch=_ARCH, limit_solutions=1)
+    assert sols, "Need one solution to generate the conversion helper"
+    kernels = generateKernelObjectsFromSolutions(sols)
+    assert kernels, "Need one generated kernel to derive production helper state"
+    _assembler, iim = _ch._toolchain()
+    conversions = initConversionKernelObjects(kernels[0], iim)
+    assert conversions, "Need at least one conversion helper"
+    conversion = conversions[0]
+    err, src = conversion.getSourceFileString()
+    header = conversion.getHeaderFileString()
+
+    assert err == 0
+    assert kernels[0]["InternalSupportParams"]["SupportDeviceScalarAlpha"] is True
+    assert "_DSA_PostGSU" in conversion.getKernelName()
+    assert "_GG_" not in header
+    assert "_GG_" not in src
+    assert "unsigned int deviceScalarAlpha;" in header
+    assert "if(arg.deviceScalarAlpha){" in src
+    assert "arg.alpha = arg.ScaleAlphaVec[0];" in src
+    assert "if(arg.ScaleAlphaVec != nullptr && !arg.deviceScalarAlpha){" in src
+    assert "ScaleAlphaVec[arg.deviceScalarAlpha ? 0 :" not in src
+
+    kernels[0]["InternalSupportParams"]["SupportDeviceScalarAlpha"] = False
+    legacy_conversions = initConversionKernelObjects(kernels[0], iim)
+    legacy = legacy_conversions[0]
+    legacy_err, legacy_src = legacy.getSourceFileString()
+    legacy_header = legacy.getHeaderFileString()
+
+    assert legacy_err == 0
+    assert "_DSA_PostGSU" not in legacy.getKernelName()
+    assert "_GG_" in legacy_header
+    assert "_GG_" in legacy_src
+    assert "unsigned int deviceScalarAlpha;" not in legacy_header
+    assert "arg.deviceScalarAlpha" not in legacy_src
+    assert "arg.ScaleAlphaVec[" in legacy_src

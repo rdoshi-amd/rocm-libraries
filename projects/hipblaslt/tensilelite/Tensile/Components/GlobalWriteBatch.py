@@ -29,7 +29,7 @@ from rocisa.instruction import BufferAtomicAddF32, BufferAtomicCmpswapB32, \
   BufferAtomicPkAddBF16, GlobalLoadB32, GlobalStoreB32, SLoadB128, \
   BufferAtomicCmpswapB64, BufferStoreB16, BufferStoreB32, BufferStoreB64, BufferStoreB128, \
   DSBPermuteB32, FlatAtomicCmpswapB32, \
-  SAddCU32, SAddU32, SAddU64, SAndB32, \
+  SAddCU32, SAddU32, SAddU64, SAndB32, SBitcmp1B32, \
   SAndB64, SAtomicDec, SAtomicInc, SBarrier, SBfmB32, SBfmB64, SBranch, SCBranchExecNZ, SCBranchExecZ, \
   SCBranchSCC0, SCBranchSCC1, SCBranchVCCNZ, SCmpGtU32, SCmpKGtU32, SCSelectB32, SCmpEQI32, SCmpEQU32, SCmpGtI32, SCmpLeI32, SCmpLeU32, SMinU32, SEndpgm, \
   SLShiftLeftB32, SLShiftLeftB64, SLShiftRightB32, SLShiftRightB64, SMovB32, SMovB64, SMulHIU32, SMulI32, \
@@ -552,7 +552,8 @@ class GlobalWriteBatchWriter:
         self.ss._clsLoopLabel = None
     return module
 
-  def globalStoreWait(self, elementIdx, waitCnter, vlcntTotalIssued, dscntTotalIssued, interleaveStoreVmcnt: bool):
+  def globalStoreWait(self, elementIdx, waitCnter, vlcntTotalIssued, dscntTotalIssued,
+                      interleaveStoreVmcnt: bool, skipPreparedScaleVecs: bool = False):
     vlcnt = -1
     dscnt = -1
     vscnt = -1
@@ -582,13 +583,15 @@ class GlobalWriteBatchWriter:
       if self.parentWriter.states.useBias == DataDirection.READ and not subtileBarrierDrains:
         waitLocalLoadCnt += self.biasLoadIssued[elementIdx]
         waitLocalLoadCntStrList.append("%d (bias)"%self.biasLoadIssued[elementIdx])
-      if (self.kernel["ProblemType"]["UseScaleAB"] == "Vector") and isSingleKernel:
+      if ((self.kernel["ProblemType"]["UseScaleAB"] == "Vector") and isSingleKernel and
+          not skipPreparedScaleVecs):
         waitLocalLoadCnt += self.scaleAVecLoadIssued[elementIdx]
         waitLocalLoadCntStrList.append("%d (scaleAVec)"%self.scaleAVecLoadIssued[elementIdx])
         waitLocalLoadCnt += self.scaleBVecLoadIssued[elementIdx]
         waitLocalLoadCntStrList.append("%d (scaleBVec)"%self.scaleBVecLoadIssued[elementIdx])
-      # Skip scaleAlphaVec when subtileBarrierDrains
-      if self.kernel["ProblemType"]["UseScaleAlphaVec"] and isSingleKernel and not subtileBarrierDrains:
+      # Skip scaleAlphaVec when subtileBarrierDrains or alpha preparation consumed it.
+      if (self.kernel["ProblemType"]["UseScaleAlphaVec"] and isSingleKernel and
+          not subtileBarrierDrains and not skipPreparedScaleVecs):
         waitLocalLoadCnt += self.scaleAlphaVecLoadIssued[elementIdx]
         waitLocalLoadCntStrList.append("%d (scaleAlphaVec)"%self.scaleAlphaVecLoadIssued[elementIdx])
       # Get vlcnt and dscnt
@@ -631,6 +634,9 @@ class GlobalWriteBatchWriter:
             tmp += " - %s"%cntStr
           comment = comment + (" " if comment else "") + "dscnt(%d) = %d%s"%(dscnt, dscntTotalIssued, tmp)
         # if not self.kernel["_GlobalAccumulation"] == "MultipleBufferSingleKernel":
+        if skipPreparedScaleVecs:
+          comment = (comment + (" " if comment else "") +
+                     "scale vectors consumed by alpha preparation")
         return SWaitCnt(dscnt=dscnt, vlcnt=vlcnt, vscnt=vscnt, comment="%s (interleaved)"%comment)
     else:
       commentList = []
@@ -648,10 +654,12 @@ class GlobalWriteBatchWriter:
       if self.parentWriter.states.useBias == DataDirection.READ:
         dscnt = 0
         commentList.append("Bias LDS")
-      if (self.kernel["ProblemType"]["UseScaleAB"] == "Vector") and isSingleKernel:
+      if ((self.kernel["ProblemType"]["UseScaleAB"] == "Vector") and isSingleKernel and
+          not skipPreparedScaleVecs):
         dscnt = 0
         commentList.append("ScaleABVec")
-      if self.kernel["ProblemType"]["UseScaleAlphaVec"] and isSingleKernel:
+      if (self.kernel["ProblemType"]["UseScaleAlphaVec"] and isSingleKernel and
+          not skipPreparedScaleVecs):
         dscnt = 0
         commentList.append("ScaleAlphaVec")
       if (vlcnt != -1) or (dscnt != -1):
@@ -727,10 +735,26 @@ class GlobalWriteBatchWriter:
     dataScaleAlphaVec     = self.ss.elementDataScaleAlphaVec[elementIdx]
     skipLoad = True if self.factorDim else False
     isSingleKernel = ((self.kernel["GlobalSplitU"] == 1 or self.kernel["GlobalSplitU"] == -1) or self.kernel["_GlobalAccumulation"] == "MultipleBufferSingleKernel") or isPersistent(self.kernel)
+    supportDeviceScalarAlpha = self.kernel.get(
+      "InternalSupportParams", {}).get("SupportDeviceScalarAlpha", False)
+
+    def addGuardedLdsLoad(targetModule, loadCode, bypassDeviceScalarAlpha):
+      if bypassDeviceScalarAlpha:
+        ldsLoadDone = Label(
+          label=self.parentWriter.labels.getNameInc("DeviceScalarScaleAlphaLoadDone"), comment="")
+        targetModule.add(
+          SBitcmp1B32(src0=sgpr("ArgType"), src1=9, comment="device scalar alpha?"))
+        targetModule.add(SCBranchSCC1(
+          labelName=ldsLoadDone.getLabelName(),
+          comment="device scalar skips ScaleAlphaVec LDS load"))
+      targetModule.add(loadCode)
+      if bypassDeviceScalarAlpha:
+        targetModule.add(ldsLoadDone)
 
     def addEpilogueLoad(modGwvw, ldName: str, addrVecVgpr, addrVec, dataVec, loadedDataVec,
                         vecOffset, gwvw, referenceVgpr, dim, referenceDim,
-                        skipLoad: bool = False, comment: str = "") -> int:
+                        skipLoad: bool = False, bypassDeviceScalarAlpha: bool = False,
+                        comment: str = "") -> int:
       """One vector's epilogue load: emitLdChange (address compute) always runs;
       captured `preamble` gates ONLY the ds_load (preamble=True = address only).
       """
@@ -745,14 +769,17 @@ class GlobalWriteBatchWriter:
         targetModule = loadInputCode if self.kernel["GroupLoadStore"] else module
         self._emitLdsBarrierIfNeeded(targetModule, isSingleKernel)
         if not preamble:
-          targetModule.add(self.parentWriter.addLdsLoad(self.kernel["ProblemType"]["ComputeDataType"], dataVec, ldsAddrVgpr, vecOffset, gwvw, comment=comment))
+          primaryLdsLoad = self.parentWriter.addLdsLoad(self.kernel["ProblemType"]["ComputeDataType"], dataVec, ldsAddrVgpr, vecOffset, gwvw, comment=comment)
+          addGuardedLdsLoad(targetModule, primaryLdsLoad, bypassDeviceScalarAlpha)
           loadedDataVec[dataVec] = ceil(self.kernel["ProblemType"]["ComputeDataType"].numBytes() * gwvw / 16)
           loadsIssued = ceil(self.kernel["ProblemType"]["ComputeDataType"].numBytes() * gwvw / 16)
           if (self.ss.cfg.gwvw != gwvw) and (not skipLoad):
             remain_load = self.ss.cfg.gwvw - 1
             #For below ds_read instruction do not add bias issued , because of all ds_load instructions need to be completed at the same time in this batch.
+            remainLdsLoads = Module("Remaining epilogue LDS loads")
             for r in range(remain_load):
-              modGwvw.add(self.parentWriter.addLdsLoad(self.kernel["ProblemType"]["ComputeDataType"], dataVec, ldsAddrVgpr, vecOffset, factor_gwvw, comment=comment))
+              remainLdsLoads.add(self.parentWriter.addLdsLoad(self.kernel["ProblemType"]["ComputeDataType"], dataVec, ldsAddrVgpr, vecOffset, factor_gwvw, comment=comment))
+            addGuardedLdsLoad(modGwvw, remainLdsLoads, bypassDeviceScalarAlpha)
       return loadsIssued
 
     modGwvwScale = []
@@ -774,7 +801,7 @@ class GlobalWriteBatchWriter:
         savLdsRefVgpr = None if (self.kernel.get("UseSubtileImpl") and addrScaleAlphaVecVgpr is not None) else localReferenceVgpr
       else:
         savLdsRefVgpr = localReferenceVgpr
-      self.loadsScaleAlphaVecIssued += addEpilogueLoad(modGwvwScaleAlpha, "ScaleAlphaVec", addrScaleAlphaVecVgpr, self.addrScaleAlphaVec, dataScaleAlphaVec, self.loadedDataScaleAlphaVec, addrCalc.scaleAlphaVecOffset[self.factorDim], factor_gwvw, savLdsRefVgpr, self.factorDim, self.factorDim, skipLoad=skipLoad, comment="load scaleAlpha")
+      self.loadsScaleAlphaVecIssued += addEpilogueLoad(modGwvwScaleAlpha, "ScaleAlphaVec", addrScaleAlphaVecVgpr, self.addrScaleAlphaVec, dataScaleAlphaVec, self.loadedDataScaleAlphaVec, addrCalc.scaleAlphaVecOffset[self.factorDim], factor_gwvw, savLdsRefVgpr, self.factorDim, self.factorDim, skipLoad=skipLoad, bypassDeviceScalarAlpha=supportDeviceScalarAlpha, comment="load scaleAlpha")
       if localReferenceVgpr == None:
         localReferenceVgpr = addrScaleAlphaVecVgpr
       modGwvwScale.append(modGwvwScaleAlpha)
@@ -913,6 +940,130 @@ class GlobalWriteBatchWriter:
     """Release scratch from _epilogScratchSgpr (no-op when non-CLS reused tmpSgpr)."""
     if self.kernel["CompactLoopStore"]:
       self.parentWriter.sgprPool.checkIn(sgprIdx)
+
+  def _deviceScalarAlphaPreparationEnabled(self):
+    isSingleKernel = ((self.kernel["GlobalSplitU"] == 1 or self.kernel["GlobalSplitU"] == -1) or
+                      self.kernel["_GlobalAccumulation"] == "MultipleBufferSingleKernel") or \
+                     isPersistent(self.kernel)
+    return (isSingleKernel and self.kernel["ProblemType"]["UseScaleAlphaVec"] and
+            self.kernel.get("InternalSupportParams", {}).get(
+              "SupportDeviceScalarAlpha", False))
+
+  def _applyScaleVec(self, module: Module, addressStr: str, dataScaleVec: int,
+                     factorDim: int, elementIdx: int, isGlobal: bool = True):
+    if not self.beta and not self.applyAlpha: # case for beta-0 and alpha == 1,(OptNLL)
+      if (self.kernel["ProblemType"]["DestDataType"].isInt8() or self.kernel["ProblemType"]["DestDataType"].isInt32() or \
+          (self.kernel["ProblemType"]["DataType"].isInt8() and self.kernel["ProblemType"]["DestDataType"].isHalf()) or \
+          (self.kernel["ProblemType"]["DataType"].isInt8() and self.kernel["ProblemType"]["DestDataType"].isBFloat16())) and \
+        self.kernel["ProblemType"]["ComputeDataType"].isSingle():
+        module.add(convertData(self.gwvw, self.ss.elementSumIdx[elementIdx],
+                               cvtType=CvtType.CVT_I32_to_F32, inputPrefix="ValuC+",
+                               prefixOffset=self.parentWriter.states.c.startVgprValu))
+
+    if self.kernel["ProblemType"]["ComputeDataType"].isSingle():
+      maskConst = 1.0
+    elif self.kernel["ProblemType"]["ComputeDataType"].isInt32():
+      maskConst = 1
+
+    gwvw = 1 if factorDim else self.gwvw
+    if isGlobal:
+      module.add(VCmpGtU32(
+        dst=sgpr("Address%s"%addressStr, self.parentWriter.states.laneSGPRCount),
+        src0=sgpr("Srd%s+2"%addressStr), src1=0, comment=" == 0 ?"))
+      for vi2 in range(0, gwvw):
+        module.add(VCndMaskB32(
+          dst=vgpr(dataScaleVec + vi2), src1=vgpr(dataScaleVec + vi2),
+          src0=maskConst,
+          src2=sgpr("Address%s"%addressStr, self.parentWriter.states.laneSGPRCount),
+          comment="1. mul 1 if 0"))
+    if factorDim and self.gwvw > 1:
+      module.add(VMovB32(dst=vgpr(dataScaleVec+1), src=vgpr(dataScaleVec),
+                         comment="copy data%s to data%s+1"%(addressStr, addressStr)))
+
+    for vi in range(0, self.gwvw):
+      inputScaleVecVgpr = dataScaleVec + (0 if factorDim else vi)
+      sumIdxV = self.ss.elementSumIdx[elementIdx] + vi
+      if self.kernel["ProblemType"]["ComputeDataType"].isSingle():
+        vgprIdx = sumIdxV - self.parentWriter.states.c.startVgprValu
+        # Generate single f32 code if edge is detected.
+        if ((vi + 1) == self.gwvw) and ((self.gwvw % 2) == 1):
+          module.add(VMulF32(dst=vgpr("ValuC+%d"%vgprIdx),
+                             src0=vgpr(inputScaleVecVgpr),
+                             src1=vgpr("ValuC+%d"%vgprIdx),
+                             comment="*= %sVMul"%addressStr))
+        # Original packed route
+        elif vi%2 == 1:
+          assert (self.gwvw % 2 == 0)
+        else:
+          module.add(VMulPKF32(dst=vgpr("ValuC+%d"%vgprIdx, 2),
+                               src0=vgpr(inputScaleVecVgpr, 2),
+                               src1=vgpr("ValuC+%d"%vgprIdx, 2),
+                               comment="*= %sVMulPK(%d)(%d)"%(
+                                 addressStr, dataScaleVec, vi)))
+      elif self.kernel["ProblemType"]["ComputeDataType"].isInt32():
+        vgprIdx = sumIdxV - self.parentWriter.states.c.startVgprValu
+        # Generate single i32 code if edge is detected.
+        if ((vi + 1) == self.gwvw) and ((self.gwvw % 2) == 1):
+          module.add(VMulLOU32(dst=vgpr("ValuC+%d"%vgprIdx),
+                               src0=vgpr(inputScaleVecVgpr),
+                               src1=vgpr("ValuC+%d"%vgprIdx),
+                               comment="*= %sVMul"%addressStr))
+        elif vi%2 == 1:
+          assert (self.gwvw % 2 == 0)
+        else:
+          module.add(VMulLOU32(dst=vgpr("ValuC+%d"%vgprIdx),
+                               src0=vgpr(inputScaleVecVgpr),
+                               src1=vgpr("ValuC+%d"%vgprIdx),
+                               comment="*= %sVMulPK(%d)(%d)"%(
+                                 addressStr, dataScaleVec, vi)))
+          module.add(VMulLOU32(dst=vgpr("ValuC+%d"%(vgprIdx+1)),
+                               src0=vgpr(inputScaleVecVgpr+1),
+                               src1=vgpr("ValuC+%d"%(vgprIdx+1)),
+                               comment="*= %sVMulPK(%d)(%d)"%(
+                                 addressStr, dataScaleVec, vi)))
+      else:
+        raise RuntimeError("Unsupported %s compute data type %s."%(
+          addressStr, str(self.kernel["ProblemType"]["ComputeDataType"])))
+
+  def _emitScaleAlphaVecPreparation(self, module: Module):
+    """Prepare every multiplicative epilogue scale before the shared tail.
+
+    Preserve the legacy order Alpha -> ScaleA -> ScaleB -> ScaleAlphaVec. A
+    device scalar has already replaced sgprAlpha and skips only the final
+    ScaleAlphaVec phase; beta, activation, conversion, and stores remain shared.
+    """
+    if not self._deviceScalarAlphaPreparationEnabled():
+      return
+
+    useScaleAB = self.kernel["ProblemType"]["UseScaleAB"] == "Vector"
+    if useScaleAB:
+      if (self.loadsScaleAVecIssued + self.loadsScaleBVecIssued +
+          self.loadsScaleAlphaVecIssued) > 0:
+        module.add(SWaitCnt(dscnt=0, comment="wait for scale-vector alpha preparation"))
+      for elementIdx in range(len(self.batchElements)):
+        self._applyScaleVec(module, "ScaleA",
+                            self.ss.elementDataScaleAVec[elementIdx], 0,
+                            elementIdx, isGlobal=False)
+        self._applyScaleVec(module, "ScaleB",
+                            self.ss.elementDataScaleBVec[elementIdx], 1,
+                            elementIdx, isGlobal=False)
+
+    preparationDone = Label(
+      label=self.parentWriter.labels.getNameInc("DeviceScalarAlphaPreparationDone"),
+      comment="")
+    module.addComment1("runtime-selected ScaleAlphaVec alpha preparation")
+    module.add(SBitcmp1B32(src0=sgpr("ArgType"), src1=9,
+                            comment="device scalar alpha?"))
+    module.add(SCBranchSCC1(
+      labelName=preparationDone.getLabelName(),
+      comment="device scalar skips vector alpha preparation"))
+    if not useScaleAB and self.loadsScaleAlphaVecIssued > 0:
+      module.add(SWaitCnt(dscnt=0, comment="wait for ScaleAlphaVec LDS preparation"))
+    for elementIdx in range(len(self.batchElements)):
+      self._applyScaleVec(module, "ScaleAlphaVec",
+                          self.ss.elementDataScaleAlphaVec[elementIdx],
+                          self.factorDim, elementIdx, isGlobal=False)
+    module.add(preparationDone)
 
   def _prolog(self, module: Module):
     module.addComment0("optSingleColVgpr=%u optSharedColVgpr=%u optSGPRUsage=%s optSrdIncForRow=%u factorDim=%u" % \
@@ -1433,6 +1584,8 @@ class GlobalWriteBatchWriter:
                 module.add(VCvtI32toF32(dst=vgpr(srcRegName), src=vgpr(srcRegName), comment="Convert MI out reg to fp32"))
               module.add(rh)
 
+    self._emitScaleAlphaVecPreparation(module)
+
   def _epilog(self, module: Module):
     # return registers to pool:
     lastDataD       = -1
@@ -1694,6 +1847,7 @@ class GlobalWriteBatchWriter:
     ########################################
     # edge has v_cndmask so loads or stores may not issue, hard to track vmcnt:
     interleaveStoreVmcnt = self.parentWriter.states.interleaveStoreVmcnt and not self.edge
+    alphaPrepared = self._deviceScalarAlphaPreparationEnabled()
 
     for elementIdx in range(len(self.batchElements)):
       for vi in range(self.gwvw):
@@ -1714,7 +1868,8 @@ class GlobalWriteBatchWriter:
     # wait for batched load
     # Here we wait all
     if not interleaveStoreVmcnt:
-      waitcntInst = self.globalStoreWait(0, [], 0, 0, False)
+      waitcntInst = self.globalStoreWait(
+        0, [], 0, 0, False, skipPreparedScaleVecs=alphaPrepared)
       if waitcntInst:
         module.add(waitcntInst)
 
@@ -1815,7 +1970,13 @@ class GlobalWriteBatchWriter:
     storeCode = Module("GroupLoadStore")
     vlcntTotalIssued = self.loadsBetaIssued + self.loadsEIssued + self.loadsGateIssued
     dscntTotalIssued = self.localLoadsBiasIssued + self.loadsScaleAVecIssued + self.loadsScaleBVecIssued + self.loadsScaleAlphaVecIssued
+    if alphaPrepared:
+      dscntTotalIssued -= self.loadsScaleAlphaVecIssued
+      if self.kernel["ProblemType"]["UseScaleAB"] == "Vector":
+        dscntTotalIssued -= self.loadsScaleAVecIssued + self.loadsScaleBVecIssued
+      assert dscntTotalIssued >= 0
     waitCnter = [vlcntTotalIssued, dscntTotalIssued]
+
     for elementIdx in range(0, len(self.batchElements)):
       element = self.batchElements[elementIdx]
       addrCalc: AddrCalculation = self.ss.elementAddr[elementIdx]
@@ -1889,77 +2050,31 @@ class GlobalWriteBatchWriter:
         module.add(self.getEdgeMovInstType()(EXEC(), sgpr(mask, self.laneSGPRC), "sgprs -> exec"))
 
       if interleaveStoreVmcnt:
-        waitcntInst = self.globalStoreWait(elementIdx, waitCnter, vlcntTotalIssued, dscntTotalIssued, True)
+        waitcntInst = self.globalStoreWait(
+          elementIdx, waitCnter, vlcntTotalIssued, dscntTotalIssued, True,
+          skipPreparedScaleVecs=alphaPrepared)
         if waitcntInst:
           module.addSpaceLine()
           module.add(waitcntInst)
-
-      def applyScaleVec(vecModule, addressStr, dataScaleVec, factorDim, isGlobal=True):
-        if not self.beta and not self.applyAlpha: # case for beta-0 and alpha == 1,(OptNLL)
-          if (self.kernel["ProblemType"]["DestDataType"].isInt8() or self.kernel["ProblemType"]["DestDataType"].isInt32() or \
-              (self.kernel["ProblemType"]["DataType"].isInt8() and self.kernel["ProblemType"]["DestDataType"].isHalf()) or \
-              (self.kernel["ProblemType"]["DataType"].isInt8() and self.kernel["ProblemType"]["DestDataType"].isBFloat16())) and \
-            self.kernel["ProblemType"]["ComputeDataType"].isSingle():
-            module.add(convertData(self.gwvw, self.ss.elementSumIdx[elementIdx], cvtType=CvtType.CVT_I32_to_F32, \
-                                        inputPrefix="ValuC+", prefixOffset=self.parentWriter.states.c.startVgprValu))
-
-        if self.kernel["ProblemType"]["ComputeDataType"].isSingle():
-          maskConst = 1.0
-        elif self.kernel["ProblemType"]["ComputeDataType"].isInt32():
-          maskConst = 1
-
-        gwvw = 1 if factorDim else self.gwvw
-        if isGlobal:
-          vecModule.add(VCmpGtU32(dst=sgpr("Address%s"%addressStr, self.parentWriter.states.laneSGPRCount), src0=sgpr("Srd%s+2"%addressStr), src1=0, comment=" == 0 ?"))
-          for vi2 in range(0, gwvw):
-            vecModule.add(VCndMaskB32(
-              dst=vgpr(dataScaleVec + vi2), \
-              src1=vgpr(dataScaleVec + vi2), \
-              src0=maskConst, \
-              src2=sgpr("Address%s"%addressStr, self.parentWriter.states.laneSGPRCount), \
-              comment="1. mul 1 if 0"))
-        if factorDim and self.gwvw > 1:
-          vecModule.add(VMovB32(dst=vgpr(dataScaleVec+1), src=vgpr(dataScaleVec), comment="copy data%s to data%s+1"%(addressStr, addressStr)))
-
-        for vi in range(0, self.gwvw):
-          inputScaleVecVgpr = dataScaleVec + (0 if factorDim else vi)
-          sumIdxV   = self.ss.elementSumIdx[elementIdx] + vi
-          if self.kernel["ProblemType"]["ComputeDataType"].isSingle():
-            vgprIdx = sumIdxV - self.parentWriter.states.c.startVgprValu
-            # Generate single f32 code if edge is detected.
-            if ((vi + 1) == self.gwvw) and ((self.gwvw % 2) == 1):
-              vecModule.add(VMulF32(dst=vgpr("ValuC+%d"%vgprIdx), src0=vgpr(inputScaleVecVgpr), src1=vgpr("ValuC+%d"%vgprIdx), comment="*= %sVMul"%addressStr ))
-            # Original packed route
-            elif vi%2 == 1:
-              assert (self.gwvw % 2 == 0)
-            else:
-              vecModule.add(VMulPKF32(dst=vgpr("ValuC+%d"%vgprIdx, 2), src0=vgpr(inputScaleVecVgpr, 2), src1=vgpr("ValuC+%d"%vgprIdx, 2), comment="*= %sVMulPK(%d)(%d)"%(addressStr, dataScaleVec,vi)))
-          elif self.kernel["ProblemType"]["ComputeDataType"].isInt32():
-            vgprIdx = sumIdxV - self.parentWriter.states.c.startVgprValu
-            # Generate single i32 code if edge is detected.
-            if ((vi + 1) == self.gwvw) and ((self.gwvw % 2) == 1):
-              vecModule.add(VMulLOU32(dst=vgpr("ValuC+%d"%vgprIdx), src0=vgpr(inputScaleVecVgpr), src1=vgpr("ValuC+%d"%vgprIdx), comment="*= %sVMul"%addressStr ))
-            elif vi%2 == 1:
-              assert (self.gwvw % 2 == 0)
-            else:
-              vecModule.add(VMulLOU32(dst=vgpr("ValuC+%d"%vgprIdx), src0=vgpr(inputScaleVecVgpr), src1=vgpr("ValuC+%d"%vgprIdx), comment="*= %sVMulPK(%d)(%d)"%(addressStr, dataScaleAlphaVec,vi)))
-              vecModule.add(VMulLOU32(dst=vgpr("ValuC+%d"%(vgprIdx+1)), src0=vgpr(inputScaleVecVgpr+1), src1=vgpr("ValuC+%d"%(vgprIdx+1)), comment="*= %sVMulPK(%d)(%d)"%(addressStr, dataScaleAlphaVec,vi)))
-          else:
-            raise RuntimeError("Unsupported %s compute data type %s."%(addressStr, str(self.kernel["ProblemType"]["ComputeDataType"])))
 
       isSingleKernel = ((self.kernel["GlobalSplitU"] == 1 or self.kernel["GlobalSplitU"] == -1) or self.kernel["_GlobalAccumulation"] == "MultipleBufferSingleKernel") or isPersistent(self.kernel)
 
       scaleAVecModule = Module("ScaleAVecModule")
       scaleBVecModule = Module("ScaleBVecModule")
-      if (self.kernel["ProblemType"]["UseScaleAB"] == "Vector") and isSingleKernel:
-        applyScaleVec(scaleAVecModule, "ScaleA", dataScaleAVec, 0, isGlobal=False)
-        applyScaleVec(scaleBVecModule, "ScaleB", dataScaleBVec, 1, isGlobal=False)
+      if ((self.kernel["ProblemType"]["UseScaleAB"] == "Vector") and isSingleKernel and
+          not alphaPrepared):
+        self._applyScaleVec(scaleAVecModule, "ScaleA", dataScaleAVec, 0,
+                            elementIdx, isGlobal=False)
+        self._applyScaleVec(scaleBVecModule, "ScaleB", dataScaleBVec, 1,
+                            elementIdx, isGlobal=False)
       module.add(scaleAVecModule)
       module.add(scaleBVecModule)
 
       scaleAlphaVecModule = Module("scaleAlphaVecModule")
-      if self.kernel["ProblemType"]["UseScaleAlphaVec"] and isSingleKernel:
-        applyScaleVec(scaleAlphaVecModule, "ScaleAlphaVec", dataScaleAlphaVec, self.factorDim, isGlobal=False)
+      if (self.kernel["ProblemType"]["UseScaleAlphaVec"] and isSingleKernel and
+          not alphaPrepared):
+        self._applyScaleVec(scaleAlphaVecModule, "ScaleAlphaVec", dataScaleAlphaVec,
+                            self.factorDim, elementIdx, isGlobal=False)
       module.add(scaleAlphaVecModule)
 
       if self.beta:

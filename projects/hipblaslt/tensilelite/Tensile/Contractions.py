@@ -853,6 +853,7 @@ class InternalArgsSupport:
                  'wgm',
                  'staggerU',
                  'perTileExtraIters',
+                 'deviceScalarAlpha',
                  'useUniversalArgs',
                  'useSFC'
                  ]
@@ -869,6 +870,7 @@ class InternalArgsSupport:
                    wgm = isp['SupportCustomWGM'],
                    staggerU = isp['SupportCustomStaggerU'],
                    perTileExtraIters = isp.get('SupportStreamKPerTileExtraIters', False),
+                   deviceScalarAlpha = isp.get('SupportDeviceScalarAlpha', False),
                    useUniversalArgs = isp['UseUniversalArgs'],
                    useSFC = useSFC)
 

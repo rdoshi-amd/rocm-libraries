@@ -6,11 +6,15 @@
 #include <ostream>
 #include <variant>
 
+#include "GpuBatchnormFwdInfSignatureKey.hpp"
+#include "GpuBatchnormFwdInfVarianceSignatureKey.hpp"
 #include "GpuConvolutionFwdSignatureKey.hpp"
 #include "GpuLayernormBwdSignatureKey.hpp"
 #include "GpuLayernormFwdSignatureKey.hpp"
+#include "GpuMatmulSignatureKey.hpp"
 #include "GpuPointwiseSignatureKey.hpp"
 #include "GpuRMSNormSignatureKey.hpp"
+#include "GpuReductionSignatureKey.hpp"
 #include "GpuSdpaFwdSignatureKey.hpp"
 #include "GpuSdpaRaggedFwdSignatureKey.hpp"
 
@@ -22,11 +26,15 @@ namespace hipdnn_integration_tests::gpu_graph_executor::detail
 using GpuPlanRegistrySignatureKey = std::variant<GpuConvolutionFwdSignatureKey,
                                                  GpuLayernormFwdSignatureKey,
                                                  GpuLayernormBwdSignatureKey,
+                                                 GpuMatmulSignatureKey,
                                                  GpuSdpaFwdSignatureKey,
                                                  GpuSdpaRaggedFwdSignatureKey,
                                                  GpuPointwiseSignatureKey,
+                                                 GpuReductionSignatureKey,
                                                  GpuRMSNormFwdSignatureKey,
-                                                 GpuRMSNormBwdSignatureKey>;
+                                                 GpuRMSNormBwdSignatureKey,
+                                                 GpuBatchnormFwdInfSignatureKey,
+                                                 GpuBatchnormFwdInfVarianceSignatureKey>;
 
 struct GpuPlanRegistrySignatureKeyHash
 {

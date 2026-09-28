@@ -33,11 +33,13 @@ add_library(
     src/GpuReferencePointwise.cpp
     src/GpuFpReferenceConvolution.cpp
     src/GpuFpReferenceLayernorm.cpp
+    src/GpuFpReferenceMatmul.cpp
     src/GpuFpReferenceSdpa.cpp
     src/GpuFpReferenceReduction.cpp
     src/GpuFpReferenceSdpaRagged.cpp
     src/GpuFpReferenceRMSNorm.cpp
     src/GpuFpReferenceBatchnorm.cpp
+    src/GpuFpReferenceRmsValidation.cpp
     src/GpuFpReferenceValidation.cpp
     src/GpuIntReferenceValidation.cpp
     src/GpuReferenceValidationFactory.cpp

@@ -11,8 +11,9 @@ pass does not, the pass inserts an `s_wait_alu`.
 
 Prefetch placement is not a hazard but a **performance** placement. Left alone, the DAG
 issues a prefetch as soon as its address is ready, far ahead of the `tensor_load_to_lds` it
-belongs with. Develop avoided that by accident: WaitAwareScheduleRepairPass carried the
-prefetch forward to the segment end, the barrier right before the tensor_load.
+belongs with. Develop avoided that by accident: the repair pass that then ran after the DAG
+(WaitAwareScheduleRepairPass, since replaced by RepairMatrixCoexecPass) carried the prefetch
+forward to the segment end, the barrier right before the tensor_load.
 
 ## Rules, in order of measured impact
 
@@ -25,9 +26,9 @@ prefetch forward to the segment end, the barrier right before the tensor_load.
      the stage barrier waits until the ready group has issued, so the group lands just
      before `s_barrier_wait -3`. A group that is not fully ready never holds the barrier.
    - With a lead set, prefetches have their own ready queue; they are not fillers and never
-     count against the filler quota. WaitAwareScheduleRepairPass pins each prefetch, and the
-     VALU chain computing its address, ahead of the next WMMA so the repair does not carry
-     them off.
+     count against the filler quota. RepairMatrixCoexecPass keeps each prefetch where the DAG
+     put it, so the repair does not carry it off; the VALUs computing its address are ALU
+     work the repair can still move.
 2. **Wait-prone fillers** (`WaitAluHoldStrictCount`, only with ESM2, the only mode in which
    InsertWaitAlu runs). `WaitAluTracker` is InsertWaitAlu's
    own scoreboard (shared `stepInstruction()`, so the answers cannot diverge); `query(inst)`

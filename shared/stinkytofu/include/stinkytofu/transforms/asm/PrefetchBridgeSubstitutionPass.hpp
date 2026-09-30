@@ -27,7 +27,7 @@ class Pass;
 /// would cost an LDS FIFO slot for nothing.
 ///
 /// Runs immediately before InsertWaitAluPass so the counts it measures are final: passes
-/// that reorder instructions (WaitAwareScheduleRepairPass, AsmMovePropagationPass) have
+/// that reorder instructions (RepairMatrixCoexecPass, AsmMovePropagationPass) have
 /// already run.
 ///
 /// Correctness never depends on this pass. Substituting where it does not pay costs an LDS

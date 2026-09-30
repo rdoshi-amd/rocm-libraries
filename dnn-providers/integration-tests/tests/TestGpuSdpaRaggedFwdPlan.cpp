@@ -460,9 +460,9 @@ TEST(TestGpuSdpaRaggedFwdPlan, ExecuteFp8MatchesDirectFpropRagged)
     const int64_t seqStride = numHeads * headDim;
 
     RaggedSdpaFwdGraphOptions options;
-    options.descaleQUid = DESCALE_Q_UID;
-    options.descaleKUid = DESCALE_K_UID;
-    options.descaleVUid = DESCALE_V_UID;
+    options.descaleQ = FloatOperandSpec{DESCALE_Q_UID};
+    options.descaleK = FloatOperandSpec{DESCALE_K_UID};
+    options.descaleV = FloatOperandSpec{DESCALE_V_UID};
     options.oDataType = DataType::BFLOAT16;
     auto graphBuilder = createRaggedSdpaFwdGraph(Q_UID,
                                                  K_UID,
@@ -544,6 +544,217 @@ TEST(TestGpuSdpaRaggedFwdPlan, ExecuteFp8MatchesDirectFpropRagged)
     const CpuFpReferenceValidation<bfloat16> validation(tolerance, tolerance);
     EXPECT_TRUE(validation.allClose(oDirect, oPlan))
         << "fp8 plan output differs from direct fpropRagged output";
+}
+
+namespace
+{
+
+using Fp8Builder = GpuSdpaRaggedFwdPlanBuilder<DataType::FP8_E4M3,
+                                               DataType::FP8_E4M3,
+                                               DataType::FP8_E4M3,
+                                               DataType::BFLOAT16>;
+
+// One fp8 descale operand: its storage mode and value(s). One value is a scalar [1]; B * H_kv
+// values are a per-KV-head [B, H_kv, 1, 1] descale (DEVICE storage only).
+struct DescaleCase
+{
+    OperandStorage storage;
+    std::vector<float> values;
+};
+
+// fp8 ragged plan whose Q/K/V descales use the given storage modes, against a direct fpropRagged
+// call on device descale tensors holding the same values. BAKED descales are deliberately left out
+// of the variant pack (the value lives in the graph); RUNTIME_PASS_BY_VALUE descales are passed as
+// host pointers.
+void checkFp8DescaleStorage(const DescaleCase& qCase,
+                            const DescaleCase& kCase,
+                            const DescaleCase& vCase)
+{
+    using hipdnn_gpu_ref::GpuFpReferenceSdpaRagged;
+
+    constexpr int64_t DESCALE_Q_UID = 30;
+    constexpr int64_t DESCALE_K_UID = 31;
+    constexpr int64_t DESCALE_V_UID = 32;
+
+    const int64_t batch = 2;
+    const int64_t numHeads = 2;
+    const int64_t seqLen = 4; // equal per batch -> no padding
+    const int64_t headDim = 128;
+    const std::vector<int64_t> qkvDims = {batch, numHeads, seqLen, headDim};
+    const int64_t seqStride = numHeads * headDim;
+
+    const auto descaleDims = [&](const DescaleCase& c) {
+        return c.values.size() == 1 ? std::vector<int64_t>{1}
+                                    : std::vector<int64_t>{batch, numHeads, 1, 1};
+    };
+    const auto spec = [&](int64_t uid, const DescaleCase& c) {
+        FloatOperandSpec s;
+        s.uid = uid;
+        s.storage = c.storage;
+        s.bakedValue = c.values.front();
+        s.dims = descaleDims(c);
+        return s;
+    };
+
+    RaggedSdpaFwdGraphOptions options;
+    options.descaleQ = spec(DESCALE_Q_UID, qCase);
+    options.descaleK = spec(DESCALE_K_UID, kCase);
+    options.descaleV = spec(DESCALE_V_UID, vCase);
+    options.oDataType = DataType::BFLOAT16;
+    auto graphBuilder = createRaggedSdpaFwdGraph(Q_UID,
+                                                 K_UID,
+                                                 V_UID,
+                                                 O_UID,
+                                                 RAGGED_OFFSET_Q_UID,
+                                                 RAGGED_OFFSET_KV_UID,
+                                                 batch,
+                                                 qkvDims,
+                                                 qkvDims,
+                                                 qkvDims,
+                                                 qkvDims,
+                                                 DataType::FP8_E4M3,
+                                                 options);
+    auto graphWrap = hipdnn_flatbuffers_sdk::flatbuffer_utilities::GraphWrapper(
+        graphBuilder.GetBufferPointer(), graphBuilder.GetSize());
+    const Fp8Builder fp8Builder;
+    ASSERT_TRUE(fp8Builder.isApplicable(graphWrap.getNode(0), graphWrap.getTensorMap()));
+    auto plan = fp8Builder.buildNodePlan(graphWrap, graphWrap.getNode(0));
+
+    Tensor<fp8_e4m3> q(qkvDims, bshd(qkvDims));
+    Tensor<fp8_e4m3> k(qkvDims, bshd(qkvDims));
+    Tensor<fp8_e4m3> v(qkvDims, bshd(qkvDims));
+    q.fillWithRandomValues(fp8_e4m3(-1.0f), fp8_e4m3(1.0f), /*seed=*/11);
+    k.fillWithRandomValues(fp8_e4m3(-1.0f), fp8_e4m3(1.0f), /*seed=*/22);
+    v.fillWithRandomValues(fp8_e4m3(-1.0f), fp8_e4m3(1.0f), /*seed=*/33);
+    auto offQ = makeRaggedOffset({seqLen, seqLen}, seqStride);
+    auto offKv = makeRaggedOffset({seqLen, seqLen}, seqStride);
+
+    // Device copies of every descale feed the direct reference (and DEVICE plan operands).
+    const auto makeDeviceDescale = [&](const DescaleCase& c) {
+        Tensor<float> t(descaleDims(c));
+        std::copy(c.values.begin(), c.values.end(), t.memory().hostData());
+        t.memory().markHostModified();
+        return t;
+    };
+    auto descaleQ = makeDeviceDescale(qCase);
+    auto descaleK = makeDeviceDescale(kCase);
+    auto descaleV = makeDeviceDescale(vCase);
+    float hostQ = qCase.values.front();
+    float hostK = kCase.values.front();
+    float hostV = vCase.values.front();
+
+    Tensor<bfloat16> oPlan(qkvDims, bshd(qkvDims));
+    std::unordered_map<int64_t, void*> variantPack{
+        {Q_UID, q.memory().deviceData()},
+        {K_UID, k.memory().deviceData()},
+        {V_UID, v.memory().deviceData()},
+        {O_UID, oPlan.memory().deviceData()},
+        {RAGGED_OFFSET_Q_UID, offQ.memory().deviceData()},
+        {RAGGED_OFFSET_KV_UID, offKv.memory().deviceData()},
+    };
+    const auto bind = [&](int64_t uid, const DescaleCase& c, Tensor<float>& device, float& host) {
+        if(c.storage == OperandStorage::DEVICE)
+        {
+            variantPack.emplace(uid, device.memory().deviceData());
+        }
+        else if(c.storage == OperandStorage::RUNTIME_PASS_BY_VALUE)
+        {
+            variantPack.emplace(uid, &host);
+        }
+    };
+    bind(DESCALE_Q_UID, qCase, descaleQ, hostQ);
+    bind(DESCALE_K_UID, kCase, descaleK, hostK);
+    bind(DESCALE_V_UID, vCase, descaleV, hostV);
+    plan->execute(variantPack);
+    oPlan.markDeviceModified();
+
+    Tensor<bfloat16> oDirect(qkvDims, bshd(qkvDims));
+    GpuFpReferenceSdpaRagged::fpropRagged<fp8_e4m3, fp8_e4m3, fp8_e4m3, bfloat16, float>(
+        q,
+        k,
+        v,
+        oDirect,
+        offQ,
+        offKv,
+        std::nullopt,
+        -1,
+        -1,
+        true,
+        nullptr,
+        nullptr,
+        hipdnn_gpu_ref::SdpaSoftmaxProbabilityMode::FLOAT,
+        &descaleQ,
+        &descaleK,
+        &descaleV);
+
+    const float tolerance = 1e-2f;
+    const CpuFpReferenceValidation<bfloat16> validation(tolerance, tolerance);
+    EXPECT_TRUE(validation.allClose(oDirect, oPlan))
+        << "fp8 plan output differs from direct fpropRagged output";
+}
+
+} // namespace
+
+// Reviewer repro: a baked Q descale lives in the graph, not the variant pack.
+TEST(TestGpuSdpaRaggedFwdPlan, ExecuteFp8BakedDescaleNotInVariantPack)
+{
+    SKIP_IF_NO_DEVICES();
+    checkFp8DescaleStorage({OperandStorage::BAKED, {0.5f}},
+                           {OperandStorage::DEVICE, {0.25f}},
+                           {OperandStorage::DEVICE, {2.0f}});
+}
+
+TEST(TestGpuSdpaRaggedFwdPlan, ExecuteFp8RuntimePassByValueDescales)
+{
+    SKIP_IF_NO_DEVICES();
+    checkFp8DescaleStorage({OperandStorage::RUNTIME_PASS_BY_VALUE, {0.5f}},
+                           {OperandStorage::RUNTIME_PASS_BY_VALUE, {0.25f}},
+                           {OperandStorage::RUNTIME_PASS_BY_VALUE, {2.0f}});
+}
+
+// Every storage mode in one graph, with a per-KV-head [B, H_kv, 1, 1] device V descale.
+TEST(TestGpuSdpaRaggedFwdPlan, ExecuteFp8MixedDescaleStorage)
+{
+    SKIP_IF_NO_DEVICES();
+    checkFp8DescaleStorage({OperandStorage::BAKED, {0.5f}},
+                           {OperandStorage::RUNTIME_PASS_BY_VALUE, {0.25f}},
+                           {OperandStorage::DEVICE, {1.5f, 2.0f, 2.5f, 3.0f}});
+}
+
+// A host-stored (baked / runtime pass-by-value) descale is a scalar; a non-scalar one is malformed.
+TEST(TestGpuSdpaRaggedFwdPlanBuilder, IsNotApplicableForNonScalarHostDescale)
+{
+    for(const auto storage : {OperandStorage::BAKED, OperandStorage::RUNTIME_PASS_BY_VALUE})
+    {
+        FloatOperandSpec descale;
+        descale.uid = 30;
+        descale.storage = storage;
+        descale.bakedValue = 0.5f;
+        descale.dims = {2, 2, 1, 1};
+        RaggedSdpaFwdGraphOptions options;
+        options.descaleQ = descale;
+        options.descaleK = FloatOperandSpec{31};
+        options.descaleV = FloatOperandSpec{32};
+        options.oDataType = DataType::BFLOAT16;
+        const std::vector<int64_t> dims = {2, 2, 4, 128};
+        auto graphBuilder = createRaggedSdpaFwdGraph(Q_UID,
+                                                     K_UID,
+                                                     V_UID,
+                                                     O_UID,
+                                                     RAGGED_OFFSET_Q_UID,
+                                                     RAGGED_OFFSET_KV_UID,
+                                                     /*batch=*/2,
+                                                     dims,
+                                                     dims,
+                                                     dims,
+                                                     dims,
+                                                     DataType::FP8_E4M3,
+                                                     options);
+        auto graphWrap = hipdnn_flatbuffers_sdk::flatbuffer_utilities::GraphWrapper(
+            graphBuilder.GetBufferPointer(), graphBuilder.GetSize());
+        const Fp8Builder fp8Builder;
+        EXPECT_FALSE(fp8Builder.isApplicable(graphWrap.getNode(0), graphWrap.getTensorMap()));
+    }
 }
 
 // Frontend-default dense stats [B,H,Sq,1] with unequal per-batch lengths: each batch's LSE rows

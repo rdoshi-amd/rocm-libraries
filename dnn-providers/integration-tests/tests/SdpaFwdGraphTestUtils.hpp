@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <utility>
 #include <vector>
 
 #include <hipdnn_data_sdk/utilities/ShapeUtilities.hpp>
@@ -121,12 +122,14 @@ enum class OperandStorage
     RUNTIME_PASS_BY_VALUE, // is_runtime_pass_by_value; the variant pack carries a host pointer
 };
 
-// A FLOAT operand tensor of a graph. BAKED/RUNTIME_PASS_BY_VALUE operands are scalars ([1]).
+// A FLOAT operand tensor of a graph. BAKED/RUNTIME_PASS_BY_VALUE operands must be scalars ([1]);
+// DEVICE operands may be e.g. per-KV-head descales [B, H_kv, 1, 1].
 struct FloatOperandSpec
 {
     int64_t uid = 0;
     OperandStorage storage = OperandStorage::DEVICE;
     float bakedValue = 0.0f; // BAKED only
+    std::vector<int64_t> dims = {1};
 };
 
 // Optional features of createRaggedSdpaFwdGraph. Every field defaults to "absent".
@@ -142,10 +145,10 @@ struct RaggedSdpaFwdGraphOptions
     RaggedStatsLayout statsLayout = RaggedStatsLayout::DENSE;
     // uid of the stats tensor's own INT32 ragged_offset aux; required for PACKED stats.
     std::optional<int64_t> raggedOffsetStatsUid;
-    // FLOAT scalar [1] fp8 descale tensors wired into attrs.descale_q/k/v_tensor_uid.
-    std::optional<int64_t> descaleQUid;
-    std::optional<int64_t> descaleKUid;
-    std::optional<int64_t> descaleVUid;
+    // FLOAT fp8 descale tensors wired into attrs.descale_q/k/v_tensor_uid.
+    std::optional<FloatOperandSpec> descaleQ;
+    std::optional<FloatOperandSpec> descaleK;
+    std::optional<FloatOperandSpec> descaleV;
     // FLOAT attention scale tensor wired into attrs.scale_tensor_uid.
     std::optional<FloatOperandSpec> scale;
 };
@@ -187,17 +190,17 @@ inline flatbuffers::FlatBufferBuilder
     {
         attrs.stats_tensor_uid = options.statsUid;
     }
-    if(options.descaleQUid.has_value())
+    if(options.descaleQ.has_value())
     {
-        attrs.descale_q_tensor_uid = options.descaleQUid;
+        attrs.descale_q_tensor_uid = options.descaleQ->uid;
     }
-    if(options.descaleKUid.has_value())
+    if(options.descaleK.has_value())
     {
-        attrs.descale_k_tensor_uid = options.descaleKUid;
+        attrs.descale_k_tensor_uid = options.descaleK->uid;
     }
-    if(options.descaleVUid.has_value())
+    if(options.descaleV.has_value())
     {
-        attrs.descale_v_tensor_uid = options.descaleVUid;
+        attrs.descale_v_tensor_uid = options.descaleV->uid;
     }
     if(options.scale.has_value())
     {
@@ -307,25 +310,9 @@ inline flatbuffers::FlatBufferBuilder
         }
     }
 
-    // fp8 Q/K/V descale tensors: FLOAT, scalar [1].
-    const std::vector<int64_t> descaleDims = {1};
-    const auto descaleStrides = generateStrides(descaleDims);
-    const auto addDescale = [&](std::optional<int64_t> uid, const char* name) {
-        if(uid.has_value())
-        {
-            tensors.push_back(CreateTensorAttributesDirect(
-                builder, uid.value(), name, DataType::FLOAT, &descaleStrides, &descaleDims));
-        }
-    };
-    addDescale(options.descaleQUid, "DescaleQ");
-    addDescale(options.descaleKUid, "DescaleK");
-    addDescale(options.descaleVUid, "DescaleV");
-
     // FLOAT operand tensor in the requested storage mode (see OperandStorage).
-    const auto addFloatOperand = [&](const FloatOperandSpec& spec,
-                                     const char* name,
-                                     const std::vector<int64_t>& dims) {
-        const auto strides = generateStrides(dims);
+    const auto addFloatOperand = [&](const FloatOperandSpec& spec, const char* name) {
+        const auto strides = generateStrides(spec.dims);
         const bool baked = spec.storage == OperandStorage::BAKED;
         const Float32Value bakedValue(spec.bakedValue);
         const flatbuffers::Offset<void> value
@@ -336,16 +323,22 @@ inline flatbuffers::FlatBufferBuilder
             name,
             DataType::FLOAT,
             &strides,
-            &dims,
+            &spec.dims,
             /*virtual_=*/false,
             baked ? TensorValue::Float32Value : TensorValue::NONE,
             value,
             /*is_runtime_pass_by_value=*/spec.storage == OperandStorage::RUNTIME_PASS_BY_VALUE));
     };
 
-    if(options.scale.has_value())
+    for(const auto& [spec, name] : {std::pair{&options.scale, "Scale"},
+                                    std::pair{&options.descaleQ, "DescaleQ"},
+                                    std::pair{&options.descaleK, "DescaleK"},
+                                    std::pair{&options.descaleV, "DescaleV"}})
     {
-        addFloatOperand(options.scale.value(), "Scale", {1});
+        if(spec->has_value())
+        {
+            addFloatOperand(spec->value(), name);
+        }
     }
 
     auto sdpaAttrs = CreateSdpaAttributes(builder, &attrs);

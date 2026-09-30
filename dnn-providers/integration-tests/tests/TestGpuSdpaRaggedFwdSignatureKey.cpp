@@ -123,9 +123,9 @@ TEST(TestGpuSdpaRaggedFwdSignatureKey, Fp8NodeKeyAndRouting)
     constexpr int64_t DESCALE_V_UID = 32;
 
     RaggedSdpaFwdGraphOptions options;
-    options.descaleQUid = DESCALE_Q_UID;
-    options.descaleKUid = DESCALE_K_UID;
-    options.descaleVUid = DESCALE_V_UID;
+    options.descaleQ = FloatOperandSpec{DESCALE_Q_UID};
+    options.descaleK = FloatOperandSpec{DESCALE_K_UID};
+    options.descaleV = FloatOperandSpec{DESCALE_V_UID};
     options.oDataType = DataType::BFLOAT16;
     auto graphBuilder = createRaggedSdpaFwdGraph(Q_UID,
                                                  K_UID,

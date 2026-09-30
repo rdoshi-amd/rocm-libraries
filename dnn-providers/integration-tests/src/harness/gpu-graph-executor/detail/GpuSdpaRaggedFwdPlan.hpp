@@ -9,9 +9,11 @@
 #include <string>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 #include <hipdnn-gpu-ref/GpuFpReferenceSdpaRagged.hpp>
 #include <hipdnn-gpu-ref/ShallowGpuTensor.hpp>
+#include <hipdnn_data_sdk/utilities/Tensor.hpp>
 #include <hipdnn_flatbuffers_sdk/data_objects/graph_generated.h>
 #include <hipdnn_flatbuffers_sdk/data_objects/sdpa_attributes_generated.h>
 #include <hipdnn_flatbuffers_sdk/flatbuffer_utilities/GraphWrapper.hpp>
@@ -159,22 +161,38 @@ public:
                                           _params.raggedOffsetLseTensor->strides);
         }
 
-        // Optional fp8 Q/K/V descale (float) views. fpropRagged validates their shape.
-        const auto wrapDescale
+        // Optional fp8 Q/K/V descale, by storage mode (fpropRagged validates the shape). A host
+        // scalar (baked in the graph, or runtime pass-by-value with a host pointer in the variant
+        // pack) is resolved and staged in a one-element tensor; a device-resident descale is viewed
+        // in place.
+        const auto bindDescale
             = [&variantPack](
                   const std::optional<hipdnn_flatbuffers_sdk::data_objects::TensorAttributesT>& d,
-                  std::optional<hipdnn_gpu_ref::ShallowGpuTensor<float>>& out) {
-                  if(d.has_value())
-                  {
-                      out.emplace(variantPack.at(d->uid), d->dims, d->strides);
-                  }
-              };
-        std::optional<hipdnn_gpu_ref::ShallowGpuTensor<float>> descaleQTensor;
-        std::optional<hipdnn_gpu_ref::ShallowGpuTensor<float>> descaleKTensor;
-        std::optional<hipdnn_gpu_ref::ShallowGpuTensor<float>> descaleVTensor;
-        wrapDescale(_params.descaleQTensor, descaleQTensor);
-        wrapDescale(_params.descaleKTensor, descaleKTensor);
-        wrapDescale(_params.descaleVTensor, descaleVTensor);
+                  std::optional<hipdnn_data_sdk::utilities::Tensor<float>>& staged,
+                  std::optional<hipdnn_gpu_ref::ShallowGpuTensor<float>>& view)
+            -> hipdnn_data_sdk::utilities::TensorBase<float>* {
+            if(!d.has_value())
+            {
+                return nullptr;
+            }
+            if(isHostScalarOperand(*d))
+            {
+                staged.emplace(std::vector<int64_t>{1});
+                staged->fillWithValue(resolveScalarOperand(*d, variantPack, "SDPA descale"));
+                return &staged.value();
+            }
+            view.emplace(variantPack.at(d->uid), d->dims, d->strides);
+            return &view.value();
+        };
+        std::optional<hipdnn_data_sdk::utilities::Tensor<float>> stagedDescaleQ;
+        std::optional<hipdnn_data_sdk::utilities::Tensor<float>> stagedDescaleK;
+        std::optional<hipdnn_data_sdk::utilities::Tensor<float>> stagedDescaleV;
+        std::optional<hipdnn_gpu_ref::ShallowGpuTensor<float>> descaleQView;
+        std::optional<hipdnn_gpu_ref::ShallowGpuTensor<float>> descaleKView;
+        std::optional<hipdnn_gpu_ref::ShallowGpuTensor<float>> descaleVView;
+        auto* descaleQ = bindDescale(_params.descaleQTensor, stagedDescaleQ, descaleQView);
+        auto* descaleK = bindDescale(_params.descaleKTensor, stagedDescaleK, descaleKView);
+        auto* descaleV = bindDescale(_params.descaleVTensor, stagedDescaleV, descaleVView);
 
         std::optional<float> attnScale;
         if(_params.scaleTensor.has_value())
@@ -197,9 +215,9 @@ public:
                 lseTensor.has_value() ? &lseTensor.value() : nullptr,
                 raggedOffsetLseTensor.has_value() ? &raggedOffsetLseTensor.value() : nullptr,
                 sdpaProbabilityMode<QDataType, KDataType, VDataType, ODataType>(),
-                descaleQTensor.has_value() ? &descaleQTensor.value() : nullptr,
-                descaleKTensor.has_value() ? &descaleKTensor.value() : nullptr,
-                descaleVTensor.has_value() ? &descaleVTensor.value() : nullptr);
+                descaleQ,
+                descaleK,
+                descaleV);
     }
 
 private:
@@ -311,7 +329,8 @@ public:
         }
 
         // Supported: fp8 Q/K/V descale (registered for the fp8 combo). Each, when present, must
-        // exist in the map and be FLOAT. Unsupported: softmax/output (re)quantization
+        // exist in the map and be FLOAT; a descale stored as a host scalar (baked or runtime
+        // pass-by-value) must be a single element. Unsupported: softmax/output (re)quantization
         // (descale_s / scale_s / scale_o / amax_s / amax_o) — AITER fp8 fwd descales Q/K/V only.
         if(nodeAttributes->descale_s_tensor_uid().has_value()
            || nodeAttributes->scale_s_tensor_uid().has_value()
@@ -331,6 +350,12 @@ public:
                 CHECK_TENSOR_TYPE(tensorMap,
                                   descaleUid.value(),
                                   hipdnn_flatbuffers_sdk::data_objects::DataType::FLOAT);
+                const auto descale = hipdnn_test_sdk::detail::unpackTensorAttributes(
+                    *tensorMap.at(descaleUid.value()));
+                if(isHostScalarOperand(descale) && elementCount(descale) != 1)
+                {
+                    return false;
+                }
             }
         }
 

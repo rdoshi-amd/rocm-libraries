@@ -28,7 +28,8 @@ namespace hipdnn_integration_tests::gpu_graph_executor::detail
 // Unpacked tensor attributes + resolved SDPA parameters for a ragged (RFC-0014: packed [B,H,S,D] +
 // ragged_offset) node. q/k/v/o are rank-4 [B,H,S,D] with BSHD strides; raggedOffsetQ/raggedOffsetKv
 // are int32 element-offset aux tensors [B+1,1,1,1] carried on the Q and K primaries. The optional
-// LSE tensor is rank-4 [B,H,Sq,1]. No additive mask (gated off on the ASM v3 path).
+// LSE tensor is rank-4 [B,H,Sq,1]: ragged (packed) when it carries its own ragged_offset aux, dense
+// otherwise (the frontend's default stats layout). No additive mask (gated off on the ASM v3 path).
 struct GpuSdpaRaggedFwdParams
 {
     GpuSdpaRaggedFwdParams(
@@ -43,6 +44,8 @@ struct GpuSdpaRaggedFwdParams
         int64_t rightBound,
         bool topLeftAlignment,
         const hipdnn_flatbuffers_sdk::data_objects::TensorAttributes* lseAttributes = nullptr,
+        const hipdnn_flatbuffers_sdk::data_objects::TensorAttributes* raggedOffsetLseAttributes
+        = nullptr,
         const hipdnn_flatbuffers_sdk::data_objects::TensorAttributes* descaleQAttributes = nullptr,
         const hipdnn_flatbuffers_sdk::data_objects::TensorAttributes* descaleKAttributes = nullptr,
         const hipdnn_flatbuffers_sdk::data_objects::TensorAttributes* descaleVAttributes = nullptr)
@@ -62,6 +65,11 @@ struct GpuSdpaRaggedFwdParams
                         ? std::make_optional(
                               hipdnn_test_sdk::detail::unpackTensorAttributes(*lseAttributes))
                         : std::nullopt)
+        , raggedOffsetLseTensor(
+              raggedOffsetLseAttributes != nullptr
+                  ? std::make_optional(
+                        hipdnn_test_sdk::detail::unpackTensorAttributes(*raggedOffsetLseAttributes))
+                  : std::nullopt)
         , descaleQTensor(descaleQAttributes != nullptr
                              ? std::make_optional(hipdnn_test_sdk::detail::unpackTensorAttributes(
                                    *descaleQAttributes))
@@ -88,6 +96,8 @@ struct GpuSdpaRaggedFwdParams
     int64_t rightBound;
     bool topLeftAlignment;
     std::optional<hipdnn_flatbuffers_sdk::data_objects::TensorAttributesT> lseTensor;
+    // Present only for a ragged (packed) LSE; absent means a dense [B,H,Sq,1] LSE.
+    std::optional<hipdnn_flatbuffers_sdk::data_objects::TensorAttributesT> raggedOffsetLseTensor;
     // Optional fp8 Q/K/V descale (float), scalar [1] or per-KV-head [B, H_kv, 1, 1].
     std::optional<hipdnn_flatbuffers_sdk::data_objects::TensorAttributesT> descaleQTensor;
     std::optional<hipdnn_flatbuffers_sdk::data_objects::TensorAttributesT> descaleKTensor;
@@ -129,13 +139,20 @@ public:
             _params.raggedOffsetKvTensor.dims,
             _params.raggedOffsetKvTensor.strides);
 
-        // LSE (optional) is rank-4 [B, H, Sq, 1] for the ragged reference; pass through directly.
+        // LSE (optional) is rank-4 [B, H, Sq, 1], ragged when it carries a ragged_offset aux.
         std::optional<hipdnn_gpu_ref::ShallowGpuTensor<float>> lseTensor;
+        std::optional<hipdnn_gpu_ref::ShallowGpuTensor<int32_t>> raggedOffsetLseTensor;
         if(_params.lseTensor.has_value())
         {
             lseTensor.emplace(variantPack.at(_params.lseTensor->uid),
                               _params.lseTensor->dims,
                               _params.lseTensor->strides);
+        }
+        if(_params.raggedOffsetLseTensor.has_value())
+        {
+            raggedOffsetLseTensor.emplace(variantPack.at(_params.raggedOffsetLseTensor->uid),
+                                          _params.raggedOffsetLseTensor->dims,
+                                          _params.raggedOffsetLseTensor->strides);
         }
 
         // Optional fp8 Q/K/V descale (float) views. fpropRagged validates their shape.
@@ -168,6 +185,7 @@ public:
                 _params.rightBound,
                 _params.topLeftAlignment,
                 lseTensor.has_value() ? &lseTensor.value() : nullptr,
+                raggedOffsetLseTensor.has_value() ? &raggedOffsetLseTensor.value() : nullptr,
                 sdpaProbabilityMode<QDataType, KDataType, VDataType, ODataType>(),
                 descaleQTensor.has_value() ? &descaleQTensor.value() : nullptr,
                 descaleKTensor.has_value() ? &descaleKTensor.value() : nullptr,
@@ -315,13 +333,24 @@ public:
         }
 
         // Supported: log-sum-exp output via the stats tensor. It must exist in the map and be
-        // FLOAT (LSE is always float).
+        // FLOAT (LSE is always float). A stats tensor carrying a ragged_offset aux is packed; the
+        // aux must exist and be INT32. Without one the stats tensor is dense [B,H,Sq,1].
         if(nodeAttributes->stats_tensor_uid().has_value())
         {
             CHECK_TENSOR_EXISTS(tensorMap, nodeAttributes->stats_tensor_uid().value());
             CHECK_TENSOR_TYPE(tensorMap,
                               nodeAttributes->stats_tensor_uid().value(),
                               hipdnn_flatbuffers_sdk::data_objects::DataType::FLOAT);
+            const auto statsRaggedOffsetUid
+                = tensorMap.at(nodeAttributes->stats_tensor_uid().value())
+                      ->ragged_offset_tensor_uid();
+            if(statsRaggedOffsetUid.has_value())
+            {
+                CHECK_TENSOR_EXISTS(tensorMap, statsRaggedOffsetUid.value());
+                CHECK_TENSOR_TYPE(tensorMap,
+                                  statsRaggedOffsetUid.value(),
+                                  hipdnn_flatbuffers_sdk::data_objects::DataType::INT32);
+            }
         }
 
         return true;
@@ -348,6 +377,10 @@ public:
         const auto* lsePtr = nodeAttributes->stats_tensor_uid().has_value()
                                  ? tensorMap.at(nodeAttributes->stats_tensor_uid().value())
                                  : nullptr;
+        const auto* raggedOffsetLsePtr
+            = (lsePtr != nullptr && lsePtr->ragged_offset_tensor_uid().has_value())
+                  ? tensorMap.at(lsePtr->ragged_offset_tensor_uid().value())
+                  : nullptr;
 
         const auto descalePtr = [&tensorMap](::flatbuffers::Optional<int64_t> uid)
             -> const hipdnn_flatbuffers_sdk::data_objects::TensorAttributes* {
@@ -414,6 +447,7 @@ public:
                                    rightBound,
                                    isTopLeft,
                                    lsePtr,
+                                   raggedOffsetLsePtr,
                                    descaleQPtr,
                                    descaleKPtr,
                                    descaleVPtr));

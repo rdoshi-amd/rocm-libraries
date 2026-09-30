@@ -26,7 +26,8 @@ namespace hipdnn_gpu_ref
 // sequence lengths are derived as (ragged_offset[b+1] - ragged_offset[b]) / seqStride. Numerics
 // (fp32 softmax, provider P storage) and the SdpaSoftmaxProbabilityMode enum are shared with the
 // dense reference. No additive bias/alibi/dropout (gated off on the ASM v3 path); per-batch
-// causal/sliding-window and GQA/MQA are supported.
+// causal/sliding-window and GQA/MQA are supported. The optional LSE is logical [B, H, Sq_max, 1]:
+// ragged (packed) when raggedOffsetLse is given, else dense and addressed through its strides.
 class GpuFpReferenceSdpaRagged
 {
 public:
@@ -36,22 +37,23 @@ public:
               class VDataType = QDataType,
               class ODataType = QDataType,
               class ComputeDataType = float>
-    static void fpropRagged(hipdnn_data_sdk::utilities::TensorBase<QDataType>& q,
-                            hipdnn_data_sdk::utilities::TensorBase<KDataType>& k,
-                            hipdnn_data_sdk::utilities::TensorBase<VDataType>& v,
-                            hipdnn_data_sdk::utilities::TensorBase<ODataType>& o,
-                            hipdnn_data_sdk::utilities::TensorBase<int32_t>& raggedOffsetQ,
-                            hipdnn_data_sdk::utilities::TensorBase<int32_t>& raggedOffsetKv,
-                            std::optional<float> attnScaleValue = std::nullopt,
-                            int64_t leftBound = -1,
-                            int64_t rightBound = -1,
-                            bool topLeftAlignment = true,
-                            hipdnn_data_sdk::utilities::TensorBase<float>* lse = nullptr,
-                            SdpaSoftmaxProbabilityMode probabilityMode
-                            = SdpaSoftmaxProbabilityMode::FLOAT,
-                            hipdnn_data_sdk::utilities::TensorBase<float>* descaleQ = nullptr,
-                            hipdnn_data_sdk::utilities::TensorBase<float>* descaleK = nullptr,
-                            hipdnn_data_sdk::utilities::TensorBase<float>* descaleV = nullptr)
+    static void
+        fpropRagged(hipdnn_data_sdk::utilities::TensorBase<QDataType>& q,
+                    hipdnn_data_sdk::utilities::TensorBase<KDataType>& k,
+                    hipdnn_data_sdk::utilities::TensorBase<VDataType>& v,
+                    hipdnn_data_sdk::utilities::TensorBase<ODataType>& o,
+                    hipdnn_data_sdk::utilities::TensorBase<int32_t>& raggedOffsetQ,
+                    hipdnn_data_sdk::utilities::TensorBase<int32_t>& raggedOffsetKv,
+                    std::optional<float> attnScaleValue = std::nullopt,
+                    int64_t leftBound = -1,
+                    int64_t rightBound = -1,
+                    bool topLeftAlignment = true,
+                    hipdnn_data_sdk::utilities::TensorBase<float>* lse = nullptr,
+                    hipdnn_data_sdk::utilities::TensorBase<int32_t>* raggedOffsetLse = nullptr,
+                    SdpaSoftmaxProbabilityMode probabilityMode = SdpaSoftmaxProbabilityMode::FLOAT,
+                    hipdnn_data_sdk::utilities::TensorBase<float>* descaleQ = nullptr,
+                    hipdnn_data_sdk::utilities::TensorBase<float>* descaleK = nullptr,
+                    hipdnn_data_sdk::utilities::TensorBase<float>* descaleV = nullptr)
     {
         validateInput(
             q.dims(), k.dims(), v.dims(), o.dims(), raggedOffsetQ.dims(), raggedOffsetKv.dims());
@@ -78,10 +80,11 @@ public:
                 probabilityMode);
 
         void* lsePtr = nullptr;
+        void* raggedOffsetLsePtr = nullptr;
         std::vector<int64_t> lseStrides;
         if(lse != nullptr)
         {
-            // LSE is one value per query token; packed [B, H, Sq, 1].
+            // LSE is one value per query token; logical [B, H, Sq, 1], dense or ragged.
             if(lse->dims().size() != 4 || lse->dims()[0] != batch || lse->dims()[1] != numHeads
                || lse->dims()[3] != 1)
             {
@@ -90,6 +93,20 @@ public:
             }
             lsePtr = lse->memory().deviceData();
             lseStrides = lse->strides();
+            if(raggedOffsetLse != nullptr)
+            {
+                if(raggedOffsetLse->dims() != raggedOffsetQ.dims())
+                {
+                    throw std::invalid_argument(
+                        "GpuFpReferenceSdpaRagged: raggedOffsetLse must be rank-4 [B+1, 1, 1, 1]");
+                }
+                raggedOffsetLsePtr = raggedOffsetLse->memory().deviceData();
+            }
+        }
+        else if(raggedOffsetLse != nullptr)
+        {
+            throw std::invalid_argument(
+                "GpuFpReferenceSdpaRagged: raggedOffsetLse given without an lse tensor");
         }
 
         // Optional fp8 Q/K/V descale: scalar [1] or per-KV-head [B, H_kv, 1, 1]. The Q descale is
@@ -103,6 +120,7 @@ public:
                             v.memory().deviceData(),
                             o.memory().deviceData(),
                             lsePtr,
+                            raggedOffsetLsePtr,
                             raggedOffsetQ.memory().deviceData(),
                             raggedOffsetKv.memory().deviceData(),
                             seqStrideQ,
@@ -256,6 +274,7 @@ private:
                                     const void* vPtr,
                                     void* oPtr,
                                     void* lsePtr,
+                                    const void* raggedOffsetLsePtr,
                                     const void* raggedOffsetQPtr,
                                     const void* raggedOffsetKvPtr,
                                     int64_t seqStrideQ,

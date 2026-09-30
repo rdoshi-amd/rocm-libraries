@@ -66,7 +66,7 @@ extern "C" __global__ void sdpaRaggedFwdRef(SdpaRaggedFwdArgs args)
     auto* k = static_cast<const K_TYPE*>(args.k);
     auto* v = static_cast<const V_TYPE*>(args.v);
     auto* o = static_cast<O_TYPE*>(args.o);
-    // LSE is always float, packed [B, H, Sq, 1]; nullptr disables it. Written once per
+    // LSE is always float, logical [B, H, Sq, 1]; nullptr disables it. Written once per
     // (tokenGlobalQ, h) by the dv == 0 thread (see below).
     auto* lse = static_cast<float*>(args.lse);
 
@@ -196,9 +196,13 @@ extern "C" __global__ void sdpaRaggedFwdRef(SdpaRaggedFwdArgs args)
     O_TYPE* tag = nullptr;
 
     // LSE is per (tokenGlobalQ, h); only the dv == 0 thread writes it, so every output
-    // row has exactly one writer and there is no contention. Packed [B,H,Sq,1]:
-    // seq stride = lseStr.s[2] (== H), head stride = lseStr.s[1] (== 1).
-    long long lseIdx = tokenGlobalQ * args.lseStr.s[2] + h * args.lseStr.s[1];
+    // row has exactly one writer and there is no contention. Batch b starts at its own
+    // ragged_offset[b] for a ragged (packed) LSE, else at b * lseStr.s[0] for a dense
+    // [B, H, Sq_max, 1] LSE; within the batch, the query row is the batch-relative sq.
+    const long long lseBatchBase = args.raggedOffsetLse != nullptr
+                                       ? static_cast<long long>(args.raggedOffsetLse[b])
+                                       : b * args.lseStr.s[0];
+    long long lseIdx = lseBatchBase + h * args.lseStr.s[1] + sq * args.lseStr.s[2];
 
     // Fully-masked row (no keys in range, incl. seqKv == 0): probabilities are all zero,
     // so the output is zero. Matches CpuFpReferenceSdpa (avoids a 0/0 NaN).

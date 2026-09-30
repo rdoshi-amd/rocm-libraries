@@ -61,7 +61,8 @@ struct SdpaFwdArgs
 // count: tokenBoundary[b] = ragged_offset[b] / seqStride. Global-token addressing
 // (globalToken * seqStride + h * headStride + d) lands in the packed buffer for every tensor, so
 // only the Q- and K-side offsets are needed. No additive mask (bias is gated off on the ASM v3
-// path). lseStr is rank-4 for a packed [B,H,Sq,1] LSE (seq stride = H).
+// path). The optional LSE is logical [B,H,Sq,1] and is either ragged (packed, with its own
+// raggedOffsetLse element offsets) or dense (raggedOffsetLse == nullptr; batch stride lseStr.s[0]).
 
 // NOLINTBEGIN(misc-non-private-member-variables-in-classes,
 //             readability-identifier-naming,
@@ -72,8 +73,11 @@ struct SdpaRaggedFwdArgs
     const void* k;
     const void* v;
     void* o;
-    // Optional log-sum-exp output, packed [B, H, Sq, 1], always float. nullptr disables it.
+    // Optional log-sum-exp output, logical [B, H, Sq, 1], always float. nullptr disables it.
     void* lse;
+    // LSE cumulative ELEMENT offsets (RFC-0014), int32, length batch+1, for a ragged (packed) LSE;
+    // nullptr for a dense LSE addressed through lseStr alone.
+    const int* raggedOffsetLse;
     // Cumulative ELEMENT offsets (RFC-0014 ragged_offset), int32, length batch+1. raggedOffsetQ is
     // the Q tensor's offset (also gives o's token boundaries); raggedOffsetKv is the K tensor's.
     const int* raggedOffsetQ;

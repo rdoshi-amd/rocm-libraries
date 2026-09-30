@@ -103,15 +103,42 @@ inline std::vector<int64_t> bshdStrides(const std::vector<int64_t>& dims)
     return {s * h * d, d, h * d, 1};
 }
 
+// Layout of the optional stats (LSE) tensor of a ragged SDPA graph.
+enum class RaggedStatsLayout
+{
+    // Dense [B, H, Sq_max, 1] with contiguous strides and no ragged_offset: the frontend's
+    // default stats layout (SdpaFwdNode fills generateStrides when strides are unset).
+    DENSE,
+    // Packed [B, H, Sq_max, 1] with BSHD strides (seq stride = H) carrying its own ragged_offset.
+    PACKED,
+};
+
+// Optional features of createRaggedSdpaFwdGraph. Every field defaults to "absent".
+struct RaggedSdpaFwdGraphOptions
+{
+    // Behavior fields (bounds, scale, unsupported-mode uids/flags); tensor uids are filled in.
+    hipdnn_flatbuffers_sdk::data_objects::SdpaAttributesT attrs{};
+    // Output dtype; UNSET means the shared input dtype (fp8 graphs use a distinct bf16 output).
+    hipdnn_flatbuffers_sdk::data_objects::DataType oDataType
+        = hipdnn_flatbuffers_sdk::data_objects::DataType::UNSET;
+    // FLOAT LSE output [B, H, Sq, 1] wired into attrs.stats_tensor_uid.
+    std::optional<int64_t> statsUid;
+    RaggedStatsLayout statsLayout = RaggedStatsLayout::DENSE;
+    // uid of the stats tensor's own INT32 ragged_offset aux; required for PACKED stats.
+    std::optional<int64_t> raggedOffsetStatsUid;
+    // FLOAT scalar [1] fp8 descale tensors wired into attrs.descale_q/k/v_tensor_uid.
+    std::optional<int64_t> descaleQUid;
+    std::optional<int64_t> descaleKUid;
+    std::optional<int64_t> descaleVUid;
+};
+
 // Creates a single-node RAGGED (RFC-0014: packed [B,H,S,D] + ragged_offset) SDPA-forward graph.
 //
 // q/k/v/o are rank-4 [B,H,S,D] with BSHD-layout strides. Two INT32 ragged_offset aux tensors of
 // shape [batch+1,1,1,1] are added: raggedOffsetQ is shared by q and o, raggedOffsetKv by k and v
 // (valid only when the shared primaries have equal per-token element counts, i.e. D_q==D_v and
 // Hk==Hv — which the plan/routing tests use). Each primary's ragged_offset_tensor_uid is set, which
-// routes the node to the ragged reference. When `statsUid` is set, a FLOAT LSE tensor [B,H,Sq,1] is
-// added. When descaleQ/K/V uids are set, FLOAT scalar [1] descale tensors are added and wired into
-// attrs.descale_q/k/v_tensor_uid (fp8 path).
+// routes the node to the ragged reference. Optional stats/descale tensors come from `options`.
 inline flatbuffers::FlatBufferBuilder
     createRaggedSdpaFwdGraph(int64_t qUid,
                              int64_t kUid,
@@ -125,38 +152,34 @@ inline flatbuffers::FlatBufferBuilder
                              const std::vector<int64_t>& vDims,
                              const std::vector<int64_t>& oDims,
                              hipdnn_flatbuffers_sdk::data_objects::DataType dataType,
-                             hipdnn_flatbuffers_sdk::data_objects::SdpaAttributesT attrs = {},
-                             std::optional<int64_t> statsUid = std::nullopt,
-                             std::optional<int64_t> descaleQUid = std::nullopt,
-                             std::optional<int64_t> descaleKUid = std::nullopt,
-                             std::optional<int64_t> descaleVUid = std::nullopt,
-                             hipdnn_flatbuffers_sdk::data_objects::DataType oDataType
-                             = hipdnn_flatbuffers_sdk::data_objects::DataType::UNSET)
+                             const RaggedSdpaFwdGraphOptions& options = {})
 {
     using namespace hipdnn_flatbuffers_sdk::data_objects;
 
     // Output dtype defaults to the shared dtype; fp8 uses a distinct bf16 output.
-    const DataType outputDataType = (oDataType == DataType::UNSET) ? dataType : oDataType;
+    const DataType outputDataType
+        = (options.oDataType == DataType::UNSET) ? dataType : options.oDataType;
 
+    auto attrs = options.attrs;
     attrs.q_tensor_uid = qUid;
     attrs.k_tensor_uid = kUid;
     attrs.v_tensor_uid = vUid;
     attrs.o_tensor_uid = oUid;
-    if(statsUid.has_value())
+    if(options.statsUid.has_value())
     {
-        attrs.stats_tensor_uid = statsUid;
+        attrs.stats_tensor_uid = options.statsUid;
     }
-    if(descaleQUid.has_value())
+    if(options.descaleQUid.has_value())
     {
-        attrs.descale_q_tensor_uid = descaleQUid;
+        attrs.descale_q_tensor_uid = options.descaleQUid;
     }
-    if(descaleKUid.has_value())
+    if(options.descaleKUid.has_value())
     {
-        attrs.descale_k_tensor_uid = descaleKUid;
+        attrs.descale_k_tensor_uid = options.descaleKUid;
     }
-    if(descaleVUid.has_value())
+    if(options.descaleVUid.has_value())
     {
-        attrs.descale_v_tensor_uid = descaleVUid;
+        attrs.descale_v_tensor_uid = options.descaleVUid;
     }
 
     flatbuffers::FlatBufferBuilder builder;
@@ -225,15 +248,41 @@ inline flatbuffers::FlatBufferBuilder
                                                    &offsetStrides,
                                                    &offsetDims));
 
-    // LSE output tensor (ragged): rank-4 [B, H, Sq, 1], FLOAT typed.
-    std::vector<int64_t> statsDims;
-    std::vector<int64_t> statsStrides;
-    if(statsUid.has_value())
+    // LSE output tensor: rank-4 [B, H, Sq, 1], FLOAT typed; dense or packed (own ragged_offset).
+    if(options.statsUid.has_value())
     {
-        statsDims = {qDims[0], qDims[1], qDims[2], 1};
-        statsStrides = bshdStrides(statsDims);
-        tensors.push_back(CreateTensorAttributesDirect(
-            builder, statsUid.value(), "Stats", DataType::FLOAT, &statsStrides, &statsDims));
+        const std::vector<int64_t> statsDims = {qDims[0], qDims[1], qDims[2], 1};
+        if(options.statsLayout == RaggedStatsLayout::DENSE)
+        {
+            const auto statsStrides = generateStrides(statsDims);
+            tensors.push_back(CreateTensorAttributesDirect(builder,
+                                                           options.statsUid.value(),
+                                                           "Stats",
+                                                           DataType::FLOAT,
+                                                           &statsStrides,
+                                                           &statsDims));
+        }
+        else
+        {
+            const auto statsStrides = bshdStrides(statsDims);
+            tensors.push_back(CreateTensorAttributesDirect(builder,
+                                                           options.statsUid.value(),
+                                                           "Stats",
+                                                           DataType::FLOAT,
+                                                           &statsStrides,
+                                                           &statsDims,
+                                                           /*virtual_=*/false,
+                                                           TensorValue::NONE,
+                                                           /*value=*/0,
+                                                           /*is_runtime_pass_by_value=*/false,
+                                                           options.raggedOffsetStatsUid.value()));
+            tensors.push_back(CreateTensorAttributesDirect(builder,
+                                                           options.raggedOffsetStatsUid.value(),
+                                                           "RaggedOffsetStats",
+                                                           DataType::INT32,
+                                                           &offsetStrides,
+                                                           &offsetDims));
+        }
     }
 
     // fp8 Q/K/V descale tensors: FLOAT, scalar [1].
@@ -246,9 +295,9 @@ inline flatbuffers::FlatBufferBuilder
                 builder, uid.value(), name, DataType::FLOAT, &descaleStrides, &descaleDims));
         }
     };
-    addDescale(descaleQUid, "DescaleQ");
-    addDescale(descaleKUid, "DescaleK");
-    addDescale(descaleVUid, "DescaleV");
+    addDescale(options.descaleQUid, "DescaleQ");
+    addDescale(options.descaleKUid, "DescaleK");
+    addDescale(options.descaleVUid, "DescaleV");
 
     auto sdpaAttrs = CreateSdpaAttributes(builder, &attrs);
 

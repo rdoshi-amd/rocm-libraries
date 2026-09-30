@@ -315,8 +315,10 @@ TEST(TestGpuSdpaRaggedFwdFp32, RaggedLseOutput)
 
     auto offQ = makeRaggedOffset(cumQ, numHeads * headDim);
     auto offKv = makeRaggedOffset(cumKv, numHeads * headDim);
+    // Packed (ragged) LSE: [B,H,S,1] BSHD with seq stride H, so its element offsets are cum * H.
+    auto offLse = makeRaggedOffset(cumQ, numHeads);
     GpuFpReferenceSdpaRagged::fpropRagged<float, float, float, float, float>(
-        q, k, v, oGpu, offQ, offKv, std::nullopt, -1, -1, true, &lseGpu);
+        q, k, v, oGpu, offQ, offKv, std::nullopt, -1, -1, true, &lseGpu, &offLse);
 
     const float tolerance = gpuRefFwdTolerance<float>();
     compareRaggedPacked(oGpu, oCpuBack, tolerance);
@@ -326,6 +328,125 @@ TEST(TestGpuSdpaRaggedFwdFp32, RaggedLseOutput)
     {
         EXPECT_NEAR(lg[i], lseCpuBack[i], tolerance) << "LSE mismatch at element " << i;
     }
+}
+
+namespace
+{
+
+constexpr float LSE_SENTINEL = -99.0f;
+
+// Dense (non-ragged) LSE, the frontend's default stats layout: [B, H, Sq_max, 1] with contiguous
+// strides, so batch b starts at b * H * Sq_max regardless of the ragged Q packing. GPU vs the CPU
+// ragged reference writing through the same dense tensor. Both LSE buffers start at a sentinel, so
+// padding rows (sq >= seqQ[b]) must stay untouched and a mis-addressed write shows up as a mismatch.
+// With zeroQk, every score is 0 and the expected LSE of a valid row is log(seqKv[b]).
+void checkRaggedDenseLse(const std::vector<int64_t>& seqQ,
+                         const std::vector<int64_t>& seqKv,
+                         int64_t numHeads,
+                         int64_t headDim,
+                         bool zeroQk)
+{
+    const auto batch = static_cast<int64_t>(seqQ.size());
+    const auto sMaxQ = maxOf(seqQ);
+    const auto sMaxKv = maxOf(seqKv);
+    const auto totalQ = sum(seqQ);
+    const auto totalKv = sum(seqKv);
+    const auto cumQ = cumTokens(seqQ);
+    const auto cumKv = cumTokens(seqKv);
+
+    const std::vector<int64_t> qDims = {batch, numHeads, sMaxQ, headDim};
+    const std::vector<int64_t> kvDims = {batch, numHeads, sMaxKv, headDim};
+    const std::vector<int64_t> lseDims = {batch, numHeads, sMaxQ, 1};
+
+    Tensor<float> q(qDims, bshd(qDims));
+    Tensor<float> k(kvDims, bshd(kvDims));
+    Tensor<float> v(kvDims, bshd(kvDims));
+    Tensor<float> oGpu(qDims, bshd(qDims));
+    if(zeroQk)
+    {
+        q.fillWithValue(0.0f);
+        k.fillWithValue(0.0f);
+    }
+    else
+    {
+        fillPackedRandom(q, totalQ * numHeads * headDim, -1.0f, 1.0f, SEED_Q);
+        fillPackedRandom(k, totalKv * numHeads * headDim, -1.0f, 1.0f, SEED_K);
+    }
+    fillPackedRandom(v, totalKv * numHeads * headDim, -1.0f, 1.0f, SEED_V);
+
+    Tensor<float> lseCpu(lseDims);
+    Tensor<float> lseGpu(lseDims);
+    lseCpu.fillWithValue(LSE_SENTINEL);
+    lseGpu.fillWithValue(LSE_SENTINEL);
+
+    std::vector<float> oCpuBack(static_cast<size_t>(totalQ * numHeads * headDim), 0.0f);
+    {
+        auto qR = wrapRagged(q.memory().hostData(), qDims, numHeads * headDim, cumQ);
+        auto kR = wrapRagged(k.memory().hostData(), kvDims, numHeads * headDim, cumKv);
+        auto vR = wrapRagged(v.memory().hostData(), kvDims, numHeads * headDim, cumKv);
+        auto oR = wrapRagged(oCpuBack.data(), qDims, numHeads * headDim, cumQ);
+        CpuFpReferenceSdpaRagged::forward<float, float, float, float, float>(
+            qR, kR, vR, oR, std::nullopt, -1, -1, true, &lseCpu);
+    }
+
+    auto offQ = makeRaggedOffset(cumQ, numHeads * headDim);
+    auto offKv = makeRaggedOffset(cumKv, numHeads * headDim);
+    GpuFpReferenceSdpaRagged::fpropRagged<float, float, float, float, float>(
+        q,
+        k,
+        v,
+        oGpu,
+        offQ,
+        offKv,
+        std::nullopt,
+        -1,
+        -1,
+        true,
+        &lseGpu,
+        /*raggedOffsetLse=*/nullptr);
+
+    const float tolerance = gpuRefFwdTolerance<float>();
+    compareRaggedPacked(oGpu, oCpuBack, tolerance);
+
+    for(int64_t b = 0; b < batch; ++b)
+    {
+        for(int64_t h = 0; h < numHeads; ++h)
+        {
+            for(int64_t s = 0; s < sMaxQ; ++s)
+            {
+                const float gpu = lseGpu(b, h, s, 0);
+                EXPECT_NEAR(gpu, lseCpu(b, h, s, 0), tolerance)
+                    << "dense LSE mismatch at [" << b << ", " << h << ", " << s << ", 0]";
+                if(s >= seqQ[static_cast<size_t>(b)])
+                {
+                    EXPECT_EQ(gpu, LSE_SENTINEL)
+                        << "padding row written at [" << b << ", " << h << ", " << s << ", 0]";
+                }
+                else if(zeroQk)
+                {
+                    EXPECT_NEAR(
+                        gpu, std::log(static_cast<float>(seqKv[static_cast<size_t>(b)])), tolerance)
+                        << "zero-score LSE must be log(seqKv) at [" << b << ", " << h << ", " << s
+                        << ", 0]";
+                }
+            }
+        }
+    }
+}
+
+} // namespace
+
+// Reviewer repro: B=2, H=2, Sq=2, Q/K lengths {1, 2}, zero Q/K. stats[1,1,1,0] must be log(2).
+TEST(TestGpuSdpaRaggedFwdFp32, RaggedDenseLseUnequalLengths)
+{
+    SKIP_IF_NO_DEVICES();
+    checkRaggedDenseLse({1, 2}, {1, 2}, 2, 16, /*zeroQk=*/true);
+}
+
+TEST(TestGpuSdpaRaggedFwdFp32, RaggedDenseLseCrossAttention)
+{
+    SKIP_IF_NO_DEVICES();
+    checkRaggedDenseLse({3, 5, 1}, {4, 2, 6}, 2, 16, /*zeroQk=*/false);
 }
 
 namespace
@@ -421,6 +542,7 @@ void checkRaggedFp8(const std::vector<int64_t>& seqQ,
         rightBound,
         topLeftAlignment,
         nullptr,
+        nullptr,
         SdpaSoftmaxProbabilityMode::FLOAT,
         &descaleQ,
         &descaleK,
@@ -497,6 +619,7 @@ TEST(TestGpuSdpaRaggedFwdFp8, ThrowsOnPerQueryHeadQDescaleUnderGqa)
                      -1,
                      -1,
                      true,
+                     nullptr,
                      nullptr,
                      SdpaSoftmaxProbabilityMode::FLOAT,
                      &perQueryHead,

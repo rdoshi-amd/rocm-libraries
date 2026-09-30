@@ -122,6 +122,11 @@ TEST(TestGpuSdpaRaggedFwdSignatureKey, Fp8NodeKeyAndRouting)
     constexpr int64_t DESCALE_K_UID = 31;
     constexpr int64_t DESCALE_V_UID = 32;
 
+    RaggedSdpaFwdGraphOptions options;
+    options.descaleQUid = DESCALE_Q_UID;
+    options.descaleKUid = DESCALE_K_UID;
+    options.descaleVUid = DESCALE_V_UID;
+    options.oDataType = DataType::BFLOAT16;
     auto graphBuilder = createRaggedSdpaFwdGraph(Q_UID,
                                                  K_UID,
                                                  V_UID,
@@ -134,12 +139,7 @@ TEST(TestGpuSdpaRaggedFwdSignatureKey, Fp8NodeKeyAndRouting)
                                                  DIMS,
                                                  DIMS,
                                                  DataType::FP8_E4M3,
-                                                 /*attrs=*/{},
-                                                 /*statsUid=*/std::nullopt,
-                                                 DESCALE_Q_UID,
-                                                 DESCALE_K_UID,
-                                                 DESCALE_V_UID,
-                                                 /*oDataType=*/DataType::BFLOAT16);
+                                                 options);
     auto graphWrap = hipdnn_flatbuffers_sdk::flatbuffer_utilities::GraphWrapper(
         graphBuilder.GetBufferPointer(), graphBuilder.GetSize());
 

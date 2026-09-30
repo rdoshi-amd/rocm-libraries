@@ -27,14 +27,16 @@ namespace hipdnn_test_sdk::utilities
 // `ragged_offset` aux, so packed addressing is delegated to the SDK: `getHostValue({b,h,s,d})` bases
 // at `ragged_offset[b]` and adds the (batch-relative) strided offset, and per-batch sequence lengths
 // come from `raggedIterationInfo()` (`rowOffsets`, `seqStride`). No manual global-token arithmetic.
-// Supports GQA/MQA, per-batch causal/sliding-window, fp8 Q/K/V descale, and optional LSE (also a
-// ragged tensor). No additive bias/alibi/dropout (gated off on the ASM v3 path). Descales are
+// Supports GQA/MQA, per-batch causal/sliding-window, fp8 Q/K/V descale, and an optional LSE that is
+// either ragged (packed, own ragged_offset) or dense [B, H, Sq_max, 1]; both are written through
+// `setHostValue({b,h,sq,0})`. No additive bias/alibi/dropout (gated off on the ASM v3 path). Descales are
 // scalar [1] or per-(batch, KV-head) [B, H_kv, 1, 1]; Q and K descales are both indexed by the K
 // head a query head maps to (as in CpuFpReferenceSdpa and AITER's [B, H_kv] contract).
 class CpuFpReferenceSdpaRagged
 {
 public:
-    // q/k/v/o (and lse) must be ragged tensors; descale tensors are ordinary (scalar/per-head).
+    // q/k/v/o must be ragged tensors; lse may be ragged or dense; descale tensors are ordinary
+    // (scalar/per-head).
     template <class QDataType,
               class KDataType = QDataType,
               class VDataType = QDataType,

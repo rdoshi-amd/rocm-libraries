@@ -427,6 +427,74 @@ TEST(TestCpuFpReferenceSdpaRaggedFp8, RaggedGqaPerKvHeadDescaleQkv)
         {4, 6}, {5, 3}, 4, numHeadsKv, 128, descaleQ, descaleK, descaleV, -1, -1, true);
 }
 
+// --- Dense LSE (the frontend's default [B, H, Sq_max, 1] stats layout) ---
+// The ragged LSE path is validated against the dense reference in checkRaggedVsDense; a dense LSE
+// written through the same forward() must carry the identical per-(b, h, sq) values, with padding
+// rows (sq >= seqQ[b]) left untouched. This is the contract the GPU reference mirrors.
+TEST(TestCpuFpReferenceSdpaRaggedFp32, DenseLseMatchesRaggedLse)
+{
+    const std::vector<int64_t> seqQ = {3, 5, 1};
+    const std::vector<int64_t> seqKv = {4, 2, 6};
+    const int64_t numHeads = 2;
+    const int64_t headDim = 16;
+    const auto batch = static_cast<int64_t>(seqQ.size());
+    const auto sMaxQ = maxOf(seqQ);
+    const auto sMaxKv = maxOf(seqKv);
+    const auto totalQ = sum(seqQ);
+    const auto totalKv = sum(seqKv);
+    const auto cumQ = cumTokens(seqQ);
+    const auto cumKv = cumTokens(seqKv);
+
+    const std::vector<int64_t> qDims = {batch, numHeads, sMaxQ, headDim};
+    const std::vector<int64_t> kvDims = {batch, numHeads, sMaxKv, headDim};
+    const std::vector<int64_t> lseDims = {batch, numHeads, sMaxQ, 1};
+
+    std::vector<float> qBack(static_cast<size_t>(totalQ * numHeads * headDim));
+    std::vector<float> kBack(static_cast<size_t>(totalKv * numHeads * headDim));
+    std::vector<float> vBack(static_cast<size_t>(totalKv * numHeads * headDim));
+    std::vector<float> oBack(qBack.size(), 0.0f);
+    std::vector<float> lseRaggedBack(static_cast<size_t>(totalQ * numHeads), 0.0f);
+    fillPacked(qBack, 11);
+    fillPacked(kBack, 22);
+    fillPacked(vBack, 33);
+
+    auto q = wrapRagged(qBack.data(), qDims, numHeads * headDim, cumQ);
+    auto k = wrapRagged(kBack.data(), kvDims, numHeads * headDim, cumKv);
+    auto v = wrapRagged(vBack.data(), kvDims, numHeads * headDim, cumKv);
+    auto o = wrapRagged(oBack.data(), qDims, numHeads * headDim, cumQ);
+    auto lseRagged = wrapRagged(lseRaggedBack.data(), lseDims, numHeads, cumQ);
+
+    constexpr float SENTINEL = -99.0f;
+    Tensor<float> lseDense(lseDims);
+    lseDense.fillWithValue(SENTINEL);
+
+    CpuFpReferenceSdpaRagged::forward<float, float, float, float, float>(
+        q, k, v, o, std::nullopt, -1, -1, true, &lseRagged);
+    CpuFpReferenceSdpaRagged::forward<float, float, float, float, float>(
+        q, k, v, o, std::nullopt, -1, -1, true, &lseDense);
+
+    for(int64_t b = 0; b < batch; ++b)
+    {
+        for(int64_t h = 0; h < numHeads; ++h)
+        {
+            for(int64_t s = 0; s < sMaxQ; ++s)
+            {
+                const float dense = lseDense(b, h, s, 0);
+                if(s < seqQ[static_cast<size_t>(b)])
+                {
+                    EXPECT_EQ(dense, lseRagged.getHostValue(std::vector<int64_t>{b, h, s, 0}))
+                        << "dense LSE mismatch batch " << b << " head " << h << " token " << s;
+                }
+                else
+                {
+                    EXPECT_EQ(dense, SENTINEL)
+                        << "padding row written batch " << b << " head " << h << " token " << s;
+                }
+            }
+        }
+    }
+}
+
 // --- Fully-masked branch: a zero-length-KV batch yields zero output and LSE = -inf ---
 
 TEST(TestCpuFpReferenceSdpaRaggedFp32, ZeroLengthKvFullyMasked)

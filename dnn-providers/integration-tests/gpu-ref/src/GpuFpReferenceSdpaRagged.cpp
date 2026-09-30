@@ -76,6 +76,7 @@ void GpuFpReferenceSdpaRagged::launchSdpaRaggedFwd(const void* qPtr,
                                                    const void* vPtr,
                                                    void* oPtr,
                                                    void* lsePtr,
+                                                   const void* raggedOffsetLsePtr,
                                                    const void* raggedOffsetQPtr,
                                                    const void* raggedOffsetKvPtr,
                                                    int64_t seqStrideQ,
@@ -125,6 +126,7 @@ void GpuFpReferenceSdpaRagged::launchSdpaRaggedFwd(const void* qPtr,
     args.v = vPtr;
     args.o = oPtr;
     args.lse = lsePtr;
+    args.raggedOffsetLse = static_cast<const int*>(raggedOffsetLsePtr);
     args.raggedOffsetQ = static_cast<const int*>(raggedOffsetQPtr);
     args.raggedOffsetKv = static_cast<const int*>(raggedOffsetKvPtr);
     args.seqStrideQ = static_cast<long long>(seqStrideQ);

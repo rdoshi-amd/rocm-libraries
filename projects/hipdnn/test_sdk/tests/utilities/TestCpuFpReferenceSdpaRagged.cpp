@@ -141,20 +141,23 @@ Tensor<float> extractDenseSlice(TensorBase<T>& ragged, int64_t b, int64_t seqLen
     return dense;
 }
 
-// Like extractDenseSlice but dequantizes fp8 -> float and folds in the per-(batch,head) descale.
-// Folding descale into the inputs is algebraically the reference's score*=dQ*dK; out*=dV.
+// Like extractDenseSlice but dequantizes fp8 -> float and folds in the per-(batch, KV-head) descale.
+// Folding descale into the inputs is algebraically the reference's score*=dQ*dK; out*=dV. Descales
+// are per KV head, so tensor head h reads descale head h / headsPerDescaleHead (H_q / H_kv for Q,
+// 1 for K/V).
 template <typename FP8>
 Tensor<float> dequantDenseSlice(TensorBase<FP8>& ragged,
                                 int64_t b,
                                 int64_t seqLen,
-                                TensorBase<float>& descale)
+                                TensorBase<float>& descale,
+                                int64_t headsPerDescaleHead)
 {
     const auto heads = ragged.dims()[1];
     const auto dim = ragged.dims()[3];
     Tensor<float> dense({1, heads, seqLen, dim});
     for(int64_t h = 0; h < heads; ++h)
     {
-        const float dsc = descaleValue(descale, b, h);
+        const float dsc = descaleValue(descale, b, h / headsPerDescaleHead);
         for(int64_t s = 0; s < seqLen; ++s)
         {
             for(int64_t d = 0; d < dim; ++d)
@@ -313,9 +316,9 @@ void checkRaggedFp8VsDense(const std::vector<int64_t>& seqQ,
     {
         const auto sQ = seqQ[static_cast<size_t>(b)];
         const auto sKv = seqKv[static_cast<size_t>(b)];
-        auto qd = dequantDenseSlice(q, b, sQ, descaleQ);
-        auto kd = dequantDenseSlice(k, b, sKv, descaleK);
-        auto vd = dequantDenseSlice(v, b, sKv, descaleV);
+        auto qd = dequantDenseSlice(q, b, sQ, descaleQ, numHeads / numHeadsKv);
+        auto kd = dequantDenseSlice(k, b, sKv, descaleK, 1);
+        auto vd = dequantDenseSlice(v, b, sKv, descaleV, 1);
         Tensor<bfloat16> oDense({1, numHeads, sQ, headDim});
         CpuFpReferenceSdpa::forward<float, float, float, bfloat16, float>(qd,
                                                                           kd,
@@ -409,6 +412,19 @@ TEST(TestCpuFpReferenceSdpaRaggedFp8, RaggedCausalGqaPerKvHeadDescale)
     auto descaleV = makePerHeadDescale(batch, numHeadsKv, 0.3f);
     checkRaggedFp8VsDense(
         {4, 6}, {4, 6}, 4, numHeadsKv, 128, descaleQ, descaleK, descaleV, -1, 0, true);
+}
+
+// GQA with per-KV-head descales on all of Q/K/V (AITER's [B, H_kv] shape). Distinct values per
+// (batch, KV head) on Q catch a Q descale indexed by the query head instead of its KV head.
+TEST(TestCpuFpReferenceSdpaRaggedFp8, RaggedGqaPerKvHeadDescaleQkv)
+{
+    const int64_t batch = 2;
+    const int64_t numHeadsKv = 2; // GQA (numHeads = 4)
+    auto descaleQ = makePerHeadDescale(batch, numHeadsKv, 0.4f);
+    auto descaleK = makePerHeadDescale(batch, numHeadsKv, 0.2f);
+    auto descaleV = makePerHeadDescale(batch, numHeadsKv, 0.3f);
+    checkRaggedFp8VsDense(
+        {4, 6}, {5, 3}, 4, numHeadsKv, 128, descaleQ, descaleK, descaleV, -1, -1, true);
 }
 
 // --- Fully-masked branch: a zero-length-KV batch yields zero output and LSE = -inf ---
@@ -513,9 +529,27 @@ TEST(TestCpuFpReferenceSdpaRaggedFp32, ThrowsOnBadDescaleShape)
     auto v = wrapRagged(vB.data(), dims, int64_t{2} * 16, cum);
     auto o = wrapRagged(oB.data(), dims, int64_t{2} * 16, cum);
 
-    Tensor<float> badDescale({1, 3, 1, 1}); // heads (3) != numHeads (2)
+    Tensor<float> badDescale({1, 3, 1, 1}); // heads (3) != H_kv (2)
     EXPECT_THROW((CpuFpReferenceSdpaRagged::forward<float, float, float, float, float>(
                      q, k, v, o, std::nullopt, -1, -1, true, nullptr, &badDescale)),
+                 std::invalid_argument);
+}
+
+TEST(TestCpuFpReferenceSdpaRaggedFp32, ThrowsOnPerQueryHeadQDescaleUnderGqa)
+{
+    // Q descale is per KV head: under GQA (H_q = 4, H_kv = 2) a [B, H_q, 1, 1] Q descale is invalid.
+    std::vector<float> qB;
+    std::vector<float> kB;
+    std::vector<float> vB;
+    std::vector<float> oB;
+    auto q = makeValidRagged(qB, {1, 4, 4, 16}, {4});
+    auto k = makeValidRagged(kB, {1, 2, 4, 16}, {4});
+    auto v = makeValidRagged(vB, {1, 2, 4, 16}, {4});
+    auto o = makeValidRagged(oB, {1, 4, 4, 16}, {4});
+
+    auto perQueryHead = makePerHeadDescale(1, 4, 0.5f);
+    EXPECT_THROW((CpuFpReferenceSdpaRagged::forward<float, float, float, float, float>(
+                     q, k, v, o, std::nullopt, -1, -1, true, nullptr, &perQueryHead)),
                  std::invalid_argument);
 }
 

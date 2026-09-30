@@ -28,7 +28,9 @@ namespace hipdnn_test_sdk::utilities
 // at `ragged_offset[b]` and adds the (batch-relative) strided offset, and per-batch sequence lengths
 // come from `raggedIterationInfo()` (`rowOffsets`, `seqStride`). No manual global-token arithmetic.
 // Supports GQA/MQA, per-batch causal/sliding-window, fp8 Q/K/V descale, and optional LSE (also a
-// ragged tensor). No additive bias/alibi/dropout (gated off on the ASM v3 path).
+// ragged tensor). No additive bias/alibi/dropout (gated off on the ASM v3 path). Descales are
+// scalar [1] or per-(batch, KV-head) [B, H_kv, 1, 1]; Q and K descales are both indexed by the K
+// head a query head maps to (as in CpuFpReferenceSdpa and AITER's [B, H_kv] contract).
 class CpuFpReferenceSdpaRagged
 {
 public:
@@ -88,7 +90,8 @@ public:
             validateLse(lse->dims(), batch, numHeads);
         }
 
-        const DescaleBinding dq = bindDescale(descaleQ, batch, numHeads, "Q");
+        // Q descale is per KV head: query head h reads the descale of the K head it attends to.
+        const DescaleBinding dq = bindDescale(descaleQ, batch, numHeadsK, "Q");
         const DescaleBinding dk = bindDescale(descaleK, batch, numHeadsK, "K");
         const DescaleBinding dv = bindDescale(descaleV, batch, numHeadsV, "V");
 
@@ -108,7 +111,7 @@ public:
                 const int64_t kvHeadV = h / headsPerHeadV;
 
                 const auto descaleQK
-                    = static_cast<ComputeDataType>(dq.value(b, h) * dk.value(b, kvHeadK));
+                    = static_cast<ComputeDataType>(dq.value(b, kvHeadK) * dk.value(b, kvHeadK));
                 const auto descaleVVal = dv.value(b, kvHeadV);
 
                 for(int64_t sq = 0; sq < seqQ; ++sq)
@@ -243,7 +246,7 @@ private:
             return binding;
         }
         throw std::invalid_argument(std::string("CpuFpReferenceSdpaRagged: ") + name
-                                    + " descale must be scalar [1] or per-head [B, heads, 1, 1]");
+                                    + " descale must be scalar [1] or per-KV-head [B, H_kv, 1, 1]");
     }
 
     // Mirrors the kernel's per-batch window mask: asymmetric +1 on the right bound.

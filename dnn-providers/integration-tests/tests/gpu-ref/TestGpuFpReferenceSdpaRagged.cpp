@@ -455,3 +455,52 @@ TEST(TestGpuSdpaRaggedFwdFp8, RaggedCausalGqaPerKvHeadDescale)
     auto descaleV = makePerHeadDescale(batch, numHeadsKv, 0.3f);
     checkRaggedFp8({4, 6}, {4, 6}, 4, numHeadsKv, 128, descaleQ, descaleK, descaleV, -1, 0, true);
 }
+
+// GQA with per-KV-head descales on all of Q/K/V (AITER's [B, H_kv] shape); distinct values per
+// (batch, KV head) on Q catch a Q descale indexed by the query head instead of its KV head.
+TEST(TestGpuSdpaRaggedFwdFp8, RaggedGqaPerKvHeadDescaleQkv)
+{
+    SKIP_IF_NO_DEVICES();
+    const int64_t batch = 2;
+    const int64_t numHeadsKv = 2; // GQA (numHeads = 4)
+    auto descaleQ = makePerHeadDescale(batch, numHeadsKv, 0.4f);
+    auto descaleK = makePerHeadDescale(batch, numHeadsKv, 0.2f);
+    auto descaleV = makePerHeadDescale(batch, numHeadsKv, 0.3f);
+    checkRaggedFp8({4, 6}, {5, 3}, 4, numHeadsKv, 128, descaleQ, descaleK, descaleV, -1, -1, true);
+}
+
+TEST(TestGpuSdpaRaggedFwdFp8, ThrowsOnPerQueryHeadQDescaleUnderGqa)
+{
+    SKIP_IF_NO_DEVICES();
+    // Q descale is per KV head: under GQA (H_q = 4, H_kv = 2) a [B, H_q, 1, 1] Q descale is invalid.
+    const std::vector<int64_t> qDims = {1, 4, 4, 128};
+    const std::vector<int64_t> kvDims = {1, 2, 4, 128};
+    Tensor<fp8_e4m3> q(qDims, bshd(qDims));
+    Tensor<fp8_e4m3> k(kvDims, bshd(kvDims));
+    Tensor<fp8_e4m3> v(kvDims, bshd(kvDims));
+    Tensor<bfloat16> o(qDims, bshd(qDims));
+    const auto cum = cumTokens({4});
+    auto offQ = makeRaggedOffset(cum, 4 * 128);
+    auto offKv = makeRaggedOffset(cum, 2 * 128);
+
+    auto perQueryHead = makePerHeadDescale(1, 4, 0.5f);
+    auto descaleK = makeScalarDescale(1.0f);
+    auto descaleV = makeScalarDescale(1.0f);
+    EXPECT_THROW((GpuFpReferenceSdpaRagged::fpropRagged<fp8_e4m3, fp8_e4m3, fp8_e4m3, bfloat16>(
+                     q,
+                     k,
+                     v,
+                     o,
+                     offQ,
+                     offKv,
+                     std::nullopt,
+                     -1,
+                     -1,
+                     true,
+                     nullptr,
+                     SdpaSoftmaxProbabilityMode::FLOAT,
+                     &perQueryHead,
+                     &descaleK,
+                     &descaleV)),
+                 std::invalid_argument);
+}

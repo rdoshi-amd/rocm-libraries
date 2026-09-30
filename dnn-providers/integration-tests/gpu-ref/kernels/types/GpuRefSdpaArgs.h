@@ -83,8 +83,8 @@ struct SdpaRaggedFwdArgs
     long long seqStrideQ;
     long long seqStrideKv;
     // Optional fp8 Q/K/V descale (float; nullptr = none). Indexed by (batch, head) via the
-    // batch/head strides below; per-tensor [1] descale uses zero strides. descaleQ is indexed by
-    // the Q head; descaleK/descaleV by the KV head. Applied as: score *= descaleQ*descaleK,
+    // batch/head strides below; per-tensor [1] descale uses zero strides. descaleQ and descaleK are
+    // indexed by the K head, descaleV by the V head. Applied as: score *= descaleQ*descaleK,
     // output *= descaleV. No softmax/output requant (AITER fp8 fwd contract).
     const float* descaleQ;
     const float* descaleK;

@@ -92,8 +92,9 @@ public:
             lseStrides = lse->strides();
         }
 
-        // Optional fp8 Q/K/V descale: scalar [1]/(1,1,1,1) or per-KV-head [B, heads, 1, 1].
-        const DescaleBinding dq = bindDescale(descaleQ, batch, numHeads, "Q");
+        // Optional fp8 Q/K/V descale: scalar [1] or per-KV-head [B, H_kv, 1, 1]. The Q descale is
+        // per K head (query head h reads the descale of the K head it attends to).
+        const DescaleBinding dq = bindDescale(descaleQ, batch, numHeadsK, "Q");
         const DescaleBinding dk = bindDescale(descaleK, batch, numHeadsK, "K");
         const DescaleBinding dv = bindDescale(descaleV, batch, numHeadsV, "V");
 
@@ -149,8 +150,8 @@ private:
         long long headStride = 0;
     };
 
-    // Validate a descale tensor's shape (scalar [1] / (1,1,1,1), or per-head [B, heads, 1, 1]) and
-    // resolve its device pointer + strides. `heads` is H_q for Q and H_kv for K/V.
+    // Validate a descale tensor's shape (scalar [1] / (1,1,1,1), or per-KV-head [B, heads, 1, 1])
+    // and resolve its device pointer + strides. `heads` is H_k for Q and K, H_v for V.
     static DescaleBinding bindDescale(hipdnn_data_sdk::utilities::TensorBase<float>* descale,
                                       int64_t batch,
                                       int64_t heads,
@@ -175,7 +176,7 @@ private:
             return binding;
         }
         throw std::invalid_argument(std::string("GpuFpReferenceSdpaRagged: ") + name
-                                    + " descale must be scalar [1] or per-head [B, heads, 1, 1]");
+                                    + " descale must be scalar [1] or per-KV-head [B, H_kv, 1, 1]");
     }
 
     static void validateInput(const std::vector<int64_t>& qDims,

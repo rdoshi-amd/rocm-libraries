@@ -88,7 +88,7 @@ struct GpuSdpaRaggedFwdParams
     int64_t rightBound;
     bool topLeftAlignment;
     std::optional<hipdnn_flatbuffers_sdk::data_objects::TensorAttributesT> lseTensor;
-    // Optional fp8 Q/K/V descale (float), scalar [1] or per-head [B, heads, 1, 1].
+    // Optional fp8 Q/K/V descale (float), scalar [1] or per-KV-head [B, H_kv, 1, 1].
     std::optional<hipdnn_flatbuffers_sdk::data_objects::TensorAttributesT> descaleQTensor;
     std::optional<hipdnn_flatbuffers_sdk::data_objects::TensorAttributesT> descaleKTensor;
     std::optional<hipdnn_flatbuffers_sdk::data_objects::TensorAttributesT> descaleVTensor;

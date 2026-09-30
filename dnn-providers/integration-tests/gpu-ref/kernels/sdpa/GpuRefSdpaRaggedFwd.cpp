@@ -115,11 +115,12 @@ extern "C" __global__ void sdpaRaggedFwdRef(SdpaRaggedFwdArgs args)
     long long kvHeadV = h / (args.numHeads / args.numHeadsV);
 
     // Optional fp8 Q/K/V descale, constant per thread (b, h, kvHead* are fixed). 1 when absent.
-    // Q is indexed by the Q head; K/V by the KV head. Applied as score *= descaleQ*descaleK and
-    // output *= descaleV (AITER fp8 fwd contract: Q/K/V descale only, no softmax/output requant).
+    // Q and K are indexed by the K head, V by the V head (AITER's [B, H_kv] contract). Applied as
+    // score *= descaleQ*descaleK and output *= descaleV (AITER fp8 fwd contract: Q/K/V descale
+    // only, no softmax/output requant).
     const COMPUTE_TYPE descaleQ
         = args.descaleQ != nullptr
-              ? args.descaleQ[b * args.descaleQBatchStride + h * args.descaleQHeadStride]
+              ? args.descaleQ[b * args.descaleQBatchStride + kvHeadK * args.descaleQHeadStride]
               : static_cast<COMPUTE_TYPE>(1);
     const COMPUTE_TYPE descaleK
         = args.descaleK != nullptr

@@ -113,6 +113,22 @@ enum class RaggedStatsLayout
     PACKED,
 };
 
+// Storage mode of a FLOAT operand tensor (attention scale, fp8 descale) in a graph.
+enum class OperandStorage
+{
+    DEVICE, // ordinary tensor; the variant pack carries a device pointer
+    BAKED, // value stored in the graph; the variant pack may omit the uid
+    RUNTIME_PASS_BY_VALUE, // is_runtime_pass_by_value; the variant pack carries a host pointer
+};
+
+// A FLOAT operand tensor of a graph. BAKED/RUNTIME_PASS_BY_VALUE operands are scalars ([1]).
+struct FloatOperandSpec
+{
+    int64_t uid = 0;
+    OperandStorage storage = OperandStorage::DEVICE;
+    float bakedValue = 0.0f; // BAKED only
+};
+
 // Optional features of createRaggedSdpaFwdGraph. Every field defaults to "absent".
 struct RaggedSdpaFwdGraphOptions
 {
@@ -130,6 +146,8 @@ struct RaggedSdpaFwdGraphOptions
     std::optional<int64_t> descaleQUid;
     std::optional<int64_t> descaleKUid;
     std::optional<int64_t> descaleVUid;
+    // FLOAT attention scale tensor wired into attrs.scale_tensor_uid.
+    std::optional<FloatOperandSpec> scale;
 };
 
 // Creates a single-node RAGGED (RFC-0014: packed [B,H,S,D] + ragged_offset) SDPA-forward graph.
@@ -180,6 +198,10 @@ inline flatbuffers::FlatBufferBuilder
     if(options.descaleVUid.has_value())
     {
         attrs.descale_v_tensor_uid = options.descaleVUid;
+    }
+    if(options.scale.has_value())
+    {
+        attrs.scale_tensor_uid = options.scale->uid;
     }
 
     flatbuffers::FlatBufferBuilder builder;
@@ -298,6 +320,33 @@ inline flatbuffers::FlatBufferBuilder
     addDescale(options.descaleQUid, "DescaleQ");
     addDescale(options.descaleKUid, "DescaleK");
     addDescale(options.descaleVUid, "DescaleV");
+
+    // FLOAT operand tensor in the requested storage mode (see OperandStorage).
+    const auto addFloatOperand = [&](const FloatOperandSpec& spec,
+                                     const char* name,
+                                     const std::vector<int64_t>& dims) {
+        const auto strides = generateStrides(dims);
+        const bool baked = spec.storage == OperandStorage::BAKED;
+        const Float32Value bakedValue(spec.bakedValue);
+        const flatbuffers::Offset<void> value
+            = baked ? builder.CreateStruct(bakedValue).Union() : flatbuffers::Offset<void>();
+        tensors.push_back(CreateTensorAttributesDirect(
+            builder,
+            spec.uid,
+            name,
+            DataType::FLOAT,
+            &strides,
+            &dims,
+            /*virtual_=*/false,
+            baked ? TensorValue::Float32Value : TensorValue::NONE,
+            value,
+            /*is_runtime_pass_by_value=*/spec.storage == OperandStorage::RUNTIME_PASS_BY_VALUE));
+    };
+
+    if(options.scale.has_value())
+    {
+        addFloatOperand(options.scale.value(), "Scale", {1});
+    }
 
     auto sdpaAttrs = CreateSdpaAttributes(builder, &attrs);
 

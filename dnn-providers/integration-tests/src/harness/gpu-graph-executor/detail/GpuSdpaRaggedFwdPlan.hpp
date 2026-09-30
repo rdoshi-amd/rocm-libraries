@@ -8,6 +8,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <utility>
 
 #include <hipdnn-gpu-ref/GpuFpReferenceSdpaRagged.hpp>
 #include <hipdnn-gpu-ref/ShallowGpuTensor.hpp>
@@ -18,6 +19,7 @@
 #include <hipdnn_test_sdk/utilities/cpu_graph_executor/detail/PlanUtils.hpp>
 #include <hipdnn_test_sdk/utilities/detail/FlatbufferTensorAttributesUtils.hpp>
 
+#include "GpuScalarOperand.hpp"
 #include "GpuSdpaFwdPlan.hpp" // reuse sdpaProbabilityMode<>()
 #include "IGpuGraphNodePlanBuilder.hpp"
 #include "IGpuGraphNodePlanExecutor.hpp"
@@ -39,7 +41,7 @@ struct GpuSdpaRaggedFwdParams
         const hipdnn_flatbuffers_sdk::data_objects::TensorAttributes& oAttributes,
         const hipdnn_flatbuffers_sdk::data_objects::TensorAttributes& raggedOffsetQAttributes,
         const hipdnn_flatbuffers_sdk::data_objects::TensorAttributes& raggedOffsetKvAttributes,
-        std::optional<float> attnScaleValue,
+        std::optional<hipdnn_flatbuffers_sdk::data_objects::TensorAttributesT> scaleTensor,
         int64_t leftBound,
         int64_t rightBound,
         bool topLeftAlignment,
@@ -57,7 +59,7 @@ struct GpuSdpaRaggedFwdParams
               hipdnn_test_sdk::detail::unpackTensorAttributes(raggedOffsetQAttributes))
         , raggedOffsetKvTensor(
               hipdnn_test_sdk::detail::unpackTensorAttributes(raggedOffsetKvAttributes))
-        , attnScaleValue(attnScaleValue)
+        , scaleTensor(std::move(scaleTensor))
         , leftBound(leftBound)
         , rightBound(rightBound)
         , topLeftAlignment(topLeftAlignment)
@@ -91,7 +93,9 @@ struct GpuSdpaRaggedFwdParams
     hipdnn_flatbuffers_sdk::data_objects::TensorAttributesT oTensor;
     hipdnn_flatbuffers_sdk::data_objects::TensorAttributesT raggedOffsetQTensor;
     hipdnn_flatbuffers_sdk::data_objects::TensorAttributesT raggedOffsetKvTensor;
-    std::optional<float> attnScaleValue;
+    // Folded attention scale operand (scale tensor, else a baked attn_scale_value), resolved to a
+    // host float at execute time by its storage mode; absent => reference default 1/sqrt(D).
+    std::optional<hipdnn_flatbuffers_sdk::data_objects::TensorAttributesT> scaleTensor;
     int64_t leftBound;
     int64_t rightBound;
     bool topLeftAlignment;
@@ -172,6 +176,12 @@ public:
         wrapDescale(_params.descaleKTensor, descaleKTensor);
         wrapDescale(_params.descaleVTensor, descaleVTensor);
 
+        std::optional<float> attnScale;
+        if(_params.scaleTensor.has_value())
+        {
+            attnScale = resolveScalarOperand(*_params.scaleTensor, variantPack, "SDPA scale");
+        }
+
         hipdnn_gpu_ref::GpuFpReferenceSdpaRagged::
             fpropRagged<QDataType, KDataType, VDataType, ODataType, ComputeDataType>(
                 qTensor,
@@ -180,7 +190,7 @@ public:
                 oTensor,
                 raggedOffsetQTensor,
                 raggedOffsetKvTensor,
-                _params.attnScaleValue,
+                attnScale,
                 _params.leftBound,
                 _params.rightBound,
                 _params.topLeftAlignment,
@@ -324,6 +334,22 @@ public:
             }
         }
 
+        // Supported: attention scale from scale_tensor_uid in any storage mode (baked, runtime
+        // pass-by-value, or device-resident). It must be a single element; a device-resident scale
+        // must be FLOAT (it is read back as one float at execute time).
+        if(nodeAttributes->scale_tensor_uid().has_value())
+        {
+            CHECK_TENSOR_EXISTS(tensorMap, nodeAttributes->scale_tensor_uid().value());
+            const auto scale = hipdnn_test_sdk::detail::unpackTensorAttributes(
+                *tensorMap.at(nodeAttributes->scale_tensor_uid().value()));
+            if(elementCount(scale) != 1
+               || (!isHostScalarOperand(scale)
+                   && scale.data_type != hipdnn_flatbuffers_sdk::data_objects::DataType::FLOAT))
+            {
+                return false;
+            }
+        }
+
         // Unsupported: max / running-sum softmax stats outputs (the reference does not produce
         // these). The log-sum-exp stats tensor IS supported and handled below.
         if(nodeAttributes->max_tensor_uid().has_value()
@@ -368,11 +394,15 @@ public:
 
         const auto& tensorMap = graph.getTensorMap();
 
+        const auto* scalePtr = nodeAttributes->scale_tensor_uid().has_value()
+                                   ? tensorMap.at(nodeAttributes->scale_tensor_uid().value())
+                                   : nullptr;
         std::optional<float> attnScaleValue;
         if(nodeAttributes->attn_scale_value().has_value())
         {
             attnScaleValue = nodeAttributes->attn_scale_value();
         }
+        auto scaleTensor = hipdnn_test_sdk::detail::foldSdpaScale(scalePtr, attnScaleValue);
 
         const auto* lsePtr = nodeAttributes->stats_tensor_uid().has_value()
                                  ? tensorMap.at(nodeAttributes->stats_tensor_uid().value())
@@ -442,7 +472,7 @@ public:
                                    *tensorMap.at(nodeAttributes->o_tensor_uid()),
                                    *tensorMap.at(qAttr->ragged_offset_tensor_uid().value()),
                                    *tensorMap.at(kAttr->ragged_offset_tensor_uid().value()),
-                                   attnScaleValue,
+                                   std::move(scaleTensor),
                                    leftBound,
                                    rightBound,
                                    isTopLeft,

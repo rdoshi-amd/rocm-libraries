@@ -3,8 +3,11 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <optional>
+#include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -557,3 +560,156 @@ TEST(TestGpuSdpaRaggedFwdPlan, ExecutePackedStatsUnequalLengthsMatchesCpu)
     SKIP_IF_NO_DEVICES();
     checkPlanLseAgainstCpu(RaggedStatsLayout::PACKED);
 }
+
+namespace
+{
+
+constexpr int64_t SCALE_UID = 40;
+
+// Where the attention scale of a ragged SDPA graph comes from.
+enum class ScaleSource
+{
+    ATTR_VALUE, // attrs.attn_scale_value (no scale tensor)
+    DEVICE_TENSOR, // scale_tensor_uid, device-resident
+    BAKED_TENSOR, // scale_tensor_uid, value stored in the graph (absent from the variant pack)
+    RUNTIME_PASS_BY_VALUE, // scale_tensor_uid, host pointer in the variant pack
+};
+
+std::string scaleSourceName(const ::testing::TestParamInfo<ScaleSource>& info)
+{
+    switch(info.param)
+    {
+    case ScaleSource::ATTR_VALUE:
+        return "AttrValue";
+    case ScaleSource::DEVICE_TENSOR:
+        return "DeviceTensor";
+    case ScaleSource::BAKED_TENSOR:
+        return "BakedTensor";
+    case ScaleSource::RUNTIME_PASS_BY_VALUE:
+        return "RuntimePassByValue";
+    default:
+        return "Unknown";
+    }
+}
+
+class TestGpuSdpaRaggedFwdPlanScale : public ::testing::TestWithParam<ScaleSource>
+{
+};
+
+} // namespace
+
+// A non-default attention scale must reach the kernel in every storage mode. Random inputs give
+// non-uniform logits, so the output depends on the scale; the sensitivity check below proves the
+// comparison would catch a fallback to the default 1/sqrt(D).
+TEST_P(TestGpuSdpaRaggedFwdPlanScale, ExecuteHonorsNonDefaultScale)
+{
+    SKIP_IF_NO_DEVICES();
+
+    using hipdnn_gpu_ref::GpuFpReferenceSdpaRagged;
+
+    constexpr float SCALE = 0.9f; // default for D = 16 is 0.25
+    const std::vector<int64_t> seqLens = {3, 5};
+    const int64_t batch = 2;
+    const int64_t numHeads = 2;
+    const int64_t headDim = 16;
+    const int64_t seqStride = numHeads * headDim;
+    const int64_t totalQ = 8;
+    const std::vector<int64_t> dims = {batch, numHeads, 5, headDim};
+    const auto source = GetParam();
+
+    RaggedSdpaFwdGraphOptions options;
+    if(source == ScaleSource::ATTR_VALUE)
+    {
+        options.attrs.attn_scale_value = SCALE;
+    }
+    else
+    {
+        FloatOperandSpec scale;
+        scale.uid = SCALE_UID;
+        scale.storage = source == ScaleSource::DEVICE_TENSOR ? OperandStorage::DEVICE
+                        : source == ScaleSource::BAKED_TENSOR
+                            ? OperandStorage::BAKED
+                            : OperandStorage::RUNTIME_PASS_BY_VALUE;
+        scale.bakedValue = SCALE;
+        options.scale = scale;
+    }
+    auto graphBuilder = createRaggedSdpaFwdGraph(Q_UID,
+                                                 K_UID,
+                                                 V_UID,
+                                                 O_UID,
+                                                 RAGGED_OFFSET_Q_UID,
+                                                 RAGGED_OFFSET_KV_UID,
+                                                 batch,
+                                                 dims,
+                                                 dims,
+                                                 dims,
+                                                 dims,
+                                                 DataType::FLOAT,
+                                                 options);
+    auto graphWrap = hipdnn_flatbuffers_sdk::flatbuffer_utilities::GraphWrapper(
+        graphBuilder.GetBufferPointer(), graphBuilder.GetSize());
+    const Fp32Builder fp32Builder;
+    ASSERT_TRUE(fp32Builder.isApplicable(graphWrap.getNode(0), graphWrap.getTensorMap()));
+    auto plan = fp32Builder.buildNodePlan(graphWrap, graphWrap.getNode(0));
+
+    Tensor<float> q(dims, bshd(dims));
+    Tensor<float> k(dims, bshd(dims));
+    Tensor<float> v(dims, bshd(dims));
+    q.fillWithRandomValues(-2.0f, 2.0f, /*seed=*/11);
+    k.fillWithRandomValues(-2.0f, 2.0f, /*seed=*/22);
+    v.fillWithRandomValues(-1.0f, 1.0f, /*seed=*/33);
+    auto offQ = makeRaggedOffset(seqLens, seqStride);
+    auto offKv = makeRaggedOffset(seqLens, seqStride);
+
+    Tensor<float> scaleDevice({1});
+    scaleDevice.fillWithValue(SCALE);
+    float scaleHost = SCALE;
+
+    Tensor<float> oPlan(dims, bshd(dims));
+    std::unordered_map<int64_t, void*> variantPack{
+        {Q_UID, q.memory().deviceData()},
+        {K_UID, k.memory().deviceData()},
+        {V_UID, v.memory().deviceData()},
+        {O_UID, oPlan.memory().deviceData()},
+        {RAGGED_OFFSET_Q_UID, offQ.memory().deviceData()},
+        {RAGGED_OFFSET_KV_UID, offKv.memory().deviceData()},
+    };
+    if(source == ScaleSource::DEVICE_TENSOR)
+    {
+        variantPack.emplace(SCALE_UID, scaleDevice.memory().deviceData());
+    }
+    else if(source == ScaleSource::RUNTIME_PASS_BY_VALUE)
+    {
+        variantPack.emplace(SCALE_UID, &scaleHost);
+    }
+    plan->execute(variantPack);
+    oPlan.markDeviceModified();
+
+    const auto runDirect = [&](std::optional<float> scale) {
+        Tensor<float> o(dims, bshd(dims));
+        GpuFpReferenceSdpaRagged::fpropRagged<float, float, float, float, float>(
+            q, k, v, o, offQ, offKv, scale);
+        return o;
+    };
+    auto oExpected = runDirect(SCALE);
+    auto oDefault = runDirect(std::nullopt);
+
+    const auto* plan0 = oPlan.memory().hostData();
+    const auto* expected = oExpected.memory().hostData();
+    const auto* fallback = oDefault.memory().hostData();
+    float maxScaleEffect = 0.0f;
+    for(int64_t i = 0; i < totalQ * seqStride; ++i) // packed region only
+    {
+        EXPECT_NEAR(plan0[i], expected[i], 1e-5f) << "output mismatch at element " << i;
+        maxScaleEffect = std::max(maxScaleEffect, std::abs(expected[i] - fallback[i]));
+    }
+    EXPECT_GT(maxScaleEffect, 1e-2f) << "inputs too uniform: the scale does not affect the output";
+}
+
+INSTANTIATE_TEST_SUITE_P(ScaleSources,
+                         TestGpuSdpaRaggedFwdPlanScale,
+                         ::testing::Values(ScaleSource::ATTR_VALUE,
+                                           ScaleSource::DEVICE_TENSOR,
+                                           ScaleSource::BAKED_TENSOR,
+                                           ScaleSource::RUNTIME_PASS_BY_VALUE),
+                         scaleSourceName);

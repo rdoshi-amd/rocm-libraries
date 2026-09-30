@@ -16,9 +16,10 @@ namespace hipdnn_integration_tests::gpu_graph_executor::detail
 {
 
 // Returns true if any of the given operand uids resolves to a runtime
-// pass-by-value tensor. No registered GPU reference plan can resolve a PBV
-// host scalar yet, so a builder whose op consumes any PBV operand reports
-// itself not-applicable, and the harness falls back to the CPU reference.
+// pass-by-value tensor. A builder whose plan cannot resolve a PBV host scalar
+// uses this to report itself not-applicable, and the harness falls back to the
+// CPU reference. Plans that do resolve host scalars (e.g. the ragged SDPA plan,
+// via GpuScalarOperand.hpp) handle those operands instead of calling this.
 // Callers MUST pass every operand uid their node consumes (required and
 // optional) so the check is exhaustive per node rather than graph-wide.
 inline bool anyOperandIsRuntimePassByValue(

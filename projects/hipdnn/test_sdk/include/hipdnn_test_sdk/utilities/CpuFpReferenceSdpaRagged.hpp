@@ -14,6 +14,7 @@
 
 #include <hipdnn_data_sdk/utilities/Tensor.hpp>
 #include <hipdnn_test_sdk/utilities/detail/CpuFpReferenceUtilities.hpp>
+#include <hipdnn_test_sdk/utilities/detail/RaggedTokenBoundaries.hpp>
 
 namespace hipdnn_test_sdk::utilities
 {
@@ -32,6 +33,9 @@ namespace hipdnn_test_sdk::utilities
 // `setHostValue({b,h,sq,0})`. No additive bias/alibi/dropout (gated off on the ASM v3 path). Descales are
 // scalar [1] or per-(batch, KV-head) [B, H_kv, 1, 1]; Q and K descales are both indexed by the K
 // head a query head maps to (as in CpuFpReferenceSdpa and AITER's [B, H_kv] contract).
+// Tensors that share a packing must describe the same per-batch sequence lengths: Q/O (and a ragged
+// LSE) share the query token boundaries and K/V share the key token boundaries. Their element
+// offsets may differ (different per-token widths); inconsistent lengths are rejected.
 class CpuFpReferenceSdpaRagged
 {
 public:
@@ -59,9 +63,10 @@ public:
         const auto qInfo = q.raggedIterationInfo();
         const auto kInfo = k.raggedIterationInfo();
         const auto vInfo = v.raggedIterationInfo();
-        if(!qInfo.has_value() || !kInfo.has_value() || !vInfo.has_value())
+        const auto oInfo = o.raggedIterationInfo();
+        if(!qInfo.has_value() || !kInfo.has_value() || !vInfo.has_value() || !oInfo.has_value())
         {
-            throw std::invalid_argument("CpuFpReferenceSdpaRagged: q/k/v must be ragged tensors "
+            throw std::invalid_argument("CpuFpReferenceSdpaRagged: q/k/v/o must be ragged tensors "
                                         "(ShallowRaggedTensor / RaggedTensor)");
         }
 
@@ -81,15 +86,38 @@ public:
                                : (static_cast<ComputeDataType>(1.0)
                                   / std::sqrt(static_cast<ComputeDataType>(headDim)));
 
-        // Element-offset tables (rowOffsets) + sequence strides for the Q and K/V axes.
-        const auto& qRows = qInfo->rowOffsets;
-        const auto& kRows = kInfo->rowOffsets;
-        const auto qSeqStride = qInfo->seqStride;
-        const auto kSeqStride = kInfo->seqStride;
+        // Token boundaries per tensor; tensors sharing a packing must agree batch by batch.
+        const std::string who = "CpuFpReferenceSdpaRagged";
+        const auto qTokens
+            = detail::raggedTokenBoundaries(qInfo->rowOffsets, qInfo->seqStride, who, "Q");
+        const auto kTokens
+            = detail::raggedTokenBoundaries(kInfo->rowOffsets, kInfo->seqStride, who, "K");
+        detail::requireMatchingTokenBoundaries(
+            qTokens,
+            "Q",
+            detail::raggedTokenBoundaries(oInfo->rowOffsets, oInfo->seqStride, who, "O"),
+            "O",
+            who);
+        detail::requireMatchingTokenBoundaries(
+            kTokens,
+            "K",
+            detail::raggedTokenBoundaries(vInfo->rowOffsets, vInfo->seqStride, who, "V"),
+            "V",
+            who);
 
         if(lse != nullptr)
         {
             validateLse(lse->dims(), batch, numHeads);
+            if(const auto lseInfo = lse->raggedIterationInfo())
+            {
+                detail::requireMatchingTokenBoundaries(
+                    qTokens,
+                    "Q",
+                    detail::raggedTokenBoundaries(
+                        lseInfo->rowOffsets, lseInfo->seqStride, who, "LSE"),
+                    "LSE",
+                    who);
+            }
         }
 
         // Q descale is per KV head: query head h reads the descale of the K head it attends to.
@@ -101,10 +129,9 @@ public:
 
         for(int64_t b = 0; b < batch; ++b)
         {
-            const int64_t seqQ
-                = (qRows[static_cast<size_t>(b) + 1] - qRows[static_cast<size_t>(b)]) / qSeqStride;
-            const int64_t seqKv
-                = (kRows[static_cast<size_t>(b) + 1] - kRows[static_cast<size_t>(b)]) / kSeqStride;
+            const auto bIdx = static_cast<size_t>(b);
+            const int64_t seqQ = qTokens[bIdx + 1] - qTokens[bIdx];
+            const int64_t seqKv = kTokens[bIdx + 1] - kTokens[bIdx];
             const int64_t windowOffset = topLeftAlignment ? 0 : (seqKv - seqQ);
 
             for(int64_t h = 0; h < numHeads; ++h)

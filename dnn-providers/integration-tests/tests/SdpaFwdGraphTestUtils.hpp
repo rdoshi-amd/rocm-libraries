@@ -151,15 +151,19 @@ struct RaggedSdpaFwdGraphOptions
     std::optional<FloatOperandSpec> descaleV;
     // FLOAT attention scale tensor wired into attrs.scale_tensor_uid.
     std::optional<FloatOperandSpec> scale;
+    // uids of separate INT32 ragged_offset aux tensors for V and O. Absent: V shares K's aux and O
+    // shares Q's (valid only when the pair has equal per-token widths, Hv*Dv == Hk*D, H*Dv == H*D).
+    std::optional<int64_t> raggedOffsetVUid;
+    std::optional<int64_t> raggedOffsetOUid;
 };
 
 // Creates a single-node RAGGED (RFC-0014: packed [B,H,S,D] + ragged_offset) SDPA-forward graph.
 //
-// q/k/v/o are rank-4 [B,H,S,D] with BSHD-layout strides. Two INT32 ragged_offset aux tensors of
-// shape [batch+1,1,1,1] are added: raggedOffsetQ is shared by q and o, raggedOffsetKv by k and v
-// (valid only when the shared primaries have equal per-token element counts, i.e. D_q==D_v and
-// Hk==Hv — which the plan/routing tests use). Each primary's ragged_offset_tensor_uid is set, which
-// routes the node to the ragged reference. Optional stats/descale tensors come from `options`.
+// q/k/v/o are rank-4 [B,H,S,D] with BSHD-layout strides, each carrying a ragged_offset_tensor_uid
+// (which routes the node to the ragged reference). INT32 ragged_offset aux tensors of shape
+// [batch+1,1,1,1] are added for Q and K, and for V and O when `options` gives them their own uids
+// (otherwise V uses K's aux and O uses Q's). Optional stats/descale/scale tensors come from
+// `options`.
 inline flatbuffers::FlatBufferBuilder
     createRaggedSdpaFwdGraph(int64_t qUid,
                              int64_t kUid,
@@ -214,7 +218,10 @@ inline flatbuffers::FlatBufferBuilder
     const auto vStrides = bshdStrides(vDims);
     const auto oStrides = bshdStrides(oDims);
 
-    // Primaries carry ragged_offset_tensor_uid (q,o -> Q offset; k,v -> KV offset).
+    const auto raggedOffsetVUid = options.raggedOffsetVUid.value_or(raggedOffsetKvUid);
+    const auto raggedOffsetOUid = options.raggedOffsetOUid.value_or(raggedOffsetQUid);
+
+    // Primaries carry ragged_offset_tensor_uid.
     std::vector<flatbuffers::Offset<TensorAttributes>> tensors;
     tensors.push_back(CreateTensorAttributesDirect(builder,
                                                    qUid,
@@ -248,7 +255,7 @@ inline flatbuffers::FlatBufferBuilder
                                                    TensorValue::NONE,
                                                    /*value=*/0,
                                                    /*is_runtime_pass_by_value=*/false,
-                                                   raggedOffsetKvUid));
+                                                   raggedOffsetVUid));
     tensors.push_back(CreateTensorAttributesDirect(builder,
                                                    oUid,
                                                    "O",
@@ -259,7 +266,7 @@ inline flatbuffers::FlatBufferBuilder
                                                    TensorValue::NONE,
                                                    /*value=*/0,
                                                    /*is_runtime_pass_by_value=*/false,
-                                                   raggedOffsetQUid));
+                                                   raggedOffsetOUid));
 
     // ragged_offset aux tensors: INT32, rank-4 [batch+1, 1, 1, 1].
     const std::vector<int64_t> offsetDims = {batch + 1, 1, 1, 1};
@@ -272,6 +279,24 @@ inline flatbuffers::FlatBufferBuilder
                                                    DataType::INT32,
                                                    &offsetStrides,
                                                    &offsetDims));
+    if(options.raggedOffsetVUid.has_value())
+    {
+        tensors.push_back(CreateTensorAttributesDirect(builder,
+                                                       raggedOffsetVUid,
+                                                       "RaggedOffsetV",
+                                                       DataType::INT32,
+                                                       &offsetStrides,
+                                                       &offsetDims));
+    }
+    if(options.raggedOffsetOUid.has_value())
+    {
+        tensors.push_back(CreateTensorAttributesDirect(builder,
+                                                       raggedOffsetOUid,
+                                                       "RaggedOffsetO",
+                                                       DataType::INT32,
+                                                       &offsetStrides,
+                                                       &offsetDims));
+    }
 
     // LSE output tensor: rank-4 [B, H, Sq, 1], FLOAT typed; dense or packed (own ragged_offset).
     if(options.statsUid.has_value())

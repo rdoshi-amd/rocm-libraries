@@ -180,11 +180,14 @@ void checkRagged(const std::vector<int64_t>& seqQ,
             qR, kR, vR, oR, scale, leftBound, rightBound, topLeftAlignment);
     }
 
-    // GPU reference on device tensors.
+    // GPU reference on device tensors. Each primary gets its own offsets: with Hv*Dv != Hk*D (or
+    // Dv != D) V's and O's element offsets differ from K's and Q's for the same token boundaries.
     auto offQ = makeRaggedOffset(cumQ, numHeads * headDim);
-    auto offKv = makeRaggedOffset(cumKv, numHeadsK * headDim);
+    auto offK = makeRaggedOffset(cumKv, numHeadsK * headDim);
+    auto offV = makeRaggedOffset(cumKv, numHeadsV * headDimV);
+    auto offO = makeRaggedOffset(cumQ, numHeads * headDimV);
     GpuFpReferenceSdpaRagged::fpropRagged<T, T, T, T, ComputeType>(
-        q, k, v, oGpu, offQ, offKv, scale, leftBound, rightBound, topLeftAlignment);
+        q, k, v, oGpu, offQ, offK, offV, offO, scale, leftBound, rightBound, topLeftAlignment);
 
     compareRaggedPacked(oGpu, oCpuBack, gpuRefFwdTolerance<T>());
 }
@@ -318,7 +321,7 @@ TEST(TestGpuSdpaRaggedFwdFp32, RaggedLseOutput)
     // Packed (ragged) LSE: [B,H,S,1] BSHD with seq stride H, so its element offsets are cum * H.
     auto offLse = makeRaggedOffset(cumQ, numHeads);
     GpuFpReferenceSdpaRagged::fpropRagged<float, float, float, float, float>(
-        q, k, v, oGpu, offQ, offKv, std::nullopt, -1, -1, true, &lseGpu, &offLse);
+        q, k, v, oGpu, offQ, offKv, offKv, offQ, std::nullopt, -1, -1, true, &lseGpu, &offLse);
 
     const float tolerance = gpuRefFwdTolerance<float>();
     compareRaggedPacked(oGpu, oCpuBack, tolerance);
@@ -398,6 +401,8 @@ void checkRaggedDenseLse(const std::vector<int64_t>& seqQ,
         oGpu,
         offQ,
         offKv,
+        offKv,
+        offQ,
         std::nullopt,
         -1,
         -1,
@@ -537,6 +542,8 @@ void checkRaggedFp8(const std::vector<int64_t>& seqQ,
         oGpu,
         offQ,
         offKv,
+        offKv,
+        offQ,
         std::nullopt,
         leftBound,
         rightBound,
@@ -615,6 +622,8 @@ TEST(TestGpuSdpaRaggedFwdFp8, ThrowsOnPerQueryHeadQDescaleUnderGqa)
                      o,
                      offQ,
                      offKv,
+                     offKv,
+                     offQ,
                      std::nullopt,
                      -1,
                      -1,
@@ -626,4 +635,73 @@ TEST(TestGpuSdpaRaggedFwdFp8, ThrowsOnPerQueryHeadQDescaleUnderGqa)
                      &descaleK,
                      &descaleV)),
                  std::invalid_argument);
+}
+
+// --- Tensors sharing a packing must describe the same per-batch sequence lengths ---
+
+namespace
+{
+
+// Runs fpropRagged (fp32, B = 2, H = 1, D = 16, S_max = 2) with per-tensor sequence lengths; a
+// non-empty lseLens adds a ragged LSE with those lengths. Returns whether it threw
+// std::invalid_argument; any other outcome (including success) returns false.
+bool throwsOnLengths(const std::vector<int64_t>& qLens,
+                     const std::vector<int64_t>& kLens,
+                     const std::vector<int64_t>& vLens,
+                     const std::vector<int64_t>& oLens,
+                     const std::vector<int64_t>& lseLens = {})
+{
+    const int64_t headDim = 16;
+    const std::vector<int64_t> dims = {2, 1, 2, headDim};
+    const std::vector<int64_t> lseDims = {2, 1, 2, 1};
+    Tensor<float> q(dims, bshd(dims));
+    Tensor<float> k(dims, bshd(dims));
+    Tensor<float> v(dims, bshd(dims));
+    Tensor<float> o(dims, bshd(dims));
+    Tensor<float> lse(lseDims, bshd(lseDims));
+    q.fillWithValue(0.0f);
+    k.fillWithValue(0.0f);
+    v.fillWithValue(1.0f);
+    auto offQ = makeRaggedOffset(cumTokens(qLens), headDim);
+    auto offK = makeRaggedOffset(cumTokens(kLens), headDim);
+    auto offV = makeRaggedOffset(cumTokens(vLens), headDim);
+    auto offO = makeRaggedOffset(cumTokens(oLens), headDim);
+    auto offLse = makeRaggedOffset(cumTokens(lseLens.empty() ? qLens : lseLens), 1);
+    const bool withLse = !lseLens.empty();
+    try
+    {
+        GpuFpReferenceSdpaRagged::fpropRagged<float>(q,
+                                                     k,
+                                                     v,
+                                                     o,
+                                                     offQ,
+                                                     offK,
+                                                     offV,
+                                                     offO,
+                                                     std::nullopt,
+                                                     -1,
+                                                     -1,
+                                                     true,
+                                                     withLse ? &lse : nullptr,
+                                                     withLse ? &offLse : nullptr);
+    }
+    catch(const std::invalid_argument&)
+    {
+        return true;
+    }
+    return false;
+}
+
+} // namespace
+
+// Reviewer repro (K lengths {2, 1}, V lengths {1, 2}, same S_max) plus the Q/O and Q/LSE pairs.
+TEST(TestGpuSdpaRaggedFwdFp32, ThrowsOnSequenceLengthMismatch)
+{
+    SKIP_IF_NO_DEVICES();
+    EXPECT_TRUE(throwsOnLengths({1, 1}, {2, 1}, {1, 2}, {1, 1})) << "K/V mismatch accepted";
+    EXPECT_TRUE(throwsOnLengths({2, 1}, {2, 2}, {2, 2}, {1, 2})) << "Q/O mismatch accepted";
+    EXPECT_TRUE(throwsOnLengths({2, 1}, {2, 2}, {2, 2}, {2, 1}, {1, 2}))
+        << "Q/LSE mismatch accepted";
+    // Consistent lengths (with a ragged LSE) run normally.
+    EXPECT_FALSE(throwsOnLengths({2, 1}, {1, 2}, {1, 2}, {2, 1}, {2, 1}));
 }

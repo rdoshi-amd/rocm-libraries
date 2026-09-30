@@ -56,7 +56,8 @@ struct SdpaFwdArgs
 // k=[B,Hk,Skv,D], v=[B,Hv,Skv,Dv], o=[B,H,Sq,Dv]. The physical buffer is packed (no per-batch
 // padding): batch b's data begins at element offset ragged_offset[b]. raggedOffsetQ/raggedOffsetKv
 // are the cumulative ELEMENT offsets (RFC-0014), int32, length batch+1, for the Q and K tensors
-// respectively (o shares Q token boundaries; v shares K token boundaries). The per-tensor sequence
+// respectively. o shares Q's token boundaries and v shares K's; the host validates this against the
+// o/v ragged_offset tables before launch. The per-tensor sequence
 // stride (seqStrideQ = qStr.s[2], seqStrideKv = kStr.s[2]) converts an element offset to a token
 // count: tokenBoundary[b] = ragged_offset[b] / seqStride. Global-token addressing
 // (globalToken * seqStride + h * headStride + d) lands in the packed buffer for every tensor, so

@@ -30,8 +30,8 @@ namespace hipdnn_integration_tests::gpu_graph_executor::detail
 {
 
 // Unpacked tensor attributes + resolved SDPA parameters for a ragged (RFC-0014: packed [B,H,S,D] +
-// ragged_offset) node. q/k/v/o are rank-4 [B,H,S,D] with BSHD strides; raggedOffsetQ/raggedOffsetKv
-// are int32 element-offset aux tensors [B+1,1,1,1] carried on the Q and K primaries. The optional
+// ragged_offset) node. q/k/v/o are rank-4 [B,H,S,D] with BSHD strides, each carrying its own int32
+// element-offset aux [B+1,1,1,1] (raggedOffsetQ/K/V/O). The optional
 // LSE tensor is rank-4 [B,H,Sq,1]: ragged (packed) when it carries its own ragged_offset aux, dense
 // otherwise (the frontend's default stats layout). No additive mask (gated off on the ASM v3 path).
 struct GpuSdpaRaggedFwdParams
@@ -42,7 +42,9 @@ struct GpuSdpaRaggedFwdParams
         const hipdnn_flatbuffers_sdk::data_objects::TensorAttributes& vAttributes,
         const hipdnn_flatbuffers_sdk::data_objects::TensorAttributes& oAttributes,
         const hipdnn_flatbuffers_sdk::data_objects::TensorAttributes& raggedOffsetQAttributes,
-        const hipdnn_flatbuffers_sdk::data_objects::TensorAttributes& raggedOffsetKvAttributes,
+        const hipdnn_flatbuffers_sdk::data_objects::TensorAttributes& raggedOffsetKAttributes,
+        const hipdnn_flatbuffers_sdk::data_objects::TensorAttributes& raggedOffsetVAttributes,
+        const hipdnn_flatbuffers_sdk::data_objects::TensorAttributes& raggedOffsetOAttributes,
         std::optional<hipdnn_flatbuffers_sdk::data_objects::TensorAttributesT> scaleTensor,
         int64_t leftBound,
         int64_t rightBound,
@@ -59,8 +61,12 @@ struct GpuSdpaRaggedFwdParams
         , oTensor(hipdnn_test_sdk::detail::unpackTensorAttributes(oAttributes))
         , raggedOffsetQTensor(
               hipdnn_test_sdk::detail::unpackTensorAttributes(raggedOffsetQAttributes))
-        , raggedOffsetKvTensor(
-              hipdnn_test_sdk::detail::unpackTensorAttributes(raggedOffsetKvAttributes))
+        , raggedOffsetKTensor(
+              hipdnn_test_sdk::detail::unpackTensorAttributes(raggedOffsetKAttributes))
+        , raggedOffsetVTensor(
+              hipdnn_test_sdk::detail::unpackTensorAttributes(raggedOffsetVAttributes))
+        , raggedOffsetOTensor(
+              hipdnn_test_sdk::detail::unpackTensorAttributes(raggedOffsetOAttributes))
         , scaleTensor(std::move(scaleTensor))
         , leftBound(leftBound)
         , rightBound(rightBound)
@@ -94,7 +100,9 @@ struct GpuSdpaRaggedFwdParams
     hipdnn_flatbuffers_sdk::data_objects::TensorAttributesT vTensor;
     hipdnn_flatbuffers_sdk::data_objects::TensorAttributesT oTensor;
     hipdnn_flatbuffers_sdk::data_objects::TensorAttributesT raggedOffsetQTensor;
-    hipdnn_flatbuffers_sdk::data_objects::TensorAttributesT raggedOffsetKvTensor;
+    hipdnn_flatbuffers_sdk::data_objects::TensorAttributesT raggedOffsetKTensor;
+    hipdnn_flatbuffers_sdk::data_objects::TensorAttributesT raggedOffsetVTensor;
+    hipdnn_flatbuffers_sdk::data_objects::TensorAttributesT raggedOffsetOTensor;
     // Folded attention scale operand (scale tensor, else a baked attn_scale_value), resolved to a
     // host float at execute time by its storage mode; absent => reference default 1/sqrt(D).
     std::optional<hipdnn_flatbuffers_sdk::data_objects::TensorAttributesT> scaleTensor;
@@ -136,14 +144,15 @@ public:
         hipdnn_gpu_ref::ShallowGpuTensor<ODataType> oTensor(
             variantPack.at(_params.oTensor.uid), _params.oTensor.dims, _params.oTensor.strides);
 
-        hipdnn_gpu_ref::ShallowGpuTensor<int32_t> raggedOffsetQTensor(
-            variantPack.at(_params.raggedOffsetQTensor.uid),
-            _params.raggedOffsetQTensor.dims,
-            _params.raggedOffsetQTensor.strides);
-        hipdnn_gpu_ref::ShallowGpuTensor<int32_t> raggedOffsetKvTensor(
-            variantPack.at(_params.raggedOffsetKvTensor.uid),
-            _params.raggedOffsetKvTensor.dims,
-            _params.raggedOffsetKvTensor.strides);
+        const auto bindOffsets
+            = [&variantPack](const hipdnn_flatbuffers_sdk::data_objects::TensorAttributesT& t) {
+                  return hipdnn_gpu_ref::ShallowGpuTensor<int32_t>(
+                      variantPack.at(t.uid), t.dims, t.strides);
+              };
+        auto raggedOffsetQTensor = bindOffsets(_params.raggedOffsetQTensor);
+        auto raggedOffsetKTensor = bindOffsets(_params.raggedOffsetKTensor);
+        auto raggedOffsetVTensor = bindOffsets(_params.raggedOffsetVTensor);
+        auto raggedOffsetOTensor = bindOffsets(_params.raggedOffsetOTensor);
 
         // LSE (optional) is rank-4 [B, H, Sq, 1], ragged when it carries a ragged_offset aux.
         std::optional<hipdnn_gpu_ref::ShallowGpuTensor<float>> lseTensor;
@@ -207,7 +216,9 @@ public:
                 vTensor,
                 oTensor,
                 raggedOffsetQTensor,
-                raggedOffsetKvTensor,
+                raggedOffsetKTensor,
+                raggedOffsetVTensor,
+                raggedOffsetOTensor,
                 attnScale,
                 _params.leftBound,
                 _params.rightBound,
@@ -484,19 +495,23 @@ public:
             isTopLeft = false;
         }
 
-        // ragged_offset aux tensors are carried on the Q and K primaries (RFC-0014). The kernel needs
-        // only these two: o reuses Q token boundaries and v reuses K.
+        // Every primary carries its own ragged_offset aux (RFC-0014; checked in isApplicable).
+        // fpropRagged validates that o/v describe the same per-batch lengths as q/k.
         const auto* qAttr = tensorMap.at(nodeAttributes->q_tensor_uid());
         const auto* kAttr = tensorMap.at(nodeAttributes->k_tensor_uid());
+        const auto* vAttr = tensorMap.at(nodeAttributes->v_tensor_uid());
+        const auto* oAttr = tensorMap.at(nodeAttributes->o_tensor_uid());
 
         return std::make_unique<
             GpuSdpaRaggedFwdPlan<QDataType, KDataType, VDataType, ODataType, float>>(
             GpuSdpaRaggedFwdParams(*qAttr,
                                    *kAttr,
-                                   *tensorMap.at(nodeAttributes->v_tensor_uid()),
-                                   *tensorMap.at(nodeAttributes->o_tensor_uid()),
+                                   *vAttr,
+                                   *oAttr,
                                    *tensorMap.at(qAttr->ragged_offset_tensor_uid().value()),
                                    *tensorMap.at(kAttr->ragged_offset_tensor_uid().value()),
+                                   *tensorMap.at(vAttr->ragged_offset_tensor_uid().value()),
+                                   *tensorMap.at(oAttr->ragged_offset_tensor_uid().value()),
                                    std::move(scaleTensor),
                                    leftBound,
                                    rightBound,

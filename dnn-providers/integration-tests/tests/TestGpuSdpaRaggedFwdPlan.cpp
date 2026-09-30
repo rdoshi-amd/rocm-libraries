@@ -423,6 +423,8 @@ TEST(TestGpuSdpaRaggedFwdPlan, ExecuteMatchesDirectFpropRaggedBf16)
         oDirect,
         offQ,
         offKv,
+        offKv,
+        offQ,
         std::nullopt,
         /*leftBound=*/-1,
         /*rightBound=*/-1,
@@ -529,6 +531,8 @@ TEST(TestGpuSdpaRaggedFwdPlan, ExecuteFp8MatchesDirectFpropRagged)
         oDirect,
         offQ,
         offKv,
+        offKv,
+        offQ,
         std::nullopt,
         -1,
         -1,
@@ -676,6 +680,8 @@ void checkFp8DescaleStorage(const DescaleCase& qCase,
         oDirect,
         offQ,
         offKv,
+        offKv,
+        offQ,
         std::nullopt,
         -1,
         -1,
@@ -770,6 +776,66 @@ TEST(TestGpuSdpaRaggedFwdPlan, ExecutePackedStatsUnequalLengthsMatchesCpu)
 {
     SKIP_IF_NO_DEVICES();
     checkPlanLseAgainstCpu(RaggedStatsLayout::PACKED);
+}
+
+// V carries its own ragged_offset aux (as every RFC-0014 primary may). The plan hands all four
+// offset tables to fpropRagged: V lengths that differ from K's must be rejected, matching ones run.
+TEST(TestGpuSdpaRaggedFwdPlan, ExecuteRejectsKvSequenceLengthMismatch)
+{
+    SKIP_IF_NO_DEVICES();
+
+    constexpr int64_t RAGGED_OFFSET_V_UID = 23;
+    const int64_t numHeads = 2;
+    const int64_t headDim = 16;
+    const int64_t seqStride = numHeads * headDim;
+    const std::vector<int64_t> dims = {2, numHeads, 2, headDim};
+
+    RaggedSdpaFwdGraphOptions options;
+    options.raggedOffsetVUid = RAGGED_OFFSET_V_UID;
+    auto graphBuilder = createRaggedSdpaFwdGraph(Q_UID,
+                                                 K_UID,
+                                                 V_UID,
+                                                 O_UID,
+                                                 RAGGED_OFFSET_Q_UID,
+                                                 RAGGED_OFFSET_KV_UID,
+                                                 /*batch=*/2,
+                                                 dims,
+                                                 dims,
+                                                 dims,
+                                                 dims,
+                                                 DataType::FLOAT,
+                                                 options);
+    auto graphWrap = hipdnn_flatbuffers_sdk::flatbuffer_utilities::GraphWrapper(
+        graphBuilder.GetBufferPointer(), graphBuilder.GetSize());
+    const Fp32Builder fp32Builder;
+    ASSERT_TRUE(fp32Builder.isApplicable(graphWrap.getNode(0), graphWrap.getTensorMap()));
+    auto plan = fp32Builder.buildNodePlan(graphWrap, graphWrap.getNode(0));
+
+    Tensor<float> q(dims, bshd(dims));
+    Tensor<float> k(dims, bshd(dims));
+    Tensor<float> v(dims, bshd(dims));
+    Tensor<float> o(dims, bshd(dims));
+    q.fillWithValue(0.0f);
+    k.fillWithValue(0.0f);
+    v.fillWithValue(1.0f);
+    auto offQ = makeRaggedOffset({1, 1}, seqStride);
+    auto offK = makeRaggedOffset({2, 1}, seqStride);
+    auto offVMismatch = makeRaggedOffset({1, 2}, seqStride);
+    auto offVMatch = makeRaggedOffset({2, 1}, seqStride);
+
+    const auto variantPackWithV = [&](Tensor<int32_t>& offV) {
+        return std::unordered_map<int64_t, void*>{
+            {Q_UID, q.memory().deviceData()},
+            {K_UID, k.memory().deviceData()},
+            {V_UID, v.memory().deviceData()},
+            {O_UID, o.memory().deviceData()},
+            {RAGGED_OFFSET_Q_UID, offQ.memory().deviceData()},
+            {RAGGED_OFFSET_KV_UID, offK.memory().deviceData()},
+            {RAGGED_OFFSET_V_UID, offV.memory().deviceData()},
+        };
+    };
+    EXPECT_THROW(plan->execute(variantPackWithV(offVMismatch)), std::invalid_argument);
+    EXPECT_NO_THROW(plan->execute(variantPackWithV(offVMatch)));
 }
 
 namespace
@@ -899,7 +965,7 @@ TEST_P(TestGpuSdpaRaggedFwdPlanScale, ExecuteHonorsNonDefaultScale)
     const auto runDirect = [&](std::optional<float> scale) {
         Tensor<float> o(dims, bshd(dims));
         GpuFpReferenceSdpaRagged::fpropRagged<float, float, float, float, float>(
-            q, k, v, o, offQ, offKv, scale);
+            q, k, v, o, offQ, offKv, offKv, offQ, scale);
         return o;
     };
     auto oExpected = runDirect(SCALE);

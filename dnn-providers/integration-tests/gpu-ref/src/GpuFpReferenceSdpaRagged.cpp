@@ -69,6 +69,20 @@ void launchKernel(hipFunction_t function, int64_t totalElements, void* argsPtr, 
 
 } // namespace
 
+// --- Ragged offset read-back (host validation of per-batch sequence lengths) ---
+
+std::vector<int64_t> GpuFpReferenceSdpaRagged::readRaggedOffsets(const void* raggedOffsetPtr,
+                                                                 int64_t count)
+{
+    std::vector<int32_t> offsets(static_cast<size_t>(count));
+    detail::throwOnHipError(hipMemcpy(offsets.data(),
+                                      raggedOffsetPtr,
+                                      offsets.size() * sizeof(int32_t),
+                                      hipMemcpyDeviceToHost),
+                            "failed to read ragged_offset");
+    return {offsets.begin(), offsets.end()};
+}
+
 // --- Ragged SDPA forward kernel launcher ---
 
 void GpuFpReferenceSdpaRagged::launchSdpaRaggedFwd(const void* qPtr,
@@ -96,6 +110,7 @@ void GpuFpReferenceSdpaRagged::launchSdpaRaggedFwd(const void* qPtr,
                                                    const std::vector<int64_t>& oTensorStrides,
                                                    const std::vector<int64_t>& lseTensorStrides,
                                                    int64_t batch,
+                                                   int64_t totalQ,
                                                    int64_t numHeads,
                                                    int64_t numHeadsK,
                                                    int64_t numHeadsV,
@@ -109,16 +124,6 @@ void GpuFpReferenceSdpaRagged::launchSdpaRaggedFwd(const void* qPtr,
 {
     auto& compiler = detail::GpuRefKernelCompiler::instance();
     auto& kernel = compiler.getOrCompile("GpuRefSdpaRaggedFwd.cpp", defines, "sdpaRaggedFwdRef");
-
-    // total_q (packed query-token count) = ragged_offset[B] / seqStrideQ, read from device so this
-    // works whether the aux is a host-backed Tensor or a device-only view (plan path).
-    int lastOffsetQ = 0;
-    detail::throwOnHipError(hipMemcpy(&lastOffsetQ,
-                                      static_cast<const int*>(raggedOffsetQPtr) + batch,
-                                      sizeof(int),
-                                      hipMemcpyDeviceToHost),
-                            "failed to read ragged_offset[B]");
-    const int64_t totalQ = static_cast<int64_t>(lastOffsetQ) / seqStrideQ;
 
     SdpaRaggedFwdArgs args{};
     args.q = qPtr;

@@ -666,6 +666,72 @@ TEST(TestCpuFpReferenceSdpaRaggedFp32, ThrowsOnKvSeqExtentMismatch)
                  std::invalid_argument);
 }
 
+// --- Tensors sharing a packing must describe the same per-batch sequence lengths ---
+
+// Reviewer repro: K lengths {2, 1} and V lengths {1, 2} with the same S_max, zero Q/K, packed V
+// {10, 20, 30}. Unchecked, batch 0 averaged in batch 1's V row (output {15, 20}).
+TEST(TestCpuFpReferenceSdpaRaggedFp32, ThrowsOnKvSequenceLengthMismatch)
+{
+    std::vector<float> qB;
+    std::vector<float> kB;
+    std::vector<float> vB;
+    std::vector<float> oB;
+    auto q = makeValidRagged(qB, {2, 1, 1, 1}, {1, 1});
+    auto k = makeValidRagged(kB, {2, 1, 2, 1}, {2, 1});
+    auto v = makeValidRagged(vB, {2, 1, 2, 1}, {1, 2});
+    auto o = makeValidRagged(oB, {2, 1, 1, 1}, {1, 1});
+    vB[0] = 10.0f;
+    vB[1] = 20.0f;
+    vB[2] = 30.0f;
+    EXPECT_THROW((CpuFpReferenceSdpaRagged::forward<float, float, float, float, float>(q, k, v, o)),
+                 std::invalid_argument);
+}
+
+TEST(TestCpuFpReferenceSdpaRaggedFp32, ThrowsOnQoSequenceLengthMismatch)
+{
+    std::vector<float> qB;
+    std::vector<float> kB;
+    std::vector<float> vB;
+    std::vector<float> oB;
+    auto q = makeValidRagged(qB, {2, 2, 2, 16}, {2, 1});
+    auto k = makeValidRagged(kB, {2, 2, 2, 16}, {2, 2});
+    auto v = makeValidRagged(vB, {2, 2, 2, 16}, {2, 2});
+    auto o = makeValidRagged(oB, {2, 2, 2, 16}, {1, 2}); // O lengths != Q lengths
+    EXPECT_THROW((CpuFpReferenceSdpaRagged::forward<float, float, float, float, float>(q, k, v, o)),
+                 std::invalid_argument);
+}
+
+TEST(TestCpuFpReferenceSdpaRaggedFp32, ThrowsOnRaggedLseSequenceLengthMismatch)
+{
+    std::vector<float> qB;
+    std::vector<float> kB;
+    std::vector<float> vB;
+    std::vector<float> oB;
+    std::vector<float> lseB;
+    auto q = makeValidRagged(qB, {2, 1, 2, 16}, {2, 1});
+    auto k = makeValidRagged(kB, {2, 1, 2, 16}, {2, 2});
+    auto v = makeValidRagged(vB, {2, 1, 2, 16}, {2, 2});
+    auto o = makeValidRagged(oB, {2, 1, 2, 16}, {2, 1});
+    auto lse = makeValidRagged(lseB, {2, 1, 2, 1}, {1, 2}); // LSE lengths != Q lengths
+    EXPECT_THROW((CpuFpReferenceSdpaRagged::forward<float, float, float, float, float>(
+                     q, k, v, o, std::nullopt, -1, -1, true, &lse)),
+                 std::invalid_argument);
+}
+
+// A dense (non-ragged) output cannot follow the packed Q layout.
+TEST(TestCpuFpReferenceSdpaRaggedFp32, ThrowsOnNonRaggedOutput)
+{
+    std::vector<float> qB;
+    std::vector<float> kB;
+    std::vector<float> vB;
+    auto q = makeValidRagged(qB, {1, 2, 4, 16}, {4});
+    auto k = makeValidRagged(kB, {1, 2, 4, 16}, {4});
+    auto v = makeValidRagged(vB, {1, 2, 4, 16}, {4});
+    Tensor<float> o({1, 2, 4, 16});
+    EXPECT_THROW((CpuFpReferenceSdpaRagged::forward<float, float, float, float, float>(q, k, v, o)),
+                 std::invalid_argument);
+}
+
 TEST(TestCpuFpReferenceSdpaRaggedFp32, ThrowsOnNonDivisibleHeads)
 {
     std::vector<float> qB;

@@ -4324,102 +4324,125 @@ namespace rocalution
 
         int m = cast_mat_A->nrow_;
         int n = cast_mat_B->ncol_;
-        int k = cast_mat_B->nrow_;
-
-        int nnzC = 0;
 
         ValueType alpha = static_cast<ValueType>(1);
 
+        rocsparse_handle   handle    = ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle);
+        rocsparse_datatype data_type = rocalution_datatype_traits<ValueType>::value;
+
         rocsparse_status status;
+
+        allocate_hip(m + 1, &this->mat_.row_offset);
+
+        // C has no columns and values until its nnz is known
+        rocsparse_spmat_descr mat_C;
+        status = rocsparse_create_csr_descr(&mat_C,
+                                            m,
+                                            n,
+                                            0,
+                                            this->mat_.row_offset,
+                                            NULL,
+                                            NULL,
+                                            rocalution_indextype_traits<PtrType>::value,
+                                            rocalution_indextype_traits<int>::value,
+                                            rocsparse_index_base_zero,
+                                            data_type);
+        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+
+        // D is ignored, since beta is NULL
+        rocsparse_spmat_descr mat_D;
+        status = rocsparse_create_csr_descr(&mat_D,
+                                            0,
+                                            0,
+                                            0,
+                                            NULL,
+                                            NULL,
+                                            NULL,
+                                            rocalution_indextype_traits<PtrType>::value,
+                                            rocalution_indextype_traits<int>::value,
+                                            rocsparse_index_base_zero,
+                                            data_type);
+        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
 
         size_t buffer_size = 0;
 
-        assert(cast_mat_A->nnz_ <= std::numeric_limits<int>::max());
-        assert(cast_mat_B->nnz_ <= std::numeric_limits<int>::max());
-
-        status = rocsparseTcsrgemm_buffer_size(
-            ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-            rocsparse_operation_none,
-            rocsparse_operation_none,
-            m,
-            n,
-            k,
-            &alpha,
-            cast_mat_A->mat_descr_,
-            cast_mat_A->nnz_,
-            cast_mat_A->mat_.row_offset,
-            cast_mat_A->mat_.col,
-            cast_mat_B->mat_descr_,
-            cast_mat_B->nnz_,
-            cast_mat_B->mat_.row_offset,
-            cast_mat_B->mat_.col,
-            this->mat_info_,
-            &buffer_size);
+        status = rocsparse_spgemm(handle,
+                                  rocsparse_operation_none,
+                                  rocsparse_operation_none,
+                                  &alpha,
+                                  cast_mat_A->spmat_descr_,
+                                  cast_mat_B->spmat_descr_,
+                                  NULL,
+                                  mat_D,
+                                  mat_C,
+                                  data_type,
+                                  rocsparse_spgemm_alg_default,
+                                  rocsparse_spgemm_stage_buffer_size,
+                                  &buffer_size,
+                                  NULL);
         CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
 
         char* buffer = NULL;
         allocate_hip(buffer_size, &buffer);
-        allocate_hip(m + 1, &this->mat_.row_offset);
 
-        status = rocsparse_csrgemm_nnz(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                                       rocsparse_operation_none,
-                                       rocsparse_operation_none,
-                                       m,
-                                       n,
-                                       k,
-                                       cast_mat_A->mat_descr_,
-                                       cast_mat_A->nnz_,
-                                       cast_mat_A->mat_.row_offset,
-                                       cast_mat_A->mat_.col,
-                                       cast_mat_B->mat_descr_,
-                                       cast_mat_B->nnz_,
-                                       cast_mat_B->mat_.row_offset,
-                                       cast_mat_B->mat_.col,
-                                       NULL,
-                                       0,
-                                       NULL,
-                                       NULL,
-                                       this->mat_descr_,
-                                       this->mat_.row_offset,
-                                       &nnzC,
-                                       this->mat_info_,
-                                       buffer);
+        status = rocsparse_spgemm(handle,
+                                  rocsparse_operation_none,
+                                  rocsparse_operation_none,
+                                  &alpha,
+                                  cast_mat_A->spmat_descr_,
+                                  cast_mat_B->spmat_descr_,
+                                  NULL,
+                                  mat_D,
+                                  mat_C,
+                                  data_type,
+                                  rocsparse_spgemm_alg_default,
+                                  rocsparse_spgemm_stage_nnz,
+                                  &buffer_size,
+                                  buffer);
+        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+
+        int64_t nrowC;
+        int64_t ncolC;
+        int64_t nnzC;
+
+        status = rocsparse_spmat_get_size(mat_C, &nrowC, &ncolC, &nnzC);
         CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
 
         allocate_hip(nnzC, &this->mat_.col);
         allocate_hip(nnzC, &this->mat_.val);
 
-        this->nrow_ = m;
-        this->ncol_ = n;
-        this->nnz_  = nnzC;
+        status = rocsparse_csr_set_pointers(
+            mat_C, this->mat_.row_offset, this->mat_.col, this->mat_.val);
+        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
 
-        status = rocsparseTcsrgemm(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                                   rocsparse_operation_none,
-                                   rocsparse_operation_none,
-                                   m,
-                                   n,
-                                   k,
-                                   &alpha,
-                                   cast_mat_A->mat_descr_,
-                                   cast_mat_A->nnz_,
-                                   cast_mat_A->mat_.val,
-                                   cast_mat_A->mat_.row_offset,
-                                   cast_mat_A->mat_.col,
-                                   cast_mat_B->mat_descr_,
-                                   cast_mat_B->nnz_,
-                                   cast_mat_B->mat_.val,
-                                   cast_mat_B->mat_.row_offset,
-                                   cast_mat_B->mat_.col,
-                                   this->mat_descr_,
-                                   this->mat_.val,
-                                   this->mat_.row_offset,
-                                   this->mat_.col,
-                                   this->mat_info_,
-                                   buffer);
+        status = rocsparse_spgemm(handle,
+                                  rocsparse_operation_none,
+                                  rocsparse_operation_none,
+                                  &alpha,
+                                  cast_mat_A->spmat_descr_,
+                                  cast_mat_B->spmat_descr_,
+                                  NULL,
+                                  mat_D,
+                                  mat_C,
+                                  data_type,
+                                  rocsparse_spgemm_alg_default,
+                                  rocsparse_spgemm_stage_compute,
+                                  &buffer_size,
+                                  buffer);
         CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
 
         free_hip(&buffer);
         CHECK_HIP_ERROR(__FILE__, __LINE__);
+
+        status = rocsparse_destroy_spmat_descr(mat_C);
+        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+
+        status = rocsparse_destroy_spmat_descr(mat_D);
+        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+
+        this->nrow_ = m;
+        this->ncol_ = n;
+        this->nnz_  = nnzC;
 
         this->CreateSpMatDescr_();
 
@@ -4477,72 +4500,146 @@ namespace rocalution
             PtrType*   csrRowPtrC = NULL;
             int*       csrColC    = NULL;
             ValueType* csrValC    = NULL;
-            PtrType    nnzC;
+            int64_t    nnzC;
 
-            allocate_hip(m + 1, &csrRowPtrC);
+            rocsparse_handle   handle    = ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle);
+            rocsparse_datatype data_type = rocalution_datatype_traits<ValueType>::value;
+
+            const rocsparse_spgeam_alg alg   = rocsparse_spgeam_alg_default;
+            const rocsparse_operation  trans = rocsparse_operation_none;
 
             rocsparse_status status;
 
-            rocsparse_mat_descr desc_mat_C;
-
-            status = rocsparse_create_mat_descr(&desc_mat_C);
+            status = rocsparse_set_pointer_mode(handle, rocsparse_pointer_mode_host);
             CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
 
-            status = rocsparse_set_mat_index_base(desc_mat_C, rocsparse_index_base_zero);
+            rocsparse_spgeam_descr descr;
+
+            status = rocsparse_create_spgeam_descr(&descr);
             CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
 
-            status = rocsparse_set_mat_type(desc_mat_C, rocsparse_matrix_type_general);
+            status = rocsparse_spgeam_set_input(
+                handle, descr, rocsparse_spgeam_input_alg, &alg, sizeof(alg), NULL);
             CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
 
-            status = rocsparse_set_pointer_mode(
-                ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                rocsparse_pointer_mode_host);
+            status = rocsparse_spgeam_set_input(
+                handle, descr, rocsparse_spgeam_input_operation_A, &trans, sizeof(trans), NULL);
             CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
 
-            status = rocsparse_csrgeam_nnz(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                                           m,
-                                           n,
-                                           this->mat_descr_,
-                                           this->nnz_,
-                                           this->mat_.row_offset,
-                                           this->mat_.col,
-                                           cast_mat->mat_descr_,
-                                           cast_mat->nnz_,
-                                           cast_mat->mat_.row_offset,
-                                           cast_mat->mat_.col,
-                                           desc_mat_C,
-                                           csrRowPtrC,
-                                           &nnzC);
+            status = rocsparse_spgeam_set_input(
+                handle, descr, rocsparse_spgeam_input_operation_B, &trans, sizeof(trans), NULL);
             CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
 
+            status = rocsparse_spgeam_set_input(handle,
+                                                descr,
+                                                rocsparse_spgeam_input_scalar_datatype,
+                                                &data_type,
+                                                sizeof(data_type),
+                                                NULL);
+            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+
+            status = rocsparse_spgeam_set_input(handle,
+                                                descr,
+                                                rocsparse_spgeam_input_compute_datatype,
+                                                &data_type,
+                                                sizeof(data_type),
+                                                NULL);
+            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+
+            // rocsparse keeps the pointers to alpha and beta, not their values
+            status = rocsparse_spgeam_set_input(
+                handle, descr, rocsparse_spgeam_input_scalar_alpha, &alpha, sizeof(&alpha), NULL);
+            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+
+            status = rocsparse_spgeam_set_input(
+                handle, descr, rocsparse_spgeam_input_scalar_beta, &beta, sizeof(&beta), NULL);
+            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+
+            // The analysis computes the row offsets of C and keeps them inside the descriptor
+            size_t buffer_size = 0;
+            char*  buffer      = NULL;
+
+            status = rocsparse_spgeam_buffer_size(handle,
+                                                  descr,
+                                                  this->spmat_descr_,
+                                                  cast_mat->spmat_descr_,
+                                                  NULL,
+                                                  rocsparse_spgeam_stage_analysis,
+                                                  &buffer_size,
+                                                  NULL);
+            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+
+            allocate_hip(buffer_size, &buffer);
+
+            status = rocsparse_spgeam(handle,
+                                      descr,
+                                      this->spmat_descr_,
+                                      cast_mat->spmat_descr_,
+                                      NULL,
+                                      rocsparse_spgeam_stage_analysis,
+                                      buffer_size,
+                                      buffer,
+                                      NULL);
+            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+
+            free_hip(&buffer);
+
+            DISCARD_HIP_ERROR(
+                hipStreamSynchronize(HIPSTREAM(_get_backend_descriptor()->HIP_stream_current)));
+            CHECK_HIP_ERROR(__FILE__, __LINE__);
+
+            status = rocsparse_spgeam_get_output(
+                handle, descr, rocsparse_spgeam_output_nnz, &nnzC, sizeof(nnzC), NULL);
+            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+
+            allocate_hip(m + 1, &csrRowPtrC);
             allocate_hip(nnzC, &csrColC);
             allocate_hip(nnzC, &csrValC);
 
-            status = rocsparseTcsrgeam(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                                       m,
-                                       n,
-                                       // A
-                                       &alpha,
-                                       this->mat_descr_,
-                                       this->nnz_,
-                                       this->mat_.val,
-                                       this->mat_.row_offset,
-                                       this->mat_.col,
-                                       // B
-                                       &beta,
-                                       cast_mat->mat_descr_,
-                                       cast_mat->nnz_,
-                                       cast_mat->mat_.val,
-                                       cast_mat->mat_.row_offset,
-                                       cast_mat->mat_.col,
-                                       // C
-                                       desc_mat_C,
-                                       csrValC,
-                                       csrRowPtrC,
-                                       csrColC);
+            rocsparse_spmat_descr mat_C;
+            status = rocsparse_create_csr_descr(&mat_C,
+                                                m,
+                                                n,
+                                                nnzC,
+                                                csrRowPtrC,
+                                                csrColC,
+                                                csrValC,
+                                                rocalution_indextype_traits<PtrType>::value,
+                                                rocalution_indextype_traits<int>::value,
+                                                rocsparse_index_base_zero,
+                                                data_type);
             CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
 
-            status = rocsparse_destroy_mat_descr(desc_mat_C);
+            status = rocsparse_spgeam_buffer_size(handle,
+                                                  descr,
+                                                  this->spmat_descr_,
+                                                  cast_mat->spmat_descr_,
+                                                  mat_C,
+                                                  rocsparse_spgeam_stage_compute,
+                                                  &buffer_size,
+                                                  NULL);
+            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+
+            allocate_hip(buffer_size, &buffer);
+
+            status = rocsparse_spgeam(handle,
+                                      descr,
+                                      this->spmat_descr_,
+                                      cast_mat->spmat_descr_,
+                                      mat_C,
+                                      rocsparse_spgeam_stage_compute,
+                                      buffer_size,
+                                      buffer,
+                                      NULL);
+            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+
+            free_hip(&buffer);
+            CHECK_HIP_ERROR(__FILE__, __LINE__);
+
+            status = rocsparse_destroy_spmat_descr(mat_C);
+            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+
+            status = rocsparse_destroy_spgeam_descr(descr);
             CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
 
             this->Clear();

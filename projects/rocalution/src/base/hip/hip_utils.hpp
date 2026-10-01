@@ -1,5 +1,5 @@
 /* ************************************************************************
- * Copyright (C) 2018-2023 Advanced Micro Devices, Inc. All rights Reserved.
+ * Copyright (C) 2018-2026 Advanced Micro Devices, Inc. All rights Reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -246,6 +246,15 @@ namespace rocalution
         }
     }
 #endif /* ROCALUTION_USE_MOVE_DPP */
+
+    template <unsigned int WFSIZE>
+    static __device__ __forceinline__ void wf_reduce_sum(int64_t* sum)
+    {
+        for(int i = WFSIZE >> 1; i > 0; i >>= 1)
+        {
+            *sum += __shfl_xor(*sum, i);
+        }
+    }
 
     template <unsigned int WF_SIZE>
     static __device__ __forceinline__ void wf_reduce_sum(float* sum)

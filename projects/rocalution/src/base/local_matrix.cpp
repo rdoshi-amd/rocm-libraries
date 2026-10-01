@@ -785,7 +785,7 @@ namespace rocalution
     }
 
     template <typename ValueType>
-    void LocalMatrix<ValueType>::SetDataPtrBCSR(int**       row_offset,
+    void LocalMatrix<ValueType>::SetDataPtrBCSR(PtrType**   row_offset,
                                                 int**       col,
                                                 ValueType** val,
                                                 std::string name,
@@ -839,7 +839,7 @@ namespace rocalution
     }
 
     template <typename ValueType>
-    void LocalMatrix<ValueType>::LeaveDataPtrBCSR(int**       row_offset,
+    void LocalMatrix<ValueType>::LeaveDataPtrBCSR(PtrType**   row_offset,
                                                   int**       col,
                                                   ValueType** val,
                                                   int&        blockdim)
@@ -869,7 +869,7 @@ namespace rocalution
     }
 
     template <typename ValueType>
-    void LocalMatrix<ValueType>::SetDataPtrMCSR(int**       row_offset,
+    void LocalMatrix<ValueType>::SetDataPtrMCSR(PtrType**   row_offset,
                                                 int**       col,
                                                 ValueType** val,
                                                 std::string name,
@@ -913,7 +913,7 @@ namespace rocalution
     }
 
     template <typename ValueType>
-    void LocalMatrix<ValueType>::LeaveDataPtrMCSR(int** row_offset, int** col, ValueType** val)
+    void LocalMatrix<ValueType>::LeaveDataPtrMCSR(PtrType** row_offset, int** col, ValueType** val)
     {
         log_debug(this, "LocalMatrix::LeaveDataPtrMCSR()", row_offset, col, val);
 

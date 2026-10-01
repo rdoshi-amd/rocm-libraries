@@ -130,7 +130,7 @@ namespace rocalution
         virtual void LeaveDataPtrCSR(PtrType** row_offset, int** col, ValueType** val);
 
         /** \brief Initialize a BCSR matrix on the Host with externally allocated data */
-        virtual void SetDataPtrBCSR(int**       row_offset,
+        virtual void SetDataPtrBCSR(PtrType**   row_offset,
                                     int**       col,
                                     ValueType** val,
                                     int64_t     nnzb,
@@ -138,13 +138,14 @@ namespace rocalution
                                     int         ncolb,
                                     int         blockdim);
         /** \brief Leave a BCSR matrix to Host pointers */
-        virtual void LeaveDataPtrBCSR(int** row_offset, int** col, ValueType** val, int& blockdim);
+        virtual void
+            LeaveDataPtrBCSR(PtrType** row_offset, int** col, ValueType** val, int& blockdim);
 
         /** \brief Initialize a MCSR matrix on the Host with externally allocated data */
         virtual void SetDataPtrMCSR(
-            int** row_offset, int** col, ValueType** val, int64_t nnz, int nrow, int ncol);
+            PtrType** row_offset, int** col, ValueType** val, int64_t nnz, int nrow, int ncol);
         /** \brief Leave a MCSR matrix to Host pointers */
-        virtual void LeaveDataPtrMCSR(int** row_offset, int** col, ValueType** val);
+        virtual void LeaveDataPtrMCSR(PtrType** row_offset, int** col, ValueType** val);
 
         /** \brief Initialize an ELL matrix on the Host with externally allocated data */
         virtual void

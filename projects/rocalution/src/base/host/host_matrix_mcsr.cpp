@@ -1,5 +1,5 @@
 /* ************************************************************************
- * Copyright (C) 2018-2025 Advanced Micro Devices, Inc. All rights Reserved.
+ * Copyright (C) 2018-2026 Advanced Micro Devices, Inc. All rights Reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -115,7 +115,7 @@ namespace rocalution
 
     template <typename ValueType>
     void HostMatrixMCSR<ValueType>::SetDataPtrMCSR(
-        int** row_offset, int** col, ValueType** val, int64_t nnz, int nrow, int ncol)
+        PtrType** row_offset, int** col, ValueType** val, int64_t nnz, int nrow, int ncol)
     {
         assert(nnz >= 0);
         assert(nrow >= 0);
@@ -140,7 +140,9 @@ namespace rocalution
     }
 
     template <typename ValueType>
-    void HostMatrixMCSR<ValueType>::LeaveDataPtrMCSR(int** row_offset, int** col, ValueType** val)
+    void HostMatrixMCSR<ValueType>::LeaveDataPtrMCSR(PtrType**   row_offset,
+                                                     int**       col,
+                                                     ValueType** val)
     {
         assert(this->nrow_ >= 0);
         assert(this->ncol_ >= 0);
@@ -250,8 +252,8 @@ namespace rocalution
         assert(this->nrow_ == this->ncol_);
         assert(this->nnz_ > 0);
 
-        int* diag_offset = NULL;
-        int* nnz_entries = NULL;
+        PtrType* diag_offset = NULL;
+        PtrType* nnz_entries = NULL;
 
         allocate_host(this->nrow_, &diag_offset);
         allocate_host(this->nrow_, &nnz_entries);
@@ -261,9 +263,9 @@ namespace rocalution
         // ai = 0 to N loop over all rows
         for(int ai = 0; ai < this->nrow_; ++ai)
         {
-            int aj;
-            int row_start = this->mat_.row_offset[ai];
-            int row_end   = this->mat_.row_offset[ai + 1];
+            PtrType aj;
+            PtrType row_start = this->mat_.row_offset[ai];
+            PtrType row_end   = this->mat_.row_offset[ai + 1];
 
             for(aj = row_start; aj < row_end; ++aj)
             {
@@ -283,7 +285,8 @@ namespace rocalution
                     this->mat_.val[aj] /= this->mat_.val[col_j];
 
                     // loop over upper offset pointer and do linear combination for nnz entry
-                    for(int ak = diag_offset[col_j]; ak < this->mat_.row_offset[col_j + 1]; ++ak)
+                    for(PtrType ak = diag_offset[col_j]; ak < this->mat_.row_offset[col_j + 1];
+                        ++ak)
                     {
                         // if nnz at this position do linear combination
                         if(nnz_entries[this->mat_.col[ak]] != 0)
@@ -336,7 +339,7 @@ namespace rocalution
         for(int ai = 0; ai < this->nrow_; ++ai)
         {
             cast_out->vec_[ai] = cast_in->vec_[ai];
-            for(int aj = this->mat_.row_offset[ai]; aj < this->mat_.row_offset[ai + 1]; ++aj)
+            for(PtrType aj = this->mat_.row_offset[ai]; aj < this->mat_.row_offset[ai + 1]; ++aj)
             {
                 if(this->mat_.col[aj] < ai)
                 {
@@ -354,7 +357,7 @@ namespace rocalution
         // Solve U
         for(int ai = this->nrow_ - 1; ai >= 0; --ai)
         {
-            for(int aj = this->mat_.row_offset[ai]; aj < this->mat_.row_offset[ai + 1]; ++aj)
+            for(PtrType aj = this->mat_.row_offset[ai]; aj < this->mat_.row_offset[ai + 1]; ++aj)
             {
                 if(this->mat_.col[aj] > ai)
                 {
@@ -447,7 +450,8 @@ namespace rocalution
             {
                 ValueType sum = this->mat_.val[ai] * cast_in->vec_[ai];
 
-                for(int aj = this->mat_.row_offset[ai]; aj < this->mat_.row_offset[ai + 1]; ++aj)
+                for(PtrType aj = this->mat_.row_offset[ai]; aj < this->mat_.row_offset[ai + 1];
+                    ++aj)
                 {
                     sum += this->mat_.val[aj] * cast_in->vec_[this->mat_.col[aj]];
                 }
@@ -486,7 +490,8 @@ namespace rocalution
             {
                 cast_out->vec_[ai] += scalar * this->mat_.val[ai] * cast_in->vec_[ai];
 
-                for(int aj = this->mat_.row_offset[ai]; aj < this->mat_.row_offset[ai + 1]; ++aj)
+                for(PtrType aj = this->mat_.row_offset[ai]; aj < this->mat_.row_offset[ai + 1];
+                    ++aj)
                 {
                     cast_out->vec_[ai]
                         += scalar * this->mat_.val[aj] * cast_in->vec_[this->mat_.col[aj]];

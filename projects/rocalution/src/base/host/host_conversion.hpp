@@ -1,5 +1,5 @@
 /* ************************************************************************
- * Copyright (C) 2018-2023 Advanced Micro Devices, Inc. All rights Reserved.
+ * Copyright (C) 2018-2026 Advanced Micro Devices, Inc. All rights Reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -43,7 +43,7 @@ namespace rocalution
                      IndexType                                           nrow,
                      IndexType                                           ncol,
                      const MatrixCSR<ValueType, IndexType, PointerType>& src,
-                     MatrixMCSR<ValueType, IndexType>*                   dst);
+                     MatrixMCSR<ValueType, IndexType, PointerType>*      dst);
 
     template <typename ValueType, typename IndexType, typename PointerType>
     bool csr_to_bcsr(int                                                 omp_threads,
@@ -51,7 +51,7 @@ namespace rocalution
                      IndexType                                           nrow,
                      IndexType                                           ncol,
                      const MatrixCSR<ValueType, IndexType, PointerType>& src,
-                     MatrixBCSR<ValueType, IndexType>*                   dst);
+                     MatrixBCSR<ValueType, IndexType, PointerType>*      dst);
 
     template <typename ValueType, typename IndexType, typename PointerType>
     bool csr_to_dia(int                                                 omp_threads,
@@ -91,12 +91,12 @@ namespace rocalution
                     int64_t*                                            nnz_coo);
 
     template <typename ValueType, typename IndexType, typename PointerType>
-    bool bcsr_to_csr(int                                           omp_threads,
-                     int64_t                                       nnz,
-                     IndexType                                     nrow,
-                     IndexType                                     ncol,
-                     const MatrixBCSR<ValueType, IndexType>&       src,
-                     MatrixCSR<ValueType, IndexType, PointerType>* dst);
+    bool bcsr_to_csr(int                                                  omp_threads,
+                     int64_t                                              nnz,
+                     IndexType                                            nrow,
+                     IndexType                                            ncol,
+                     const MatrixBCSR<ValueType, IndexType, PointerType>& src,
+                     MatrixCSR<ValueType, IndexType, PointerType>*        dst);
 
     template <typename ValueType, typename IndexType, typename PointerType>
     bool dense_to_csr(int                                           omp_threads,
@@ -133,12 +133,12 @@ namespace rocalution
                     MatrixCSR<ValueType, IndexType, PointerType>* dst);
 
     template <typename ValueType, typename IndexType, typename PointerType>
-    bool mcsr_to_csr(int                                           omp_threads,
-                     int64_t                                       nnz,
-                     IndexType                                     nrow,
-                     IndexType                                     ncol,
-                     const MatrixMCSR<ValueType, IndexType>&       src,
-                     MatrixCSR<ValueType, IndexType, PointerType>* dst);
+    bool mcsr_to_csr(int                                                  omp_threads,
+                     int64_t                                              nnz,
+                     IndexType                                            nrow,
+                     IndexType                                            ncol,
+                     const MatrixMCSR<ValueType, IndexType, PointerType>& src,
+                     MatrixCSR<ValueType, IndexType, PointerType>*        dst);
 
     template <typename ValueType, typename IndexType, typename PointerType>
     bool hyb_to_csr(int                                           omp_threads,

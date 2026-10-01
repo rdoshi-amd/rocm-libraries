@@ -1,5 +1,5 @@
 /* ************************************************************************
- * Copyright (C) 2018-2023 Advanced Micro Devices, Inc. All rights Reserved.
+ * Copyright (C) 2018-2026 Advanced Micro Devices, Inc. All rights Reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -163,7 +163,7 @@ namespace rocalution
     }
 
     template <typename ValueType>
-    void HIPAcceleratorMatrixBCSR<ValueType>::SetDataPtrBCSR(int**       row_offset,
+    void HIPAcceleratorMatrixBCSR<ValueType>::SetDataPtrBCSR(PtrType**   row_offset,
                                                              int**       col,
                                                              ValueType** val,
                                                              int64_t     nnzb,
@@ -203,7 +203,7 @@ namespace rocalution
     }
 
     template <typename ValueType>
-    void HIPAcceleratorMatrixBCSR<ValueType>::LeaveDataPtrBCSR(int**       row_offset,
+    void HIPAcceleratorMatrixBCSR<ValueType>::LeaveDataPtrBCSR(PtrType**   row_offset,
                                                                int**       col,
                                                                ValueType** val,
                                                                int&        blockdim)

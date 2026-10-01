@@ -1,5 +1,5 @@
 /* ************************************************************************
- * Copyright (C) 2020-2025 Advanced Micro Devices, Inc. All rights Reserved.
+ * Copyright (C) 2020-2026 Advanced Micro Devices, Inc. All rights Reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -123,7 +123,7 @@ namespace rocalution
     }
 
     template <typename ValueType>
-    void HostMatrixBCSR<ValueType>::SetDataPtrBCSR(int**       row_offset,
+    void HostMatrixBCSR<ValueType>::SetDataPtrBCSR(PtrType**   row_offset,
                                                    int**       col,
                                                    ValueType** val,
                                                    int64_t     nnzb,
@@ -160,7 +160,7 @@ namespace rocalution
     }
 
     template <typename ValueType>
-    void HostMatrixBCSR<ValueType>::LeaveDataPtrBCSR(int**       row_offset,
+    void HostMatrixBCSR<ValueType>::LeaveDataPtrBCSR(PtrType**   row_offset,
                                                      int**       col,
                                                      ValueType** val,
                                                      int&        blockdim)
@@ -356,12 +356,12 @@ namespace rocalution
             {
                 for(int bi = 0; bi < bsrdim; ++bi)
                 {
-                    int row_begin = this->mat_.row_offset[ai];
-                    int row_end   = this->mat_.row_offset[ai + 1];
+                    PtrType row_begin = this->mat_.row_offset[ai];
+                    PtrType row_end   = this->mat_.row_offset[ai + 1];
 
                     ValueType sum = static_cast<ValueType>(0);
 
-                    for(int aj = row_begin; aj < row_end; ++aj)
+                    for(PtrType aj = row_begin; aj < row_end; ++aj)
                     {
                         int col = this->mat_.col[aj];
 
@@ -408,12 +408,12 @@ namespace rocalution
             {
                 for(int bi = 0; bi < bsrdim; ++bi)
                 {
-                    int row_begin = this->mat_.row_offset[ai];
-                    int row_end   = this->mat_.row_offset[ai + 1];
+                    PtrType row_begin = this->mat_.row_offset[ai];
+                    PtrType row_end   = this->mat_.row_offset[ai + 1];
 
                     ValueType sum = static_cast<ValueType>(0);
 
-                    for(int aj = row_begin; aj < row_end; ++aj)
+                    for(PtrType aj = row_begin; aj < row_end; ++aj)
                     {
                         int col = this->mat_.col[aj];
 

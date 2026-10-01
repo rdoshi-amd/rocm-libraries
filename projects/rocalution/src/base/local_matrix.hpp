@@ -194,7 +194,7 @@ namespace rocalution
                            int64_t     nrow,
                            int64_t     ncol);
         ROCALUTION_EXPORT
-        void SetDataPtrBCSR(int**       row_offset,
+        void SetDataPtrBCSR(PtrType**   row_offset,
                             int**       col,
                             ValueType** val,
                             std::string name,
@@ -203,7 +203,7 @@ namespace rocalution
                             int64_t     ncolb,
                             int         blockdim);
         ROCALUTION_EXPORT
-        void SetDataPtrMCSR(int**       row_offset,
+        void SetDataPtrMCSR(PtrType**   row_offset,
                             int**       col,
                             ValueType** val,
                             std::string name,
@@ -262,9 +262,9 @@ namespace rocalution
         ROCALUTION_EXPORT
         void LeaveDataPtrCSR(PtrType** row_offset, int** col, ValueType** val);
         ROCALUTION_EXPORT
-        void LeaveDataPtrBCSR(int** row_offset, int** col, ValueType** val, int& blockdim);
+        void LeaveDataPtrBCSR(PtrType** row_offset, int** col, ValueType** val, int& blockdim);
         ROCALUTION_EXPORT
-        void LeaveDataPtrMCSR(int** row_offset, int** col, ValueType** val);
+        void LeaveDataPtrMCSR(PtrType** row_offset, int** col, ValueType** val);
         ROCALUTION_EXPORT
         void LeaveDataPtrELL(int** col, ValueType** val, int& max_row);
         ROCALUTION_EXPORT

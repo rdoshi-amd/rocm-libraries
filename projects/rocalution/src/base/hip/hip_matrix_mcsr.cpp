@@ -1,5 +1,5 @@
 /* ************************************************************************
- * Copyright (C) 2018-2023 Advanced Micro Devices, Inc. All rights Reserved.
+ * Copyright (C) 2018-2026 Advanced Micro Devices, Inc. All rights Reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -112,7 +112,7 @@ namespace rocalution
 
     template <typename ValueType>
     void HIPAcceleratorMatrixMCSR<ValueType>::SetDataPtrMCSR(
-        int** row_offset, int** col, ValueType** val, int64_t nnz, int nrow, int ncol)
+        PtrType** row_offset, int** col, ValueType** val, int64_t nnz, int nrow, int ncol)
     {
         assert(nnz >= 0);
         assert(nrow >= 0);
@@ -140,7 +140,7 @@ namespace rocalution
     }
 
     template <typename ValueType>
-    void HIPAcceleratorMatrixMCSR<ValueType>::LeaveDataPtrMCSR(int**       row_offset,
+    void HIPAcceleratorMatrixMCSR<ValueType>::LeaveDataPtrMCSR(PtrType**   row_offset,
                                                                int**       col,
                                                                ValueType** val)
     {

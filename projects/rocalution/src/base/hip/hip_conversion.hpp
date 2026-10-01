@@ -1,5 +1,5 @@
 /* ************************************************************************
- * Copyright (C) 2018-2023 Advanced Micro Devices, Inc. All rights Reserved.
+ * Copyright (C) 2018-2026 Advanced Micro Devices, Inc. All rights Reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -55,18 +55,18 @@ namespace rocalution
                          IndexType                                           ncol,
                          const MatrixCSR<ValueType, IndexType, PointerType>& src,
                          const rocsparse_mat_descr                           src_descr,
-                         MatrixBCSR<ValueType, IndexType>*                   dst,
+                         MatrixBCSR<ValueType, IndexType, PointerType>*      dst,
                          const rocsparse_mat_descr                           dst_descr);
 
     template <typename ValueType, typename IndexType, typename PointerType>
-    bool bcsr_to_csr_hip(const Rocalution_Backend_Descriptor*          backend,
-                         int64_t                                       nnz,
-                         IndexType                                     nrow,
-                         IndexType                                     ncol,
-                         const MatrixBCSR<ValueType, IndexType>&       src,
-                         const rocsparse_mat_descr                     src_descr,
-                         MatrixCSR<ValueType, IndexType, PointerType>* dst,
-                         rocsparse_mat_descr                           dst_descr);
+    bool bcsr_to_csr_hip(const Rocalution_Backend_Descriptor*                 backend,
+                         int64_t                                              nnz,
+                         IndexType                                            nrow,
+                         IndexType                                            ncol,
+                         const MatrixBCSR<ValueType, IndexType, PointerType>& src,
+                         const rocsparse_mat_descr                            src_descr,
+                         MatrixCSR<ValueType, IndexType, PointerType>*        dst,
+                         rocsparse_mat_descr                                  dst_descr);
 
     template <typename ValueType, typename IndexType, typename PointerType>
     bool csr_to_ell_hip(const Rocalution_Backend_Descriptor*                backend,

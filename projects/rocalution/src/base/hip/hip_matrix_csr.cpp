@@ -4966,7 +4966,8 @@ namespace rocalution
 
         if(this->nnz_ > 0)
         {
-            HIPAcceleratorVector<int>* cast_vec = dynamic_cast<HIPAcceleratorVector<int>*>(row_nnz);
+            HIPAcceleratorVector<PtrType>* cast_vec
+                = dynamic_cast<HIPAcceleratorVector<PtrType>*>(row_nnz);
 
             assert(cast_vec != NULL);
 
@@ -5606,8 +5607,8 @@ namespace rocalution
         rocprim_buffer = NULL;
 
         // Obtain sizes of P
-        int prolong_ncol;
-        int prolong_nrow = this->nrow_;
+        PtrType prolong_ncol;
+        int     prolong_nrow = this->nrow_;
         copy_d2h(1, prolong_row_offset, &prolong_ncol);
         ++prolong_ncol;
 
@@ -5646,7 +5647,7 @@ namespace rocalution
         free_hip(&rocprim_buffer);
         rocprim_buffer = NULL;
 
-        int max_row_nnz;
+        PtrType max_row_nnz;
         copy_d2h(1, prolong_row_offset, &max_row_nnz);
 
         // Call corresponding kernel to compute non-zero entries per row of P
@@ -7955,11 +7956,11 @@ namespace rocalution
 
         free_hip(&rocprim_buffer);
 
-        int max_row_nnz;
+        PtrType max_row_nnz;
         copy_d2h(1, cast_pi->mat_.row_offset, &max_row_nnz);
         if(global == true)
         {
-            int max_row_nnz_gst;
+            PtrType max_row_nnz_gst;
             copy_d2h(1, cast_pg->mat_.row_offset, &max_row_nnz_gst);
             max_row_nnz = std::max(max_row_nnz, max_row_nnz_gst);
         }
@@ -8595,11 +8596,11 @@ namespace rocalution
 
         free_hip(&rocprim_buffer);
 
-        int max_row_nnz;
+        PtrType max_row_nnz;
         copy_d2h(1, cast_pi->mat_.row_offset + this->nrow_, &max_row_nnz);
         if(global)
         {
-            int max_row_nnz_gst;
+            PtrType max_row_nnz_gst;
             copy_d2h(1, cast_pg->mat_.row_offset + this->nrow_, &max_row_nnz_gst);
             max_row_nnz = std::max(max_row_nnz, max_row_nnz_gst);
         }

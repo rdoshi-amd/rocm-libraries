@@ -69,8 +69,10 @@ segment is sanitized (any character other than `[A-Za-z0-9_]` becomes `_`):
 So the tier directory is always the suite prefix (`quick_*`, `standard_*`, …),
 which is what the tier YAML files match on. Two bundles that sanitize to the same
 full name abort registration with `Bundle name collision`, naming both paths.
-Keep every bundle under a tier directory: a graph placed directly in the data
-root registers under the root folder's name and matches no tier.
+Keep every bundle under a tier directory. A graph placed directly in the data
+root aborts discovery — the binary exits 1 with `Bundle content must live in a
+sub-folder of the data root, not at the root itself` — and one under any other
+top-level folder registers under that folder's name and matches no tier.
 
 Discovery imposes no folder schema beyond that; the
 `{tier}/{Op}/{Layout}/{DataType}/{Name}` convention below is a convention, kept
@@ -354,11 +356,17 @@ Rules:
 - **Platform** is `linux` or `windows`.
 - In a sweep sidecar a case id may appear in at most one group per engine. A
   case named in no group is simply unclaimed.
-- **Every bundle has a sidecar.** A sidecar claims nothing about engines, archs
-  or platforms it does not list; the absence of a claim is not a claim of
+- **Every new bundle gets a sidecar.** A sidecar claims nothing about engines,
+  archs or platforms it does not list; the absence of a claim is not a claim of
   non-support. A bundle that no engine accepts yet carries the empty sidecar
   above. A bundle with **no** sidecar is invisible to the claim machinery: no
-  verdict, not even `unclaimed_support`.
+  verdict, not even `unclaimed_support`. Nothing enforces the rule — the run
+  treats a missing sidecar as "no claims", and `verify_support_claims.py` checks
+  the sidecars that exist, not the ones that are missing — and older bundles
+  break it: most SDPA single-graph bundles and a few sweeps
+  (`quick/SdpaBackward/Default`, `quick/Reduction/Default`,
+  `quick/Pointwise/Binary`, `{quick,full}/BlockScaleDequantizeMatmul/Default`)
+  have none.
 - Sidecars are **machine-written** by `--write-support-claims`. Its form is
   stricter than JSON validity: sorted keys, 2-space indent, one array element
   per line, trailing newline, LF line endings; platforms and case ids sorted;
@@ -524,8 +532,8 @@ execution_settings:
 |---|---|---|
 | Graph `.json` | `IntegrationTestBundle.hpp` | Case dropped from registration with an `ERROR` log line; the run stays green with one test fewer |
 | `graph.template.json` + `sweep.json` | `BundleDiscovery.hpp`, `IntegrationTestBundle.hpp` | A malformed `sweep.json` or a bad/duplicate id aborts registration; a bad case (missing placeholder value, missing metadata, bad `golden.path`) is dropped like a bad graph |
-| `.meta.json` / `cases[].metadata` | `BundleMetadata.hpp`; `reference-data-scripts/verify_golden_bundles.py` | Required for every bundle and every sweep case, with `generator` and `reference_source`; a missing file or block is an error |
-| `.support.json` / `support.json` | `SupportClaims.cpp` at run time; `scripts/verify_support_claims.py` by hand | Required for every bundle; a missing sidecar is an error. A broken claim fails the test at run time |
+| `.meta.json` / `cases[].metadata` | `BundleMetadata.hpp`; `reference-data-scripts/verify_golden_bundles.py` | Required for new bundles and every sweep case, with `generator` and `reference_source`. At run time a sweep case without a `metadata` block is dropped; a single-graph bundle without `.meta.json` loads with empty metadata, unless it has golden `.bin` files, in which case it fails. Some SDPA single-graph bundles have no `.meta.json`, and many older sweeps lack `generator` or `reference_source`, so the verifier fails on the whole tree; run it on the directories you touched ([details](adding-tests.md#check-the-data-itself)) |
+| `.support.json` / `support.json` | `SupportClaims.cpp` at run time; `scripts/verify_support_claims.py` by hand | Required for new bundles, but not enforced: a missing sidecar means "no claims" at run time and is not reported by the verifier. A sidecar that does not parse, and a broken claim, fail that bundle's test |
 | Golden `.bin` / `.dvc` | `IntegrationTestBundle.hpp`; `reference-data-scripts/verify_golden_bundles.py` | Falls back to a reference in `auto` mode; fails in `golden` mode |
 | Engine `.toml` | `TestSettings.hpp` | Binary exits 1 at startup |
 | `test_categories*.yaml` | `shared/ctest/parse_test_categories.py` | CMake **warning** at configure; that target's tier suites are not generated, so `ctest -L <tier>` quietly runs less. Check the configure log or `ctest -N -L <tier>` |

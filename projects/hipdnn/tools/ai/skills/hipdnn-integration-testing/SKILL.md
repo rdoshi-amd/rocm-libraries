@@ -30,7 +30,10 @@ fresh.
 2. **Local documents first.** If `<repo-root>/dnn-providers/integration-tests/docs/README.md`
    exists, read the documents from there. A local copy describes the code the
    developer is actually building, including unmerged changes on their branch,
-   so it wins over any remote copy.
+   so it wins over any remote copy. That index file is the test: without it the
+   checkout has no usable documents, even if other files exist under `docs/` or
+   a `README.md` sits next to it — an older tree, not a partial source to
+   answer from.
 3. **GitHub `develop` otherwise.** If there is no checkout, or that file does not
    exist in it, fetch the same paths from raw GitHub — the index first:
 
@@ -45,10 +48,11 @@ fresh.
    matches against. Tell the developer the text came from `develop` and may not
    match their tree.
 4. **Neither reachable** → stop and say so. Do not substitute remembered
-   content.
+   content, and do not answer from other READMEs or documents that happen to
+   exist in the checkout.
 
-Say once, in a line, which source you loaded (checkout path and branch, or
-GitHub `develop`).
+Say once, in a line, which source you loaded: the checkout path and its branch
+(`git -C <repo-root> rev-parse --abbrev-ref HEAD`), or GitHub `develop`.
 
 Read the index first. It defines the terms, maps topics to documents, and
 lists the signals a run can print. Then read every document the task touches;
@@ -82,6 +86,14 @@ output against **every row** of the signals table in the index and report each
 signal that is present, with the next step the documents prescribe. Report the
 result the way the running document says to, never as an exit code alone.
 
+This applies when the developer asked about something else, too. Before
+anything else, give one short line that accounts for the whole table — the
+rows present by name, then "absent: all other rows" — so a row that was not
+checked cannot be mistaken for one that was. Rows that need two parts of the
+output read together (a header line, or one counter set beside another) are
+the easiest to miss; check them against the summary blocks themselves, not the
+pass/fail line.
+
 If the output you have lacks the blocks the documents say a run prints — for
 example a CTest run that shows only pass/fail lines — obtain the full output
 the way the running document describes before concluding that no signal is
@@ -90,8 +102,13 @@ present, and say that you did.
 Call out `unclaimed_support` explicitly every time it appears in a
 `SUPPORT CLAIM SUMMARY`, even when the run is green and even when the developer
 asked about something else. Name the engine, arch and platform from the
-summary's `run` block and the bundles and cases listed, and point the developer
-at the documented procedure for updating the sidecars.
+summary's `run` block and the bundles and cases listed, and give the complete
+command that would record them: the documented authoring command with every
+argument filled in for this run and this checkout — test article, engine,
+engine config, data directory (wherever the documented procedure says it must
+point) and a filter that selects the listed bundles — followed by the
+confirming run the procedure requires. A link to the procedure alone is not
+enough.
 
 ## 4. Keep this skill hollow
 

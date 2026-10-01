@@ -95,16 +95,6 @@
             "linux"
           ]
         }
-      },
-      {
-        "cases": [
-          "runtime_epsilon"
-        ],
-        "support": {
-          "gfx1151": [
-            "windows"
-          ]
-        }
       }
     ]
   },

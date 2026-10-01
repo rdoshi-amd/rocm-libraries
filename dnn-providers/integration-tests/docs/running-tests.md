@@ -58,6 +58,16 @@ for example `miopen-provider-external-integration_quick_suite`. A YAML with
 `exclude_gpu` entries adds per-arch variants named
 `<prefix>_<category>_<arch>_suite`; see [layer 2](#what-decides-whether-a-test-runs).
 
+`-L` is a regular expression matched against each label, not an exact label.
+In a provider build directory `-L quick` therefore also selects the `ffm-quick`
+suites, the provider's own unit and integration suites (they carry tier labels
+too), and every per-arch variant — some of them `DISABLED`. List first with
+`-N`. To run exactly one lane's tier, select the suite by name:
+
+```bash
+ctest --test-dir build/dnn-providers/miopen-provider -R '^miopen-provider-external-integration_quick_suite$' --output-on-failure
+```
+
 #### Seeing the output of a passing run
 
 `--output-on-failure` prints a test's output only when that test fails. A green
@@ -204,6 +214,14 @@ full):
 | `standard` | `quick_*`, `standard_*` | `Smoke/*`, `Quick/*`, `Standard/*` | `pr`, `precheckin` |
 | `comprehensive` | `quick_*`, `standard_*`, `comprehensive_*`, `full_*` (HIP_MLOPS excludes `full_Layernorm_*`) | the above, `Comprehensive/*`, and untiered `Integration*` | `nightly`, `extended` |
 | `full` | everything (`*`) | everything | `all` |
+
+Each lane YAML also defines an `ffm-quick` category (labels `ffm-quick`,
+`ffm-full`), the fast-feedback tier. It is not a superset of `quick` and differs
+per lane: miopen lists one sweep case per op by exact name; HIP_MLOPS selects
+`quick_*`, `Smoke/*` and `Quick/*`; ASM_SDPA the `*Sdpa*` subset of those;
+hipBLASLt only `Smoke/*`, `Quick/*` and `TestCpu*GoldenReference*`, so its
+`ffm-quick` runs no bundles. Because `-L` is a regex, `-L quick` also selects
+these suites ([above](#1-ctest-by-tier-what-ci-does)).
 
 Timeouts come from `execution_settings.category_timeouts` in each YAML file and
 differ per file.
@@ -354,7 +372,7 @@ is green. To tell an expected skip from a regression, read the skip reasons:
 
 | Message | Meaning |
 |---|---|
-| `Error: zero tests ran.` followed by `registered: N … selected: 0 …` | Nothing matched. `registered: 0` is a discovery problem (wrong plugin, wrong bundle root); `N` registered with 0 selected is a filter problem. Always a configuration bug. Exit 1. |
+| `Error: zero tests ran.` followed by `registered: N … selected: 0 …` | Nothing ran. `registered: 0` is a discovery problem (wrong plugin, wrong bundle root); `N` registered with 0 selected is a filter problem. The one expected cause is GTest sharding (`GTEST_TOTAL_SHARDS` / `GTEST_SHARD_INDEX`): when GTest printed `Note: This is test shard K of M.`, the shard can be empty because there are more shards than tests the filter matched. The `selected:` line reads `nothing matched --gtest_filter` in that case too, although the filter did match. Otherwise always a configuration bug. Exit 1. |
 | `FATAL: --enforce-support-claims is active and N graph(s) carrying support` (continues over several lines) | Graphs with sidecars ran but none was ever queried: enforcement verified nothing. Usually every one of them failed to open. Exit 1. |
 | `support claims exist for X but were never queried` | A code path skipped the claim query: a harness bug, not a data problem. |
 | `Error: --enforce-support-claims requires --test-engine …` | No engine named to check claims against. |

@@ -249,7 +249,7 @@ not write a support sidecar leaves that step to you.
 
 ```bash
 python dnn-providers/integration-tests/reference-data-scripts/verify_golden_bundles.py \
-    --require-data dnn-providers/integration-tests/integration-test-bundles
+    --require-data <each bundle or sweep directory you added or changed>
 build/bin/hipdnn_golden_data_tests --reference cpu
 ```
 
@@ -257,6 +257,15 @@ The first checks graph JSON, metadata (including the required `generator` and
 `reference_source`), tensor sizes, and NaN/Inf in outputs; `--require-data`
 makes a pointer whose `.bin` was not pulled an error instead of a warning. The
 second recomputes each golden bundle with a reference executor and compares.
+
+Pass the directories you touched, not the whole `integration-test-bundles/`
+tree: the tree does not pass today. The verifier expects exactly
+`{tier}/{Op}/{Layout}/{DataType}/{Name}/{Name}.json`, so the SDPA single-graph
+bundles, which carry an extra variant directory (`…/hd128_nomask_batch/Gqa/Gqa.json`)
+or sit one level up (`…/hd128_causal_mha/Prefill.json`), are reported as
+`graph files must be named <BundleName>/<BundleName>.json`; and many older
+sweeps lack `generator` or `reference_source` in their case metadata. Your
+bundles must add no errors of their own.
 
 ### DVC troubleshooting
 
@@ -526,7 +535,10 @@ unit tests (`hipdnn_integration_tests_unit_tests`).
 
 - [ ] New graph coverage is a bundle, not a C++ test.
 - [ ] Every new bundle has its graph, its metadata (with `generator` and
-      `reference_source`) and a support sidecar, even an empty one.
+      `reference_source`) and a support sidecar, even an empty one. No tool
+      checks for a missing sidecar; look.
+- [ ] `verify_golden_bundles.py` reports no errors for the bundle directories you
+      added or changed ([Check the data itself](#check-the-data-itself)).
 - [ ] You re-ran CMake after changing bundles, sidecars or pulling data, then ran
       the lane for each engine you touched with its output visible, and read its
       `TEST COVERAGE SUMMARY` and `SUPPORT CLAIM SUMMARY` — not just the exit code.

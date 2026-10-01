@@ -130,7 +130,8 @@ hands to everything below it:
 ```cpp
 struct GraphSession
 {
-    std::unique_ptr<Graph> graph;   // null ⇒ build failed, or a deviceless stub
+    std::unique_ptr<Graph> graph;   // null in deviceless stubs; may be non-null even when the build failed
+    bool buildFailed = false;       // from_binary failed — test this, not graph == nullptr
     std::string buildError;
     RankedEngines engines;          // status, message, rankedIds, accepted
 };

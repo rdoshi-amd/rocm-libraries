@@ -47,7 +47,7 @@ the rest do not, and are easy to miss for exactly that reason.
 | `claim_failures` → `CLAIM_BROKEN` | **yes** (when enforcing) | An engine stopped accepting a graph it is claimed to support. | [Support-claim summary](running-tests.md#support-claim-summary); retract only if the drop is intended: [Retract a claim](adding-tests.md#retract-a-claim) |
 | `claim_failures` → `QUERY_ERRORED` | **yes** (when enforcing) | The support query itself failed, so acceptance is unknown. Investigate; never retract over this. | [Support-claim summary](running-tests.md#support-claim-summary) |
 | `failed_in_use` | **yes** (the test failed) | A claimed cell: the engine accepts the graph but gets it wrong. | [Support-claim summary](running-tests.md#support-claim-summary) |
-| `Error: zero tests ran.` | **yes** | Discovery or filter misconfiguration. | [Hard stops](running-tests.md#hard-stops) |
+| `Error: zero tests ran.` | **yes** | Discovery or filter misconfiguration — or, under GTest sharding, an empty shard. | [Hard stops](running-tests.md#hard-stops) |
 | `FATAL: --enforce-support-claims is active and …` | **yes** | Enforcement verified nothing. | [Hard stops](running-tests.md#hard-stops) |
 | `unclaimed_support` in the `SUPPORT CLAIM SUMMARY` | no | The engine accepts graphs that no sidecar claims. Record them. | [Updating support claims](adding-tests.md#updating-support-claims) |
 | `Skipped:` equal to (or close to) the total | no | Green, but little or nothing was tested. Read the skip reasons. | [Test coverage summary](running-tests.md#test-coverage-summary) |

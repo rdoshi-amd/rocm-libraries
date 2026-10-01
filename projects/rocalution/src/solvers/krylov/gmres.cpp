@@ -124,6 +124,8 @@ namespace rocalution
         assert(this->op_->GetM() == this->op_->GetN());
         assert(this->size_basis_ > 0);
 
+        this->op_->ApplyAnalyse();
+
         if(this->res_norm_type_ != 2)
         {
             LOG_INFO(

@@ -128,6 +128,8 @@ namespace rocalution
             this->res_norm_type_ = 2;
         }
 
+        this->op_->ApplyAnalyse();
+
         allocate_host(this->size_basis_, &this->c_);
         allocate_host(this->size_basis_, &this->s_);
         allocate_host(this->size_basis_ + 1, &this->r_);

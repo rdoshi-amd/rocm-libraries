@@ -226,6 +226,16 @@ namespace rocalution
 
         assert(this->build_ == false);
 
+        // Analyse the operators of the hierarchy
+        this->op_->ApplyAnalyse();
+
+        for(int i = 0; i < this->levels_ - 1; ++i)
+        {
+            this->op_level_[i]->ApplyAnalyse();
+            this->restrict_op_level_[i]->ApplyAnalyse();
+            this->prolong_op_level_[i]->ApplyAnalyse();
+        }
+
         // Initialize smoothers
         assert(this->smoother_level_ != NULL);
 

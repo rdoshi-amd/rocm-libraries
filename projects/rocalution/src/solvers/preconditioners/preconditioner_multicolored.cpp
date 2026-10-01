@@ -286,6 +286,14 @@ namespace rocalution
                     }
                 }
             }
+
+            for(int i = 0; i < this->num_blocks_; ++i)
+            {
+                for(int j = 0; j < this->num_blocks_; ++j)
+                {
+                    this->preconditioner_block_[i][j]->ApplyAnalyse();
+                }
+            }
         }
         else
         {

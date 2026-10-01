@@ -307,6 +307,9 @@ namespace rocalution
             //    AA_.ConvertTo(this->precond_mat_format_, this->format_block_dim_);
         }
 
+        this->E_.ApplyAnalyse();
+        this->F_.ApplyAnalyse();
+
         log_debug(this, "MultiElimination::Build()", this->build_, " #*# end");
     }
 

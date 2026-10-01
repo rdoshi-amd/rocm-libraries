@@ -131,6 +131,8 @@ namespace rocalution
         assert(this->op_->GetM() > 0);
         assert(static_cast<int64_t>(this->s_) <= this->op_->GetM());
 
+        this->op_->ApplyAnalyse();
+
         this->r_.CloneBackend(*this->op_);
         this->v_.CloneBackend(*this->op_);
 

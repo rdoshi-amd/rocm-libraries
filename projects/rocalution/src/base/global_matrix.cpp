@@ -922,6 +922,15 @@ namespace rocalution
     }
 
     template <typename ValueType>
+    void GlobalMatrix<ValueType>::ApplyAnalyse(void) const
+    {
+        log_debug(this, "GlobalMatrix::ApplyAnalyse()");
+
+        this->matrix_interior_.ApplyAnalyse();
+        this->matrix_ghost_.ApplyAnalyse();
+    }
+
+    template <typename ValueType>
     void GlobalMatrix<ValueType>::Apply(const GlobalVector<ValueType>& in,
                                         GlobalVector<ValueType>*       out) const
     {

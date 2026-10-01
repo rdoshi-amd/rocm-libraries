@@ -629,6 +629,8 @@ namespace rocalution
         assert(this->op_ != NULL);
         assert(this->op_->GetM() == this->op_->GetN());
 
+        this->op_->ApplyAnalyse();
+
         this->build_ = true;
 
         this->x_old_.CloneBackend(*this->op_);

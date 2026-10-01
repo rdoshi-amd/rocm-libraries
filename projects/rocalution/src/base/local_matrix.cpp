@@ -2179,6 +2179,17 @@ namespace rocalution
     }
 
     template <typename ValueType>
+    void LocalMatrix<ValueType>::ApplyAnalyse(void) const
+    {
+        log_debug(this, "LocalMatrix::ApplyAnalyse()");
+
+        if(this->GetNnz() > 0)
+        {
+            this->matrix_->ApplyAnalysis();
+        }
+    }
+
+    template <typename ValueType>
     void LocalMatrix<ValueType>::Apply(const LocalVector<ValueType>& in,
                                        LocalVector<ValueType>*       out) const
     {

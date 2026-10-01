@@ -983,6 +983,32 @@ namespace rocalution
         ROCALUTION_EXPORT
         void ConvertTo(unsigned int matrix_format, int blockdim = 1);
 
+        /** \brief Analyse the matrix for subsequent matrix-vector multiplications
+      * \details
+      * Optional. Performs the analysis of the matrix-vector multiplication up front,
+      * instead of during the first call to Apply() or ApplyAdd(). The analysis remains
+      * valid as long as only the values of the matrix change. It is discarded when
+      * the structure of the matrix changes, the matrix is converted to another
+      * format, or it is moved to another backend.
+      * \par Example
+      * \code{.cpp}
+      * LocalMatrix<T> A;
+      * LocalVector<T> x;
+      * LocalVector<T> y;
+      *
+      * // Fill A, x and y and move them to the accelerator
+      *
+      * A.ApplyAnalyse();
+      *
+      * for(int i = 0; i < 100; ++i)
+      * {
+      *     A.Apply(x, &y);
+      * }
+      * \endcode
+      */
+        ROCALUTION_EXPORT
+        virtual void ApplyAnalyse(void) const;
+
         /** \brief Perform matrix-vector multiplication, out = this * in;
       * \par Example
       * \code{.cpp}

@@ -247,6 +247,12 @@ namespace rocalution
         ROCALUTION_EXPORT
         void ConvertTo(unsigned int matrix_format, int blockdim = 1);
 
+        /** \brief Analyse the interior and ghost matrices for subsequent matrix-vector
+      * multiplications, see LocalMatrix::ApplyAnalyse()
+      */
+        ROCALUTION_EXPORT
+        virtual void ApplyAnalyse(void) const;
+
         /** \brief Perform matrix-vector multiplication, out = this * in; */
         ROCALUTION_EXPORT
         virtual void Apply(const GlobalVector<ValueType>& in, GlobalVector<ValueType>* out) const;

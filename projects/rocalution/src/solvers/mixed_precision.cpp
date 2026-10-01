@@ -186,6 +186,8 @@ namespace rocalution
         assert(this->op_->GetM() == this->op_->GetN());
         assert(this->op_->GetM() > 0);
 
+        this->op_h_->ApplyAnalyse();
+
         assert(this->op_l_ == NULL);
         this->op_l_ = new OperatorTypeL;
 
@@ -234,6 +236,8 @@ namespace rocalution
 
         this->op_l_->MoveToAccelerator();
         this->Solver_L_->MoveToAccelerator();
+
+        this->op_l_->ApplyAnalyse();
 
         log_debug(this, "MixedPrecisionDC::Build()", " #*# end");
     }

@@ -162,6 +162,8 @@ namespace rocalution
             }
         }
 
+        this->AIChebyshev_.ApplyAnalyse();
+
         log_debug(this, "AIChebyshev::Build()", this->build_, " #*# end");
     }
 
@@ -292,6 +294,9 @@ namespace rocalution
             this->FSAI_L_.ConvertTo(this->precond_mat_format_, this->format_block_dim_);
             this->FSAI_LT_.ConvertTo(this->precond_mat_format_, this->format_block_dim_);
         }
+
+        this->FSAI_L_.ApplyAnalyse();
+        this->FSAI_LT_.ApplyAnalyse();
     }
 
     template <class OperatorType, class VectorType, typename ValueType>
@@ -417,6 +422,8 @@ namespace rocalution
         {
             this->SPAI_.ConvertTo(this->precond_mat_format_, this->format_block_dim_);
         }
+
+        this->SPAI_.ApplyAnalyse();
 
         log_debug(this, "SPAI::Build()", this->build_, " #*# end");
     }
@@ -612,6 +619,10 @@ namespace rocalution
             this->L_.ConvertTo(this->precond_mat_format_, this->format_block_dim_);
             this->LT_.ConvertTo(this->precond_mat_format_, this->format_block_dim_);
         }
+
+        this->TNS_.ApplyAnalyse();
+        this->L_.ApplyAnalyse();
+        this->LT_.ApplyAnalyse();
 
         log_debug(this, "TNS::Build()", this->build_, " #*# end");
     }

@@ -313,6 +313,13 @@ namespace rocalution
                     this->A_block_[i][j]->Clear();
                 }
             }
+            else
+            {
+                for(int j = 0; j < i; ++j)
+                {
+                    this->A_block_[i][j]->ApplyAnalyse();
+                }
+            }
         }
 
         log_debug(this, "BlockPreconditioner::Build()", this->build_, " #*# end");

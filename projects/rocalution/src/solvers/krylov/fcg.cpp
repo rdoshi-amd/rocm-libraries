@@ -115,6 +115,8 @@ namespace rocalution
         assert(this->op_->GetM() == this->op_->GetN());
         assert(this->op_->GetM() > 0);
 
+        this->op_->ApplyAnalyse();
+
         if(this->precond_ != NULL)
         {
             this->precond_->SetOperator(*this->op_);

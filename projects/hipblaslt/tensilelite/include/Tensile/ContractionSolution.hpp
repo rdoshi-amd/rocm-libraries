@@ -164,7 +164,9 @@ namespace TensileLite
         X_MACRO(StrideE2) \
         X_MACRO(StrideScaleA2) \
         X_MACRO(StrideScaleB2) \
-        X_MACRO(StrideMetadata2)
+        X_MACRO(StrideMetadata2) \
+        X_MACRO(AddressScaleZeroA) \
+        X_MACRO(ScaleBlockSizeA)
 
     enum class CustomArgSemantic
     {

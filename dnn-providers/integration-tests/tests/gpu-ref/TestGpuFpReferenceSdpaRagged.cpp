@@ -679,6 +679,51 @@ TEST(TestGpuSdpaRaggedFwdFp8, ThrowsOnPerQueryHeadQDescaleUnderGqa)
                  std::invalid_argument);
 }
 
+// Checks the device fp8 decode table against the host fp8_e4m3 for all 256 byte values. With one
+// key, the softmax weight is exactly 1, so the fp32 output is the decoded V. Only -0 can't be told
+// apart, because the P@V sum starts at +0.
+TEST(TestGpuSdpaRaggedFwdFp8, DecodesEveryFp8ValueExactly)
+{
+    SKIP_IF_NO_DEVICES();
+    const int64_t headDim = 16;
+    const int64_t headDimV = 256;
+    const std::vector<int64_t> qkDims = {1, 1, 1, headDim};
+    const std::vector<int64_t> voDims = {1, 1, 1, headDimV};
+    Tensor<fp8_e4m3> q(qkDims, bshd(qkDims));
+    Tensor<fp8_e4m3> k(qkDims, bshd(qkDims));
+    Tensor<fp8_e4m3> v(voDims, bshd(voDims));
+    Tensor<float> o(voDims, bshd(voDims));
+    q.fillWithValue(fp8_e4m3::from_bits(0));
+    k.fillWithValue(fp8_e4m3::from_bits(0));
+    auto* vp = v.memory().hostData();
+    for(int64_t i = 0; i < headDimV; ++i)
+    {
+        vp[i] = fp8_e4m3::from_bits(static_cast<uint8_t>(i));
+    }
+    v.memory().markHostModified();
+    const auto cum = cumTokens({1});
+    auto offQk = makeRaggedOffset(cum, headDim);
+    auto offVo = makeRaggedOffset(cum, headDimV);
+
+    GpuFpReferenceSdpaRagged::fpropRagged<fp8_e4m3, fp8_e4m3, fp8_e4m3, float>(
+        q, k, v, o, offQk, offQk, offVo, offVo);
+
+    const auto* op = o.memory().hostData();
+    for(int64_t i = 0; i < headDimV; ++i)
+    {
+        const float expected = static_cast<float>(fp8_e4m3::from_bits(static_cast<uint8_t>(i)));
+        const float got = op[i];
+        if(std::isnan(expected))
+        {
+            EXPECT_TRUE(std::isnan(got)) << "byte " << i;
+        }
+        else
+        {
+            EXPECT_EQ(got, expected) << "byte " << i;
+        }
+    }
+}
+
 // --- Tensors sharing a packing must describe the same per-batch sequence lengths ---
 
 namespace

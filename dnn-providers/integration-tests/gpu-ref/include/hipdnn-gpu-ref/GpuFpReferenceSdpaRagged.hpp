@@ -4,6 +4,7 @@
 #pragma once
 
 #include <hipdnn-gpu-ref/GpuFpReferenceSdpa.hpp>
+#include <hipdnn_data_sdk/types/Fp8E4M3.hpp>
 #include <hipdnn_data_sdk/utilities/Tensor.hpp>
 #include <hipdnn_test_sdk/utilities/detail/RaggedTokenBoundaries.hpp>
 
@@ -12,6 +13,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 namespace hipdnn_gpu_ref
@@ -56,6 +58,9 @@ public:
                     hipdnn_data_sdk::utilities::TensorBase<float>* descaleK = nullptr,
                     hipdnn_data_sdk::utilities::TensorBase<float>* descaleV = nullptr)
     {
+        // fp8 is input-only: the kernel can decode fp8 but not encode it (AITER writes bf16).
+        static_assert(!std::is_same_v<ODataType, hipdnn_data_sdk::types::fp8_e4m3>,
+                      "fpropRagged: fp8 output is not supported; pass a bf16 or float ODataType");
         validateInput(q.dims(),
                       k.dims(),
                       v.dims(),

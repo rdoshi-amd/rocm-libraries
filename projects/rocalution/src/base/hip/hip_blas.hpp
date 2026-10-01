@@ -1,5 +1,5 @@
 /* ************************************************************************
- * Copyright (C) 2018-2023 Advanced Micro Devices, Inc. All rights Reserved.
+ * Copyright (C) 2018-2026 Advanced Micro Devices, Inc. All rights Reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -135,22 +135,6 @@ namespace rocalution
                                 const ValueType*  B,
                                 int               ldb,
                                 const ValueType*  beta,
-                                ValueType*        C,
-                                int               ldc);
-
-    // rocblas_geam
-    template <typename ValueType>
-    rocblas_status rocblasTgeam(rocblas_handle    handle,
-                                rocblas_operation transA,
-                                rocblas_operation transB,
-                                int               m,
-                                int               n,
-                                const ValueType*  alpha,
-                                const ValueType*  A,
-                                int               lda,
-                                const ValueType*  beta,
-                                const ValueType*  B,
-                                int               ldb,
                                 ValueType*        C,
                                 int               ldc);
 

@@ -1,5 +1,5 @@
 /* ************************************************************************
- * Copyright (C) 2018-2023 Advanced Micro Devices, Inc. All rights Reserved.
+ * Copyright (C) 2018-2026 Advanced Micro Devices, Inc. All rights Reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -732,103 +732,6 @@ namespace rocalution
         //    return rocblas_zgemm(handle, transa, transb, m, n, k,
         //                         alpha, A, lda, B, ldb, beta, C, ldc);
         FATAL_ERROR(__FILE__, __LINE__);
-    }
-
-    // rocblas_geam
-    template <>
-    rocblas_status rocblasTgeam(rocblas_handle    handle,
-                                rocblas_operation transA,
-                                rocblas_operation transB,
-                                int               m,
-                                int               n,
-                                const float*      alpha,
-                                const float*      A,
-                                int               lda,
-                                const float*      beta,
-                                const float*      B,
-                                int               ldb,
-                                float*            C,
-                                int               ldc)
-    {
-        return rocblas_sgeam(handle, transA, transB, m, n, alpha, A, lda, beta, B, ldb, C, ldc);
-    }
-
-    template <>
-    rocblas_status rocblasTgeam(rocblas_handle    handle,
-                                rocblas_operation transA,
-                                rocblas_operation transB,
-                                int               m,
-                                int               n,
-                                const double*     alpha,
-                                const double*     A,
-                                int               lda,
-                                const double*     beta,
-                                const double*     B,
-                                int               ldb,
-                                double*           C,
-                                int               ldc)
-    {
-        return rocblas_dgeam(handle, transA, transB, m, n, alpha, A, lda, beta, B, ldb, C, ldc);
-    }
-
-    template <>
-    rocblas_status rocblasTgeam(rocblas_handle             handle,
-                                rocblas_operation          transA,
-                                rocblas_operation          transB,
-                                int                        m,
-                                int                        n,
-                                const std::complex<float>* alpha,
-                                const std::complex<float>* A,
-                                int                        lda,
-                                const std::complex<float>* beta,
-                                const std::complex<float>* B,
-                                int                        ldb,
-                                std::complex<float>*       C,
-                                int                        ldc)
-    {
-        return rocblas_cgeam(handle,
-                             transA,
-                             transB,
-                             m,
-                             n,
-                             (const rocblas_float_complex*)alpha,
-                             (const rocblas_float_complex*)A,
-                             lda,
-                             (const rocblas_float_complex*)beta,
-                             (const rocblas_float_complex*)B,
-                             ldb,
-                             (rocblas_float_complex*)C,
-                             ldc);
-    }
-
-    template <>
-    rocblas_status rocblasTgeam(rocblas_handle              handle,
-                                rocblas_operation           transA,
-                                rocblas_operation           transB,
-                                int                         m,
-                                int                         n,
-                                const std::complex<double>* alpha,
-                                const std::complex<double>* A,
-                                int                         lda,
-                                const std::complex<double>* beta,
-                                const std::complex<double>* B,
-                                int                         ldb,
-                                std::complex<double>*       C,
-                                int                         ldc)
-    {
-        return rocblas_zgeam(handle,
-                             transA,
-                             transB,
-                             m,
-                             n,
-                             (const rocblas_double_complex*)alpha,
-                             (const rocblas_double_complex*)A,
-                             lda,
-                             (const rocblas_double_complex*)beta,
-                             (const rocblas_double_complex*)B,
-                             ldb,
-                             (rocblas_double_complex*)C,
-                             ldc);
     }
 
 } // namespace rocalution

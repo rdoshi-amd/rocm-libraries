@@ -405,51 +405,6 @@ namespace rocalution
                                       rocsparse_solve_policy    policy,
                                       void*                     temp_buffer);
 
-    // rocsparse bsric0 buffer size
-    template <typename ValueType>
-    rocsparse_status rocsparseTbsric0_buffer_size(rocsparse_handle          handle,
-                                                  rocsparse_direction       dir,
-                                                  int                       mb,
-                                                  int                       nnzb,
-                                                  const rocsparse_mat_descr descr,
-                                                  ValueType*                bsr_val,
-                                                  const int*                bsr_row_ptr,
-                                                  const int*                bsr_col_ind,
-                                                  int                       bsr_dim,
-                                                  rocsparse_mat_info        info,
-                                                  size_t*                   buffer_size);
-
-    // rocsparse bsric0 analysis
-    template <typename ValueType>
-    rocsparse_status rocsparseTbsric0_analysis(rocsparse_handle          handle,
-                                               rocsparse_direction       dir,
-                                               int                       mb,
-                                               int                       nnzb,
-                                               const rocsparse_mat_descr descr,
-                                               ValueType*                bsr_val,
-                                               const int*                bsr_row_ptr,
-                                               const int*                bsr_col_ind,
-                                               int                       bsr_dim,
-                                               rocsparse_mat_info        info,
-                                               rocsparse_analysis_policy analysis,
-                                               rocsparse_solve_policy    solve,
-                                               void*                     temp_buffer);
-
-    // rocsparse bsric0
-    template <typename ValueType>
-    rocsparse_status rocsparseTbsric0(rocsparse_handle          handle,
-                                      rocsparse_direction       dir,
-                                      int                       mb,
-                                      int                       nnzb,
-                                      const rocsparse_mat_descr descr,
-                                      ValueType*                bsr_val,
-                                      const int*                bsr_row_ptr,
-                                      const int*                bsr_col_ind,
-                                      int                       bsr_dim,
-                                      rocsparse_mat_info        info,
-                                      rocsparse_solve_policy    policy,
-                                      void*                     temp_buffer);
-
     // rocsparse csrilu0 buffer size
     template <typename ValueType>
     rocsparse_status rocsparseTcsrilu0_buffer_size(rocsparse_handle          handle,
@@ -534,118 +489,6 @@ namespace rocalution
                                        rocsparse_solve_policy    policy,
                                        void*                     temp_buffer);
 
-    // rocsparse_csr2bsr
-    template <typename ValueType>
-    rocsparse_status rocsparseTcsr2bsr(rocsparse_handle          handle,
-                                       rocsparse_direction       dir,
-                                       int                       m,
-                                       int                       n,
-                                       const rocsparse_mat_descr csr_descr,
-                                       const ValueType*          csr_val,
-                                       const int*                csr_row_ptr,
-                                       const int*                csr_col_ind,
-                                       int                       block_dim,
-                                       const rocsparse_mat_descr bsr_descr,
-                                       ValueType*                bsr_val,
-                                       int*                      bsr_row_ptr,
-                                       int*                      bsr_col_ind);
-
-    // rocsparse_bsr2csr
-    template <typename ValueType>
-    rocsparse_status rocsparseTbsr2csr(rocsparse_handle          handle,
-                                       rocsparse_direction       dir,
-                                       int                       mb,
-                                       int                       nb,
-                                       const rocsparse_mat_descr bsr_descr,
-                                       const ValueType*          bsr_val,
-                                       const int*                bsr_row_ptr,
-                                       const int*                bsr_col_ind,
-                                       int                       block_dim,
-                                       const rocsparse_mat_descr csr_descr,
-                                       ValueType*                csr_val,
-                                       int*                      csr_row_ptr,
-                                       int*                      csr_col_ind);
-
-    // rocsparse csr2csc
-    template <typename ValueType>
-    rocsparse_status rocsparseTcsr2csc(rocsparse_handle     handle,
-                                       int                  m,
-                                       int                  n,
-                                       int                  nnz,
-                                       const ValueType*     csr_val,
-                                       const int*           csr_row_ptr,
-                                       const int*           csr_col_ind,
-                                       ValueType*           csc_val,
-                                       int*                 csc_row_ind,
-                                       int*                 csc_col_ptr,
-                                       rocsparse_action     copy_values,
-                                       rocsparse_index_base idx_base,
-                                       void*                temp_buffer);
-
-    // rocsparse csr2ell
-    template <typename ValueType>
-    rocsparse_status rocsparseTcsr2ell(rocsparse_handle          handle,
-                                       int                       m,
-                                       const rocsparse_mat_descr csr_descr,
-                                       const ValueType*          csr_val,
-                                       const int*                csr_row_ptr,
-                                       const int*                csr_col_ind,
-                                       const rocsparse_mat_descr ell_descr,
-                                       int                       ell_width,
-                                       ValueType*                ell_val,
-                                       int*                      ell_col_ind);
-
-    // rocsparse ell2csr
-    template <typename ValueType>
-    rocsparse_status rocsparseTell2csr(rocsparse_handle          handle,
-                                       int                       m,
-                                       int                       n,
-                                       const rocsparse_mat_descr ell_descr,
-                                       int                       ell_width,
-                                       const ValueType*          ell_val,
-                                       const int*                ell_col_ind,
-                                       const rocsparse_mat_descr csr_descr,
-                                       ValueType*                csr_val,
-                                       const int*                csr_row_ptr,
-                                       int*                      csr_col_ind);
-
-    // rocsparse csr2dense
-    template <typename ValueType>
-    rocsparse_status rocsparseTcsr2dense(rocsparse_handle          handle,
-                                         int                       m,
-                                         int                       n,
-                                         const rocsparse_mat_descr csr_descr,
-                                         const ValueType*          csr_val,
-                                         const int*                csr_row_ptr,
-                                         const int*                csr_col_ind,
-                                         ValueType*                A,
-                                         int                       ld);
-
-    // rocsparse dense2csr
-    template <typename ValueType>
-    rocsparse_status rocsparseTdense2csr(rocsparse_handle          handle,
-                                         int                       m,
-                                         int                       n,
-                                         const rocsparse_mat_descr descr_A,
-                                         const ValueType*          A,
-                                         int                       lda,
-                                         const int*                nnz_per_row,
-                                         ValueType*                csr_val,
-                                         int*                      csr_row_ptr,
-                                         int*                      csr_col_ind);
-
-    // rocsparse nnz
-    template <typename ValueType>
-    rocsparse_status rocsparseTnnz(rocsparse_handle          handle,
-                                   rocsparse_direction       dir_A,
-                                   int                       m,
-                                   int                       n,
-                                   const rocsparse_mat_descr descr_A,
-                                   const ValueType*          A,
-                                   int                       lda,
-                                   int*                      nnz_per_row_column,
-                                   int*                      nnz_total);
-
     // rocsparse gthr
     template <typename ValueType>
     rocsparse_status rocsparseTgthr(rocsparse_handle     handle,
@@ -654,32 +497,6 @@ namespace rocalution
                                     ValueType*           x_val,
                                     int*                 x_ind,
                                     rocsparse_index_base idx_base);
-    // rocsparse nnz compress
-    template <typename ValueType>
-    rocsparse_status rocsparseTnnz_compress(rocsparse_handle          handle,
-                                            rocsparse_int             m,
-                                            const rocsparse_mat_descr descr_A,
-                                            const ValueType*          csr_val_A,
-                                            const rocsparse_int*      csr_row_ptr_A,
-                                            rocsparse_int*            nnz_per_row,
-                                            rocsparse_int*            nnz_C,
-                                            ValueType                 tol);
-
-    // rocsparse csr2csr compress
-    template <typename ValueType>
-    rocsparse_status rocsparseTcsr2csr_compress(rocsparse_handle          handle,
-                                                rocsparse_int             m,
-                                                rocsparse_int             n,
-                                                const rocsparse_mat_descr descr_A,
-                                                const ValueType*          csr_val_A,
-                                                const rocsparse_int*      csr_row_ptr_A,
-                                                const rocsparse_int*      csr_col_ind_A,
-                                                rocsparse_int             nnz_A,
-                                                const rocsparse_int*      nnz_per_row,
-                                                ValueType*                csr_val_C,
-                                                rocsparse_int*            csr_row_ptr_C,
-                                                rocsparse_int*            csr_col_ind_C,
-                                                ValueType                 tol);
 
     // rocsparse csritilu0 compute
     template <typename ValueType>

@@ -160,16 +160,23 @@ private:
                 node, tensorMap, node.compute_data_type());
         case NodeAttrs::SdpaAttributes:
         {
-            // A ragged SDPA node (RFC-0014 packed layout) has a ragged_offset_tensor_uid on Q.
-            // Dense and ragged keys live in separate registry buckets, and this is where we pick.
+            // A ragged SDPA node (RFC-0014 packed layout) has a ragged_offset on a primary. Any
+            // ragged primary picks the ragged bucket, so a partly ragged node is rejected there
+            // instead of being run as dense.
             const auto* sdpaAttributes = node.attributes_as_SdpaAttributes();
             if(sdpaAttributes != nullptr)
             {
-                const auto qIt = tensorMap.find(sdpaAttributes->q_tensor_uid());
-                if(qIt != tensorMap.end() && qIt->second != nullptr
-                   && qIt->second->ragged_offset_tensor_uid().has_value())
+                for(const auto uid : {sdpaAttributes->q_tensor_uid(),
+                                      sdpaAttributes->k_tensor_uid(),
+                                      sdpaAttributes->v_tensor_uid(),
+                                      sdpaAttributes->o_tensor_uid()})
                 {
-                    return detail::GpuSdpaRaggedFwdSignatureKey(node, tensorMap);
+                    const auto it = tensorMap.find(uid);
+                    if(it != tensorMap.end() && it->second != nullptr
+                       && it->second->ragged_offset_tensor_uid().has_value())
+                    {
+                        return detail::GpuSdpaRaggedFwdSignatureKey(node, tensorMap);
+                    }
                 }
             }
             return detail::GpuSdpaFwdSignatureKey(node, tensorMap);

@@ -11,6 +11,7 @@
 
 #include "SdpaFwdGraphTestUtils.hpp"
 #include "harness/gpu-graph-executor/GpuReferenceGraphExecutor.hpp"
+#include "harness/gpu-graph-executor/detail/GpuSdpaFwdPlan.hpp"
 #include "harness/gpu-graph-executor/detail/GpuSdpaRaggedFwdSignatureKey.hpp"
 
 using namespace hipdnn_flatbuffers_sdk::data_objects;
@@ -44,6 +45,23 @@ flatbuffers::FlatBufferBuilder makeRaggedGraph(DataType dataType)
                                     DIMS,
                                     DIMS,
                                     dataType);
+}
+
+// The ragged bf16 graph with Q's ragged_offset removed: K, V and O stay ragged.
+flatbuffers::FlatBufferBuilder makeGraphWithDenseQ()
+{
+    auto ragged = makeRaggedGraph(DataType::BFLOAT16);
+    auto graph = UnPackGraph(ragged.GetBufferPointer());
+    for(auto& tensor : graph->tensors)
+    {
+        if(tensor->uid == Q_UID)
+        {
+            tensor->ragged_offset_tensor_uid = flatbuffers::nullopt;
+        }
+    }
+    flatbuffers::FlatBufferBuilder builder;
+    builder.Finish(Graph::Pack(builder, graph.get()));
+    return builder;
 }
 
 } // namespace
@@ -92,8 +110,7 @@ TEST(TestGpuSdpaRaggedFwdSignatureKey, CreateFromNodeAndTensorMap)
     EXPECT_TRUE(keyFromNode == expectedKey);
 }
 
-// The dense plan rejects any primary with ragged_offset, so an applicable node here must have
-// been taken by the ragged plan.
+// Ragged and dense nodes are both applicable, each through its own plan (checked below).
 TEST(TestGpuSdpaRaggedFwdSignatureKey, ExecutorRoutesRaggedBf16NodeToRaggedPlan)
 {
     using hipdnn_integration_tests::gpu_graph_executor::GpuReferenceGraphExecutor;
@@ -106,6 +123,30 @@ TEST(TestGpuSdpaRaggedFwdSignatureKey, ExecutorRoutesRaggedBf16NodeToRaggedPlan)
     auto denseBuilder = createSdpaFwdGraph(
         Q_UID, K_UID, V_UID, O_UID, DIMS, DIMS, DIMS, DIMS, DataType::BFLOAT16);
     EXPECT_TRUE(executor.isApplicable(denseBuilder.GetBufferPointer(), denseBuilder.GetSize()));
+}
+
+// The dense plan must not take a ragged node, or it would read packed data as dense.
+TEST(TestGpuSdpaRaggedFwdSignatureKey, DensePlanRejectsRaggedNode)
+{
+    auto graphBuilder = makeRaggedGraph(DataType::BFLOAT16);
+    auto graphWrap = hipdnn_flatbuffers_sdk::flatbuffer_utilities::GraphWrapper(
+        graphBuilder.GetBufferPointer(), graphBuilder.GetSize());
+    const GpuSdpaFwdPlanBuilder<DataType::BFLOAT16,
+                                DataType::BFLOAT16,
+                                DataType::BFLOAT16,
+                                DataType::BFLOAT16>
+        denseBuilder;
+    EXPECT_FALSE(denseBuilder.isApplicable(graphWrap.getNode(0), graphWrap.getTensorMap()));
+}
+
+// Dense Q with ragged K/V/O fits neither plan. It must not be run by the dense one.
+TEST(TestGpuSdpaRaggedFwdSignatureKey, ExecutorRejectsPartlyRaggedNode)
+{
+    using hipdnn_integration_tests::gpu_graph_executor::GpuReferenceGraphExecutor;
+
+    auto graphBuilder = makeGraphWithDenseQ();
+    GpuReferenceGraphExecutor executor;
+    EXPECT_FALSE(executor.isApplicable(graphBuilder.GetBufferPointer(), graphBuilder.GetSize()));
 }
 
 // fp8 Q/K/V with bf16 O and scalar descales keys and routes to the ragged plan too.

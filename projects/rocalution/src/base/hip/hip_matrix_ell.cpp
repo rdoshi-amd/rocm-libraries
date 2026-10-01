@@ -65,20 +65,7 @@ namespace rocalution
 
         this->spmat_descr_ = 0;
 
-        this->mat_descr_ = 0;
-
         CHECK_HIP_ERROR(__FILE__, __LINE__);
-
-        rocsparse_status status;
-
-        status = rocsparse_create_mat_descr(&this->mat_descr_);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        status = rocsparse_set_mat_index_base(this->mat_descr_, rocsparse_index_base_zero);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        status = rocsparse_set_mat_type(this->mat_descr_, rocsparse_matrix_type_general);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
     }
 
     template <typename ValueType>
@@ -122,11 +109,6 @@ namespace rocalution
         log_debug(this, "HIPAcceleratorMatrixELL::~HIPAcceleratorMatrixELL()", "destructor");
 
         this->Clear();
-
-        rocsparse_status status;
-
-        status = rocsparse_destroy_mat_descr(this->mat_descr_);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
     }
 
     template <typename ValueType>
@@ -643,16 +625,42 @@ namespace rocalution
     }
 
     template <typename ValueType>
+    void HIPAcceleratorMatrixELL<ValueType>::ApplyAnalysis(void) const
+    {
+        if(this->nnz_ > 0 && this->spmv_.IsAnalysed() == false)
+        {
+            this->spmv_.Analyse(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
+                                rocsparse_spmv_alg_ell,
+                                this->spmat_descr_);
+        }
+    }
+
+    template <typename ValueType>
     void HIPAcceleratorMatrixELL<ValueType>::ApplyAnalyse_(ValueType                   alpha,
                                                            rocsparse_const_dnvec_descr x,
                                                            ValueType                   beta,
                                                            rocsparse_dnvec_descr       y) const
     {
+        if(this->spmv_.IsAnalysed() == false)
+        {
+            LOG_VERBOSE_INFO(2,
+                             "*** warning: HIPAcceleratorMatrixELL performs the SpMV analysis "
+                             "lazily, call ApplyAnalyse() beforehand to avoid this");
+
+            this->spmv_.Analyse(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
+                                rocsparse_spmv_alg_ell,
+                                this->spmat_descr_,
+                                alpha,
+                                x,
+                                beta,
+                                y);
+        }
     }
 
     template <typename ValueType>
     void HIPAcceleratorMatrixELL<ValueType>::ApplyAnalyseClear_(void)
     {
+        this->spmv_.Clear();
     }
 
     template <typename ValueType>
@@ -680,20 +688,12 @@ namespace rocalution
             // Lazy matrix analyse
             this->ApplyAnalyse_(alpha, cast_in->dnvec_descr_, beta, cast_out->dnvec_descr_);
 
-            rocsparse_status status;
-            status = rocsparseTellmv(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                                     rocsparse_operation_none,
-                                     this->nrow_,
-                                     this->ncol_,
-                                     &alpha,
-                                     this->mat_descr_,
-                                     this->mat_.val,
-                                     this->mat_.col,
-                                     this->mat_.max_row,
-                                     cast_in->vec_,
-                                     &beta,
-                                     cast_out->vec_);
-            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+            this->spmv_.Compute(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
+                                alpha,
+                                this->spmat_descr_,
+                                cast_in->dnvec_descr_,
+                                beta,
+                                cast_out->dnvec_descr_);
         }
     }
 
@@ -722,20 +722,12 @@ namespace rocalution
             // Lazy matrix analyse
             this->ApplyAnalyse_(scalar, cast_in->dnvec_descr_, beta, cast_out->dnvec_descr_);
 
-            rocsparse_status status;
-            status = rocsparseTellmv(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                                     rocsparse_operation_none,
-                                     this->nrow_,
-                                     this->ncol_,
-                                     &scalar,
-                                     this->mat_descr_,
-                                     this->mat_.val,
-                                     this->mat_.col,
-                                     this->mat_.max_row,
-                                     cast_in->vec_,
-                                     &beta,
-                                     cast_out->vec_);
-            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+            this->spmv_.Compute(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
+                                scalar,
+                                this->spmat_descr_,
+                                cast_in->dnvec_descr_,
+                                beta,
+                                cast_out->dnvec_descr_);
         }
     }
 

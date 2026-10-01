@@ -69,6 +69,8 @@ namespace rocalution
         this->mat_descr_ = 0;
         this->mat_info_  = 0;
 
+        this->spmat_descr_ = 0;
+
         this->mat_buffer_size_ = 0;
         this->mat_buffer_      = NULL;
 
@@ -108,6 +110,49 @@ namespace rocalution
     }
 
     template <typename ValueType>
+    void HIPAcceleratorMatrixBCSR<ValueType>::CreateSpMatDescr_(void)
+    {
+        this->DestroySpMatDescr_();
+
+        if(this->mat_.nnzb >= 0)
+        {
+            // Determine whether we are using row or column major for the blocks
+            rocsparse_direction dir
+                = BCSR_IND_BASE ? rocsparse_direction_row : rocsparse_direction_column;
+
+            rocsparse_status status
+                = rocsparse_create_bsr_descr(&this->spmat_descr_,
+                                             this->mat_.nrowb,
+                                             this->mat_.ncolb,
+                                             this->mat_.nnzb,
+                                             dir,
+                                             this->mat_.blockdim,
+                                             this->mat_.row_offset,
+                                             this->mat_.col,
+                                             this->mat_.val,
+                                             rocalution_indextype_traits<PtrType>::value,
+                                             rocsparse_indextype_i32,
+                                             rocsparse_index_base_zero,
+                                             rocalution_datatype_traits<ValueType>::value);
+            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+        }
+    }
+
+    template <typename ValueType>
+    void HIPAcceleratorMatrixBCSR<ValueType>::DestroySpMatDescr_(void)
+    {
+        if(this->spmat_descr_ != NULL)
+        {
+            rocsparse_status status = rocsparse_destroy_spmat_descr(this->spmat_descr_);
+            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+
+            this->spmat_descr_ = NULL;
+        }
+
+        this->ApplyAnalyseClear_();
+    }
+
+    template <typename ValueType>
     void HIPAcceleratorMatrixBCSR<ValueType>::Info(void) const
     {
         LOG_INFO("HIPAcceleratorMatrixBCSR<ValueType>");
@@ -143,11 +188,15 @@ namespace rocalution
         this->mat_.ncolb    = ncolb;
         this->mat_.nnzb     = nnzb;
         this->mat_.blockdim = blockdim;
+
+        this->CreateSpMatDescr_();
     }
 
     template <typename ValueType>
     void HIPAcceleratorMatrixBCSR<ValueType>::Clear()
     {
+        this->DestroySpMatDescr_();
+
         free_hip(&this->mat_.row_offset);
         free_hip(&this->mat_.col);
         free_hip(&this->mat_.val);
@@ -200,6 +249,8 @@ namespace rocalution
         this->mat_.row_offset = *row_offset;
         this->mat_.col        = *col;
         this->mat_.val        = *val;
+
+        this->CreateSpMatDescr_();
     }
 
     template <typename ValueType>
@@ -215,6 +266,8 @@ namespace rocalution
 
         DISCARD_HIP_ERROR(hipDeviceSynchronize());
         CHECK_HIP_ERROR(__FILE__, __LINE__);
+
+        this->DestroySpMatDescr_();
 
         *row_offset = this->mat_.row_offset;
         *col        = this->mat_.col;
@@ -270,6 +323,8 @@ namespace rocalution
             copy_h2d(this->mat_.nnzb * this->mat_.blockdim * this->mat_.blockdim,
                      cast_mat->mat_.val,
                      this->mat_.val);
+
+            this->ApplyAnalyseClear_();
         }
         else
         {
@@ -365,6 +420,8 @@ namespace rocalution
             copy_h2d(this->mat_.nnzb * this->mat_.blockdim * this->mat_.blockdim,
                      hip_cast_mat->mat_.val,
                      this->mat_.val);
+
+            this->ApplyAnalyseClear_();
         }
         else
         {
@@ -486,6 +543,8 @@ namespace rocalution
                      this->mat_.val,
                      true,
                      HIPSTREAM(_get_backend_descriptor()->HIP_stream_current));
+
+            this->ApplyAnalyseClear_();
         }
         else
         {
@@ -600,6 +659,8 @@ namespace rocalution
                      this->mat_.val,
                      true,
                      HIPSTREAM(_get_backend_descriptor()->HIP_stream_current));
+
+            this->ApplyAnalyseClear_();
         }
         else
         {
@@ -723,6 +784,8 @@ namespace rocalution
                 this->nrow_ = this->mat_.nrowb * this->mat_.blockdim;
                 this->ncol_ = this->mat_.ncolb * this->mat_.blockdim;
                 this->nnz_  = this->mat_.nnzb * this->mat_.blockdim * this->mat_.blockdim;
+
+                this->CreateSpMatDescr_();
 
                 return true;
             }
@@ -1619,6 +1682,45 @@ namespace rocalution
     }
 
     template <typename ValueType>
+    void HIPAcceleratorMatrixBCSR<ValueType>::ApplyAnalysis(void) const
+    {
+        if(this->nnz_ > 0 && this->spmv_.IsAnalysed() == false)
+        {
+            this->spmv_.Analyse(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
+                                rocsparse_spmv_alg_bsr,
+                                this->spmat_descr_);
+        }
+    }
+
+    template <typename ValueType>
+    void HIPAcceleratorMatrixBCSR<ValueType>::ApplyAnalyse_(ValueType                   alpha,
+                                                            rocsparse_const_dnvec_descr x,
+                                                            ValueType                   beta,
+                                                            rocsparse_dnvec_descr       y) const
+    {
+        if(this->spmv_.IsAnalysed() == false)
+        {
+            LOG_VERBOSE_INFO(2,
+                             "*** warning: HIPAcceleratorMatrixBCSR performs the SpMV analysis "
+                             "lazily, call ApplyAnalyse() beforehand to avoid this");
+
+            this->spmv_.Analyse(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
+                                rocsparse_spmv_alg_bsr,
+                                this->spmat_descr_,
+                                alpha,
+                                x,
+                                beta,
+                                y);
+        }
+    }
+
+    template <typename ValueType>
+    void HIPAcceleratorMatrixBCSR<ValueType>::ApplyAnalyseClear_(void)
+    {
+        this->spmv_.Clear();
+    }
+
+    template <typename ValueType>
     void HIPAcceleratorMatrixBCSR<ValueType>::Apply(const BaseVector<ValueType>& in,
                                                     BaseVector<ValueType>*       out) const
     {
@@ -1637,30 +1739,18 @@ namespace rocalution
             assert(cast_in != NULL);
             assert(cast_out != NULL);
 
-            ValueType alpha = 1.0;
-            ValueType beta  = 0.0;
+            ValueType alpha = static_cast<ValueType>(1);
+            ValueType beta  = static_cast<ValueType>(0);
 
-            // Determine whether we are using row or column major for the blocks
-            rocsparse_direction dir
-                = BCSR_IND_BASE ? rocsparse_direction_row : rocsparse_direction_column;
+            // Lazy matrix analyse
+            this->ApplyAnalyse_(alpha, cast_in->dnvec_descr_, beta, cast_out->dnvec_descr_);
 
-            rocsparse_status status;
-            status = rocsparseTbsrmv(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                                     dir,
-                                     rocsparse_operation_none,
-                                     this->mat_.nrowb,
-                                     this->mat_.ncolb,
-                                     this->mat_.nnzb,
-                                     &alpha,
-                                     this->mat_descr_,
-                                     this->mat_.val,
-                                     this->mat_.row_offset,
-                                     this->mat_.col,
-                                     this->mat_.blockdim,
-                                     cast_in->vec_,
-                                     &beta,
-                                     cast_out->vec_);
-            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+            this->spmv_.Compute(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
+                                alpha,
+                                this->spmat_descr_,
+                                cast_in->dnvec_descr_,
+                                beta,
+                                cast_out->dnvec_descr_);
         }
     }
 
@@ -1684,29 +1774,17 @@ namespace rocalution
             assert(cast_in != NULL);
             assert(cast_out != NULL);
 
-            ValueType beta = 1.0;
+            ValueType beta = static_cast<ValueType>(1);
 
-            // Determine whether we are using row or column major for the blocks
-            rocsparse_direction dir
-                = BCSR_IND_BASE ? rocsparse_direction_row : rocsparse_direction_column;
+            // Lazy matrix analyse
+            this->ApplyAnalyse_(scalar, cast_in->dnvec_descr_, beta, cast_out->dnvec_descr_);
 
-            rocsparse_status status;
-            status = rocsparseTbsrmv(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                                     dir,
-                                     rocsparse_operation_none,
-                                     this->mat_.nrowb,
-                                     this->mat_.ncolb,
-                                     this->mat_.nnzb,
-                                     &scalar,
-                                     this->mat_descr_,
-                                     this->mat_.val,
-                                     this->mat_.row_offset,
-                                     this->mat_.col,
-                                     this->mat_.blockdim,
-                                     cast_in->vec_,
-                                     &beta,
-                                     cast_out->vec_);
-            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+            this->spmv_.Compute(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
+                                scalar,
+                                this->spmat_descr_,
+                                cast_in->dnvec_descr_,
+                                beta,
+                                cast_out->dnvec_descr_);
         }
     }
 

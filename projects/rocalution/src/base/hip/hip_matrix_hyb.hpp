@@ -27,6 +27,7 @@
 #include "../base_matrix.hpp"
 #include "../base_vector.hpp"
 #include "../matrix_formats.hpp"
+#include "hip_sparse.hpp"
 
 #include <rocsparse/rocsparse.h>
 
@@ -76,19 +77,31 @@ namespace rocalution
         virtual void CopyToHost(HostMatrix<ValueType>* dst) const;
         virtual void CopyToHostAsync(HostMatrix<ValueType>* dst) const;
 
+        virtual void ApplyAnalysis(void) const;
         virtual void Apply(const BaseVector<ValueType>& in, BaseVector<ValueType>* out) const;
         virtual void ApplyAdd(const BaseVector<ValueType>& in,
                               ValueType                    scalar,
                               BaseVector<ValueType>*       out) const;
 
     private:
+        void CreateSpMatDescr_(void);
+        void DestroySpMatDescr_(void);
+        void ApplyAnalyse_(ValueType                   alpha,
+                           rocsparse_const_dnvec_descr x,
+                           ValueType                   beta,
+                           rocsparse_dnvec_descr       y) const;
+        void ApplyAnalyseClear_(void);
+
         MatrixHYB<ValueType, int> mat_;
 
         int64_t ell_nnz_;
         int64_t coo_nnz_;
 
-        rocsparse_mat_descr ell_mat_descr_;
-        rocsparse_mat_descr coo_mat_descr_;
+        rocsparse_spmat_descr ell_spmat_descr_;
+        rocsparse_spmat_descr coo_spmat_descr_;
+
+        mutable HIPSpMV<ValueType> ell_spmv_;
+        mutable HIPSpMV<ValueType> coo_spmv_;
 
         friend class BaseVector<ValueType>;
         friend class AcceleratorVector<ValueType>;

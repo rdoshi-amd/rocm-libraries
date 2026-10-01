@@ -27,6 +27,7 @@
 #include "../base_matrix.hpp"
 #include "../base_vector.hpp"
 #include "../matrix_formats.hpp"
+#include "hip_sparse.hpp"
 #include "rocalution/utils/types.hpp"
 
 #include <rocsparse/rocsparse.h>
@@ -184,7 +185,7 @@ namespace rocalution
 
         virtual bool Gershgorin(ValueType& lambda_min, ValueType& lambda_max) const;
 
-        void         ApplyAnalysis(void) const;
+        virtual void ApplyAnalysis(void) const;
         virtual void Apply(const BaseVector<ValueType>& in, BaseVector<ValueType>* out) const;
         virtual void ApplyAdd(const BaseVector<ValueType>& in,
                               ValueType                    scalar,
@@ -490,6 +491,8 @@ namespace rocalution
         MatrixCSR<ValueType, int, PtrType> mat_;
 
         rocsparse_spmat_descr spmat_descr_;
+
+        mutable HIPSpMV<ValueType> spmv_;
 
         rocsparse_mat_descr L_mat_descr_;
         rocsparse_mat_descr U_mat_descr_;

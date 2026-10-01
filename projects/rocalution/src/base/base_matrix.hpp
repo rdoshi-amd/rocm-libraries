@@ -447,6 +447,8 @@ namespace rocalution
         /** \brief Compute the spectrum approximation with Gershgorin circles theorem */
         virtual bool Gershgorin(ValueType& lambda_min, ValueType& lambda_max) const;
 
+        /** \brief Analyse the matrix for subsequent Apply() and ApplyAdd() calls */
+        virtual void ApplyAnalysis(void) const;
         /** \brief Apply the matrix to vector, out = this*in; */
         virtual void Apply(const BaseVector<ValueType>& in, BaseVector<ValueType>* out) const = 0;
         /** \brief Apply and add the matrix to vector, out = out + scalar*this*in; */

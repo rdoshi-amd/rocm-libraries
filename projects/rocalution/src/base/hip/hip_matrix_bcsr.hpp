@@ -27,6 +27,7 @@
 #include "../base_matrix.hpp"
 #include "../base_vector.hpp"
 #include "../matrix_formats.hpp"
+#include "hip_sparse.hpp"
 
 #include <rocsparse/rocsparse.h>
 
@@ -98,17 +99,30 @@ namespace rocalution
         virtual void UAnalyseClear(void);
         virtual bool USolve(const BaseVector<ValueType>& in, BaseVector<ValueType>* out) const;
 
+        virtual void ApplyAnalysis(void) const;
         virtual void Apply(const BaseVector<ValueType>& in, BaseVector<ValueType>* out) const;
         virtual void ApplyAdd(const BaseVector<ValueType>& in,
                               ValueType                    scalar,
                               BaseVector<ValueType>*       out) const;
 
     private:
+        void CreateSpMatDescr_(void);
+        void DestroySpMatDescr_(void);
+        void ApplyAnalyse_(ValueType                   alpha,
+                           rocsparse_const_dnvec_descr x,
+                           ValueType                   beta,
+                           rocsparse_dnvec_descr       y) const;
+        void ApplyAnalyseClear_(void);
+
         MatrixBCSR<ValueType, int, PtrType> mat_;
 
         rocsparse_mat_descr L_mat_descr_;
         rocsparse_mat_descr U_mat_descr_;
         rocsparse_mat_descr mat_descr_;
+
+        rocsparse_spmat_descr spmat_descr_;
+
+        mutable HIPSpMV<ValueType> spmv_;
 
         rocsparse_mat_info mat_info_;
 

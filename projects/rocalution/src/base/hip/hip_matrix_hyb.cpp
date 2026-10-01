@@ -76,30 +76,10 @@ namespace rocalution
 
         this->set_backend(local_backend);
 
-        this->ell_mat_descr_ = 0;
-        this->coo_mat_descr_ = 0;
+        this->ell_spmat_descr_ = 0;
+        this->coo_spmat_descr_ = 0;
 
         CHECK_HIP_ERROR(__FILE__, __LINE__);
-
-        rocsparse_status status;
-
-        status = rocsparse_create_mat_descr(&this->ell_mat_descr_);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        status = rocsparse_set_mat_index_base(this->ell_mat_descr_, rocsparse_index_base_zero);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        status = rocsparse_set_mat_type(this->ell_mat_descr_, rocsparse_matrix_type_general);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        status = rocsparse_create_mat_descr(&this->coo_mat_descr_);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        status = rocsparse_set_mat_index_base(this->coo_mat_descr_, rocsparse_index_base_zero);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        status = rocsparse_set_mat_type(this->coo_mat_descr_, rocsparse_matrix_type_general);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
     }
 
     template <typename ValueType>
@@ -108,14 +88,67 @@ namespace rocalution
         log_debug(this, "HIPAcceleratorMatrixHYB::~HIPAcceleratorMatrixHYB()", "destructor");
 
         this->Clear();
+    }
+
+    template <typename ValueType>
+    void HIPAcceleratorMatrixHYB<ValueType>::CreateSpMatDescr_(void)
+    {
+        this->DestroySpMatDescr_();
 
         rocsparse_status status;
 
-        status = rocsparse_destroy_mat_descr(this->ell_mat_descr_);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+        if(this->ell_nnz_ > 0)
+        {
+            status = rocsparse_create_ell_descr(&this->ell_spmat_descr_,
+                                                this->nrow_,
+                                                this->ncol_,
+                                                this->mat_.ELL.col,
+                                                this->mat_.ELL.val,
+                                                this->mat_.ELL.max_row,
+                                                rocsparse_indextype_i32,
+                                                rocsparse_index_base_zero,
+                                                rocalution_datatype_traits<ValueType>::value);
+            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+        }
 
-        status = rocsparse_destroy_mat_descr(this->coo_mat_descr_);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+        if(this->coo_nnz_ > 0)
+        {
+            status = rocsparse_create_coo_descr(&this->coo_spmat_descr_,
+                                                this->nrow_,
+                                                this->ncol_,
+                                                this->coo_nnz_,
+                                                this->mat_.COO.row,
+                                                this->mat_.COO.col,
+                                                this->mat_.COO.val,
+                                                rocsparse_indextype_i32,
+                                                rocsparse_index_base_zero,
+                                                rocalution_datatype_traits<ValueType>::value);
+            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+        }
+    }
+
+    template <typename ValueType>
+    void HIPAcceleratorMatrixHYB<ValueType>::DestroySpMatDescr_(void)
+    {
+        rocsparse_status status;
+
+        if(this->ell_spmat_descr_ != NULL)
+        {
+            status = rocsparse_destroy_spmat_descr(this->ell_spmat_descr_);
+            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+
+            this->ell_spmat_descr_ = NULL;
+        }
+
+        if(this->coo_spmat_descr_ != NULL)
+        {
+            status = rocsparse_destroy_spmat_descr(this->coo_spmat_descr_);
+            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+
+            this->coo_spmat_descr_ = NULL;
+        }
+
+        this->ApplyAnalyseClear_();
     }
 
     template <typename ValueType>
@@ -165,11 +198,15 @@ namespace rocalution
         this->coo_nnz_ = coo_nnz;
 
         this->nnz_ += coo_nnz;
+
+        this->CreateSpMatDescr_();
     }
 
     template <typename ValueType>
     void HIPAcceleratorMatrixHYB<ValueType>::Clear()
     {
+        this->DestroySpMatDescr_();
+
         free_hip(&this->mat_.ELL.val);
         free_hip(&this->mat_.ELL.col);
         free_hip(&this->mat_.COO.row);
@@ -216,6 +253,8 @@ namespace rocalution
             copy_h2d(this->coo_nnz_, cast_mat->mat_.COO.row, this->mat_.COO.row);
             copy_h2d(this->coo_nnz_, cast_mat->mat_.COO.col, this->mat_.COO.col);
             copy_h2d(this->coo_nnz_, cast_mat->mat_.COO.val, this->mat_.COO.val);
+
+            this->ApplyAnalyseClear_();
         }
         else
         {
@@ -301,6 +340,8 @@ namespace rocalution
             copy_d2d(this->coo_nnz_, hip_cast_mat->mat_.COO.row, this->mat_.COO.row);
             copy_d2d(this->coo_nnz_, hip_cast_mat->mat_.COO.col, this->mat_.COO.col);
             copy_d2d(this->coo_nnz_, hip_cast_mat->mat_.COO.val, this->mat_.COO.val);
+
+            this->ApplyAnalyseClear_();
         }
         else
         {
@@ -422,6 +463,8 @@ namespace rocalution
                      this->mat_.COO.val,
                      true,
                      HIPSTREAM(_get_backend_descriptor()->HIP_stream_current));
+
+            this->ApplyAnalyseClear_();
         }
         else
         {
@@ -547,6 +590,8 @@ namespace rocalution
                      this->mat_.COO.val,
                      true,
                      HIPSTREAM(_get_backend_descriptor()->HIP_stream_current));
+
+            this->ApplyAnalyseClear_();
         }
         else
         {
@@ -685,11 +730,67 @@ namespace rocalution
                 this->ell_nnz_ = nnz_ell;
                 this->coo_nnz_ = nnz_coo;
 
+                this->CreateSpMatDescr_();
+
                 return true;
             }
         }
 
         return false;
+    }
+
+    template <typename ValueType>
+    void HIPAcceleratorMatrixHYB<ValueType>::ApplyAnalysis(void) const
+    {
+        rocsparse_handle handle = ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle);
+
+        if(this->ell_nnz_ > 0 && this->ell_spmv_.IsAnalysed() == false)
+        {
+            this->ell_spmv_.Analyse(handle, rocsparse_spmv_alg_ell, this->ell_spmat_descr_);
+        }
+
+        if(this->coo_nnz_ > 0 && this->coo_spmv_.IsAnalysed() == false)
+        {
+            this->coo_spmv_.Analyse(handle, rocsparse_spmv_alg_coo, this->coo_spmat_descr_);
+        }
+    }
+
+    template <typename ValueType>
+    void HIPAcceleratorMatrixHYB<ValueType>::ApplyAnalyse_(ValueType                   alpha,
+                                                           rocsparse_const_dnvec_descr x,
+                                                           ValueType                   beta,
+                                                           rocsparse_dnvec_descr       y) const
+    {
+        rocsparse_handle handle = ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle);
+
+        bool ell_lazy = this->ell_nnz_ > 0 && this->ell_spmv_.IsAnalysed() == false;
+        bool coo_lazy = this->coo_nnz_ > 0 && this->coo_spmv_.IsAnalysed() == false;
+
+        if(ell_lazy || coo_lazy)
+        {
+            LOG_VERBOSE_INFO(2,
+                             "*** warning: HIPAcceleratorMatrixHYB performs the SpMV analysis "
+                             "lazily, call ApplyAnalyse() beforehand to avoid this");
+        }
+
+        if(ell_lazy)
+        {
+            this->ell_spmv_.Analyse(
+                handle, rocsparse_spmv_alg_ell, this->ell_spmat_descr_, alpha, x, beta, y);
+        }
+
+        if(coo_lazy)
+        {
+            this->coo_spmv_.Analyse(
+                handle, rocsparse_spmv_alg_coo, this->coo_spmat_descr_, alpha, x, beta, y);
+        }
+    }
+
+    template <typename ValueType>
+    void HIPAcceleratorMatrixHYB<ValueType>::ApplyAnalyseClear_(void)
+    {
+        this->ell_spmv_.Clear();
+        this->coo_spmv_.Clear();
     }
 
     template <typename ValueType>
@@ -711,50 +812,37 @@ namespace rocalution
             assert(cast_in != NULL);
             assert(cast_out != NULL);
 
-            ValueType alpha = 1.0;
+            rocsparse_handle handle = ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle);
+
+            ValueType alpha = static_cast<ValueType>(1);
+            ValueType beta  = static_cast<ValueType>(0);
+
+            // Lazy matrix analyse
+            this->ApplyAnalyse_(alpha, cast_in->dnvec_descr_, beta, cast_out->dnvec_descr_);
 
             // ELL
             if(this->ell_nnz_ > 0)
             {
-                ValueType beta = 0.0;
+                this->ell_spmv_.Compute(handle,
+                                        alpha,
+                                        this->ell_spmat_descr_,
+                                        cast_in->dnvec_descr_,
+                                        beta,
+                                        cast_out->dnvec_descr_);
 
-                rocsparse_status status;
-                status = rocsparseTellmv(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                                         rocsparse_operation_none,
-                                         this->nrow_,
-                                         this->ncol_,
-                                         &alpha,
-                                         this->ell_mat_descr_,
-                                         this->mat_.ELL.val,
-                                         this->mat_.ELL.col,
-                                         this->mat_.ELL.max_row,
-                                         cast_in->vec_,
-                                         &beta,
-                                         cast_out->vec_);
-                CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+                // Add the COO part to the result of the ELL part
+                beta = static_cast<ValueType>(1);
             }
 
             // COO
             if(this->coo_nnz_ > 0)
             {
-                // Add to y from ELL part
-                ValueType beta = 1.0;
-
-                rocsparse_status status;
-                status = rocsparseTcoomv(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                                         rocsparse_operation_none,
-                                         this->nrow_,
-                                         this->ncol_,
-                                         this->coo_nnz_,
-                                         &alpha,
-                                         this->coo_mat_descr_,
-                                         this->mat_.COO.val,
-                                         this->mat_.COO.row,
-                                         this->mat_.COO.col,
-                                         cast_in->vec_,
-                                         &beta,
-                                         cast_out->vec_);
-                CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+                this->coo_spmv_.Compute(handle,
+                                        alpha,
+                                        this->coo_spmat_descr_,
+                                        cast_in->dnvec_descr_,
+                                        beta,
+                                        cast_out->dnvec_descr_);
             }
         }
     }
@@ -779,48 +867,33 @@ namespace rocalution
             assert(cast_in != NULL);
             assert(cast_out != NULL);
 
+            rocsparse_handle handle = ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle);
+
+            ValueType beta = static_cast<ValueType>(1);
+
+            // Lazy matrix analyse
+            this->ApplyAnalyse_(scalar, cast_in->dnvec_descr_, beta, cast_out->dnvec_descr_);
+
             // ELL
             if(this->ell_nnz_ > 0)
             {
-                ValueType beta = 0.0;
-
-                rocsparse_status status;
-                status = rocsparseTellmv(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                                         rocsparse_operation_none,
-                                         this->nrow_,
-                                         this->ncol_,
-                                         &scalar,
-                                         this->ell_mat_descr_,
-                                         this->mat_.ELL.val,
-                                         this->mat_.ELL.col,
-                                         this->mat_.ELL.max_row,
-                                         cast_in->vec_,
-                                         &beta,
-                                         cast_out->vec_);
-                CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+                this->ell_spmv_.Compute(handle,
+                                        scalar,
+                                        this->ell_spmat_descr_,
+                                        cast_in->dnvec_descr_,
+                                        beta,
+                                        cast_out->dnvec_descr_);
             }
 
             // COO
             if(this->coo_nnz_ > 0)
             {
-                // Add to y from ELL part
-                ValueType beta = 1.0;
-
-                rocsparse_status status;
-                status = rocsparseTcoomv(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                                         rocsparse_operation_none,
-                                         this->nrow_,
-                                         this->ncol_,
-                                         this->coo_nnz_,
-                                         &scalar,
-                                         this->coo_mat_descr_,
-                                         this->mat_.COO.val,
-                                         this->mat_.COO.row,
-                                         this->mat_.COO.col,
-                                         cast_in->vec_,
-                                         &beta,
-                                         cast_out->vec_);
-                CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+                this->coo_spmv_.Compute(handle,
+                                        scalar,
+                                        this->coo_spmat_descr_,
+                                        cast_in->dnvec_descr_,
+                                        beta,
+                                        cast_out->dnvec_descr_);
             }
         }
     }

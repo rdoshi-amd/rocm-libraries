@@ -89,22 +89,47 @@ namespace rocalution
         static constexpr rocsparse_indextype value = rocsparse_indextype_i64;
     };
 
-    // rocsparse csrmv
+    // rocsparse v2 spmv, the analysis is performed once and shared by all subsequent
+    // compute calls. The analysis has to be cleared whenever the sparse matrix
+    // descriptor or the sparsity pattern of the matrix changes.
     template <typename ValueType>
-    rocsparse_status rocsparseTcsrmv(rocsparse_handle          handle,
-                                     rocsparse_operation       trans,
-                                     int                       m,
-                                     int                       n,
-                                     int                       nnz,
-                                     const ValueType*          alpha,
-                                     const rocsparse_mat_descr descr,
-                                     const ValueType*          csr_val,
-                                     const int*                csr_row_ptr,
-                                     const int*                csr_col_ind,
-                                     rocsparse_mat_info        info,
-                                     const ValueType*          x,
-                                     const ValueType*          beta,
-                                     ValueType*                y);
+    class HIPSpMV
+    {
+    public:
+        HIPSpMV(void);
+        ~HIPSpMV(void);
+
+        HIPSpMV(const HIPSpMV&)            = delete;
+        HIPSpMV& operator=(const HIPSpMV&) = delete;
+
+        bool IsAnalysed(void) const;
+
+        void Analyse(rocsparse_handle            handle,
+                     rocsparse_spmv_alg          alg,
+                     rocsparse_const_spmat_descr mat,
+                     ValueType                   alpha,
+                     rocsparse_const_dnvec_descr x,
+                     ValueType                   beta,
+                     rocsparse_dnvec_descr       y);
+        // Analyse without vectors, e.g. ahead of the first multiplication
+        void Analyse(rocsparse_handle            handle,
+                     rocsparse_spmv_alg          alg,
+                     rocsparse_const_spmat_descr mat);
+
+        void Compute(rocsparse_handle            handle,
+                     ValueType                   alpha,
+                     rocsparse_const_spmat_descr mat,
+                     rocsparse_const_dnvec_descr x,
+                     ValueType                   beta,
+                     rocsparse_dnvec_descr       y) const;
+
+        void Clear(void);
+
+    private:
+        rocsparse_spmv_descr descr_;
+        size_t               buffer_size_;
+        char*                buffer_;
+    };
 
     // rocsparse csrsv buffer size
     template <typename ValueType>
@@ -249,55 +274,6 @@ namespace rocalution
                                      ValueType*                y,
                                      rocsparse_solve_policy    policy,
                                      void*                     temp_buffer);
-
-    // rocsparse coomv
-    template <typename ValueType>
-    rocsparse_status rocsparseTcoomv(rocsparse_handle          handle,
-                                     rocsparse_operation       trans,
-                                     int                       m,
-                                     int                       n,
-                                     int                       nnz,
-                                     const ValueType*          alpha,
-                                     const rocsparse_mat_descr descr,
-                                     const ValueType*          coo_val,
-                                     const int*                coo_row_ind,
-                                     const int*                coo_col_ind,
-                                     const ValueType*          x,
-                                     const ValueType*          beta,
-                                     ValueType*                y);
-
-    // rocsparse ellmv
-    template <typename ValueType>
-    rocsparse_status rocsparseTellmv(rocsparse_handle          handle,
-                                     rocsparse_operation       trans,
-                                     int                       m,
-                                     int                       n,
-                                     const ValueType*          alpha,
-                                     const rocsparse_mat_descr descr,
-                                     const ValueType*          ell_val,
-                                     const int*                ell_col_ind,
-                                     int                       ell_width,
-                                     const ValueType*          x,
-                                     const ValueType*          beta,
-                                     ValueType*                y);
-
-    // rocsparse bsrmv
-    template <typename ValueType>
-    rocsparse_status rocsparseTbsrmv(rocsparse_handle          handle,
-                                     rocsparse_direction       dir,
-                                     rocsparse_operation       trans,
-                                     int                       mb,
-                                     int                       nb,
-                                     int                       nnzb,
-                                     const ValueType*          alpha,
-                                     const rocsparse_mat_descr descr,
-                                     const ValueType*          bsr_val,
-                                     const int*                bsr_row_ptr,
-                                     const int*                bsr_col_ind,
-                                     int                       bsr_dim,
-                                     const ValueType*          x,
-                                     const ValueType*          beta,
-                                     ValueType*                y);
 
     // rocsparse csrgeam
     template <typename ValueType>

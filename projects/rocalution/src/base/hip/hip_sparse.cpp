@@ -24,141 +24,194 @@
 #include "hip_sparse.hpp"
 #include "../../utils/def.hpp"
 #include "../../utils/log.hpp"
+#include "hip_allocate_free.hpp"
+#include "hip_utils.hpp"
 
+#include <cassert>
 #include <complex>
 #include <rocsparse/rocsparse.h>
 
 namespace rocalution
 {
-    // rocsparse csrmv
-    template <>
-    rocsparse_status rocsparseTcsrmv(rocsparse_handle          handle,
-                                     rocsparse_operation       trans,
-                                     int                       m,
-                                     int                       n,
-                                     int                       nnz,
-                                     const float*              alpha,
-                                     const rocsparse_mat_descr descr,
-                                     const float*              csr_val,
-                                     const int*                csr_row_ptr,
-                                     const int*                csr_col_ind,
-                                     rocsparse_mat_info        info,
-                                     const float*              x,
-                                     const float*              beta,
-                                     float*                    y)
+    template <typename ValueType>
+    HIPSpMV<ValueType>::HIPSpMV(void)
+        : descr_(NULL)
+        , buffer_size_(0)
+        , buffer_(NULL)
     {
-        return rocsparse_scsrmv(handle,
-                                trans,
-                                m,
-                                n,
-                                nnz,
-                                alpha,
-                                descr,
-                                csr_val,
-                                csr_row_ptr,
-                                csr_col_ind,
-                                info,
-                                x,
-                                beta,
-                                y);
     }
 
-    template <>
-    rocsparse_status rocsparseTcsrmv(rocsparse_handle          handle,
-                                     rocsparse_operation       trans,
-                                     int                       m,
-                                     int                       n,
-                                     int                       nnz,
-                                     const double*             alpha,
-                                     const rocsparse_mat_descr descr,
-                                     const double*             csr_val,
-                                     const int*                csr_row_ptr,
-                                     const int*                csr_col_ind,
-                                     rocsparse_mat_info        info,
-                                     const double*             x,
-                                     const double*             beta,
-                                     double*                   y)
+    template <typename ValueType>
+    HIPSpMV<ValueType>::~HIPSpMV(void)
     {
-        return rocsparse_dcsrmv(handle,
-                                trans,
-                                m,
-                                n,
-                                nnz,
-                                alpha,
-                                descr,
-                                csr_val,
-                                csr_row_ptr,
-                                csr_col_ind,
-                                info,
-                                x,
-                                beta,
-                                y);
+        this->Clear();
     }
 
-    template <>
-    rocsparse_status rocsparseTcsrmv(rocsparse_handle           handle,
-                                     rocsparse_operation        trans,
-                                     int                        m,
-                                     int                        n,
-                                     int                        nnz,
-                                     const std::complex<float>* alpha,
-                                     const rocsparse_mat_descr  descr,
-                                     const std::complex<float>* csr_val,
-                                     const int*                 csr_row_ptr,
-                                     const int*                 csr_col_ind,
-                                     rocsparse_mat_info         info,
-                                     const std::complex<float>* x,
-                                     const std::complex<float>* beta,
-                                     std::complex<float>*       y)
+    template <typename ValueType>
+    bool HIPSpMV<ValueType>::IsAnalysed(void) const
     {
-        return rocsparse_ccsrmv(handle,
-                                trans,
-                                m,
-                                n,
-                                nnz,
-                                (const rocsparse_float_complex*)alpha,
-                                descr,
-                                (const rocsparse_float_complex*)csr_val,
-                                csr_row_ptr,
-                                csr_col_ind,
-                                info,
-                                (const rocsparse_float_complex*)x,
-                                (const rocsparse_float_complex*)beta,
-                                (rocsparse_float_complex*)y);
+        return this->descr_ != NULL;
     }
 
-    template <>
-    rocsparse_status rocsparseTcsrmv(rocsparse_handle            handle,
-                                     rocsparse_operation         trans,
-                                     int                         m,
-                                     int                         n,
-                                     int                         nnz,
-                                     const std::complex<double>* alpha,
-                                     const rocsparse_mat_descr   descr,
-                                     const std::complex<double>* csr_val,
-                                     const int*                  csr_row_ptr,
-                                     const int*                  csr_col_ind,
-                                     rocsparse_mat_info          info,
-                                     const std::complex<double>* x,
-                                     const std::complex<double>* beta,
-                                     std::complex<double>*       y)
+    template <typename ValueType>
+    void HIPSpMV<ValueType>::Analyse(rocsparse_handle            handle,
+                                     rocsparse_spmv_alg          alg,
+                                     rocsparse_const_spmat_descr mat,
+                                     ValueType                   alpha,
+                                     rocsparse_const_dnvec_descr x,
+                                     ValueType                   beta,
+                                     rocsparse_dnvec_descr       y)
     {
-        return rocsparse_zcsrmv(handle,
-                                trans,
-                                m,
-                                n,
-                                nnz,
-                                (const rocsparse_double_complex*)alpha,
-                                descr,
-                                (const rocsparse_double_complex*)csr_val,
-                                csr_row_ptr,
-                                csr_col_ind,
-                                info,
-                                (const rocsparse_double_complex*)x,
-                                (const rocsparse_double_complex*)beta,
-                                (rocsparse_double_complex*)y);
+        assert(this->descr_ == NULL);
+        assert(mat != NULL);
+
+        const rocsparse_operation operation = rocsparse_operation_none;
+        const rocsparse_datatype  datatype  = rocalution_datatype_traits<ValueType>::value;
+
+        rocsparse_status status = rocsparse_create_spmv_descr(&this->descr_);
+        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+
+        status = rocsparse_spmv_set_input(
+            handle, this->descr_, rocsparse_spmv_input_alg, &alg, sizeof(alg), NULL);
+        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+
+        status = rocsparse_spmv_set_input(handle,
+                                          this->descr_,
+                                          rocsparse_spmv_input_operation,
+                                          &operation,
+                                          sizeof(operation),
+                                          NULL);
+        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+
+        status = rocsparse_spmv_set_input(handle,
+                                          this->descr_,
+                                          rocsparse_spmv_input_scalar_datatype,
+                                          &datatype,
+                                          sizeof(datatype),
+                                          NULL);
+        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+
+        status = rocsparse_spmv_set_input(handle,
+                                          this->descr_,
+                                          rocsparse_spmv_input_compute_datatype,
+                                          &datatype,
+                                          sizeof(datatype),
+                                          NULL);
+        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+
+        size_t analysis_buffer_size = 0;
+        status                      = rocsparse_v2_spmv_buffer_size(handle,
+                                               this->descr_,
+                                               mat,
+                                               x,
+                                               y,
+                                               rocsparse_v2_spmv_stage_analysis,
+                                               &analysis_buffer_size,
+                                               NULL);
+        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+
+        char* analysis_buffer = NULL;
+        allocate_hip(analysis_buffer_size, &analysis_buffer);
+
+        status = rocsparse_v2_spmv(handle,
+                                   this->descr_,
+                                   &alpha,
+                                   mat,
+                                   x,
+                                   &beta,
+                                   y,
+                                   rocsparse_v2_spmv_stage_analysis,
+                                   analysis_buffer_size,
+                                   analysis_buffer,
+                                   NULL);
+        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+
+        free_hip(&analysis_buffer);
+
+        status = rocsparse_v2_spmv_buffer_size(handle,
+                                               this->descr_,
+                                               mat,
+                                               x,
+                                               y,
+                                               rocsparse_v2_spmv_stage_compute,
+                                               &this->buffer_size_,
+                                               NULL);
+        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+
+        allocate_hip(this->buffer_size_, &this->buffer_);
     }
 
+    template <typename ValueType>
+    void HIPSpMV<ValueType>::Analyse(rocsparse_handle            handle,
+                                     rocsparse_spmv_alg          alg,
+                                     rocsparse_const_spmat_descr mat)
+    {
+        // The analysis only depends on the matrix, empty vectors are sufficient
+        rocsparse_dnvec_descr x;
+        rocsparse_dnvec_descr y;
+
+        rocsparse_status status = rocsparse_create_dnvec_descr(
+            &x, 0, NULL, rocalution_datatype_traits<ValueType>::value);
+        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+
+        status = rocsparse_create_dnvec_descr(
+            &y, 0, NULL, rocalution_datatype_traits<ValueType>::value);
+        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+
+        this->Analyse(handle, alg, mat, static_cast<ValueType>(1), x, static_cast<ValueType>(0), y);
+
+        status = rocsparse_destroy_dnvec_descr(x);
+        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+
+        status = rocsparse_destroy_dnvec_descr(y);
+        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+    }
+
+    template <typename ValueType>
+    void HIPSpMV<ValueType>::Compute(rocsparse_handle            handle,
+                                     ValueType                   alpha,
+                                     rocsparse_const_spmat_descr mat,
+                                     rocsparse_const_dnvec_descr x,
+                                     ValueType                   beta,
+                                     rocsparse_dnvec_descr       y) const
+    {
+        assert(this->descr_ != NULL);
+
+        rocsparse_status status = rocsparse_v2_spmv(handle,
+                                                    this->descr_,
+                                                    &alpha,
+                                                    mat,
+                                                    x,
+                                                    &beta,
+                                                    y,
+                                                    rocsparse_v2_spmv_stage_compute,
+                                                    this->buffer_size_,
+                                                    this->buffer_,
+                                                    NULL);
+        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+    }
+
+    template <typename ValueType>
+    void HIPSpMV<ValueType>::Clear(void)
+    {
+        if(this->descr_ != NULL)
+        {
+            rocsparse_status status = rocsparse_destroy_spmv_descr(this->descr_);
+            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+
+            this->descr_ = NULL;
+        }
+
+        free_hip(&this->buffer_);
+        this->buffer_size_ = 0;
+    }
+
+    template class HIPSpMV<float>;
+    template class HIPSpMV<double>;
+#ifdef SUPPORT_COMPLEX
+    template class HIPSpMV<std::complex<float>>;
+    template class HIPSpMV<std::complex<double>>;
+#endif
     // rocsparse csrsv buffer size
     template <>
     rocsparse_status rocsparseTcsrsv_buffer_size(rocsparse_handle          handle,
@@ -1214,347 +1267,6 @@ namespace rocalution
                                       (rocsparse_double_complex*)y,
                                       policy,
                                       temp_buffer);
-    }
-
-    // rocsparse coomv
-    template <>
-    rocsparse_status rocsparseTcoomv(rocsparse_handle          handle,
-                                     rocsparse_operation       trans,
-                                     int                       m,
-                                     int                       n,
-                                     int                       nnz,
-                                     const float*              alpha,
-                                     const rocsparse_mat_descr descr,
-                                     const float*              coo_val,
-                                     const int*                coo_row_ind,
-                                     const int*                coo_col_ind,
-                                     const float*              x,
-                                     const float*              beta,
-                                     float*                    y)
-    {
-        return rocsparse_scoomv(
-            handle, trans, m, n, nnz, alpha, descr, coo_val, coo_row_ind, coo_col_ind, x, beta, y);
-    }
-
-    template <>
-    rocsparse_status rocsparseTcoomv(rocsparse_handle          handle,
-                                     rocsparse_operation       trans,
-                                     int                       m,
-                                     int                       n,
-                                     int                       nnz,
-                                     const double*             alpha,
-                                     const rocsparse_mat_descr descr,
-                                     const double*             coo_val,
-                                     const int*                coo_row_ind,
-                                     const int*                coo_col_ind,
-                                     const double*             x,
-                                     const double*             beta,
-                                     double*                   y)
-    {
-        return rocsparse_dcoomv(
-            handle, trans, m, n, nnz, alpha, descr, coo_val, coo_row_ind, coo_col_ind, x, beta, y);
-    }
-
-    template <>
-    rocsparse_status rocsparseTcoomv(rocsparse_handle           handle,
-                                     rocsparse_operation        trans,
-                                     int                        m,
-                                     int                        n,
-                                     int                        nnz,
-                                     const std::complex<float>* alpha,
-                                     const rocsparse_mat_descr  descr,
-                                     const std::complex<float>* coo_val,
-                                     const int*                 coo_row_ind,
-                                     const int*                 coo_col_ind,
-                                     const std::complex<float>* x,
-                                     const std::complex<float>* beta,
-                                     std::complex<float>*       y)
-    {
-        return rocsparse_ccoomv(handle,
-                                trans,
-                                m,
-                                n,
-                                nnz,
-                                (const rocsparse_float_complex*)alpha,
-                                descr,
-                                (const rocsparse_float_complex*)coo_val,
-                                coo_row_ind,
-                                coo_col_ind,
-                                (const rocsparse_float_complex*)x,
-                                (const rocsparse_float_complex*)beta,
-                                (rocsparse_float_complex*)y);
-    }
-
-    template <>
-    rocsparse_status rocsparseTcoomv(rocsparse_handle            handle,
-                                     rocsparse_operation         trans,
-                                     int                         m,
-                                     int                         n,
-                                     int                         nnz,
-                                     const std::complex<double>* alpha,
-                                     const rocsparse_mat_descr   descr,
-                                     const std::complex<double>* coo_val,
-                                     const int*                  coo_row_ind,
-                                     const int*                  coo_col_ind,
-                                     const std::complex<double>* x,
-                                     const std::complex<double>* beta,
-                                     std::complex<double>*       y)
-    {
-        return rocsparse_zcoomv(handle,
-                                trans,
-                                m,
-                                n,
-                                nnz,
-                                (const rocsparse_double_complex*)alpha,
-                                descr,
-                                (const rocsparse_double_complex*)coo_val,
-                                coo_row_ind,
-                                coo_col_ind,
-                                (const rocsparse_double_complex*)x,
-                                (const rocsparse_double_complex*)beta,
-                                (rocsparse_double_complex*)y);
-    }
-
-    // rocsparse ellmv
-    template <>
-    rocsparse_status rocsparseTellmv(rocsparse_handle          handle,
-                                     rocsparse_operation       trans,
-                                     int                       m,
-                                     int                       n,
-                                     const float*              alpha,
-                                     const rocsparse_mat_descr descr,
-                                     const float*              ell_val,
-                                     const int*                ell_col_ind,
-                                     int                       ell_width,
-                                     const float*              x,
-                                     const float*              beta,
-                                     float*                    y)
-    {
-        return rocsparse_sellmv(
-            handle, trans, m, n, alpha, descr, ell_val, ell_col_ind, ell_width, x, beta, y);
-    }
-
-    template <>
-    rocsparse_status rocsparseTellmv(rocsparse_handle          handle,
-                                     rocsparse_operation       trans,
-                                     int                       m,
-                                     int                       n,
-                                     const double*             alpha,
-                                     const rocsparse_mat_descr descr,
-                                     const double*             ell_val,
-                                     const int*                ell_col_ind,
-                                     int                       ell_width,
-                                     const double*             x,
-                                     const double*             beta,
-                                     double*                   y)
-    {
-        return rocsparse_dellmv(
-            handle, trans, m, n, alpha, descr, ell_val, ell_col_ind, ell_width, x, beta, y);
-    }
-
-    template <>
-    rocsparse_status rocsparseTellmv(rocsparse_handle           handle,
-                                     rocsparse_operation        trans,
-                                     int                        m,
-                                     int                        n,
-                                     const std::complex<float>* alpha,
-                                     const rocsparse_mat_descr  descr,
-                                     const std::complex<float>* ell_val,
-                                     const int*                 ell_col_ind,
-                                     int                        ell_width,
-                                     const std::complex<float>* x,
-                                     const std::complex<float>* beta,
-                                     std::complex<float>*       y)
-    {
-        return rocsparse_cellmv(handle,
-                                trans,
-                                m,
-                                n,
-                                (const rocsparse_float_complex*)alpha,
-                                descr,
-                                (const rocsparse_float_complex*)ell_val,
-                                ell_col_ind,
-                                ell_width,
-                                (const rocsparse_float_complex*)x,
-                                (const rocsparse_float_complex*)beta,
-                                (rocsparse_float_complex*)y);
-    }
-
-    template <>
-    rocsparse_status rocsparseTellmv(rocsparse_handle            handle,
-                                     rocsparse_operation         trans,
-                                     int                         m,
-                                     int                         n,
-                                     const std::complex<double>* alpha,
-                                     const rocsparse_mat_descr   descr,
-                                     const std::complex<double>* ell_val,
-                                     const int*                  ell_col_ind,
-                                     int                         ell_width,
-                                     const std::complex<double>* x,
-                                     const std::complex<double>* beta,
-                                     std::complex<double>*       y)
-    {
-        return rocsparse_zellmv(handle,
-                                trans,
-                                m,
-                                n,
-                                (const rocsparse_double_complex*)alpha,
-                                descr,
-                                (const rocsparse_double_complex*)ell_val,
-                                ell_col_ind,
-                                ell_width,
-                                (const rocsparse_double_complex*)x,
-                                (const rocsparse_double_complex*)beta,
-                                (rocsparse_double_complex*)y);
-    }
-
-    // rocsparse bsrmv
-    template <>
-    rocsparse_status rocsparseTbsrmv(rocsparse_handle          handle,
-                                     rocsparse_direction       dir,
-                                     rocsparse_operation       trans,
-                                     int                       mb,
-                                     int                       nb,
-                                     int                       nnzb,
-                                     const float*              alpha,
-                                     const rocsparse_mat_descr descr,
-                                     const float*              bsr_val,
-                                     const int*                bsr_row_ptr,
-                                     const int*                bsr_col_ind,
-                                     int                       bsr_dim,
-                                     const float*              x,
-                                     const float*              beta,
-                                     float*                    y)
-    {
-        return rocsparse_sbsrmv(handle,
-                                dir,
-                                trans,
-                                mb,
-                                nb,
-                                nnzb,
-                                alpha,
-                                descr,
-                                bsr_val,
-                                bsr_row_ptr,
-                                bsr_col_ind,
-                                bsr_dim,
-#if ROCSPARSE_VERSION_MAJOR >= 3
-                                nullptr,
-#endif
-                                x,
-                                beta,
-                                y);
-    }
-
-    template <>
-    rocsparse_status rocsparseTbsrmv(rocsparse_handle          handle,
-                                     rocsparse_direction       dir,
-                                     rocsparse_operation       trans,
-                                     int                       mb,
-                                     int                       nb,
-                                     int                       nnzb,
-                                     const double*             alpha,
-                                     const rocsparse_mat_descr descr,
-                                     const double*             bsr_val,
-                                     const int*                bsr_row_ptr,
-                                     const int*                bsr_col_ind,
-                                     int                       bsr_dim,
-                                     const double*             x,
-                                     const double*             beta,
-                                     double*                   y)
-    {
-        return rocsparse_dbsrmv(handle,
-                                dir,
-                                trans,
-                                mb,
-                                nb,
-                                nnzb,
-                                alpha,
-                                descr,
-                                bsr_val,
-                                bsr_row_ptr,
-                                bsr_col_ind,
-                                bsr_dim,
-#if ROCSPARSE_VERSION_MAJOR >= 3
-                                nullptr,
-#endif
-                                x,
-                                beta,
-                                y);
-    }
-
-    template <>
-    rocsparse_status rocsparseTbsrmv(rocsparse_handle           handle,
-                                     rocsparse_direction        dir,
-                                     rocsparse_operation        trans,
-                                     int                        mb,
-                                     int                        nb,
-                                     int                        nnzb,
-                                     const std::complex<float>* alpha,
-                                     const rocsparse_mat_descr  descr,
-                                     const std::complex<float>* bsr_val,
-                                     const int*                 bsr_row_ptr,
-                                     const int*                 bsr_col_ind,
-                                     int                        bsr_dim,
-                                     const std::complex<float>* x,
-                                     const std::complex<float>* beta,
-                                     std::complex<float>*       y)
-    {
-        return rocsparse_cbsrmv(handle,
-                                dir,
-                                trans,
-                                mb,
-                                nb,
-                                nnzb,
-                                (const rocsparse_float_complex*)alpha,
-                                descr,
-                                (const rocsparse_float_complex*)bsr_val,
-                                bsr_row_ptr,
-                                bsr_col_ind,
-                                bsr_dim,
-#if ROCSPARSE_VERSION_MAJOR >= 3
-                                nullptr,
-#endif
-                                (const rocsparse_float_complex*)x,
-                                (const rocsparse_float_complex*)beta,
-                                (rocsparse_float_complex*)y);
-    }
-
-    template <>
-    rocsparse_status rocsparseTbsrmv(rocsparse_handle            handle,
-                                     rocsparse_direction         dir,
-                                     rocsparse_operation         trans,
-                                     int                         mb,
-                                     int                         nb,
-                                     int                         nnzb,
-                                     const std::complex<double>* alpha,
-                                     const rocsparse_mat_descr   descr,
-                                     const std::complex<double>* bsr_val,
-                                     const int*                  bsr_row_ptr,
-                                     const int*                  bsr_col_ind,
-                                     int                         bsr_dim,
-                                     const std::complex<double>* x,
-                                     const std::complex<double>* beta,
-                                     std::complex<double>*       y)
-    {
-        return rocsparse_zbsrmv(handle,
-                                dir,
-                                trans,
-                                mb,
-                                nb,
-                                nnzb,
-                                (const rocsparse_double_complex*)alpha,
-                                descr,
-                                (const rocsparse_double_complex*)bsr_val,
-                                bsr_row_ptr,
-                                bsr_col_ind,
-                                bsr_dim,
-#if ROCSPARSE_VERSION_MAJOR >= 3
-                                nullptr,
-#endif
-                                (const rocsparse_double_complex*)x,
-                                (const rocsparse_double_complex*)beta,
-                                (rocsparse_double_complex*)y);
     }
 
     // rocsparse csrgeam

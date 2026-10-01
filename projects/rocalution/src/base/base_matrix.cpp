@@ -500,6 +500,11 @@ namespace rocalution
     }
 
     template <typename ValueType>
+    void BaseMatrix<ValueType>::ApplyAnalysis(void) const
+    {
+    }
+
+    template <typename ValueType>
     bool BaseMatrix<ValueType>::Scale(ValueType alpha)
     {
         return false;

@@ -257,6 +257,8 @@ namespace rocalution
             copy_h2d(this->nnz_, cast_mat->mat_.row, this->mat_.row);
             copy_h2d(this->nnz_, cast_mat->mat_.col, this->mat_.col);
             copy_h2d(this->nnz_, cast_mat->mat_.val, this->mat_.val);
+
+            this->ApplyAnalyseClear_();
         }
         else
         {
@@ -326,6 +328,8 @@ namespace rocalution
             copy_d2d(this->nnz_, hip_cast_mat->mat_.row, this->mat_.row);
             copy_d2d(this->nnz_, hip_cast_mat->mat_.col, this->mat_.col);
             copy_d2d(this->nnz_, hip_cast_mat->mat_.val, this->mat_.val);
+
+            this->ApplyAnalyseClear_();
         }
         else
         {
@@ -423,6 +427,8 @@ namespace rocalution
                      this->mat_.val,
                      true,
                      HIPSTREAM(_get_backend_descriptor()->HIP_stream_current));
+
+            this->ApplyAnalyseClear_();
         }
         else
         {
@@ -516,6 +522,8 @@ namespace rocalution
                      this->mat_.val,
                      true,
                      HIPSTREAM(_get_backend_descriptor()->HIP_stream_current));
+
+            this->ApplyAnalyseClear_();
         }
         else
         {
@@ -598,6 +606,8 @@ namespace rocalution
         copy_d2d(this->nnz_, row, this->mat_.row);
         copy_d2d(this->nnz_, col, this->mat_.col);
         copy_d2d(this->nnz_, val, this->mat_.val);
+
+        this->ApplyAnalyseClear_();
     }
 
     template <typename ValueType>
@@ -646,6 +656,8 @@ namespace rocalution
                 this->nrow_ = cast_mat_csr->nrow_;
                 this->ncol_ = cast_mat_csr->ncol_;
                 this->nnz_  = cast_mat_csr->nnz_;
+
+                this->CreateSpMatDescr_();
 
                 return true;
             }
@@ -794,6 +806,8 @@ namespace rocalution
                                                                                this->mat_.row,
                                                                                this->mat_.col);
             CHECK_HIP_ERROR(__FILE__, __LINE__);
+
+            this->ApplyAnalyseClear_();
         }
 
         return true;
@@ -853,6 +867,8 @@ namespace rocalution
             CHECK_HIP_ERROR(__FILE__, __LINE__);
 
             free_hip(&pb);
+
+            this->ApplyAnalyseClear_();
         }
 
         return true;

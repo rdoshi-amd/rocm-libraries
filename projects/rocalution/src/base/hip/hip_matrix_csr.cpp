@@ -330,6 +330,7 @@ namespace rocalution
             if(cast_mat->mat_.row_offset != NULL)
             {
                 copy_h2d(this->nrow_ + 1, cast_mat->mat_.row_offset, this->mat_.row_offset);
+                this->ApplyAnalyseClear_();
             }
 
             copy_h2d(this->nnz_, cast_mat->mat_.col, this->mat_.col);
@@ -371,6 +372,7 @@ namespace rocalution
                          this->mat_.row_offset,
                          true,
                          HIPSTREAM(_get_backend_descriptor()->HIP_stream_current));
+                this->ApplyAnalyseClear_();
             }
 
             copy_h2d(this->nnz_,
@@ -506,6 +508,7 @@ namespace rocalution
             if(hip_cast_mat->mat_.row_offset)
             {
                 copy_d2d(this->nrow_ + 1, hip_cast_mat->mat_.row_offset, this->mat_.row_offset);
+                this->ApplyAnalyseClear_();
             }
 
             copy_d2d(this->nnz_, hip_cast_mat->mat_.col, this->mat_.col);
@@ -556,6 +559,7 @@ namespace rocalution
                          this->mat_.row_offset,
                          true,
                          HIPSTREAM(_get_backend_descriptor()->HIP_stream_current));
+                this->ApplyAnalyseClear_();
             }
 
             copy_d2d(this->nnz_,
@@ -709,6 +713,8 @@ namespace rocalution
 
         copy_d2d(this->nnz_, col, this->mat_.col);
         copy_d2d(this->nnz_, val, this->mat_.val);
+
+        this->ApplyAnalyseClear_();
     }
 
     template <typename ValueType>
@@ -766,6 +772,8 @@ namespace rocalution
                 this->ncol_ = cast_mat_coo->ncol_;
                 this->nnz_  = cast_mat_coo->nnz_;
 
+                this->CreateSpMatDescr_();
+
                 return true;
             }
         }
@@ -788,6 +796,8 @@ namespace rocalution
                 this->nrow_ = cast_mat_ell->nrow_;
                 this->ncol_ = cast_mat_ell->ncol_;
                 this->nnz_  = nnz;
+
+                this->CreateSpMatDescr_();
 
                 return true;
             }
@@ -812,6 +822,8 @@ namespace rocalution
                 this->ncol_ = cast_mat_dense->ncol_;
                 this->nnz_  = nnz;
 
+                this->CreateSpMatDescr_();
+
                 return true;
             }
         }
@@ -833,6 +845,8 @@ namespace rocalution
                 this->nrow_ = nrow;
                 this->ncol_ = ncol;
                 this->nnz_  = nnz;
+
+                this->CreateSpMatDescr_();
 
                 return true;
             }
@@ -975,6 +989,8 @@ namespace rocalution
             this->mat_.val = csr_val_sorted;
 
             free_hip(&buffer);
+
+            this->CreateSpMatDescr_();
         }
 
         return true;
@@ -1551,6 +1567,8 @@ namespace rocalution
             free_hip(&this->mat_.val);
 
             this->mat_.val = ilu0;
+
+            this->CreateSpMatDescr_();
         }
 
         return true;
@@ -4403,6 +4421,8 @@ namespace rocalution
 
         free_hip(&buffer);
         CHECK_HIP_ERROR(__FILE__, __LINE__);
+
+        this->CreateSpMatDescr_();
 
         return true;
     }
@@ -9653,6 +9673,13 @@ namespace rocalution
         }
         CHECK_HIP_ERROR(__FILE__, __LINE__);
 
+        cast_pi->CreateSpMatDescr_();
+
+        if(global == true)
+        {
+            cast_pg->CreateSpMatDescr_();
+        }
+
         return true;
     }
 
@@ -10083,6 +10110,8 @@ namespace rocalution
                 HIPSTREAM(_get_backend_descriptor()->HIP_stream_current)>>>(
                 static_cast<int>(this->nnz_), workspace.vec_, perm.vec_, this->mat_.col);
             CHECK_HIP_ERROR(__FILE__, __LINE__);
+
+            this->CreateSpMatDescr_();
         }
 
         return true;
@@ -10182,6 +10211,8 @@ namespace rocalution
         CHECK_HIP_ERROR(__FILE__, __LINE__);
 
         free_hip(&workspace);
+
+        this->ApplyAnalyseClear_();
 
         return true;
     }

@@ -1,5 +1,5 @@
 /* ************************************************************************
- * Copyright (C) 2018-2023 Advanced Micro Devices, Inc. All rights Reserved.
+ * Copyright (C) 2018-2026 Advanced Micro Devices, Inc. All rights Reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -76,9 +76,18 @@ namespace rocalution
                               BaseVector<ValueType>*       out) const;
 
     private:
+        void CreateSpMatDescr_(void);
+        void DestroySpMatDescr_(void);
+        void ApplyAnalyse_(ValueType                   alpha,
+                           rocsparse_const_dnvec_descr x,
+                           ValueType                   beta,
+                           rocsparse_dnvec_descr       y) const;
+        void ApplyAnalyseClear_(void);
+
         MatrixELL<ValueType, int> mat_;
 
-        rocsparse_mat_descr mat_descr_;
+        rocsparse_spmat_descr spmat_descr_;
+        rocsparse_mat_descr   mat_descr_;
 
         friend class HIPAcceleratorMatrixCSR<ValueType>;
 

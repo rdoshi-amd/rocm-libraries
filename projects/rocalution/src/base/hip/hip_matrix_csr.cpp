@@ -92,6 +92,8 @@ namespace rocalution
         this->mat_.val        = NULL;
         this->set_backend(local_backend);
 
+        this->spmat_descr_ = 0;
+
         this->L_mat_descr_ = 0;
         this->U_mat_descr_ = 0;
 
@@ -122,6 +124,43 @@ namespace rocalution
 
         status = rocsparse_create_mat_info(&this->mat_info_itsv_);
         CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+    }
+
+    template <typename ValueType>
+    void HIPAcceleratorMatrixCSR<ValueType>::CreateSpMatDescr_(void)
+    {
+        this->DestroySpMatDescr_();
+
+        if(this->nnz_ >= 0)
+        {
+            rocsparse_status status
+                = rocsparse_create_csr_descr(&this->spmat_descr_,
+                                             this->nrow_,
+                                             this->ncol_,
+                                             this->nnz_,
+                                             this->mat_.row_offset,
+                                             this->mat_.col,
+                                             this->mat_.val,
+                                             rocalution_indextype_traits<PtrType>::value,
+                                             rocalution_indextype_traits<int>::value,
+                                             rocsparse_index_base_zero,
+                                             rocalution_datatype_traits<ValueType>::value);
+            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+        }
+    }
+
+    template <typename ValueType>
+    void HIPAcceleratorMatrixCSR<ValueType>::DestroySpMatDescr_(void)
+    {
+        if(this->spmat_descr_ != NULL)
+        {
+            rocsparse_status status = rocsparse_destroy_spmat_descr(this->spmat_descr_);
+            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+
+            this->spmat_descr_ = NULL;
+        }
+
+        this->ApplyAnalyseClear_();
     }
 
     template <typename ValueType>
@@ -170,6 +209,8 @@ namespace rocalution
         this->nrow_ = nrow;
         this->ncol_ = ncol;
         this->nnz_  = nnz;
+
+        this->CreateSpMatDescr_();
     }
 
     template <typename ValueType>
@@ -200,7 +241,7 @@ namespace rocalution
         this->mat_.col        = *col;
         this->mat_.val        = *val;
 
-        this->ApplyAnalysis();
+        this->CreateSpMatDescr_();
     }
 
     template <typename ValueType>
@@ -214,6 +255,8 @@ namespace rocalution
 
         DISCARD_HIP_ERROR(hipDeviceSynchronize());
         CHECK_HIP_ERROR(__FILE__, __LINE__);
+
+        this->DestroySpMatDescr_();
 
         // see free_host function for details
         *row_offset = this->mat_.row_offset;
@@ -232,6 +275,8 @@ namespace rocalution
     template <typename ValueType>
     void HIPAcceleratorMatrixCSR<ValueType>::Clear(void)
     {
+        this->DestroySpMatDescr_();
+
         free_hip(&this->mat_.row_offset);
         free_hip(&this->mat_.col);
         free_hip(&this->mat_.val);
@@ -297,8 +342,6 @@ namespace rocalution
             src.Info();
             FATAL_ERROR(__FILE__, __LINE__);
         }
-
-        this->ApplyAnalysis();
     }
 
     template <typename ValueType>
@@ -348,8 +391,6 @@ namespace rocalution
             src.Info();
             FATAL_ERROR(__FILE__, __LINE__);
         }
-
-        this->ApplyAnalysis();
     }
 
     template <typename ValueType>
@@ -485,8 +526,6 @@ namespace rocalution
                 FATAL_ERROR(__FILE__, __LINE__);
             }
         }
-
-        this->ApplyAnalysis();
     }
 
     template <typename ValueType>
@@ -545,8 +584,6 @@ namespace rocalution
                 FATAL_ERROR(__FILE__, __LINE__);
             }
         }
-
-        this->ApplyAnalysis();
     }
 
     template <typename ValueType>
@@ -672,8 +709,6 @@ namespace rocalution
 
         copy_d2d(this->nnz_, col, this->mat_.col);
         copy_d2d(this->nnz_, val, this->mat_.val);
-
-        this->ApplyAnalysis();
     }
 
     template <typename ValueType>
@@ -731,8 +766,6 @@ namespace rocalution
                 this->ncol_ = cast_mat_coo->ncol_;
                 this->nnz_  = cast_mat_coo->nnz_;
 
-                this->ApplyAnalysis();
-
                 return true;
             }
         }
@@ -757,8 +790,6 @@ namespace rocalution
                 this->nrow_ = cast_mat_ell->nrow_;
                 this->ncol_ = cast_mat_ell->ncol_;
                 this->nnz_  = nnz;
-
-                this->ApplyAnalysis();
 
                 return true;
             }
@@ -895,8 +926,6 @@ namespace rocalution
         copy_h2d(this->nrow_ + 1, row_offset, this->mat_.row_offset);
         copy_h2d(this->nnz_, col, this->mat_.col);
         copy_h2d(this->nnz_, val, this->mat_.val);
-
-        this->ApplyAnalysis();
     }
 
     template <typename ValueType>
@@ -1197,9 +1226,9 @@ namespace rocalution
 
             free_hip(&d_offset);
             free_hip(&d_data);
-        }
 
-        this->ApplyAnalysis();
+            this->CreateSpMatDescr_();
+        }
 
         return true;
     }
@@ -1207,22 +1236,21 @@ namespace rocalution
     template <typename ValueType>
     void HIPAcceleratorMatrixCSR<ValueType>::ApplyAnalysis(void) const
     {
-        if(this->nnz_ > 0)
-        {
-            rocsparse_status status;
-            status
-                = rocsparseTcsrmv_analysis(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                                           rocsparse_operation_none,
-                                           this->nrow_,
-                                           this->ncol_,
-                                           this->nnz_,
-                                           this->mat_descr_,
-                                           this->mat_.val,
-                                           this->mat_.row_offset,
-                                           this->mat_.col,
-                                           this->mat_info_);
-            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-        }
+        // TODO deprecate
+        // no-op
+    }
+
+    template <typename ValueType>
+    void HIPAcceleratorMatrixCSR<ValueType>::ApplyAnalyse_(ValueType                   alpha,
+                                                           rocsparse_const_dnvec_descr x,
+                                                           ValueType                   beta,
+                                                           rocsparse_dnvec_descr       y) const
+    {
+    }
+
+    template <typename ValueType>
+    void HIPAcceleratorMatrixCSR<ValueType>::ApplyAnalyseClear_(void)
+    {
     }
 
     template <typename ValueType>
@@ -1245,6 +1273,9 @@ namespace rocalution
 
             ValueType alpha = static_cast<ValueType>(1);
             ValueType beta  = static_cast<ValueType>(0);
+
+            // Lazy matrix analyse
+            this->ApplyAnalyse_(alpha, cast_in->dnvec_descr_, beta, cast_out->dnvec_descr_);
 
             rocsparse_status status;
             status = rocsparseTcsrmv(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
@@ -1285,6 +1316,9 @@ namespace rocalution
             assert(cast_out->size_ == this->nrow_);
 
             ValueType beta = static_cast<ValueType>(1);
+
+            // Lazy matrix analyse
+            this->ApplyAnalyse_(scalar, cast_in->dnvec_descr_, beta, cast_out->dnvec_descr_);
 
             rocsparse_status status;
             status = rocsparseTcsrmv(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
@@ -1440,7 +1474,7 @@ namespace rocalution
                 this->mat_.row_offset,
                 this->mat_.col,
                 rocsparse_index_base_zero,
-                rocsparseTdatatype<ValueType>(),
+                rocalution_datatype_traits<ValueType>::value,
                 &buffer_size);
             CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
 
@@ -1462,7 +1496,7 @@ namespace rocalution
                 this->mat_.row_offset,
                 this->mat_.col,
                 rocsparse_index_base_zero,
-                rocsparseTdatatype<ValueType>(),
+                rocalution_datatype_traits<ValueType>::value,
                 buffer_size,
                 buffer);
             CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
@@ -3467,36 +3501,33 @@ namespace rocalution
 
         copy_d2h(1, row_nnz + row_size, &mat_nnz);
 
-        cast_mat->AllocateCSR(mat_nnz, row_size, col_size);
+        int*       sub_col = NULL;
+        ValueType* sub_val = NULL;
+
+        allocate_hip(mat_nnz, &sub_col);
+        allocate_hip(mat_nnz, &sub_val);
 
         // not empty submatrix
         if(mat_nnz > 0)
         {
-            free_hip(&cast_mat->mat_.row_offset);
-            cast_mat->mat_.row_offset = row_nnz;
-            // copying the sub matrix
-
             kernel_csr_extract_submatrix_copy<<<
                 GridSize,
                 BlockSize,
                 0,
-                HIPSTREAM(_get_backend_descriptor()->HIP_stream_current)>>>(
-                this->mat_.row_offset,
-                this->mat_.col,
-                this->mat_.val,
-                row_offset,
-                col_offset,
-                row_size,
-                col_size,
-                cast_mat->mat_.row_offset,
-                cast_mat->mat_.col,
-                cast_mat->mat_.val);
+                HIPSTREAM(_get_backend_descriptor()->HIP_stream_current)>>>(this->mat_.row_offset,
+                                                                            this->mat_.col,
+                                                                            this->mat_.val,
+                                                                            row_offset,
+                                                                            col_offset,
+                                                                            row_size,
+                                                                            col_size,
+                                                                            row_nnz,
+                                                                            sub_col,
+                                                                            sub_val);
             CHECK_HIP_ERROR(__FILE__, __LINE__);
         }
-        else
-        {
-            free_hip(&row_nnz);
-        }
+
+        cast_mat->SetDataPtrCSR(&row_nnz, &sub_col, &sub_val, mat_nnz, row_size, col_size);
 
         return true;
     }
@@ -3519,7 +3550,11 @@ namespace rocalution
         // compute nnz per row
         int nrow = this->nrow_;
 
-        allocate_hip(nrow + 1, &cast_L->mat_.row_offset);
+        PtrType*   L_row_offset = NULL;
+        int*       L_col        = NULL;
+        ValueType* L_val        = NULL;
+
+        allocate_hip(nrow + 1, &L_row_offset);
 
         dim3 BlockSize(this->local_backend_.HIP_block_size);
         dim3 GridSize(nrow / this->local_backend_.HIP_block_size + 1);
@@ -3528,7 +3563,7 @@ namespace rocalution
                                         BlockSize,
                                         0,
                                         HIPSTREAM(_get_backend_descriptor()->HIP_stream_current)>>>(
-            nrow, this->mat_.row_offset, this->mat_.col, cast_L->mat_.row_offset);
+            nrow, this->mat_.row_offset, this->mat_.col, L_row_offset);
         CHECK_HIP_ERROR(__FILE__, __LINE__);
 
         // partial sum row_nnz to obtain row_offset vector
@@ -3538,8 +3573,8 @@ namespace rocalution
         DISCARD_HIP_ERROR(
             rocprim::exclusive_scan(NULL,
                                     rocprim_size,
-                                    cast_L->mat_.row_offset,
-                                    cast_L->mat_.row_offset,
+                                    L_row_offset,
+                                    L_row_offset,
                                     0,
                                     nrow + 1,
                                     rocprim::plus<PtrType>(),
@@ -3551,8 +3586,8 @@ namespace rocalution
         DISCARD_HIP_ERROR(
             rocprim::exclusive_scan(rocprim_buffer,
                                     rocprim_size,
-                                    cast_L->mat_.row_offset,
-                                    cast_L->mat_.row_offset,
+                                    L_row_offset,
+                                    L_row_offset,
                                     0,
                                     nrow + 1,
                                     rocprim::plus<PtrType>(),
@@ -3562,11 +3597,11 @@ namespace rocalution
         free_hip(&rocprim_buffer);
 
         PtrType nnz_L;
-        copy_d2h(1, cast_L->mat_.row_offset + nrow, &nnz_L);
+        copy_d2h(1, L_row_offset + nrow, &nnz_L);
 
         // allocate lower triangular part structure
-        allocate_hip(nnz_L, &cast_L->mat_.col);
-        allocate_hip(nnz_L, &cast_L->mat_.val);
+        allocate_hip(nnz_L, &L_col);
+        allocate_hip(nnz_L, &L_val);
 
         // fill lower triangular part
         kernel_csr_extract_l_triangular<<<
@@ -3577,16 +3612,12 @@ namespace rocalution
                                                                         this->mat_.row_offset,
                                                                         this->mat_.col,
                                                                         this->mat_.val,
-                                                                        cast_L->mat_.row_offset,
-                                                                        cast_L->mat_.col,
-                                                                        cast_L->mat_.val);
+                                                                        L_row_offset,
+                                                                        L_col,
+                                                                        L_val);
         CHECK_HIP_ERROR(__FILE__, __LINE__);
 
-        cast_L->nrow_ = this->nrow_;
-        cast_L->ncol_ = this->ncol_;
-        cast_L->nnz_  = nnz_L;
-
-        cast_L->ApplyAnalysis();
+        cast_L->SetDataPtrCSR(&L_row_offset, &L_col, &L_val, nnz_L, this->nrow_, this->ncol_);
 
         return true;
     }
@@ -3609,7 +3640,11 @@ namespace rocalution
         // compute nnz per row
         int nrow = this->nrow_;
 
-        allocate_hip(nrow + 1, &cast_L->mat_.row_offset);
+        PtrType*   L_row_offset = NULL;
+        int*       L_col        = NULL;
+        ValueType* L_val        = NULL;
+
+        allocate_hip(nrow + 1, &L_row_offset);
 
         dim3 BlockSize(this->local_backend_.HIP_block_size);
         dim3 GridSize(nrow / this->local_backend_.HIP_block_size + 1);
@@ -3618,7 +3653,7 @@ namespace rocalution
                                        BlockSize,
                                        0,
                                        HIPSTREAM(_get_backend_descriptor()->HIP_stream_current)>>>(
-            nrow, this->mat_.row_offset, this->mat_.col, cast_L->mat_.row_offset);
+            nrow, this->mat_.row_offset, this->mat_.col, L_row_offset);
         CHECK_HIP_ERROR(__FILE__, __LINE__);
 
         // partial sum row_nnz to obtain row_offset vector
@@ -3628,8 +3663,8 @@ namespace rocalution
         DISCARD_HIP_ERROR(
             rocprim::exclusive_scan(NULL,
                                     rocprim_size,
-                                    cast_L->mat_.row_offset,
-                                    cast_L->mat_.row_offset,
+                                    L_row_offset,
+                                    L_row_offset,
                                     0,
                                     nrow + 1,
                                     rocprim::plus<PtrType>(),
@@ -3641,8 +3676,8 @@ namespace rocalution
         DISCARD_HIP_ERROR(
             rocprim::exclusive_scan(rocprim_buffer,
                                     rocprim_size,
-                                    cast_L->mat_.row_offset,
-                                    cast_L->mat_.row_offset,
+                                    L_row_offset,
+                                    L_row_offset,
                                     0,
                                     nrow + 1,
                                     rocprim::plus<PtrType>(),
@@ -3652,11 +3687,11 @@ namespace rocalution
         free_hip(&rocprim_buffer);
 
         PtrType nnz_L;
-        copy_d2h(1, cast_L->mat_.row_offset + nrow, &nnz_L);
+        copy_d2h(1, L_row_offset + nrow, &nnz_L);
 
         // allocate lower triangular part structure
-        allocate_hip(nnz_L, &cast_L->mat_.col);
-        allocate_hip(nnz_L, &cast_L->mat_.val);
+        allocate_hip(nnz_L, &L_col);
+        allocate_hip(nnz_L, &L_val);
 
         // fill lower triangular part
         kernel_csr_extract_l_triangular<<<
@@ -3667,16 +3702,12 @@ namespace rocalution
                                                                         this->mat_.row_offset,
                                                                         this->mat_.col,
                                                                         this->mat_.val,
-                                                                        cast_L->mat_.row_offset,
-                                                                        cast_L->mat_.col,
-                                                                        cast_L->mat_.val);
+                                                                        L_row_offset,
+                                                                        L_col,
+                                                                        L_val);
         CHECK_HIP_ERROR(__FILE__, __LINE__);
 
-        cast_L->nrow_ = this->nrow_;
-        cast_L->ncol_ = this->ncol_;
-        cast_L->nnz_  = nnz_L;
-
-        cast_L->ApplyAnalysis();
+        cast_L->SetDataPtrCSR(&L_row_offset, &L_col, &L_val, nnz_L, this->nrow_, this->ncol_);
 
         return true;
     }
@@ -3699,7 +3730,11 @@ namespace rocalution
         // compute nnz per row
         int nrow = this->nrow_;
 
-        allocate_hip(nrow + 1, &cast_U->mat_.row_offset);
+        PtrType*   U_row_offset = NULL;
+        int*       U_col        = NULL;
+        ValueType* U_val        = NULL;
+
+        allocate_hip(nrow + 1, &U_row_offset);
 
         dim3 BlockSize(this->local_backend_.HIP_block_size);
         dim3 GridSize(nrow / this->local_backend_.HIP_block_size + 1);
@@ -3708,7 +3743,7 @@ namespace rocalution
                                         BlockSize,
                                         0,
                                         HIPSTREAM(_get_backend_descriptor()->HIP_stream_current)>>>(
-            nrow, this->mat_.row_offset, this->mat_.col, cast_U->mat_.row_offset);
+            nrow, this->mat_.row_offset, this->mat_.col, U_row_offset);
         CHECK_HIP_ERROR(__FILE__, __LINE__);
 
         // partial sum row_nnz to obtain row_offset vector
@@ -3718,8 +3753,8 @@ namespace rocalution
         DISCARD_HIP_ERROR(
             rocprim::exclusive_scan(NULL,
                                     rocprim_size,
-                                    cast_U->mat_.row_offset,
-                                    cast_U->mat_.row_offset,
+                                    U_row_offset,
+                                    U_row_offset,
                                     0,
                                     nrow + 1,
                                     rocprim::plus<PtrType>(),
@@ -3731,8 +3766,8 @@ namespace rocalution
         DISCARD_HIP_ERROR(
             rocprim::exclusive_scan(rocprim_buffer,
                                     rocprim_size,
-                                    cast_U->mat_.row_offset,
-                                    cast_U->mat_.row_offset,
+                                    U_row_offset,
+                                    U_row_offset,
                                     0,
                                     nrow + 1,
                                     rocprim::plus<PtrType>(),
@@ -3742,11 +3777,11 @@ namespace rocalution
         free_hip(&rocprim_buffer);
 
         PtrType nnz_U;
-        copy_d2h(1, cast_U->mat_.row_offset + nrow, &nnz_U);
+        copy_d2h(1, U_row_offset + nrow, &nnz_U);
 
         // allocate lower triangular part structure
-        allocate_hip(nnz_U, &cast_U->mat_.col);
-        allocate_hip(nnz_U, &cast_U->mat_.val);
+        allocate_hip(nnz_U, &U_col);
+        allocate_hip(nnz_U, &U_val);
 
         // fill upper triangular part
         kernel_csr_extract_u_triangular<<<
@@ -3757,16 +3792,12 @@ namespace rocalution
                                                                         this->mat_.row_offset,
                                                                         this->mat_.col,
                                                                         this->mat_.val,
-                                                                        cast_U->mat_.row_offset,
-                                                                        cast_U->mat_.col,
-                                                                        cast_U->mat_.val);
+                                                                        U_row_offset,
+                                                                        U_col,
+                                                                        U_val);
         CHECK_HIP_ERROR(__FILE__, __LINE__);
 
-        cast_U->nrow_ = this->nrow_;
-        cast_U->ncol_ = this->ncol_;
-        cast_U->nnz_  = nnz_U;
-
-        cast_U->ApplyAnalysis();
+        cast_U->SetDataPtrCSR(&U_row_offset, &U_col, &U_val, nnz_U, this->nrow_, this->ncol_);
 
         return true;
     }
@@ -3789,7 +3820,11 @@ namespace rocalution
         // compute nnz per row
         int nrow = this->nrow_;
 
-        allocate_hip(nrow + 1, &cast_U->mat_.row_offset);
+        PtrType*   U_row_offset = NULL;
+        int*       U_col        = NULL;
+        ValueType* U_val        = NULL;
+
+        allocate_hip(nrow + 1, &U_row_offset);
 
         dim3 BlockSize(this->local_backend_.HIP_block_size);
         dim3 GridSize(nrow / this->local_backend_.HIP_block_size + 1);
@@ -3798,7 +3833,7 @@ namespace rocalution
                                        BlockSize,
                                        0,
                                        HIPSTREAM(_get_backend_descriptor()->HIP_stream_current)>>>(
-            nrow, this->mat_.row_offset, this->mat_.col, cast_U->mat_.row_offset);
+            nrow, this->mat_.row_offset, this->mat_.col, U_row_offset);
         CHECK_HIP_ERROR(__FILE__, __LINE__);
 
         // partial sum row_nnz to obtain row_offset vector
@@ -3808,8 +3843,8 @@ namespace rocalution
         DISCARD_HIP_ERROR(
             rocprim::exclusive_scan(NULL,
                                     rocprim_size,
-                                    cast_U->mat_.row_offset,
-                                    cast_U->mat_.row_offset,
+                                    U_row_offset,
+                                    U_row_offset,
                                     0,
                                     nrow + 1,
                                     rocprim::plus<PtrType>(),
@@ -3821,8 +3856,8 @@ namespace rocalution
         DISCARD_HIP_ERROR(
             rocprim::exclusive_scan(rocprim_buffer,
                                     rocprim_size,
-                                    cast_U->mat_.row_offset,
-                                    cast_U->mat_.row_offset,
+                                    U_row_offset,
+                                    U_row_offset,
                                     0,
                                     nrow + 1,
                                     rocprim::plus<PtrType>(),
@@ -3832,11 +3867,11 @@ namespace rocalution
         free_hip(&rocprim_buffer);
 
         PtrType nnz_U;
-        copy_d2h(1, cast_U->mat_.row_offset + nrow, &nnz_U);
+        copy_d2h(1, U_row_offset + nrow, &nnz_U);
 
         // allocate lower triangular part structure
-        allocate_hip(nnz_U, &cast_U->mat_.col);
-        allocate_hip(nnz_U, &cast_U->mat_.val);
+        allocate_hip(nnz_U, &U_col);
+        allocate_hip(nnz_U, &U_val);
 
         // fill lower triangular part
         kernel_csr_extract_u_triangular<<<
@@ -3847,16 +3882,12 @@ namespace rocalution
                                                                         this->mat_.row_offset,
                                                                         this->mat_.col,
                                                                         this->mat_.val,
-                                                                        cast_U->mat_.row_offset,
-                                                                        cast_U->mat_.col,
-                                                                        cast_U->mat_.val);
+                                                                        U_row_offset,
+                                                                        U_col,
+                                                                        U_val);
         CHECK_HIP_ERROR(__FILE__, __LINE__);
 
-        cast_U->nrow_ = this->nrow_;
-        cast_U->ncol_ = this->ncol_;
-        cast_U->nnz_  = nnz_U;
-
-        cast_U->ApplyAnalysis();
+        cast_U->SetDataPtrCSR(&U_row_offset, &U_col, &U_val, nnz_U, this->nrow_, this->ncol_);
 
         return true;
     }
@@ -4379,8 +4410,6 @@ namespace rocalution
                                    buffer);
         CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
 
-        this->ApplyAnalysis();
-
         free_hip(&buffer);
         CHECK_HIP_ERROR(__FILE__, __LINE__);
 
@@ -4510,8 +4539,6 @@ namespace rocalution
             this->SetDataPtrCSR(&csrRowPtrC, &csrColC, &csrValC, nnzC, m, n);
         }
 
-        this->ApplyAnalysis();
-
         return true;
     }
 
@@ -4627,7 +4654,7 @@ namespace rocalution
         this->ncol_ = ncol;
         this->nnz_  = nnz;
 
-        this->ApplyAnalysis();
+        this->CreateSpMatDescr_();
 
         return true;
     }
@@ -4718,8 +4745,6 @@ namespace rocalution
             free_hip(&row_offset);
             free_hip(&mat_row_offset);
         }
-
-        this->ApplyAnalysis();
 
         return true;
     }
@@ -9374,6 +9399,13 @@ namespace rocalution
         }
 
         CHECK_HIP_ERROR(__FILE__, __LINE__);
+
+        cast_pi->CreateSpMatDescr_();
+
+        if(global == true)
+        {
+            cast_pg->CreateSpMatDescr_();
+        }
 
         return true;
     }

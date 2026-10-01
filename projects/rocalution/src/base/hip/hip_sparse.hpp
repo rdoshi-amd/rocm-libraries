@@ -1,5 +1,5 @@
 /* ************************************************************************
- * Copyright (C) 2018-2024 Advanced Micro Devices, Inc. All rights Reserved.
+ * Copyright (C) 2018-2026 Advanced Micro Devices, Inc. All rights Reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -29,22 +29,65 @@
 
 namespace rocalution
 {
-    // ValueType to rocsparse_datatype
+    // ValueType to rocsparse_datatype. Value types rocSPARSE has no datatype for
+    // (e.g. bool and int64_t, which rocALUTION instantiates its vectors with) only
+    // provide is_supported = false, so accessing value for them fails to compile and
+    // has to be guarded by if constexpr(is_supported).
     template <typename ValueType>
-    rocsparse_datatype rocsparseTdatatype();
+    struct rocalution_datatype_traits
+    {
+        static constexpr bool is_supported = false;
+    };
 
-    // rocsparse csrmv analysis
-    template <typename ValueType>
-    rocsparse_status rocsparseTcsrmv_analysis(rocsparse_handle          handle,
-                                              rocsparse_operation       trans,
-                                              int                       m,
-                                              int                       n,
-                                              int                       nnz,
-                                              const rocsparse_mat_descr descr,
-                                              const ValueType*          csr_val,
-                                              const int*                csr_row_ptr,
-                                              const int*                csr_col_ind,
-                                              rocsparse_mat_info        info);
+    template <>
+    struct rocalution_datatype_traits<float>
+    {
+        static constexpr bool               is_supported = true;
+        static constexpr rocsparse_datatype value        = rocsparse_datatype_f32_r;
+    };
+
+    template <>
+    struct rocalution_datatype_traits<double>
+    {
+        static constexpr bool               is_supported = true;
+        static constexpr rocsparse_datatype value        = rocsparse_datatype_f64_r;
+    };
+
+    template <>
+    struct rocalution_datatype_traits<std::complex<float>>
+    {
+        static constexpr bool               is_supported = true;
+        static constexpr rocsparse_datatype value        = rocsparse_datatype_f32_c;
+    };
+
+    template <>
+    struct rocalution_datatype_traits<std::complex<double>>
+    {
+        static constexpr bool               is_supported = true;
+        static constexpr rocsparse_datatype value        = rocsparse_datatype_f64_c;
+    };
+
+    template <>
+    struct rocalution_datatype_traits<int32_t>
+    {
+        static constexpr bool               is_supported = true;
+        static constexpr rocsparse_datatype value        = rocsparse_datatype_i32_r;
+    };
+
+    template <typename IndexType>
+    struct rocalution_indextype_traits;
+
+    template <>
+    struct rocalution_indextype_traits<int32_t>
+    {
+        static constexpr rocsparse_indextype value = rocsparse_indextype_i32;
+    };
+
+    template <>
+    struct rocalution_indextype_traits<int64_t>
+    {
+        static constexpr rocsparse_indextype value = rocsparse_indextype_i64;
+    };
 
     // rocsparse csrmv
     template <typename ValueType>

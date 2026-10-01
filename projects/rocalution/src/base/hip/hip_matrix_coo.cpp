@@ -1,5 +1,5 @@
 /* ************************************************************************
- * Copyright (C) 2018-2023 Advanced Micro Devices, Inc. All rights Reserved.
+ * Copyright (C) 2018-2026 Advanced Micro Devices, Inc. All rights Reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -66,6 +66,8 @@ namespace rocalution
         this->mat_.val = NULL;
         this->set_backend(local_backend);
 
+        this->spmat_descr_ = 0;
+
         this->mat_descr_ = 0;
 
         CHECK_HIP_ERROR(__FILE__, __LINE__);
@@ -80,6 +82,42 @@ namespace rocalution
 
         status = rocsparse_set_mat_type(this->mat_descr_, rocsparse_matrix_type_general);
         CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+    }
+
+    template <typename ValueType>
+    void HIPAcceleratorMatrixCOO<ValueType>::CreateSpMatDescr_(void)
+    {
+        this->DestroySpMatDescr_();
+
+        if(this->nnz_ >= 0)
+        {
+            rocsparse_status status
+                = rocsparse_create_coo_descr(&this->spmat_descr_,
+                                             this->nrow_,
+                                             this->ncol_,
+                                             this->nnz_,
+                                             this->mat_.row,
+                                             this->mat_.col,
+                                             this->mat_.val,
+                                             rocsparse_indextype_i32,
+                                             rocsparse_index_base_zero,
+                                             rocalution_datatype_traits<ValueType>::value);
+            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+        }
+    }
+
+    template <typename ValueType>
+    void HIPAcceleratorMatrixCOO<ValueType>::DestroySpMatDescr_(void)
+    {
+        if(this->spmat_descr_ != NULL)
+        {
+            rocsparse_status status = rocsparse_destroy_spmat_descr(this->spmat_descr_);
+            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+
+            this->spmat_descr_ = NULL;
+        }
+
+        this->ApplyAnalyseClear_();
     }
 
     template <typename ValueType>
@@ -121,6 +159,8 @@ namespace rocalution
         this->nrow_ = nrow;
         this->ncol_ = ncol;
         this->nnz_  = nnz;
+
+        this->CreateSpMatDescr_();
     }
 
     template <typename ValueType>
@@ -150,6 +190,8 @@ namespace rocalution
         this->mat_.row = *row;
         this->mat_.col = *col;
         this->mat_.val = *val;
+
+        this->CreateSpMatDescr_();
     }
 
     template <typename ValueType>
@@ -161,6 +203,8 @@ namespace rocalution
 
         DISCARD_HIP_ERROR(hipDeviceSynchronize());
         CHECK_HIP_ERROR(__FILE__, __LINE__);
+
+        this->DestroySpMatDescr_();
 
         // see free_host function for details
         *row = this->mat_.row;
@@ -179,6 +223,8 @@ namespace rocalution
     template <typename ValueType>
     void HIPAcceleratorMatrixCOO<ValueType>::Clear()
     {
+        this->DestroySpMatDescr_();
+
         free_hip(&this->mat_.row);
         free_hip(&this->mat_.col);
         free_hip(&this->mat_.val);
@@ -609,6 +655,19 @@ namespace rocalution
     }
 
     template <typename ValueType>
+    void HIPAcceleratorMatrixCOO<ValueType>::ApplyAnalyse_(ValueType                   alpha,
+                                                           rocsparse_const_dnvec_descr x,
+                                                           ValueType                   beta,
+                                                           rocsparse_dnvec_descr       y) const
+    {
+    }
+
+    template <typename ValueType>
+    void HIPAcceleratorMatrixCOO<ValueType>::ApplyAnalyseClear_(void)
+    {
+    }
+
+    template <typename ValueType>
     void HIPAcceleratorMatrixCOO<ValueType>::Apply(const BaseVector<ValueType>& in,
                                                    BaseVector<ValueType>*       out) const
     {
@@ -627,8 +686,11 @@ namespace rocalution
             assert(cast_in != NULL);
             assert(cast_out != NULL);
 
-            ValueType alpha = 1.0;
-            ValueType beta  = 0.0;
+            ValueType alpha = static_cast<ValueType>(1);
+            ValueType beta  = static_cast<ValueType>(0);
+
+            // Lazy matrix analyse
+            this->ApplyAnalyse_(alpha, cast_in->dnvec_descr_, beta, cast_out->dnvec_descr_);
 
             rocsparse_status status;
             status = rocsparseTcoomv(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
@@ -668,7 +730,10 @@ namespace rocalution
             assert(cast_in != NULL);
             assert(cast_out != NULL);
 
-            ValueType beta = 1.0;
+            ValueType beta = static_cast<ValueType>(1);
+
+            // Lazy matrix analyse
+            this->ApplyAnalyse_(scalar, cast_in->dnvec_descr_, beta, cast_out->dnvec_descr_);
 
             rocsparse_status status;
             status = rocsparseTcoomv(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
@@ -847,6 +912,8 @@ namespace rocalution
             this->mat_.val = coo_val_sorted;
 
             free_hip(&buffer);
+
+            this->CreateSpMatDescr_();
         }
 
         return true;

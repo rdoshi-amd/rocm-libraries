@@ -479,7 +479,17 @@ namespace rocalution
                                  BaseVector<int64_t>*         global_col);
 
     private:
+        void CreateSpMatDescr_(void);
+        void DestroySpMatDescr_(void);
+        void ApplyAnalyse_(ValueType                   alpha,
+                           rocsparse_const_dnvec_descr x,
+                           ValueType                   beta,
+                           rocsparse_dnvec_descr       y) const;
+        void ApplyAnalyseClear_(void);
+
         MatrixCSR<ValueType, int, PtrType> mat_;
+
+        rocsparse_spmat_descr spmat_descr_;
 
         rocsparse_mat_descr L_mat_descr_;
         rocsparse_mat_descr U_mat_descr_;

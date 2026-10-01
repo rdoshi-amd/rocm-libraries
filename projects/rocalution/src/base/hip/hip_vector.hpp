@@ -1,5 +1,5 @@
 /* ************************************************************************
- * Copyright (C) 2018-2023 Advanced Micro Devices, Inc. All rights Reserved.
+ * Copyright (C) 2018-2026 Advanced Micro Devices, Inc. All rights Reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -30,6 +30,7 @@
 #include "../base_vector.hpp"
 
 #include <hip/hip_runtime.h>
+#include <rocsparse/rocsparse.h>
 
 #include <complex>
 
@@ -169,7 +170,11 @@ namespace rocalution
         virtual void Sort(BaseVector<ValueType>* sorted, BaseVector<int>* perm) const;
 
     private:
-        ValueType* vec_;
+        void CreateDnVecDescr_(void);
+        void DestroyDnVecDescr_(void);
+
+        ValueType*            vec_;
+        rocsparse_dnvec_descr dnvec_descr_;
 
         friend class HIPAcceleratorVector<float>;
         friend class HIPAcceleratorVector<double>;

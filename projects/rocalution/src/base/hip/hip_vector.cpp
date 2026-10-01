@@ -1,5 +1,5 @@
 /* ************************************************************************
- * Copyright (C) 2018-2025 Advanced Micro Devices, Inc. All rights Reserved.
+ * Copyright (C) 2018-2026 Advanced Micro Devices, Inc. All rights Reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -33,6 +33,7 @@
 #include "hip_blas.hpp"
 #include "hip_kernels_general.hpp"
 #include "hip_kernels_vector.hpp"
+#include "hip_sparse.hpp"
 #include "hip_utils.hpp"
 
 #include <hip/hip_runtime.h>
@@ -63,10 +64,42 @@ namespace rocalution
         log_debug(
             this, "HIPAcceleratorVector::HIPAcceleratorVector()", "constructor with local_backend");
 
-        this->vec_ = NULL;
+        this->vec_         = NULL;
+        this->dnvec_descr_ = NULL;
         this->set_backend(local_backend);
 
         CHECK_HIP_ERROR(__FILE__, __LINE__);
+    }
+
+    template <typename ValueType>
+    void HIPAcceleratorVector<ValueType>::CreateDnVecDescr_(void)
+    {
+        this->DestroyDnVecDescr_();
+
+        if constexpr(rocalution_datatype_traits<ValueType>::is_supported)
+        {
+            if(this->size_ > 0)
+            {
+                rocsparse_status status
+                    = rocsparse_create_dnvec_descr(&this->dnvec_descr_,
+                                                   this->size_,
+                                                   this->vec_,
+                                                   rocalution_datatype_traits<ValueType>::value);
+                CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+            }
+        }
+    }
+
+    template <typename ValueType>
+    void HIPAcceleratorVector<ValueType>::DestroyDnVecDescr_(void)
+    {
+        if(this->dnvec_descr_ != NULL)
+        {
+            rocsparse_status status = rocsparse_destroy_dnvec_descr(this->dnvec_descr_);
+            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+
+            this->dnvec_descr_ = NULL;
+        }
     }
 
     template <typename ValueType>
@@ -98,6 +131,8 @@ namespace rocalution
 
         this->size_ = n;
 
+        this->CreateDnVecDescr_();
+
         CHECK_HIP_ERROR(__FILE__, __LINE__);
     }
 
@@ -111,11 +146,16 @@ namespace rocalution
             assert(*ptr != NULL);
         }
 
+        this->Clear();
+
+        this->size_ = size;
+
         DISCARD_HIP_ERROR(hipDeviceSynchronize());
         CHECK_HIP_ERROR(__FILE__, __LINE__);
 
-        this->vec_  = *ptr;
-        this->size_ = size;
+        this->vec_ = *ptr;
+
+        this->CreateDnVecDescr_();
     }
 
     template <typename ValueType>
@@ -125,6 +165,9 @@ namespace rocalution
 
         DISCARD_HIP_ERROR(hipDeviceSynchronize());
         CHECK_HIP_ERROR(__FILE__, __LINE__);
+
+        this->DestroyDnVecDescr_();
+
         *ptr       = this->vec_;
         this->vec_ = NULL;
 
@@ -134,6 +177,8 @@ namespace rocalution
     template <typename ValueType>
     void HIPAcceleratorVector<ValueType>::Clear(void)
     {
+        this->DestroyDnVecDescr_();
+
         if(this->size_ > 0)
         {
             free_hip(&this->vec_);

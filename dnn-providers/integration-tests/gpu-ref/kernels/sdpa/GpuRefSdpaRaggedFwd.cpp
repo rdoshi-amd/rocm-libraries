@@ -58,6 +58,56 @@ __device__ inline COMPUTE_TYPE storeSoftmaxProbability(COMPUTE_TYPE probability)
 #endif
 }
 
+// Where each batch's queries and keys live. All per-batch addressing goes through the helpers
+// below, so paged KV only has to swap in seq_len_kv and a page-table lookup here.
+struct BatchRange
+{
+    long long b;
+    long long qBase; // first Q token of the batch (global token index)
+    long long seqQ;
+    long long kvBase; // first K/V token of the batch
+    long long seqKv;
+};
+
+__device__ inline long long tokenAt(const int* offsets, long long i, long long seqStride)
+{
+    return static_cast<long long>(offsets[i]) / seqStride;
+}
+
+// Batch that owns a global Q token. A linear scan is fine for a reference. Empty batches own no
+// tokens, so they are never returned.
+__device__ inline long long findBatch(const SdpaRaggedFwdArgs& args, long long tokenGlobalQ)
+{
+    long long b = 0;
+    while(b + 1 < args.batch && tokenGlobalQ >= tokenAt(args.raggedOffsetQ, b + 1, args.seqStrideQ))
+    {
+        ++b;
+    }
+    return b;
+}
+
+__device__ inline BatchRange batchRange(const SdpaRaggedFwdArgs& args, long long b)
+{
+    const long long qBase = tokenAt(args.raggedOffsetQ, b, args.seqStrideQ);
+    const long long kvBase = tokenAt(args.raggedOffsetKv, b, args.seqStrideKv);
+    return {b,
+            qBase,
+            tokenAt(args.raggedOffsetQ, b + 1, args.seqStrideQ) - qBase,
+            kvBase,
+            tokenAt(args.raggedOffsetKv, b + 1, args.seqStrideKv) - kvBase};
+}
+
+// Element offset of key/value row skv (batch-relative) in the K and V buffers.
+__device__ inline long long kRow(const SdpaRaggedFwdArgs& args, const BatchRange& r, long long skv)
+{
+    return (r.kvBase + skv) * args.kStr.s[2];
+}
+
+__device__ inline long long vRow(const SdpaRaggedFwdArgs& args, const BatchRange& r, long long skv)
+{
+    return (r.kvBase + skv) * args.vStr.s[2];
+}
+
 } // namespace
 
 extern "C" __global__ void sdpaRaggedFwdRef(SdpaRaggedFwdArgs args)
@@ -84,31 +134,11 @@ extern "C" __global__ void sdpaRaggedFwdRef(SdpaRaggedFwdArgs args)
     long long h = tmp % args.numHeads;
     long long tokenGlobalQ = tmp / args.numHeads;
 
-    // Map the global Q token to its batch via the cumulative ELEMENT offsets, converted to token
-    // boundaries by dividing by the Q sequence stride. Linear scan: fine for a reference, and
-    // batch counts are small. Batches with seqQ_b == 0 own no Q tokens, so no thread lands in them.
-    long long b = 0;
-    for(long long batchIdx = 0; batchIdx < args.batch; ++batchIdx)
-    {
-        const long long lo = static_cast<long long>(args.raggedOffsetQ[batchIdx]) / args.seqStrideQ;
-        const long long hi
-            = static_cast<long long>(args.raggedOffsetQ[batchIdx + 1]) / args.seqStrideQ;
-        if(tokenGlobalQ >= lo && tokenGlobalQ < hi)
-        {
-            b = batchIdx;
-            break;
-        }
-    }
-
-    // Per-batch token boundaries derived from the element offsets (exact: offsets are whole
-    // multiples of the sequence stride).
-    const long long qBase = static_cast<long long>(args.raggedOffsetQ[b]) / args.seqStrideQ;
-    const long long kvBase = static_cast<long long>(args.raggedOffsetKv[b]) / args.seqStrideKv;
-    const long long seqQ
-        = static_cast<long long>(args.raggedOffsetQ[b + 1]) / args.seqStrideQ - qBase;
-    const long long seqKv
-        = static_cast<long long>(args.raggedOffsetKv[b + 1]) / args.seqStrideKv - kvBase;
-    const long long sq = tokenGlobalQ - qBase; // within-batch query position
+    const BatchRange range = batchRange(args, findBatch(args, tokenGlobalQ));
+    const long long b = range.b;
+    const long long seqQ = range.seqQ;
+    const long long seqKv = range.seqKv;
+    const long long sq = tokenGlobalQ - range.qBase; // query position within the batch
 
     // GQA/MQA: K and V head counts are independent.
     long long kvHeadK = h / (args.numHeads / args.numHeadsK);
@@ -145,13 +175,13 @@ extern "C" __global__ void sdpaRaggedFwdRef(SdpaRaggedFwdArgs args)
     // Recomputed in both softmax passes (correctness over speed for a reference). Rank-4 BSHD
     // strides: s[2] = seq/token, s[1] = head, s[3] = dim.
     auto score = [&](long long skv) -> COMPUTE_TYPE {
+        const long long kRowBase = kRow(args, range, skv);
         COMPUTE_TYPE dot = static_cast<COMPUTE_TYPE>(0);
         for(long long d = 0; d < args.headDim; ++d)
         {
             long long qIdx
                 = tokenGlobalQ * args.qStr.s[2] + h * args.qStr.s[1] + d * args.qStr.s[3];
-            long long kIdx
-                = (kvBase + skv) * args.kStr.s[2] + kvHeadK * args.kStr.s[1] + d * args.kStr.s[3];
+            long long kIdx = kRowBase + kvHeadK * args.kStr.s[1] + d * args.kStr.s[3];
             dot += toAccum(q[qIdx]) * toAccum(k[kIdx]);
         }
         // descaleQK folds the fp8 Q/K dequant scalars into the score (both constant over d).
@@ -238,8 +268,7 @@ extern "C" __global__ void sdpaRaggedFwdRef(SdpaRaggedFwdArgs args)
         COMPUTE_TYPE probability = expf(s - maxVal) / sumExp;
         probability = storeSoftmaxProbability(probability);
 
-        long long vIdx
-            = (kvBase + skv) * args.vStr.s[2] + kvHeadV * args.vStr.s[1] + dv * args.vStr.s[3];
+        long long vIdx = vRow(args, range, skv) + kvHeadV * args.vStr.s[1] + dv * args.vStr.s[3];
         weighted += probability * toAccum(v[vIdx]);
     }
 

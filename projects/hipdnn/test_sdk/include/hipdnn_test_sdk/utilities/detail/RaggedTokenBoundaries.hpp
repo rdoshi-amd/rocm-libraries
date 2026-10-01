@@ -11,19 +11,25 @@
 namespace hipdnn_test_sdk::detail
 {
 
-// Converts an RFC-0014 ragged_offset table (B+1 cumulative ELEMENT offsets) into token boundaries,
-// tokenBoundary[b] = offset[b] / seqStride. Tensors of different per-token widths (e.g. K with
-// H_k*D and V with H_v*D_v) have different element offsets for the same packing, so consistency
-// between tensors is checked on token boundaries, never on raw offsets. Throws std::invalid_argument
-// unless every offset is a whole number of tokens and the offsets are non-decreasing.
+// Turns an RFC-0014 ragged_offset table (B+1 cumulative element offsets) into token boundaries:
+// offset[b] / seqStride. Tensors with different per-token widths share a packing but not their
+// element offsets, so cross-tensor checks compare token boundaries, never raw offsets.
+// Throws std::invalid_argument unless offset[0] == 0, every offset is a whole number of tokens,
+// offsets never decrease, and no batch is longer than sMax (the tensor's dims()[2]).
 inline std::vector<int64_t> raggedTokenBoundaries(const std::vector<int64_t>& elementOffsets,
                                                   int64_t seqStride,
+                                                  int64_t sMax,
                                                   const std::string& who,
                                                   const char* name)
 {
     if(seqStride <= 0)
     {
         throw std::invalid_argument(who + ": " + name + " sequence stride must be positive");
+    }
+    if(!elementOffsets.empty() && elementOffsets.front() != 0)
+    {
+        throw std::invalid_argument(who + ": " + name + " ragged_offset[0] must be 0 (got "
+                                    + std::to_string(elementOffsets.front()) + ")");
     }
     std::vector<int64_t> tokens;
     tokens.reserve(elementOffsets.size());
@@ -37,12 +43,23 @@ inline std::vector<int64_t> raggedTokenBoundaries(const std::vector<int64_t>& el
                                         + " is not a whole number of tokens (seq stride "
                                         + std::to_string(seqStride) + ")");
         }
-        if(b > 0 && offset < elementOffsets[b - 1])
+        tokens.push_back(offset / seqStride);
+        if(b == 0)
+        {
+            continue;
+        }
+        const auto length = tokens[b] - tokens[b - 1];
+        if(length < 0)
         {
             throw std::invalid_argument(who + ": " + name
                                         + " ragged_offset must be non-decreasing");
         }
-        tokens.push_back(offset / seqStride);
+        if(length > sMax)
+        {
+            throw std::invalid_argument(who + ": " + name + " batch " + std::to_string(b - 1)
+                                        + " has " + std::to_string(length)
+                                        + " tokens, more than S_max = " + std::to_string(sMax));
+        }
     }
     return tokens;
 }

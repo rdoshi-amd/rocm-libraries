@@ -261,6 +261,12 @@ TEST(TestGpuSdpaRaggedFwdFp32, ZeroLengthKvBatch)
     checkRagged<float>({3, 2, 4}, {3, 0, 4}, 2, 2, 2, 16, 16);
 }
 
+TEST(TestGpuSdpaRaggedFwdFp32, ZeroLengthQBatch)
+{
+    SKIP_IF_NO_DEVICES();
+    checkRagged<float>({3, 0, 4}, {3, 2, 4}, 2, 2, 2, 16, 16);
+}
+
 // --- Head-dim coverage at the ticket's shapes (hdim_q in {128,192}, hdim_v=128) ---
 
 TEST(TestGpuSdpaRaggedFwdBfp16, RaggedHeadDim128)
@@ -274,6 +280,13 @@ TEST(TestGpuSdpaRaggedFwdFp32, RaggedHeadDim192xV128)
     SKIP_IF_NO_DEVICES();
     // hdim_q = 192, hdim_v = 128 (asymmetric head dims, as on the ASM v3 path).
     checkRagged<float>({3, 5}, {3, 5}, 2, 2, 2, 192, 128);
+}
+
+// The ASM kernel's bf16 192/128 case, with GQA and bottom-right causal.
+TEST(TestGpuSdpaRaggedFwdBfp16, RaggedHeadDim192xV128GqaCausal)
+{
+    SKIP_IF_NO_DEVICES();
+    checkRagged<bfloat16>({3, 5}, {6, 8}, 4, 2, 2, 192, 128, -1, 0, /*topLeftAlignment=*/false);
 }
 
 // --- Explicit LSE output: GPU vs CPU ragged mirror, compared over the packed region ---
@@ -452,6 +465,48 @@ TEST(TestGpuSdpaRaggedFwdFp32, RaggedDenseLseCrossAttention)
 {
     SKIP_IF_NO_DEVICES();
     checkRaggedDenseLse({3, 5, 1}, {4, 2, 6}, 2, 16, /*zeroQk=*/false);
+}
+
+// An empty query batch has no LSE rows to write; its whole Sq_max block keeps the sentinel.
+TEST(TestGpuSdpaRaggedFwdFp32, RaggedDenseLseZeroLengthQ)
+{
+    SKIP_IF_NO_DEVICES();
+    checkRaggedDenseLse({2, 0, 3}, {3, 2, 1}, 2, 16, /*zeroQk=*/false);
+}
+
+// No query tokens at all: nothing runs and nothing is written.
+TEST(TestGpuSdpaRaggedFwdFp32, AllQueriesEmpty)
+{
+    SKIP_IF_NO_DEVICES();
+    const int64_t headDim = 16;
+    const std::vector<int64_t> dims = {2, 1, 2, headDim};
+    const std::vector<int64_t> lseDims = {2, 1, 2, 1};
+    Tensor<float> q(dims, bshd(dims));
+    Tensor<float> k(dims, bshd(dims));
+    Tensor<float> v(dims, bshd(dims));
+    Tensor<float> o(dims, bshd(dims));
+    Tensor<float> lse(lseDims);
+    q.fillWithValue(1.0f);
+    k.fillWithValue(1.0f);
+    v.fillWithValue(1.0f);
+    o.fillWithValue(LSE_SENTINEL);
+    lse.fillWithValue(LSE_SENTINEL);
+    auto offQ = makeRaggedOffset({0, 0, 0}, headDim);
+    auto offKv = makeRaggedOffset({0, 2, 3}, headDim);
+
+    EXPECT_NO_THROW((GpuFpReferenceSdpaRagged::fpropRagged<float>(
+        q, k, v, o, offQ, offKv, offKv, offQ, std::nullopt, -1, -1, true, &lse)));
+
+    const auto* op = o.memory().hostData();
+    for(size_t i = 0; i < o.elementCount(); ++i)
+    {
+        EXPECT_EQ(op[i], LSE_SENTINEL) << "output written at element " << i;
+    }
+    const auto* lp = lse.memory().hostData();
+    for(size_t i = 0; i < lse.elementCount(); ++i)
+    {
+        EXPECT_EQ(lp[i], LSE_SENTINEL) << "LSE written at element " << i;
+    }
 }
 
 namespace
@@ -704,4 +759,66 @@ TEST(TestGpuSdpaRaggedFwdFp32, ThrowsOnSequenceLengthMismatch)
         << "Q/LSE mismatch accepted";
     // Consistent lengths (with a ragged LSE) run normally.
     EXPECT_FALSE(throwsOnLengths({2, 1}, {1, 2}, {1, 2}, {2, 1}, {2, 1}));
+}
+
+namespace
+{
+
+// fp32 fpropRagged with B = 2, H = 1, D = 16, S_max = 2 (4-token buffers). K/V lengths are {2, 2};
+// Q and O use the raw token boundaries qTokens. lseSq > 0 adds a dense LSE [2, 1, lseSq, 1].
+// Returns whether it threw std::invalid_argument.
+bool throwsOnQTokens(const std::vector<int64_t>& qTokens, int64_t lseSq = 0)
+{
+    const int64_t headDim = 16;
+    const std::vector<int64_t> dims = {2, 1, 2, headDim};
+    Tensor<float> q(dims, bshd(dims));
+    Tensor<float> k(dims, bshd(dims));
+    Tensor<float> v(dims, bshd(dims));
+    Tensor<float> o(dims, bshd(dims));
+    Tensor<float> lse({2, 1, std::max<int64_t>(lseSq, 1), 1});
+    q.fillWithValue(0.0f);
+    k.fillWithValue(0.0f);
+    v.fillWithValue(1.0f);
+    auto offQ = makeRaggedOffset(qTokens, headDim);
+    auto offKv = makeRaggedOffset({0, 2, 4}, headDim);
+    try
+    {
+        GpuFpReferenceSdpaRagged::fpropRagged<float>(q,
+                                                     k,
+                                                     v,
+                                                     o,
+                                                     offQ,
+                                                     offKv,
+                                                     offKv,
+                                                     offQ,
+                                                     std::nullopt,
+                                                     -1,
+                                                     -1,
+                                                     true,
+                                                     lseSq > 0 ? &lse : nullptr);
+    }
+    catch(const std::invalid_argument&)
+    {
+        return true;
+    }
+    return false;
+}
+
+} // namespace
+
+// Offset tables the CPU side rejects must be rejected here too.
+TEST(TestGpuSdpaRaggedFwdFp32, ThrowsOnBadOffsetTable)
+{
+    SKIP_IF_NO_DEVICES();
+    EXPECT_TRUE(throwsOnQTokens({1, 2, 4})) << "ragged_offset[0] != 0 accepted";
+    EXPECT_TRUE(throwsOnQTokens({0, 3, 4})) << "batch longer than S_max accepted";
+    EXPECT_FALSE(throwsOnQTokens({0, 2, 3}));
+}
+
+// A dense LSE with a smaller Sq than Q would take rows from the next batch.
+TEST(TestGpuSdpaRaggedFwdFp32, ThrowsOnLseShorterThanQ)
+{
+    SKIP_IF_NO_DEVICES();
+    EXPECT_TRUE(throwsOnQTokens({0, 2, 3}, /*lseSq=*/1));
+    EXPECT_FALSE(throwsOnQTokens({0, 2, 3}, /*lseSq=*/2));
 }

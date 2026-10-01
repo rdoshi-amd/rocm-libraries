@@ -223,6 +223,10 @@ void checkRaggedVsDense(const std::vector<int64_t>& seqQ,
     {
         const auto sQ = seqQ[static_cast<size_t>(b)];
         const auto sKv = seqKv[static_cast<size_t>(b)];
+        if(sQ == 0)
+        {
+            continue; // no rows to check, and the dense oracle rejects an empty slice
+        }
         auto qd = extractDenseSlice(q, b, sQ);
         auto kd = extractDenseSlice(k, b, sKv);
         auto vd = extractDenseSlice(v, b, sKv);
@@ -552,6 +556,41 @@ TEST(TestCpuFpReferenceSdpaRaggedFp32, ZeroLengthKvFullyMasked)
     }
 }
 
+TEST(TestCpuFpReferenceSdpaRaggedFp32, ZeroLengthQBatch)
+{
+    checkRaggedVsDense({3, 0, 4}, {3, 2, 4}, 2, 2, 16, 16);
+}
+
+// No query tokens at all: nothing is written.
+TEST(TestCpuFpReferenceSdpaRaggedFp32, AllQueriesEmpty)
+{
+    constexpr float SENTINEL = -99.0f;
+    const std::vector<int64_t> dims = {2, 1, 2, 16};
+    std::vector<float> qB(32, 1.0f);
+    std::vector<float> kB(48, 1.0f);
+    std::vector<float> vB(48, 1.0f);
+    std::vector<float> oB(32, SENTINEL);
+    auto q = wrapRagged(qB.data(), dims, 16, {0, 0, 0});
+    auto k = wrapRagged(kB.data(), dims, 16, {0, 2, 3});
+    auto v = wrapRagged(vB.data(), dims, 16, {0, 2, 3});
+    auto o = wrapRagged(oB.data(), dims, 16, {0, 0, 0});
+    Tensor<float> lse({2, 1, 2, 1});
+    lse.fillWithValue(SENTINEL);
+
+    EXPECT_NO_THROW((CpuFpReferenceSdpaRagged::forward<float, float, float, float, float>(
+        q, k, v, o, std::nullopt, -1, -1, true, &lse)));
+
+    for(size_t i = 0; i < oB.size(); ++i)
+    {
+        EXPECT_EQ(oB[i], SENTINEL) << "output written at element " << i;
+    }
+    const auto* lp = lse.memory().hostData();
+    for(size_t i = 0; i < lse.elementCount(); ++i)
+    {
+        EXPECT_EQ(lp[i], SENTINEL) << "LSE written at element " << i;
+    }
+}
+
 // --- Validation (negative) cases ---
 
 TEST(TestCpuFpReferenceSdpaRaggedFp32, ThrowsOnNonRaggedInput)
@@ -729,6 +768,76 @@ TEST(TestCpuFpReferenceSdpaRaggedFp32, ThrowsOnNonRaggedOutput)
     auto v = makeValidRagged(vB, {1, 2, 4, 16}, {4});
     Tensor<float> o({1, 2, 4, 16});
     EXPECT_THROW((CpuFpReferenceSdpaRagged::forward<float, float, float, float, float>(q, k, v, o)),
+                 std::invalid_argument);
+}
+
+namespace
+{
+
+// Overwrites a ragged tensor's offset table after construction. The tensor checked only the
+// original table, so the reference has to catch a bad edited one itself.
+void setTokenOffsets(ITensor& aux, const std::vector<int64_t>& tokens, int64_t seqStride)
+{
+    auto& offsets = static_cast<Tensor<int32_t>&>(aux);
+    for(size_t i = 0; i < tokens.size(); ++i)
+    {
+        offsets.setHostValue(
+            static_cast<int32_t>(tokens[i] * seqStride), static_cast<int64_t>(i), 0, 0, 0);
+    }
+}
+
+// B = 2, H = 1, D = 16, S_max = 2 over 4-token buffers, built valid with lengths {2, 2}. Q's and
+// O's offsets are then replaced by qTokens. Returns whether forward() threw std::invalid_argument.
+bool throwsOnEditedQTokens(const std::vector<int64_t>& qTokens)
+{
+    const std::vector<int64_t> dims = {2, 1, 2, 16};
+    const std::vector<int64_t> valid = {0, 2, 4};
+    std::vector<float> qB(64, 0.0f);
+    std::vector<float> kB(64, 0.0f);
+    std::vector<float> vB(64, 1.0f);
+    std::vector<float> oB(64, 0.0f);
+    auto qAux = makeRaggedOffsetAux(valid, 16);
+    auto oAux = makeRaggedOffsetAux(valid, 16);
+    ShallowRaggedTensor<float> q(qB.data(), dims, bshd(dims), SEQ_AXIS, qAux);
+    auto k = wrapRagged(kB.data(), dims, 16, valid);
+    auto v = wrapRagged(vB.data(), dims, 16, valid);
+    ShallowRaggedTensor<float> o(oB.data(), dims, bshd(dims), SEQ_AXIS, oAux);
+    setTokenOffsets(*qAux, qTokens, 16);
+    setTokenOffsets(*oAux, qTokens, 16);
+    try
+    {
+        CpuFpReferenceSdpaRagged::forward<float, float, float, float, float>(q, k, v, o);
+    }
+    catch(const std::invalid_argument&)
+    {
+        return true;
+    }
+    return false;
+}
+
+} // namespace
+
+TEST(TestCpuFpReferenceSdpaRaggedFp32, ThrowsOnBadOffsetTable)
+{
+    EXPECT_TRUE(throwsOnEditedQTokens({1, 2, 4})) << "ragged_offset[0] != 0 accepted";
+    EXPECT_TRUE(throwsOnEditedQTokens({0, 3, 4})) << "batch longer than S_max accepted";
+    EXPECT_FALSE(throwsOnEditedQTokens({0, 2, 3}));
+}
+
+// A dense LSE with a smaller Sq than Q would take rows from the next batch.
+TEST(TestCpuFpReferenceSdpaRaggedFp32, ThrowsOnLseShorterThanQ)
+{
+    std::vector<float> qB;
+    std::vector<float> kB;
+    std::vector<float> vB;
+    std::vector<float> oB;
+    auto q = makeValidRagged(qB, {2, 1, 2, 16}, {2, 1});
+    auto k = makeValidRagged(kB, {2, 1, 2, 16}, {2, 2});
+    auto v = makeValidRagged(vB, {2, 1, 2, 16}, {2, 2});
+    auto o = makeValidRagged(oB, {2, 1, 2, 16}, {2, 1});
+    Tensor<float> lse({2, 1, 1, 1});
+    EXPECT_THROW((CpuFpReferenceSdpaRagged::forward<float, float, float, float, float>(
+                     q, k, v, o, std::nullopt, -1, -1, true, &lse)),
                  std::invalid_argument);
 }
 

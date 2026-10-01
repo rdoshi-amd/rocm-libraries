@@ -81,11 +81,12 @@ public:
         const auto seqStrideQ = q.strides()[2];
         const auto seqStrideKv = k.strides()[2];
 
-        // Token boundaries of each tensor, read back from the (possibly device-only) offset aux.
-        // Tensors sharing a packing must agree batch by batch; total_q is Q's last boundary.
+        // Offsets may live only on the device (plan path), so read them back and check them here.
+        // Tensors that share a packing must agree on every batch's length.
         const std::string who = "GpuFpReferenceSdpaRagged";
         const auto tokenBoundaries = [&](hipdnn_data_sdk::utilities::TensorBase<int32_t>& offsets,
                                          int64_t seqStride,
+                                         int64_t sMax,
                                          const char* name) {
             if(offsets.strides()[0] != 1)
             {
@@ -93,14 +94,26 @@ public:
                                             + " ragged_offset must be contiguous");
             }
             return hipdnn_test_sdk::detail::raggedTokenBoundaries(
-                readRaggedOffsets(offsets.memory().deviceData(), batch + 1), seqStride, who, name);
+                readRaggedOffsets(offsets.memory().deviceData(), batch + 1),
+                seqStride,
+                sMax,
+                who,
+                name);
         };
-        const auto qTokens = tokenBoundaries(raggedOffsetQ, seqStrideQ, "Q");
-        const auto kTokens = tokenBoundaries(raggedOffsetK, seqStrideKv, "K");
+        const auto qTokens = tokenBoundaries(raggedOffsetQ, seqStrideQ, q.dims()[2], "Q");
+        const auto kTokens = tokenBoundaries(raggedOffsetK, seqStrideKv, k.dims()[2], "K");
         hipdnn_test_sdk::detail::requireMatchingTokenBoundaries(
-            qTokens, "Q", tokenBoundaries(raggedOffsetO, o.strides()[2], "O"), "O", who);
+            qTokens,
+            "Q",
+            tokenBoundaries(raggedOffsetO, o.strides()[2], o.dims()[2], "O"),
+            "O",
+            who);
         hipdnn_test_sdk::detail::requireMatchingTokenBoundaries(
-            kTokens, "K", tokenBoundaries(raggedOffsetV, v.strides()[2], "V"), "V", who);
+            kTokens,
+            "K",
+            tokenBoundaries(raggedOffsetV, v.strides()[2], v.dims()[2], "V"),
+            "V",
+            who);
         const int64_t totalQ = qTokens.back();
 
         const float scale = attnScaleValue.has_value()
@@ -116,12 +129,14 @@ public:
         std::vector<int64_t> lseStrides;
         if(lse != nullptr)
         {
-            // LSE is one value per query token; logical [B, H, Sq, 1], dense or ragged.
-            if(lse->dims().size() != 4 || lse->dims()[0] != batch || lse->dims()[1] != numHeads
-               || lse->dims()[3] != 1)
+            // One value per query token: [B, H, Sq, 1] with Q's Sq, dense or ragged. A shorter
+            // Sq would let a dense LSE's rows spill into the next batch.
+            const auto& lseDims = lse->dims();
+            if(lseDims.size() != 4 || lseDims[0] != batch || lseDims[1] != numHeads
+               || lseDims[2] != q.dims()[2] || lseDims[3] != 1)
             {
-                throw std::invalid_argument(
-                    "GpuFpReferenceSdpaRagged: lse must be rank-4 [B, H, Sq, 1]");
+                throw std::invalid_argument("GpuFpReferenceSdpaRagged: lse must be rank-4 [B, H, "
+                                            "Sq, 1] with Q's B, H, Sq");
             }
             lsePtr = lse->memory().deviceData();
             lseStrides = lse->strides();
@@ -136,7 +151,7 @@ public:
                 hipdnn_test_sdk::detail::requireMatchingTokenBoundaries(
                     qTokens,
                     "Q",
-                    tokenBoundaries(*raggedOffsetLse, lseStrides[2], "LSE"),
+                    tokenBoundaries(*raggedOffsetLse, lseStrides[2], lseDims[2], "LSE"),
                     "LSE",
                     who);
             }
@@ -152,6 +167,12 @@ public:
         const DescaleBinding dq = bindDescale(descaleQ, batch, numHeadsK, "Q");
         const DescaleBinding dk = bindDescale(descaleK, batch, numHeadsK, "K");
         const DescaleBinding dv = bindDescale(descaleV, batch, numHeadsV, "V");
+
+        // No query tokens: nothing to compute, and a zero-size grid is not a valid launch.
+        if(totalQ == 0)
+        {
+            return;
+        }
 
         launchSdpaRaggedFwd(q.memory().deviceData(),
                             k.memory().deviceData(),

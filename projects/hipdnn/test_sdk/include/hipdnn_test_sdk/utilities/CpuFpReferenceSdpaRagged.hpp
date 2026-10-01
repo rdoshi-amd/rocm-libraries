@@ -86,37 +86,27 @@ public:
                                : (static_cast<ComputeDataType>(1.0)
                                   / std::sqrt(static_cast<ComputeDataType>(headDim)));
 
-        // Token boundaries per tensor; tensors sharing a packing must agree batch by batch.
+        // Tensors that share a packing must agree on every batch's length.
         const std::string who = "CpuFpReferenceSdpaRagged";
-        const auto qTokens
-            = detail::raggedTokenBoundaries(qInfo->rowOffsets, qInfo->seqStride, who, "Q");
-        const auto kTokens
-            = detail::raggedTokenBoundaries(kInfo->rowOffsets, kInfo->seqStride, who, "K");
+        const auto tokens = [&](const hipdnn_data_sdk::utilities::RaggedIterationInfo& info,
+                                int64_t sMax,
+                                const char* name) {
+            return detail::raggedTokenBoundaries(info.rowOffsets, info.seqStride, sMax, who, name);
+        };
+        const auto qTokens = tokens(*qInfo, q.dims()[2], "Q");
+        const auto kTokens = tokens(*kInfo, k.dims()[2], "K");
         detail::requireMatchingTokenBoundaries(
-            qTokens,
-            "Q",
-            detail::raggedTokenBoundaries(oInfo->rowOffsets, oInfo->seqStride, who, "O"),
-            "O",
-            who);
+            qTokens, "Q", tokens(*oInfo, o.dims()[2], "O"), "O", who);
         detail::requireMatchingTokenBoundaries(
-            kTokens,
-            "K",
-            detail::raggedTokenBoundaries(vInfo->rowOffsets, vInfo->seqStride, who, "V"),
-            "V",
-            who);
+            kTokens, "K", tokens(*vInfo, v.dims()[2], "V"), "V", who);
 
         if(lse != nullptr)
         {
-            validateLse(lse->dims(), batch, numHeads);
+            validateLse(lse->dims(), q.dims());
             if(const auto lseInfo = lse->raggedIterationInfo())
             {
                 detail::requireMatchingTokenBoundaries(
-                    qTokens,
-                    "Q",
-                    detail::raggedTokenBoundaries(
-                        lseInfo->rowOffsets, lseInfo->seqStride, who, "LSE"),
-                    "LSE",
-                    who);
+                    qTokens, "Q", tokens(*lseInfo, lse->dims()[2], "LSE"), "LSE", who);
             }
         }
 
@@ -297,12 +287,14 @@ private:
         return false;
     }
 
-    static void validateLse(const std::vector<int64_t>& lseDims, int64_t batch, int64_t numHeads)
+    // LSE is [B, H, Sq, 1] with Q's Sq; a shorter Sq would let rows spill into the next batch.
+    static void validateLse(const std::vector<int64_t>& lseDims, const std::vector<int64_t>& qDims)
     {
-        if(lseDims.size() != 4 || lseDims[0] != batch || lseDims[1] != numHeads || lseDims[3] != 1)
+        if(lseDims.size() != 4 || lseDims[0] != qDims[0] || lseDims[1] != qDims[1]
+           || lseDims[2] != qDims[2] || lseDims[3] != 1)
         {
             throw std::invalid_argument(
-                "CpuFpReferenceSdpaRagged: lse must be rank-4 [B, H, Sq, 1]");
+                "CpuFpReferenceSdpaRagged: lse must be rank-4 [B, H, Sq, 1] with Q's B, H, Sq");
         }
     }
 

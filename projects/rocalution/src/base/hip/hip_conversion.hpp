@@ -48,6 +48,16 @@ namespace rocalution
                         const MatrixCOO<ValueType, IndexType>&        src,
                         MatrixCSR<ValueType, IndexType, PointerType>* dst);
 
+    // The CSC arrays of a matrix are the CSR arrays of its transpose, so dst receives the
+    // transpose of src as an ncol x nrow CSR matrix.
+    template <typename ValueType, typename IndexType, typename PointerType>
+    bool csr_to_csc_hip(const Rocalution_Backend_Descriptor*                backend,
+                        int64_t                                             nnz,
+                        IndexType                                           nrow,
+                        IndexType                                           ncol,
+                        const MatrixCSR<ValueType, IndexType, PointerType>& src,
+                        MatrixCSR<ValueType, IndexType, PointerType>*       dst);
+
     template <typename ValueType, typename IndexType, typename PointerType>
     bool csr_to_bcsr_hip(const Rocalution_Backend_Descriptor*                backend,
                          int64_t                                             nnz,

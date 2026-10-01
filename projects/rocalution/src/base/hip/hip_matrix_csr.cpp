@@ -4767,45 +4767,24 @@ namespace rocalution
         if(this->nnz_ > 0)
         {
             cast_T->Clear();
-            cast_T->AllocateCSR(this->nnz_, this->ncol_, this->nrow_);
 
-            size_t buffer_size;
+            if(csr_to_csc_hip(&this->local_backend_,
+                              this->nnz_,
+                              this->nrow_,
+                              this->ncol_,
+                              this->mat_,
+                              &cast_T->mat_)
+               == false)
+            {
+                return false;
+            }
 
-            assert(this->nnz_ <= std::numeric_limits<int>::max());
+            cast_T->nrow_ = this->ncol_;
+            cast_T->ncol_ = this->nrow_;
+            cast_T->nnz_  = this->nnz_;
 
-            rocsparse_status status = rocsparse_csr2csc_buffer_size(
-                ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                this->nrow_,
-                this->ncol_,
-                this->nnz_,
-                this->mat_.row_offset,
-                this->mat_.col,
-                rocsparse_action_numeric,
-                &buffer_size);
-            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-            char* buffer = NULL;
-            allocate_hip(buffer_size, &buffer);
-
-            status = rocsparseTcsr2csc(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                                       this->nrow_,
-                                       this->ncol_,
-                                       this->nnz_,
-                                       this->mat_.val,
-                                       this->mat_.row_offset,
-                                       this->mat_.col,
-                                       cast_T->mat_.val,
-                                       cast_T->mat_.col,
-                                       cast_T->mat_.row_offset,
-                                       rocsparse_action_numeric,
-                                       rocsparse_index_base_zero,
-                                       buffer);
-            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-            free_hip(&buffer);
+            cast_T->CreateSpMatDescr_();
         }
-
-        cast_T->ApplyAnalysis();
 
         return true;
     }

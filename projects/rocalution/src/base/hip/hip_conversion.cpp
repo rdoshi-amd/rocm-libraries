@@ -254,6 +254,77 @@ namespace rocalution
     }
 
     template <typename ValueType, typename IndexType, typename PointerType>
+    bool csr_to_csc_hip(const Rocalution_Backend_Descriptor*                backend,
+                        int64_t                                             nnz,
+                        IndexType                                           nrow,
+                        IndexType                                           ncol,
+                        const MatrixCSR<ValueType, IndexType, PointerType>& src,
+                        MatrixCSR<ValueType, IndexType, PointerType>*       dst)
+    {
+        assert(nnz > 0);
+        assert(nrow > 0);
+        assert(ncol > 0);
+
+        assert(src.row_offset != NULL);
+        assert(src.col != NULL);
+        assert(src.val != NULL);
+
+        assert(dst != NULL);
+        assert(backend != NULL);
+
+        rocsparse_const_spmat_descr source;
+        rocsparse_status            status
+            = rocsparse_create_const_csr_descr(&source,
+                                               nrow,
+                                               ncol,
+                                               nnz,
+                                               src.row_offset,
+                                               src.col,
+                                               src.val,
+                                               rocalution_indextype_traits<PointerType>::value,
+                                               rocalution_indextype_traits<IndexType>::value,
+                                               rocsparse_index_base_zero,
+                                               rocalution_datatype_traits<ValueType>::value);
+        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+
+        allocate_hip(ncol + 1, &dst->row_offset);
+
+        rocsparse_spmat_descr target;
+        status = rocsparse_create_csc_descr(&target,
+                                            nrow,
+                                            ncol,
+                                            0,
+                                            dst->row_offset,
+                                            NULL,
+                                            NULL,
+                                            rocalution_indextype_traits<PointerType>::value,
+                                            rocalution_indextype_traits<IndexType>::value,
+                                            rocsparse_index_base_zero,
+                                            rocalution_datatype_traits<ValueType>::value);
+        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+
+        bool converted = sparse_to_sparse_hip(backend, source, target, [&](int64_t target_nnz) {
+            assert(target_nnz == nnz);
+
+            allocate_hip(target_nnz, &dst->col);
+            allocate_hip(target_nnz, &dst->val);
+
+            status = rocsparse_csc_set_pointers(target, dst->row_offset, dst->col, dst->val);
+            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+
+            return true;
+        });
+
+        status = rocsparse_destroy_spmat_descr(target);
+        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+
+        status = rocsparse_destroy_spmat_descr(source);
+        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+
+        return converted;
+    }
+
+    template <typename ValueType, typename IndexType, typename PointerType>
     bool csr_to_bcsr_hip(const Rocalution_Backend_Descriptor*                backend,
                          int64_t                                             nnz,
                          IndexType                                           nrow,
@@ -1098,6 +1169,37 @@ namespace rocalution
                                  int                                            ncol,
                                  const MatrixCOO<std::complex<double>, int>&    src,
                                  MatrixCSR<std::complex<double>, int, PtrType>* dst);
+#endif
+
+    // csr_to_csc
+    template bool csr_to_csc_hip(const Rocalution_Backend_Descriptor*  backend,
+                                 int64_t                               nnz,
+                                 int                                   nrow,
+                                 int                                   ncol,
+                                 const MatrixCSR<float, int, PtrType>& src,
+                                 MatrixCSR<float, int, PtrType>*       dst);
+
+    template bool csr_to_csc_hip(const Rocalution_Backend_Descriptor*   backend,
+                                 int64_t                                nnz,
+                                 int                                    nrow,
+                                 int                                    ncol,
+                                 const MatrixCSR<double, int, PtrType>& src,
+                                 MatrixCSR<double, int, PtrType>*       dst);
+
+#ifdef SUPPORT_COMPLEX
+    template bool csr_to_csc_hip(const Rocalution_Backend_Descriptor*                backend,
+                                 int64_t                                             nnz,
+                                 int                                                 nrow,
+                                 int                                                 ncol,
+                                 const MatrixCSR<std::complex<float>, int, PtrType>& src,
+                                 MatrixCSR<std::complex<float>, int, PtrType>*       dst);
+
+    template bool csr_to_csc_hip(const Rocalution_Backend_Descriptor*                 backend,
+                                 int64_t                                              nnz,
+                                 int                                                  nrow,
+                                 int                                                  ncol,
+                                 const MatrixCSR<std::complex<double>, int, PtrType>& src,
+                                 MatrixCSR<std::complex<double>, int, PtrType>*       dst);
 #endif
 
     // csr_to_bcsr

@@ -15,15 +15,10 @@
 namespace hipdnn_integration_tests::gpu_graph_executor::detail
 {
 
-// Signature key for the ragged (RFC-0014: packed [B,H,S,D] + ragged_offset) forward SDPA GPU
-// reference.
-//
-// Deliberately a DISTINCT C++ type from GpuSdpaFwdSignatureKey even though its fields are
-// identical: distinctness is what separates dense and ragged buckets in the registry variant.
-// GpuPlanRegistrySignatureKeyEqual's cross-type overload returns false, so a dense key and a
-// ragged key with the same dtypes never collide. Dispatch between the two happens in
-// GpuReferenceGraphExecutor::buildSignatureKey, keyed on whether the Q tensor carries a
-// ragged_offset_tensor_uid.
+// Signature key for the ragged SDPA forward GPU reference (RFC-0014 packed + ragged_offset).
+// It has the same fields as GpuSdpaFwdSignatureKey but is a separate type, so dense and ragged
+// plans land in separate registry buckets. GpuReferenceGraphExecutor::buildSignatureKey picks
+// one based on whether Q has a ragged_offset_tensor_uid.
 struct GpuSdpaRaggedFwdSignatureKey
 {
     const hipdnn_flatbuffers_sdk::data_objects::NodeAttributes nodeType{
@@ -109,7 +104,7 @@ struct GpuSdpaRaggedFwdSignatureKey
                            GpuSdpaRaggedFwdSignatureKey>
             map;
 
-        // Q, K, V, O. bf16 (all-bf16) and fp8 (E4M3 inputs -> bf16 output, with Q/K/V descale).
+        // Q, K, V, O: all bf16, and fp8 E4M3 inputs with bf16 output.
         addPlanBuilder<hipdnn_flatbuffers_sdk::data_objects::DataType::BFLOAT16,
                        hipdnn_flatbuffers_sdk::data_objects::DataType::BFLOAT16,
                        hipdnn_flatbuffers_sdk::data_objects::DataType::BFLOAT16,

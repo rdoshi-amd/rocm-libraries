@@ -29,11 +29,9 @@
 namespace hipdnn_integration_tests::gpu_graph_executor::detail
 {
 
-// Unpacked tensor attributes + resolved SDPA parameters for a ragged (RFC-0014: packed [B,H,S,D] +
-// ragged_offset) node. q/k/v/o are rank-4 [B,H,S,D] with BSHD strides, each carrying its own int32
-// element-offset aux [B+1,1,1,1] (raggedOffsetQ/K/V/O). The optional
-// LSE tensor is rank-4 [B,H,Sq,1]: ragged (packed) when it carries its own ragged_offset aux, dense
-// otherwise (the frontend's default stats layout). No additive mask (gated off on the ASM v3 path).
+// Unpacked attributes and resolved parameters for a ragged SDPA node (RFC-0014 packed
+// [B,H,S,D] + ragged_offset). q/k/v/o each carry an int32 element-offset aux [B+1,1,1,1].
+// The optional LSE [B,H,Sq,1] is packed if it has its own ragged_offset aux, else dense.
 struct GpuSdpaRaggedFwdParams
 {
     GpuSdpaRaggedFwdParams(
@@ -103,23 +101,22 @@ struct GpuSdpaRaggedFwdParams
     hipdnn_flatbuffers_sdk::data_objects::TensorAttributesT raggedOffsetKTensor;
     hipdnn_flatbuffers_sdk::data_objects::TensorAttributesT raggedOffsetVTensor;
     hipdnn_flatbuffers_sdk::data_objects::TensorAttributesT raggedOffsetOTensor;
-    // Folded attention scale operand (scale tensor, else a baked attn_scale_value), resolved to a
-    // host float at execute time by its storage mode; absent => reference default 1/sqrt(D).
+    // Folded scale operand (scale tensor, else baked attn_scale_value), resolved at execute time.
+    // Absent means the reference default 1/sqrt(D).
     std::optional<hipdnn_flatbuffers_sdk::data_objects::TensorAttributesT> scaleTensor;
     int64_t leftBound;
     int64_t rightBound;
     bool topLeftAlignment;
     std::optional<hipdnn_flatbuffers_sdk::data_objects::TensorAttributesT> lseTensor;
-    // Present only for a ragged (packed) LSE; absent means a dense [B,H,Sq,1] LSE.
+    // Set only for a packed LSE. Absent means a dense [B,H,Sq,1] LSE.
     std::optional<hipdnn_flatbuffers_sdk::data_objects::TensorAttributesT> raggedOffsetLseTensor;
-    // Optional fp8 Q/K/V descale (float), scalar [1] or per-KV-head [B, H_kv, 1, 1].
+    // Optional fp8 descales (float): scalar [1] or per-KV-head [B, H_kv, 1, 1].
     std::optional<hipdnn_flatbuffers_sdk::data_objects::TensorAttributesT> descaleQTensor;
     std::optional<hipdnn_flatbuffers_sdk::data_objects::TensorAttributesT> descaleKTensor;
     std::optional<hipdnn_flatbuffers_sdk::data_objects::TensorAttributesT> descaleVTensor;
 };
 
-// Executor for the ragged (RFC-0014 packed + ragged_offset) forward SDPA GPU reference. Wraps the
-// variant-pack device pointers as shallow views and dispatches to GpuFpReferenceSdpaRagged.
+// Runs the ragged SDPA GPU reference on the variant-pack device buffers.
 template <typename QDataType,
           typename KDataType,
           typename VDataType,
@@ -154,7 +151,6 @@ public:
         auto raggedOffsetVTensor = bindOffsets(_params.raggedOffsetVTensor);
         auto raggedOffsetOTensor = bindOffsets(_params.raggedOffsetOTensor);
 
-        // LSE (optional) is rank-4 [B, H, Sq, 1], ragged when it carries a ragged_offset aux.
         std::optional<hipdnn_gpu_ref::ShallowGpuTensor<float>> lseTensor;
         std::optional<hipdnn_gpu_ref::ShallowGpuTensor<int32_t>> raggedOffsetLseTensor;
         if(_params.lseTensor.has_value())
@@ -170,10 +166,8 @@ public:
                                           _params.raggedOffsetLseTensor->strides);
         }
 
-        // Optional fp8 Q/K/V descale, by storage mode (fpropRagged validates the shape). A host
-        // scalar (baked in the graph, or runtime pass-by-value with a host pointer in the variant
-        // pack) is resolved and staged in a one-element tensor; a device-resident descale is viewed
-        // in place.
+        // A host-scalar descale (baked or pass-by-value) is staged in a one-element tensor.
+        // A device descale is viewed in place. fpropRagged checks the shape.
         const auto bindDescale
             = [&variantPack](
                   const std::optional<hipdnn_flatbuffers_sdk::data_objects::TensorAttributesT>& d,
@@ -235,13 +229,9 @@ private:
     GpuSdpaRaggedFwdParams _params;
 };
 
-// Builder for the ragged forward SDPA GPU reference.
-//
-// Applicability mirrors the dense GpuSdpaFwdPlanBuilder's unsupported-feature gates, with one
-// addition: q/k/v/o must each carry a ragged_offset_tensor_uid (the packed RFC-0014 representation),
-// and seq_len_q/kv must be ABSENT (the padded seq-lens variant is out of scope). Dispatch between the
-// dense and ragged buckets happens in GpuReferenceGraphExecutor::buildSignatureKey, keyed on whether
-// the Q tensor carries a ragged_offset_tensor_uid.
+// Same unsupported-feature gates as the dense GpuSdpaFwdPlanBuilder, plus: q/k/v/o must each
+// carry a ragged_offset aux, and seq_len_q/kv must be absent (the padded variant is not
+// supported). GpuReferenceGraphExecutor::buildSignatureKey picks dense vs ragged.
 template <hipdnn_flatbuffers_sdk::data_objects::DataType QDataTypeEnum,
           hipdnn_flatbuffers_sdk::data_objects::DataType KDataTypeEnum,
           hipdnn_flatbuffers_sdk::data_objects::DataType VDataTypeEnum,
@@ -276,8 +266,7 @@ public:
         CHECK_TENSOR_TYPE(tensorMap, nodeAttributes->v_tensor_uid(), VDataTypeEnum);
         CHECK_TENSOR_TYPE(tensorMap, nodeAttributes->o_tensor_uid(), ODataTypeEnum);
 
-        // Required: ragged nodes carry a ragged_offset_tensor_uid on each primary (RFC-0014 packed).
-        // Each referenced aux must exist and be INT32. A node without them is a dense SDPA node.
+        // Each primary needs an INT32 ragged_offset aux. Without them this is a dense SDPA node.
         for(const auto primaryUid : {nodeAttributes->q_tensor_uid(),
                                      nodeAttributes->k_tensor_uid(),
                                      nodeAttributes->v_tensor_uid(),
@@ -294,8 +283,7 @@ public:
                               hipdnn_flatbuffers_sdk::data_objects::DataType::INT32);
         }
 
-        // Out of scope: the padded seq-lens variant (packed-with-trailing-padding). Ragged here is
-        // packed-only, so per-batch lengths derive from ragged_offset alone.
+        // The padded seq-lens variant is not supported. Lengths come from ragged_offset alone.
         if(nodeAttributes->seq_len_q_tensor_uid().has_value()
            || nodeAttributes->seq_len_kv_tensor_uid().has_value())
         {
@@ -325,7 +313,7 @@ public:
             return false;
         }
 
-        // Unsupported: paged KV cache (tracked as a separate task that layers on top of ragged)
+        // Unsupported: paged KV cache (a separate task on top of ragged)
         if(nodeAttributes->page_table_k_tensor_uid().has_value()
            || nodeAttributes->page_table_v_tensor_uid().has_value())
         {
@@ -339,10 +327,8 @@ public:
             return false;
         }
 
-        // Supported: fp8 Q/K/V descale (registered for the fp8 combo). Each, when present, must
-        // exist in the map and be FLOAT; a descale stored as a host scalar (baked or runtime
-        // pass-by-value) must be a single element. Unsupported: softmax/output (re)quantization
-        // (descale_s / scale_s / scale_o / amax_s / amax_o) — AITER fp8 fwd descales Q/K/V only.
+        // AITER fp8 fwd descales Q/K/V only, with no softmax/output requant. Q/K/V descales must
+        // be FLOAT, and a host-scalar descale must be a single element.
         if(nodeAttributes->descale_s_tensor_uid().has_value()
            || nodeAttributes->scale_s_tensor_uid().has_value()
            || nodeAttributes->scale_o_tensor_uid().has_value()
@@ -370,9 +356,8 @@ public:
             }
         }
 
-        // Supported: attention scale from scale_tensor_uid in any storage mode (baked, runtime
-        // pass-by-value, or device-resident). It must be a single element; a device-resident scale
-        // must be FLOAT (it is read back as one float at execute time).
+        // The scale may be baked, pass-by-value or device-resident. It must be one element, and a
+        // device scale must be FLOAT since it is read back as one float.
         if(nodeAttributes->scale_tensor_uid().has_value())
         {
             CHECK_TENSOR_EXISTS(tensorMap, nodeAttributes->scale_tensor_uid().value());
@@ -386,17 +371,15 @@ public:
             }
         }
 
-        // Unsupported: max / running-sum softmax stats outputs (the reference does not produce
-        // these). The log-sum-exp stats tensor IS supported and handled below.
+        // The reference does not produce max / sum-exp stats. LSE is handled below.
         if(nodeAttributes->max_tensor_uid().has_value()
            || nodeAttributes->sum_exp_tensor_uid().has_value())
         {
             return false;
         }
 
-        // Supported: log-sum-exp output via the stats tensor. It must exist in the map and be
-        // FLOAT (LSE is always float). A stats tensor carrying a ragged_offset aux is packed; the
-        // aux must exist and be INT32. Without one the stats tensor is dense [B,H,Sq,1].
+        // LSE (stats tensor) must be FLOAT. With an INT32 ragged_offset aux it is packed,
+        // otherwise dense [B,H,Sq,1].
         if(nodeAttributes->stats_tensor_uid().has_value())
         {
             CHECK_TENSOR_EXISTS(tensorMap, nodeAttributes->stats_tensor_uid().value());
@@ -481,7 +464,7 @@ public:
                                         "left_bound=-1, right_bound=0 instead.");
         }
 
-        // Check deprecated attributes
+        // Deprecated causal flags override the bounds and alignment.
         if(nodeAttributes->causal_mask())
         {
             leftBound = -1;
@@ -495,8 +478,8 @@ public:
             isTopLeft = false;
         }
 
-        // Every primary carries its own ragged_offset aux (RFC-0014; checked in isApplicable).
-        // fpropRagged validates that o/v describe the same per-batch lengths as q/k.
+        // isApplicable checked that every primary has a ragged_offset aux. fpropRagged checks
+        // that o and v share the per-batch lengths of q and k.
         const auto* qAttr = tensorMap.at(nodeAttributes->q_tensor_uid());
         const auto* kAttr = tensorMap.at(nodeAttributes->k_tensor_uid());
         const auto* vAttr = tensorMap.at(nodeAttributes->v_tensor_uid());

@@ -21,14 +21,11 @@ namespace gpu_ref
 {
 
 // --- FP8 E4M3 (OCP) device decode ---
-// Byte-exact with hipdnn_data_sdk::types::fp8_e4m3 (OCP: 1 sign, 4 exp bias-7, 3 mantissa;
-// no infinity; NaN == abs 0x7F). Implemented as a self-contained magnitude lookup so the
-// kernel needs no <hip/hip_fp8.h> (unavailable under HipRTC's preinclude) and matches the
-// host reference's dequantization exactly.
+// Bit-exact with hipdnn_data_sdk::types::fp8_e4m3 (bias 7, no infinity, NaN at abs 0x7F).
+// A lookup table avoids <hip/hip_fp8.h>, which HipRTC's preinclude does not provide.
 __device__ inline float fp8OcpE4m3ToFloat(unsigned char bits)
 {
-    // Magnitude by absolute bits [0, 0x7F). Index 0x7F is NaN (guarded below), so its slot
-    // is never read and holds a placeholder.
+    // Magnitude by abs bits. Slot 0x7F is NaN and handled below, so its value is unused.
     // NOLINTNEXTLINE(modernize-avoid-c-arrays)
     static constexpr float MAG[128]
         = {0.0f,        0.001953125f, 0.00390625f, 0.005859375f, 0.0078125f,  0.009765625f,
@@ -63,8 +60,8 @@ __device__ inline float fp8OcpE4m3ToFloat(unsigned char bits)
     return ((bits & 0x80u) != 0) ? -mag : mag;
 }
 
-// Device fp8 E4M3 (OCP) storage type. One byte, decodes to float on read. HipRtcTypeName maps
-// hipdnn_data_sdk::types::fp8_e4m3 to this name so the SDPA kernel loads fp8 Q/K/V via Q_TYPE.
+// One-byte fp8 E4M3 (OCP) storage that decodes to float on read. HipRtcTypeName maps
+// fp8_e4m3 to this type so the SDPA kernel can load fp8 Q/K/V.
 // NOLINTNEXTLINE(readability-identifier-naming)
 struct GpuRefFp8E4M3
 {

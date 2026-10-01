@@ -19,11 +19,10 @@ namespace hipdnn_gpu_ref
 namespace
 {
 
-// Shared argument and stride structs — single definition used by both host and device (HipRTC).
+// Argument structs shared with the HipRTC kernel.
 #include <GpuRefSdpaArgs.h> // NOLINT(misc-include-cleaner)
 
-// Ragged q/k/v/o are rank-4; copy up to 4 strides, leaving unused entries zero. Mirrors the dense
-// launcher's helper (kept file-local to avoid coupling the two units).
+// Copy of the dense launcher's helper, kept local so the two files stay independent.
 SdpaStrides toSdpaStrides(const std::vector<int64_t>& strides)
 {
     SdpaStrides result{};
@@ -69,7 +68,7 @@ void launchKernel(hipFunction_t function, int64_t totalElements, void* argsPtr, 
 
 } // namespace
 
-// --- Ragged offset read-back (host validation of per-batch sequence lengths) ---
+// --- Ragged offset read-back for host validation ---
 
 std::vector<int64_t> GpuFpReferenceSdpaRagged::readRaggedOffsets(const void* raggedOffsetPtr,
                                                                  int64_t count)

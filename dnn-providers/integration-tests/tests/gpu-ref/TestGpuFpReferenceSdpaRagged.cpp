@@ -1,20 +1,13 @@
 // Copyright © Advanced Micro Devices, Inc., or its affiliates.
 // SPDX-License-Identifier:  MIT
 
-// ============================================================================
-// GPU-vs-CPU reference correctness gate for the RAGGED (RFC-0014: packed
-// [B,H,S,D] + ragged_offset) SDPA forward GPU reference.
+// GPU-vs-CPU tests for the ragged SDPA forward GPU reference (RFC-0014: packed [B,H,S,D] plus
+// ragged_offset).
 //
-// The GPU reference runs on plain device tensors + explicit ragged_offset aux
-// (GpuFpReferenceSdpaRagged::fpropRagged). The CPU mirror consumes the same host
-// data through RFC-0014 ragged tensors (ShallowRaggedTensor over the identical
-// packed buffers + per-primary ragged_offset aux), then the packed outputs are
-// compared element-for-element. The GPU reference runs in the default FLOAT
-// probability mode so it matches the fp32 CPU oracle (the bf16 P-storage mode is
-// a provider-divergence concern tested elsewhere). The CPU mirror itself is
-// validated against the dense CpuFpReferenceSdpa in the test_sdk suite
-// (TestCpuFpReferenceSdpaRagged).
-// ============================================================================
+// The GPU reference takes device tensors and explicit ragged_offset aux. The CPU mirror reads the
+// same host buffers as ShallowRaggedTensors, and the packed outputs are compared per element.
+// The GPU side uses the default FLOAT probability mode to match the fp32 CPU oracle. The CPU
+// mirror is checked against the dense CpuFpReferenceSdpa in TestCpuFpReferenceSdpaRagged.
 
 #include <gtest/gtest.h>
 
@@ -44,14 +37,12 @@ using namespace hipdnn_gpu_ref;
 namespace
 {
 
-// Deterministic per-tensor seeds so every run uses identical inputs.
+// Fixed seeds so every run sees the same inputs.
 constexpr unsigned int SEED_Q = 42;
 constexpr unsigned int SEED_K = 43;
 constexpr unsigned int SEED_V = 44;
 
-// dtype -> GPU-reference forward tolerance (mirrors the dense SDPA suite): the GPU
-// reference enables FMA contraction, so float carries ~40x margin at 2e-5 and
-// bf16/half get ample slack at 1e-2.
+// Same bounds as the dense SDPA GPU suite. Float keeps about 40x margin over FMA rounding.
 template <typename T>
 float gpuRefFwdTolerance()
 {
@@ -79,7 +70,7 @@ int64_t maxOf(const std::vector<int64_t>& v)
     return *std::max_element(v.begin(), v.end());
 }
 
-// ragged_offset device aux [B+1,1,1,1] INT32 = cumTokens * seqStride (elements) for the GPU path.
+// GPU ragged_offset aux: [B+1,1,1,1] int32 element offsets, cum[i] * seqStride.
 Tensor<int32_t> makeRaggedOffset(const std::vector<int64_t>& cum, int64_t seqStride)
 {
     Tensor<int32_t> off({static_cast<int64_t>(cum.size()), 1, 1, 1});
@@ -92,7 +83,7 @@ Tensor<int32_t> makeRaggedOffset(const std::vector<int64_t>& cum, int64_t seqStr
     return off;
 }
 
-// Wrap a borrowed packed host buffer as an RFC-0014 ragged tensor ([B,H,S,D], seqAxis=2, BSHD).
+// View a borrowed packed host buffer as an RFC-0014 ragged tensor (BSHD, seq axis 2).
 template <typename T>
 ShallowRaggedTensor<T> wrapRagged(T* buf,
                                   const std::vector<int64_t>& dims,
@@ -103,7 +94,7 @@ ShallowRaggedTensor<T> wrapRagged(T* buf,
         buf, dims, bshd(dims), SEQ_AXIS, makeRaggedOffsetAux(cum, seqStride));
 }
 
-// Fill the front (packed) `count` elements of a padded tensor's buffer with random values.
+// Randomize only the packed prefix (first `count` elements) of a padded buffer.
 template <typename T>
 void fillPackedRandom(Tensor<T>& t, int64_t count, float lo, float hi, unsigned int seed)
 {
@@ -117,8 +108,8 @@ void fillPackedRandom(Tensor<T>& t, int64_t count, float lo, float hi, unsigned 
     t.memory().markHostModified();
 }
 
-// Compare the packed output region: the GPU output's packed front (device->host sync) against the
-// CPU mirror's packed backing. Both use identical global-token BSHD packing, so index i aligns.
+// Compare the packed prefix of the GPU output (hostData() syncs it from device) with the CPU
+// mirror. Both use the same BSHD token packing, so index i lines up.
 template <typename T>
 void compareRaggedPacked(Tensor<T>& oGpu, const std::vector<T>& oCpuBack, float tolerance)
 {
@@ -130,9 +121,7 @@ void compareRaggedPacked(Tensor<T>& oGpu, const std::vector<T>& oCpuBack, float 
     }
 }
 
-// Core check: build packed rank-4 Q/K/V, run the ragged GPU reference on device tensors and the
-// ragged CPU mirror on ShallowRaggedTensors over the same host buffers, and compare the packed
-// output.
+// Run the GPU reference and the CPU mirror on the same packed Q/K/V and compare the outputs.
 template <typename T, typename ComputeType = float>
 void checkRagged(const std::vector<int64_t>& seqQ,
                  const std::vector<int64_t>& seqKv,
@@ -168,7 +157,7 @@ void checkRagged(const std::vector<int64_t>& seqQ,
     fillPackedRandom(k, totalKv * numHeadsK * headDim, -1.0f, 1.0f, SEED_K);
     fillPackedRandom(v, totalKv * numHeadsV * headDimV, -1.0f, 1.0f, SEED_V);
 
-    // CPU mirror first (reads pristine host buffers), into a packed backing.
+    // Run the CPU mirror first, while the host buffers are untouched.
     std::vector<T> oCpuBack(static_cast<size_t>(totalQ * numHeads * headDimV),
                             static_cast<T>(0.0f));
     {
@@ -180,8 +169,8 @@ void checkRagged(const std::vector<int64_t>& seqQ,
             qR, kR, vR, oR, scale, leftBound, rightBound, topLeftAlignment);
     }
 
-    // GPU reference on device tensors. Each primary gets its own offsets: with Hv*Dv != Hk*D (or
-    // Dv != D) V's and O's element offsets differ from K's and Q's for the same token boundaries.
+    // Each primary needs its own offsets. When Hv*Dv != Hk*D or Dv != D, the V and O offsets
+    // differ from K and Q for the same token boundaries.
     auto offQ = makeRaggedOffset(cumQ, numHeads * headDim);
     auto offK = makeRaggedOffset(cumKv, numHeadsK * headDim);
     auto offV = makeRaggedOffset(cumKv, numHeadsV * headDimV);
@@ -194,7 +183,7 @@ void checkRagged(const std::vector<int64_t>& seqQ,
 
 } // namespace
 
-// --- Plain ragged MHA (differing per-batch lengths), self-attention ---
+// --- Ragged MHA self-attention ---
 
 TEST(TestGpuSdpaRaggedFwdFp32, RaggedBasicMha)
 {
@@ -208,7 +197,7 @@ TEST(TestGpuSdpaRaggedFwdBfp16, RaggedBasicMha)
     checkRagged<bfloat16>({3, 5, 1}, {3, 5, 1}, 4, 4, 4, 16, 16);
 }
 
-// --- Cross-attention: per-batch Q and KV lengths differ ---
+// --- Cross-attention with different Q and KV lengths ---
 
 TEST(TestGpuSdpaRaggedFwdFp32, RaggedCrossAttention)
 {
@@ -216,7 +205,7 @@ TEST(TestGpuSdpaRaggedFwdFp32, RaggedCrossAttention)
     checkRagged<float>({2, 4, 3}, {5, 1, 6}, 2, 2, 2, 16, 16);
 }
 
-// --- Per-batch causal (top-left) and bottom-right, ragged lengths ---
+// --- Causal masks, top-left and bottom-right ---
 
 TEST(TestGpuSdpaRaggedFwdFp32, RaggedCausalTopLeft)
 {
@@ -227,11 +216,11 @@ TEST(TestGpuSdpaRaggedFwdFp32, RaggedCausalTopLeft)
 TEST(TestGpuSdpaRaggedFwdBfp16, RaggedCausalBottomRight)
 {
     SKIP_IF_NO_DEVICES();
-    // Cross-attention causal with bottom-right alignment exercises the per-batch windowOffset.
+    // Bottom-right causal with Sq != Skv tests the per-batch windowOffset.
     checkRagged<bfloat16>({3, 5}, {6, 8}, 2, 2, 2, 16, 16, -1, 0, false);
 }
 
-// --- Per-batch sliding window (both bounds) ---
+// --- Sliding window (both bounds) ---
 
 TEST(TestGpuSdpaRaggedFwdFp32, RaggedSlidingWindow)
 {
@@ -239,7 +228,7 @@ TEST(TestGpuSdpaRaggedFwdFp32, RaggedSlidingWindow)
     checkRagged<float>({8, 6}, {8, 6}, 2, 2, 2, 16, 16, 2, 2, true);
 }
 
-// --- GQA / MQA over ragged batches ---
+// --- GQA / MQA ---
 
 TEST(TestGpuSdpaRaggedFwdFp32, RaggedGqa)
 {
@@ -253,7 +242,7 @@ TEST(TestGpuSdpaRaggedFwdBfp16, RaggedMqa)
     checkRagged<bfloat16>({4, 6}, {4, 6}, 8, 1, 1, 16, 16);
 }
 
-// --- Edge case: a zero-length-KV batch produces exactly-zero output (both refs agree) ---
+// --- Zero-length batches. An empty KV batch gives zero output in both refs ---
 
 TEST(TestGpuSdpaRaggedFwdFp32, ZeroLengthKvBatch)
 {
@@ -267,7 +256,7 @@ TEST(TestGpuSdpaRaggedFwdFp32, ZeroLengthQBatch)
     checkRagged<float>({3, 0, 4}, {3, 2, 4}, 2, 2, 2, 16, 16);
 }
 
-// --- Head-dim coverage at the ticket's shapes (hdim_q in {128,192}, hdim_v=128) ---
+// --- Head dims from the ticket: hdim_q 128 or 192, hdim_v 128 ---
 
 TEST(TestGpuSdpaRaggedFwdBfp16, RaggedHeadDim128)
 {
@@ -278,7 +267,7 @@ TEST(TestGpuSdpaRaggedFwdBfp16, RaggedHeadDim128)
 TEST(TestGpuSdpaRaggedFwdFp32, RaggedHeadDim192xV128)
 {
     SKIP_IF_NO_DEVICES();
-    // hdim_q = 192, hdim_v = 128 (asymmetric head dims, as on the ASM v3 path).
+    // Asymmetric head dims, as on the ASM v3 path.
     checkRagged<float>({3, 5}, {3, 5}, 2, 2, 2, 192, 128);
 }
 
@@ -289,7 +278,7 @@ TEST(TestGpuSdpaRaggedFwdBfp16, RaggedHeadDim192xV128GqaCausal)
     checkRagged<bfloat16>({3, 5}, {6, 8}, 4, 2, 2, 192, 128, -1, 0, /*topLeftAlignment=*/false);
 }
 
-// --- Explicit LSE output: GPU vs CPU ragged mirror, compared over the packed region ---
+// --- Ragged LSE output ---
 
 TEST(TestGpuSdpaRaggedFwdFp32, RaggedLseOutput)
 {
@@ -331,7 +320,7 @@ TEST(TestGpuSdpaRaggedFwdFp32, RaggedLseOutput)
 
     auto offQ = makeRaggedOffset(cumQ, numHeads * headDim);
     auto offKv = makeRaggedOffset(cumKv, numHeads * headDim);
-    // Packed (ragged) LSE: [B,H,S,1] BSHD with seq stride H, so its element offsets are cum * H.
+    // Ragged LSE is [B,H,S,1] BSHD with seq stride H, so its offsets are cum * H.
     auto offLse = makeRaggedOffset(cumQ, numHeads);
     GpuFpReferenceSdpaRagged::fpropRagged<float, float, float, float, float>(
         q, k, v, oGpu, offQ, offKv, offKv, offQ, std::nullopt, -1, -1, true, &lseGpu, &offLse);
@@ -351,11 +340,10 @@ namespace
 
 constexpr float LSE_SENTINEL = -99.0f;
 
-// Dense (non-ragged) LSE, the frontend's default stats layout: [B, H, Sq_max, 1] with contiguous
-// strides, so batch b starts at b * H * Sq_max regardless of the ragged Q packing. GPU vs the CPU
-// ragged reference writing through the same dense tensor. Both LSE buffers start at a sentinel, so
-// padding rows (sq >= seqQ[b]) must stay untouched and a mis-addressed write shows up as a mismatch.
-// With zeroQk, every score is 0 and the expected LSE of a valid row is log(seqKv[b]).
+// Dense LSE, the frontend's default stats layout: contiguous [B, H, Sq_max, 1], so batch b
+// starts at b * H * Sq_max whatever the Q packing. Both LSE buffers start at a sentinel, so
+// padding rows must stay untouched and a misaddressed write shows up as a mismatch.
+// With zeroQk every score is 0, so a valid row's LSE is log(seqKv[b]).
 void checkRaggedDenseLse(const std::vector<int64_t>& seqQ,
                          const std::vector<int64_t>& seqKv,
                          int64_t numHeads,
@@ -533,7 +521,7 @@ Tensor<float> makePerHeadDescale(int64_t batch, int64_t heads, float base)
     return d;
 }
 
-// fp8 core: GPU vs CPU ragged mirror on identical packed fp8 inputs, bf16 output, with descale.
+// fp8 Q/K/V with descales and bf16 output, GPU vs CPU mirror.
 void checkRaggedFp8(const std::vector<int64_t>& seqQ,
                     const std::vector<int64_t>& seqKv,
                     int64_t numHeads,
@@ -610,15 +598,14 @@ void checkRaggedFp8(const std::vector<int64_t>& seqQ,
         &descaleK,
         &descaleV);
 
-    // bf16 output rounding + fp8 inputs -> looser tolerance than the float path.
+    // fp8 inputs and bf16 output need a looser bound than fp32.
     compareRaggedPacked(oGpu, oCpuBack, 2e-2f);
 }
 
 } // namespace
 
-// --- fp8 (E4M3) ragged: GPU vs CPU ragged mirror. fp8 Q/K/V decode identically on host (data_sdk
-// fp8_e4m3) and device (GpuRefFp8E4M3); the only divergence is the bf16 output + device-vs-host
-// math, covered by the 2e-2 tolerance. ---
+// --- fp8 (E4M3). Host and device decode fp8 the same way, so the 2e-2 bound only covers bf16
+// output rounding and device-vs-host math ---
 
 TEST(TestGpuSdpaRaggedFwdFp8, RaggedPerTensorDescale)
 {
@@ -640,8 +627,8 @@ TEST(TestGpuSdpaRaggedFwdFp8, RaggedCausalGqaPerKvHeadDescale)
     checkRaggedFp8({4, 6}, {4, 6}, 4, numHeadsKv, 128, descaleQ, descaleK, descaleV, -1, 0, true);
 }
 
-// GQA with per-KV-head descales on all of Q/K/V (AITER's [B, H_kv] shape); distinct values per
-// (batch, KV head) on Q catch a Q descale indexed by the query head instead of its KV head.
+// AITER's [B, H_kv] descale on Q, K and V under GQA. Distinct Q values per KV head catch a Q
+// descale indexed by query head.
 TEST(TestGpuSdpaRaggedFwdFp8, RaggedGqaPerKvHeadDescaleQkv)
 {
     SKIP_IF_NO_DEVICES();
@@ -656,7 +643,7 @@ TEST(TestGpuSdpaRaggedFwdFp8, RaggedGqaPerKvHeadDescaleQkv)
 TEST(TestGpuSdpaRaggedFwdFp8, ThrowsOnPerQueryHeadQDescaleUnderGqa)
 {
     SKIP_IF_NO_DEVICES();
-    // Q descale is per KV head: under GQA (H_q = 4, H_kv = 2) a [B, H_q, 1, 1] Q descale is invalid.
+    // Q descale is per KV head, so under GQA a [B, H_q, 1, 1] Q descale must be rejected.
     const std::vector<int64_t> qDims = {1, 4, 4, 128};
     const std::vector<int64_t> kvDims = {1, 2, 4, 128};
     Tensor<fp8_e4m3> q(qDims, bshd(qDims));
@@ -697,9 +684,8 @@ TEST(TestGpuSdpaRaggedFwdFp8, ThrowsOnPerQueryHeadQDescaleUnderGqa)
 namespace
 {
 
-// Runs fpropRagged (fp32, B = 2, H = 1, D = 16, S_max = 2) with per-tensor sequence lengths; a
-// non-empty lseLens adds a ragged LSE with those lengths. Returns whether it threw
-// std::invalid_argument; any other outcome (including success) returns false.
+// fp32 fpropRagged with B=2, H=1, D=16, S_max=2 and per-tensor lengths. A non-empty lseLens adds
+// a ragged LSE. Returns true only if it threw std::invalid_argument.
 bool throwsOnLengths(const std::vector<int64_t>& qLens,
                      const std::vector<int64_t>& kLens,
                      const std::vector<int64_t>& vLens,
@@ -757,16 +743,16 @@ TEST(TestGpuSdpaRaggedFwdFp32, ThrowsOnSequenceLengthMismatch)
     EXPECT_TRUE(throwsOnLengths({2, 1}, {2, 2}, {2, 2}, {1, 2})) << "Q/O mismatch accepted";
     EXPECT_TRUE(throwsOnLengths({2, 1}, {2, 2}, {2, 2}, {2, 1}, {1, 2}))
         << "Q/LSE mismatch accepted";
-    // Consistent lengths (with a ragged LSE) run normally.
+    // Consistent lengths with a ragged LSE run normally.
     EXPECT_FALSE(throwsOnLengths({2, 1}, {1, 2}, {1, 2}, {2, 1}, {2, 1}));
 }
 
 namespace
 {
 
-// fp32 fpropRagged with B = 2, H = 1, D = 16, S_max = 2 (4-token buffers). K/V lengths are {2, 2};
-// Q and O use the raw token boundaries qTokens. lseSq > 0 adds a dense LSE [2, 1, lseSq, 1].
-// Returns whether it threw std::invalid_argument.
+// fp32 fpropRagged with B=2, H=1, D=16, S_max=2 and K/V lengths {2, 2}. Q and O use the raw
+// boundaries qTokens. lseSq > 0 adds a dense LSE [2, 1, lseSq, 1]. Returns true only if it threw
+// std::invalid_argument.
 bool throwsOnQTokens(const std::vector<int64_t>& qTokens, int64_t lseSq = 0)
 {
     const int64_t headDim = 16;

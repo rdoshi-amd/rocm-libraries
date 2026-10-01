@@ -51,19 +51,12 @@ struct SdpaFwdArgs
 //           readability-identifier-naming,
 //           modernize-avoid-c-arrays)
 
-// --- Ragged (RFC-0014: packed [B,H,S,D] + ragged_offset) SDPA forward argument struct ---
-// Logical rank-4 dims [B, H, S, D] with BSHD-layout strides (seq stride = H*D): q=[B,H,Sq,D],
-// k=[B,Hk,Skv,D], v=[B,Hv,Skv,Dv], o=[B,H,Sq,Dv]. The physical buffer is packed (no per-batch
-// padding): batch b's data begins at element offset ragged_offset[b]. raggedOffsetQ/raggedOffsetKv
-// are the cumulative ELEMENT offsets (RFC-0014), int32, length batch+1, for the Q and K tensors
-// respectively. o shares Q's token boundaries and v shares K's; the host validates this against the
-// o/v ragged_offset tables before launch. The per-tensor sequence
-// stride (seqStrideQ = qStr.s[2], seqStrideKv = kStr.s[2]) converts an element offset to a token
-// count: tokenBoundary[b] = ragged_offset[b] / seqStride. Global-token addressing
-// (globalToken * seqStride + h * headStride + d) lands in the packed buffer for every tensor, so
-// only the Q- and K-side offsets are needed. No additive mask (bias is gated off on the ASM v3
-// path). The optional LSE is logical [B,H,Sq,1] and is either ragged (packed, with its own
-// raggedOffsetLse element offsets) or dense (raggedOffsetLse == nullptr; batch stride lseStr.s[0]).
+// --- Ragged SDPA forward args (RFC-0014: packed [B,H,S,D] + ragged_offset) ---
+// Tensors are logical [B, H, S, D] with BSHD strides, packed by token with no per-batch padding:
+// q=[B,H,Sq,D], k=[B,Hk,Skv,D], v=[B,Hv,Skv,Dv], o=[B,H,Sq,Dv].
+// Only Q and K offsets are passed. o shares Q's token boundaries and v shares K's. The host
+// checks this against the o/v ragged_offset tables before launch.
+// No additive mask: bias is gated off on the ASM v3 path.
 
 // NOLINTBEGIN(misc-non-private-member-variables-in-classes,
 //             readability-identifier-naming,
@@ -74,23 +67,20 @@ struct SdpaRaggedFwdArgs
     const void* k;
     const void* v;
     void* o;
-    // Optional log-sum-exp output, logical [B, H, Sq, 1], always float. nullptr disables it.
+    // Optional log-sum-exp output, float, logical [B, H, Sq, 1]. nullptr disables it.
     void* lse;
-    // LSE cumulative ELEMENT offsets (RFC-0014), int32, length batch+1, for a ragged (packed) LSE;
-    // nullptr for a dense LSE addressed through lseStr alone.
+    // Ragged LSE element offsets, length batch+1. nullptr means a dense LSE addressed by lseStr.
     const int* raggedOffsetLse;
-    // Cumulative ELEMENT offsets (RFC-0014 ragged_offset), int32, length batch+1. raggedOffsetQ is
-    // the Q tensor's offset (also gives o's token boundaries); raggedOffsetKv is the K tensor's.
+    // Cumulative element offsets (RFC-0014 ragged_offset), int32, length batch+1.
+    // Q's offsets also give o's token boundaries.
     const int* raggedOffsetQ;
     const int* raggedOffsetKv;
-    // Per-tensor sequence-axis strides (elements per token): H*D for Q, Hk*D for K. Divide a
-    // ragged_offset by these to recover token boundaries.
+    // Elements per token: H*D for Q, Hk*D for K. ragged_offset / seqStride = token boundary.
     long long seqStrideQ;
     long long seqStrideKv;
-    // Optional fp8 Q/K/V descale (float; nullptr = none). Indexed by (batch, head) via the
-    // batch/head strides below; per-tensor [1] descale uses zero strides. descaleQ and descaleK are
-    // indexed by the K head, descaleV by the V head. Applied as: score *= descaleQ*descaleK,
-    // output *= descaleV. No softmax/output requant (AITER fp8 fwd contract).
+    // Optional fp8 descale (nullptr = none), indexed through the batch/head strides below.
+    // Per-tensor descale uses zero strides. Q and K use the K head, V uses the V head.
+    // No softmax or output requant (AITER fp8 fwd contract).
     const float* descaleQ;
     const float* descaleK;
     const float* descaleV;

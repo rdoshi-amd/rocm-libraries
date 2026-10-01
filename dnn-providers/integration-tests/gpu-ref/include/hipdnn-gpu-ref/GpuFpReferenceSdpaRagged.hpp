@@ -17,21 +17,16 @@
 namespace hipdnn_gpu_ref
 {
 
-// Ragged (RFC-0014: packed [B,H,S,D] + ragged_offset) forward SDPA GPU reference, parallel to
-// GpuFpReferenceSdpa. Logical rank-4 dims with BSHD-layout strides (seq stride = strides[2] = H*D):
+// GPU reference for ragged forward SDPA (RFC-0014), the ragged twin of GpuFpReferenceSdpa.
+// Tensors are logical rank-4 with BSHD strides, packed with no per-batch padding:
 //   q = [B, H,  Sq,  D ]   k = [B, Hk, Skv, D ]
 //   v = [B, Hv, Skv, Dv]   o = [B, H,  Sq,  Dv]
-// The physical buffer is packed (no per-batch padding); batch b begins at element ragged_offset[b].
-// raggedOffsetQ/K/V/O are the cumulative ELEMENT offsets (RFC-0014), rank-4 [B+1,1,1,1] INT32, of
-// the q/k/v/o tensors. They are read back to the host and validated: o must share Q's token
-// boundaries and v must share K's (per-batch sequence lengths), while element offsets may differ
-// with the per-token width (e.g. D != Dv). The kernel then addresses o/v through Q/K token
-// boundaries. Per-batch sequence lengths are (ragged_offset[b+1] - ragged_offset[b]) / seqStride.
-// Numerics (fp32 softmax, provider P storage) and the SdpaSoftmaxProbabilityMode enum are shared
-// with the dense reference. No additive bias/alibi/dropout (gated off on the ASM v3 path);
-// per-batch causal/sliding-window and GQA/MQA are supported. The optional LSE is logical
-// [B, H, Sq_max, 1]: ragged (packed) when raggedOffsetLse is given, else dense and addressed
-// through its strides.
+// raggedOffsetQ/K/V/O are INT32 [B+1, 1, 1, 1] cumulative element offsets. Batch b starts at
+// offset[b] and has (offset[b+1] - offset[b]) / strides[2] tokens. O must match Q's token
+// boundaries and V must match K's, though element offsets differ when D != Dv.
+// The optional LSE is [B, H, Sq, 1], ragged if raggedOffsetLse is given, else dense.
+// Softmax numerics match the dense reference. Supports GQA/MQA and per-batch causal and
+// sliding window. No bias, alibi or dropout, since the ASM v3 path gates them off.
 class GpuFpReferenceSdpaRagged
 {
 public:
@@ -77,12 +72,12 @@ public:
         const auto numHeadsV = v.dims()[1];
         const auto headDimV = v.dims()[3];
 
-        // BSHD-layout sequence strides (elements per token): H*D for Q, Hk*D for K.
+        // Elements per token: H*D for Q, Hk*D for K.
         const auto seqStrideQ = q.strides()[2];
         const auto seqStrideKv = k.strides()[2];
 
         // Offsets may live only on the device (plan path), so read them back and check them here.
-        // Tensors that share a packing must agree on every batch's length.
+        // Tensors that share a packing must agree on every batch length.
         const std::string who = "GpuFpReferenceSdpaRagged";
         const auto tokenBoundaries = [&](hipdnn_data_sdk::utilities::TensorBase<int32_t>& offsets,
                                          int64_t seqStride,
@@ -129,8 +124,8 @@ public:
         std::vector<int64_t> lseStrides;
         if(lse != nullptr)
         {
-            // One value per query token: [B, H, Sq, 1] with Q's Sq, dense or ragged. A shorter
-            // Sq would let a dense LSE's rows spill into the next batch.
+            // One value per query token. Sq must match Q's, or a dense LSE's rows would spill
+            // into the next batch.
             const auto& lseDims = lse->dims();
             if(lseDims.size() != 4 || lseDims[0] != batch || lseDims[1] != numHeads
                || lseDims[2] != q.dims()[2] || lseDims[3] != 1)
@@ -162,13 +157,13 @@ public:
                 "GpuFpReferenceSdpaRagged: raggedOffsetLse given without an lse tensor");
         }
 
-        // Optional fp8 Q/K/V descale: scalar [1] or per-KV-head [B, H_kv, 1, 1]. The Q descale is
-        // per K head (query head h reads the descale of the K head it attends to).
+        // Optional fp8 descale: scalar or per KV head [B, H_kv, 1, 1]. As in AITER, the Q
+        // descale is indexed by K head.
         const DescaleBinding dq = bindDescale(descaleQ, batch, numHeadsK, "Q");
         const DescaleBinding dk = bindDescale(descaleK, batch, numHeadsK, "K");
         const DescaleBinding dv = bindDescale(descaleV, batch, numHeadsV, "V");
 
-        // No query tokens: nothing to compute, and a zero-size grid is not a valid launch.
+        // Empty Q: skip the launch, since a zero-size grid is invalid.
         if(totalQ == 0)
         {
             return;
@@ -219,8 +214,8 @@ public:
     }
 
 private:
-    // Resolved fp8 descale binding: device pointer + (batch, head) index strides. A null pointer
-    // (no descale) or a scalar descale uses zero strides.
+    // fp8 descale device pointer and its (batch, head) strides. Strides stay zero for a scalar
+    // or absent descale.
     struct DescaleBinding
     {
         const void* ptr = nullptr;
@@ -228,8 +223,7 @@ private:
         long long headStride = 0;
     };
 
-    // Validate a descale tensor's shape (scalar [1] / (1,1,1,1), or per-KV-head [B, heads, 1, 1])
-    // and resolve its device pointer + strides. `heads` is H_k for Q and K, H_v for V.
+    // Accepts a scalar (one element) or [B, heads, 1, 1]. `heads` is H_k for Q and K, H_v for V.
     static DescaleBinding bindDescale(hipdnn_data_sdk::utilities::TensorBase<float>* descale,
                                       int64_t batch,
                                       int64_t heads,
@@ -242,7 +236,7 @@ private:
         }
         if(descale->elementCount() == 1)
         {
-            binding.ptr = descale->memory().deviceData(); // scalar; zero strides
+            binding.ptr = descale->memory().deviceData(); // scalar, zero strides
             return binding;
         }
         const auto& dims = descale->dims();
@@ -268,7 +262,7 @@ private:
             throw std::invalid_argument(
                 "GpuFpReferenceSdpaRagged: q/k/v/o must all be rank-4 [B, H, S, D] tensors");
         }
-        // ragged_offset aux is rank-4 [B+1, 1, 1, 1] INT32 (RFC-0014 structural contract).
+        // RFC-0014: ragged_offset is INT32 [B+1, 1, 1, 1].
         for(const auto& d : raggedOffsetDims)
         {
             if(d.size() != 4 || d[0] != qDims[0] + 1 || d[1] != 1 || d[2] != 1 || d[3] != 1)
@@ -316,11 +310,10 @@ private:
         }
     }
 
-    // Reads a contiguous ragged_offset table (count INT32 element offsets) from device memory.
-    // Defined in GpuFpReferenceSdpaRagged.cpp.
+    // Copies `count` INT32 offsets from a contiguous ragged_offset table on the device.
     static std::vector<int64_t> readRaggedOffsets(const void* raggedOffsetPtr, int64_t count);
 
-    // --- Kernel launcher (defined in GpuFpReferenceSdpaRagged.cpp) ---
+    // --- Kernel launcher, defined in GpuFpReferenceSdpaRagged.cpp ---
 
     static void launchSdpaRaggedFwd(const void* qPtr,
                                     const void* kPtr,

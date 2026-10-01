@@ -19,28 +19,25 @@
 namespace hipdnn_test_sdk::utilities
 {
 
-// Ragged (RFC-0014: packed [B,H,S,D] + ragged_offset) forward SDPA CPU reference — the host mirror
-// of GpuFpReferenceSdpaRagged / GpuRefSdpaRaggedFwd.cpp. It is the pure fp32 oracle (no provider
-// P-storage rounding), so GPU-vs-CPU comparisons run under gpuRefFwdTolerance.
+// Ragged forward SDPA CPU reference (RFC-0014: packed [B, H, S, D] + ragged_offset), the host
+// mirror of GpuFpReferenceSdpaRagged. It computes in plain fp32 with no provider P-storage
+// rounding, so GPU-vs-CPU checks use gpuRefFwdTolerance.
 //
-// q/k/v/o are ragged-aware tensors (RFC-0014: `ShallowRaggedTensor<T>` / `RaggedTensor<T>`) with
-// logical dims `[B, H, S, D]`, seqAxis=2, and BSHD-layout strides. Each carries its own
-// `ragged_offset` aux, so packed addressing is delegated to the SDK: `getHostValue({b,h,s,d})` bases
-// at `ragged_offset[b]` and adds the (batch-relative) strided offset, and per-batch sequence lengths
-// come from `raggedIterationInfo()` (`rowOffsets`, `seqStride`). No manual global-token arithmetic.
-// Supports GQA/MQA, per-batch causal/sliding-window, fp8 Q/K/V descale, and an optional LSE that is
-// either ragged (packed, own ragged_offset) or dense [B, H, Sq_max, 1]; both are written through
-// `setHostValue({b,h,sq,0})`. No additive bias/alibi/dropout (gated off on the ASM v3 path). Descales are
-// scalar [1] or per-(batch, KV-head) [B, H_kv, 1, 1]; Q and K descales are both indexed by the K
-// head a query head maps to (as in CpuFpReferenceSdpa and AITER's [B, H_kv] contract).
-// Tensors that share a packing must describe the same per-batch sequence lengths: Q/O (and a ragged
-// LSE) share the query token boundaries and K/V share the key token boundaries. Their element
-// offsets may differ (different per-token widths); inconsistent lengths are rejected.
+// q/k/v/o are ragged tensors (ShallowRaggedTensor / RaggedTensor) with dims [B, H, S, D],
+// seqAxis 2 and BSHD strides. The SDK does the packed addressing: getHostValue({b, h, s, d})
+// starts at ragged_offset[b], and per-batch lengths come from raggedIterationInfo().
+//
+// Supports GQA/MQA, causal and sliding-window masks, fp8 descales, and an optional LSE that is
+// ragged or dense [B, H, Sq_max, 1]. No bias, alibi or dropout, as on the ASM v3 path.
+// Descales are scalar [1] or per KV head [B, H_kv, 1, 1]. Q and K descales are both indexed by
+// the KV head of the query head, as in CpuFpReferenceSdpa and AITER.
+//
+// Q/O (and a ragged LSE) must have the same per-batch lengths, and so must K/V. Their element
+// offsets can differ because their token widths differ.
 class CpuFpReferenceSdpaRagged
 {
 public:
-    // q/k/v/o must be ragged tensors; lse may be ragged or dense; descale tensors are ordinary
-    // (scalar/per-head).
+    // q/k/v/o must be ragged. lse may be ragged or dense. Descales are plain tensors.
     template <class QDataType,
               class KDataType = QDataType,
               class VDataType = QDataType,
@@ -59,7 +56,6 @@ public:
                         hipdnn_data_sdk::utilities::TensorBase<float>* descaleK = nullptr,
                         hipdnn_data_sdk::utilities::TensorBase<float>* descaleV = nullptr)
     {
-        // Per-batch offsets/strides come from the ragged tensors themselves (RFC-0014).
         const auto qInfo = q.raggedIterationInfo();
         const auto kInfo = k.raggedIterationInfo();
         const auto vInfo = v.raggedIterationInfo();
@@ -110,7 +106,7 @@ public:
             }
         }
 
-        // Q descale is per KV head: query head h reads the descale of the K head it attends to.
+        // Q descale is per KV head, like K (AITER's [B, H_kv] contract).
         const DescaleBinding dq = bindDescale(descaleQ, batch, numHeadsK, "Q");
         const DescaleBinding dk = bindDescale(descaleK, batch, numHeadsK, "K");
         const DescaleBinding dv = bindDescale(descaleV, batch, numHeadsV, "V");
@@ -135,7 +131,6 @@ public:
 
                 for(int64_t sq = 0; sq < seqQ; ++sq)
                 {
-                    // Scaled, masked scores over this batch's key range.
                     std::vector<ComputeDataType> scores(static_cast<size_t>(seqKv));
                     for(int64_t skv = 0; skv < seqKv; ++skv)
                     {
@@ -156,7 +151,6 @@ public:
                         scores[static_cast<size_t>(skv)] = dot * descaleQK * scale;
                     }
 
-                    // Numerically stable softmax over skv.
                     auto maxVal = negInf;
                     for(const auto s : scores)
                     {
@@ -195,7 +189,7 @@ public:
                         p /= sumExp;
                     }
 
-                    // Weighted sum over V (fp32 accumulate), then fold in the V descale.
+                    // V descale is applied once, after accumulation.
                     for(int64_t dvIdx = 0; dvIdx < headDimV; ++dvIdx)
                     {
                         auto acc = static_cast<ComputeDataType>(0);
@@ -227,8 +221,8 @@ public:
     }
 
 private:
-    // Resolved fp8 descale binding: host pointer + (batch, head) index strides. Absent or scalar
-    // descale reports value 1 with zero strides. Descale tensors are ordinary (not ragged).
+    // fp8 descale lookup by (batch, head). A missing descale reads as 1, a scalar has zero
+    // strides. Descale tensors are not ragged.
     struct DescaleBinding
     {
         const float* ptr = nullptr;
@@ -253,7 +247,7 @@ private:
         }
         if(descale->elementCount() == 1)
         {
-            binding.ptr = descale->memory().hostData(); // scalar; zero strides
+            binding.ptr = descale->memory().hostData(); // strides stay 0 for a scalar
             return binding;
         }
         const auto& dims = descale->dims();
@@ -268,7 +262,8 @@ private:
                                     + " descale must be scalar [1] or per-KV-head [B, H_kv, 1, 1]");
     }
 
-    // Mirrors the kernel's per-batch window mask: asymmetric +1 on the right bound.
+    // Same per-batch window mask as the kernel. Keeps skv in
+    // [sq + windowOffset - leftBound, sq + windowOffset + rightBound]. A negative bound is open.
     static bool isMasked(
         int64_t sq, int64_t skv, int64_t leftBound, int64_t rightBound, int64_t windowOffset)
     {
@@ -287,7 +282,7 @@ private:
         return false;
     }
 
-    // LSE is [B, H, Sq, 1] with Q's Sq; a shorter Sq would let rows spill into the next batch.
+    // LSE must be [B, H, Sq, 1] with Q's Sq. A shorter Sq would spill rows into the next batch.
     static void validateLse(const std::vector<int64_t>& lseDims, const std::vector<int64_t>& qDims)
     {
         if(lseDims.size() != 4 || lseDims[0] != qDims[0] || lseDims[1] != qDims[1]

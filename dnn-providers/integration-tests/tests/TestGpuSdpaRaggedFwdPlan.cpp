@@ -45,11 +45,10 @@ constexpr int64_t RAGGED_OFFSET_KV_UID = 21;
 constexpr int64_t STATS_UID = 14;
 constexpr int64_t RAGGED_OFFSET_STATS_UID = 22;
 
-// A uid intentionally absent from the graph's tensor map; used to set unsupported-mode optional
-// uids whose mere presence must make the plan inapplicable.
+// Not in the tensor map. Setting an unsupported-mode uid to it is enough to reject the node.
 constexpr int64_t UNUSED_UID = 99;
 
-// Packed rank-4 [B=1, H=2, S=8, D=16] for a single batch (shape irrelevant to applicability).
+// One batch. The shape doesn't affect applicability.
 const std::vector<int64_t> DIMS = {1, 2, 8, 16};
 
 using Bf16Builder = GpuSdpaRaggedFwdPlanBuilder<DataType::BFLOAT16,
@@ -57,7 +56,7 @@ using Bf16Builder = GpuSdpaRaggedFwdPlanBuilder<DataType::BFLOAT16,
                                                 DataType::BFLOAT16,
                                                 DataType::BFLOAT16>;
 
-// Build a bf16 ragged graph (ragged_offset on all primaries) with optional extra attrs.
+// bf16 ragged graph with optional extra attrs.
 flatbuffers::FlatBufferBuilder makeRaggedGraph(SdpaAttributesT attrs = {})
 {
     RaggedSdpaFwdGraphOptions options;
@@ -77,7 +76,7 @@ flatbuffers::FlatBufferBuilder makeRaggedGraph(SdpaAttributesT attrs = {})
                                     options);
 }
 
-// ragged_offset aux [B+1,1,1,1] INT32 = cumTokens * seqStride (element offsets).
+// INT32 ragged_offset aux [B+1,1,1,1] in element offsets: cumTokens * seqStride.
 Tensor<int32_t> makeRaggedOffset(const std::vector<int64_t>& lengths, int64_t seqStride)
 {
     Tensor<int32_t> off({static_cast<int64_t>(lengths.size()) + 1, 1, 1, 1});
@@ -96,7 +95,7 @@ using Fp32Builder = GpuSdpaRaggedFwdPlanBuilder<DataType::FLOAT,
                                                 DataType::FLOAT,
                                                 DataType::FLOAT>;
 
-// Wrap a borrowed packed host buffer as an RFC-0014 ragged tensor ([B,H,S,D], seqAxis=2, BSHD).
+// Wraps a borrowed packed host buffer as an RFC-0014 ragged tensor (BSHD, seq axis 2).
 ShallowRaggedTensor<float> wrapRagged(float* buf,
                                       const std::vector<int64_t>& dims,
                                       int64_t seqStride,
@@ -106,10 +105,9 @@ ShallowRaggedTensor<float> wrapRagged(float* buf,
         buf, dims, bshd(dims), SEQ_AXIS, makeRaggedOffsetAux(cumTokens(lengths), seqStride));
 }
 
-// fp32 ragged plan with unequal per-batch Q/KV lengths and an LSE output in `statsLayout`, checked
-// against the CPU ragged reference (an oracle independent of the GPU kernel) writing through a
-// tensor of the same layout. Both LSE buffers start at a sentinel, so padding rows must stay
-// untouched and any mis-addressed row shows up as a mismatch.
+// Runs the fp32 plan with unequal Q/KV lengths and an LSE in statsLayout, and compares it with
+// the CPU ragged reference using the same layout. Both LSE buffers start at a sentinel, so a
+// misaddressed or padding row shows up as a mismatch.
 void checkPlanLseAgainstCpu(RaggedStatsLayout statsLayout)
 {
     const std::vector<int64_t> seqQ = {3, 5, 1};
@@ -239,7 +237,7 @@ TEST(TestGpuSdpaRaggedFwdPlanBuilder, IsApplicableForBf16RaggedNode)
 
 TEST(TestGpuSdpaRaggedFwdPlanBuilder, IsNotApplicableForDenseNode)
 {
-    // No ragged_offset on the primaries: a dense node belongs to the dense plan, not the ragged one.
+    // No ragged_offset on the primaries, so this node belongs to the dense plan.
     auto graphBuilder = createSdpaFwdGraph(
         Q_UID, K_UID, V_UID, O_UID, DIMS, DIMS, DIMS, DIMS, DataType::BFLOAT16);
     auto graphWrap = hipdnn_flatbuffers_sdk::flatbuffer_utilities::GraphWrapper(
@@ -282,7 +280,7 @@ TEST(TestGpuSdpaRaggedFwdPlanBuilder, IsNotApplicableForUnsupportedModes)
     };
 
     {
-        // The padded seq-lens variant (ragged_offset + seq_len) is out of scope here.
+        // ragged_offset with seq_len (the padded variant) is not supported.
         SdpaAttributesT attrs;
         attrs.seq_len_q_tensor_uid = UNUSED_UID;
         attrs.seq_len_kv_tensor_uid = UNUSED_UID;
@@ -320,13 +318,13 @@ TEST(TestGpuSdpaRaggedFwdPlanBuilder, IsNotApplicableForUnsupportedModes)
         EXPECT_FALSE(isApplicableWith(attrs));
     }
     {
-        // Softmax/output (re)quantization is unsupported (AITER fp8 fwd descales Q/K/V only).
+        // No softmax requant: AITER fp8 forward descales only Q/K/V.
         SdpaAttributesT attrs;
         attrs.descale_s_tensor_uid = UNUSED_UID;
         EXPECT_FALSE(isApplicableWith(attrs));
     }
     {
-        // max_tensor_uid (running max softmax stat) is not produced by the reference.
+        // The reference does not produce the running-max softmax stat.
         SdpaAttributesT attrs;
         attrs.max_tensor_uid = UNUSED_UID;
         EXPECT_FALSE(isApplicableWith(attrs));
@@ -342,17 +340,15 @@ TEST(TestGpuSdpaRaggedFwdPlanBuilder, PlanConstruction)
     const Bf16Builder bf16Builder;
     auto builtPlan = bf16Builder.buildNodePlan(graphWrap, graphWrap.getNode(0));
 
-    // Parenthesize the cast: the template's commas would otherwise be parsed as macro args.
+    // Cast outside EXPECT_NE: the template's commas would split the macro arguments.
     auto* casted
         = dynamic_cast<GpuSdpaRaggedFwdPlan<bfloat16, bfloat16, bfloat16, bfloat16, float>*>(
             builtPlan.get());
     EXPECT_NE(casted, nullptr);
 }
 
-// Wiring proof: plan execute() drives the same kernel as a direct fpropRagged call (including the
-// bf16 provider probability mode and the LSE output), so identical inputs must produce identical
-// output through the graph path. Equal per-batch lengths keep prod(dims) == packed, so the padded
-// tensors are fully initialized and can be compared in full.
+// The plan must run the same kernel as a direct fpropRagged call, including the bf16
+// probability mode and the LSE. Equal lengths leave no padding, so whole tensors are compared.
 TEST(TestGpuSdpaRaggedFwdPlan, ExecuteMatchesDirectFpropRaggedBf16)
 {
     SKIP_IF_NO_DEVICES();
@@ -442,8 +438,7 @@ TEST(TestGpuSdpaRaggedFwdPlan, ExecuteMatchesDirectFpropRaggedBf16)
         << "Plan LSE differs from direct fpropRagged LSE";
 }
 
-// fp8 graph path: the plan must resolve the fp8 Q/K/V descale tensors from the variant pack and
-// hand them to fpropRagged. Validated plan-vs-direct with identical inputs, descale, and mode.
+// fp8: the plan must pass the Q/K/V descales from the variant pack through to fpropRagged.
 TEST(TestGpuSdpaRaggedFwdPlan, ExecuteFp8MatchesDirectFpropRagged)
 {
     SKIP_IF_NO_DEVICES();
@@ -558,18 +553,16 @@ using Fp8Builder = GpuSdpaRaggedFwdPlanBuilder<DataType::FP8_E4M3,
                                                DataType::FP8_E4M3,
                                                DataType::BFLOAT16>;
 
-// One fp8 descale operand: its storage mode and value(s). One value is a scalar [1]; B * H_kv
-// values are a per-KV-head [B, H_kv, 1, 1] descale (DEVICE storage only).
+// One fp8 descale. One value is a scalar [1]. B * H_kv values are a per-KV-head [B, H_kv, 1, 1]
+// descale, DEVICE storage only.
 struct DescaleCase
 {
     OperandStorage storage;
     std::vector<float> values;
 };
 
-// fp8 ragged plan whose Q/K/V descales use the given storage modes, against a direct fpropRagged
-// call on device descale tensors holding the same values. BAKED descales are deliberately left out
-// of the variant pack (the value lives in the graph); RUNTIME_PASS_BY_VALUE descales are passed as
-// host pointers.
+// Runs the fp8 plan with Q/K/V descales in the given storage modes and compares it with a direct
+// fpropRagged call on device descales. BAKED descales are left out of the variant pack on purpose.
 void checkFp8DescaleStorage(const DescaleCase& qCase,
                             const DescaleCase& kCase,
                             const DescaleCase& vCase)
@@ -633,7 +626,7 @@ void checkFp8DescaleStorage(const DescaleCase& qCase,
     auto offQ = makeRaggedOffset({seqLen, seqLen}, seqStride);
     auto offKv = makeRaggedOffset({seqLen, seqLen}, seqStride);
 
-    // Device copies of every descale feed the direct reference (and DEVICE plan operands).
+    // Device copies feed the direct reference and any DEVICE plan operands.
     const auto makeDeviceDescale = [&](const DescaleCase& c) {
         Tensor<float> t(descaleDims(c));
         std::copy(c.values.begin(), c.values.end(), t.memory().hostData());
@@ -727,7 +720,7 @@ TEST(TestGpuSdpaRaggedFwdPlan, ExecuteFp8MixedDescaleStorage)
                            {OperandStorage::DEVICE, {1.5f, 2.0f, 2.5f, 3.0f}});
 }
 
-// A host-stored (baked / runtime pass-by-value) descale is a scalar; a non-scalar one is malformed.
+// Host-stored descales (baked or pass-by-value) must be scalars.
 TEST(TestGpuSdpaRaggedFwdPlanBuilder, IsNotApplicableForNonScalarHostDescale)
 {
     for(const auto storage : {OperandStorage::BAKED, OperandStorage::RUNTIME_PASS_BY_VALUE})
@@ -763,8 +756,8 @@ TEST(TestGpuSdpaRaggedFwdPlanBuilder, IsNotApplicableForNonScalarHostDescale)
     }
 }
 
-// Frontend-default dense stats [B,H,Sq,1] with unequal per-batch lengths: each batch's LSE rows
-// start at b * H * Sq_max, not at the batch's packed Q token.
+// Dense frontend-default stats with unequal lengths: batch b's LSE rows start at b * H * Sq_max,
+// not at its first packed Q token.
 TEST(TestGpuSdpaRaggedFwdPlan, ExecuteDenseStatsUnequalLengthsMatchesCpu)
 {
     SKIP_IF_NO_DEVICES();
@@ -778,8 +771,8 @@ TEST(TestGpuSdpaRaggedFwdPlan, ExecutePackedStatsUnequalLengthsMatchesCpu)
     checkPlanLseAgainstCpu(RaggedStatsLayout::PACKED);
 }
 
-// V carries its own ragged_offset aux (as every RFC-0014 primary may). The plan hands all four
-// offset tables to fpropRagged: V lengths that differ from K's must be rejected, matching ones run.
+// V has its own ragged_offset (allowed by RFC-0014). V lengths that differ from K's must be
+// rejected and matching ones must run.
 TEST(TestGpuSdpaRaggedFwdPlan, ExecuteRejectsKvSequenceLengthMismatch)
 {
     SKIP_IF_NO_DEVICES();
@@ -875,9 +868,8 @@ class TestGpuSdpaRaggedFwdPlanScale : public ::testing::TestWithParam<ScaleSourc
 
 } // namespace
 
-// A non-default attention scale must reach the kernel in every storage mode. Random inputs give
-// non-uniform logits, so the output depends on the scale; the sensitivity check below proves the
-// comparison would catch a fallback to the default 1/sqrt(D).
+// A non-default scale must reach the kernel in every storage mode. Comparing against the
+// default-scale output proves the inputs are sensitive to the scale.
 TEST_P(TestGpuSdpaRaggedFwdPlanScale, ExecuteHonorsNonDefaultScale)
 {
     SKIP_IF_NO_DEVICES();

@@ -18,11 +18,11 @@
 namespace hipdnn_integration_tests::gpu_graph_executor::detail
 {
 
-// Storage modes of a scalar graph operand, as seen by a GPU reference plan:
-//  - baked: the value is stored in the graph (TensorAttributes value); the variant pack may omit it.
-//  - runtime pass-by-value: is_runtime_pass_by_value; the variant-pack slot holds a HOST pointer.
-//  - device-resident: an ordinary tensor; the variant-pack slot holds a DEVICE pointer.
-// The first two are host scalars; only the last one may be handed to a kernel as a device pointer.
+// A scalar operand is stored one of three ways:
+//  - baked: the value lives in the graph, and the variant pack may omit it.
+//  - runtime pass-by-value: the variant-pack slot holds a host pointer.
+//  - device-resident: an ordinary tensor whose variant-pack slot holds a device pointer.
+// The first two are host scalars and must never reach a kernel as a device pointer.
 inline bool
     isHostScalarOperand(const hipdnn_flatbuffers_sdk::data_objects::TensorAttributesT& operand)
 {
@@ -35,9 +35,8 @@ inline int64_t elementCount(const hipdnn_flatbuffers_sdk::data_objects::TensorAt
         operand.dims.begin(), operand.dims.end(), int64_t{1}, std::multiplies<int64_t>());
 }
 
-// Resolves a scalar operand to a host float by storage mode. Host scalars go through
-// resolveScalarFromVariantPack (baked value, else the runtime host pointer); a device-resident
-// operand must be a single FLOAT element and is read back with one device-to-host copy.
+// Resolves a scalar operand to a host float. A device-resident operand must be a single FLOAT
+// element and is read back with one device-to-host copy.
 inline float
     resolveScalarOperand(const hipdnn_flatbuffers_sdk::data_objects::TensorAttributesT& operand,
                          const std::unordered_map<int64_t, void*>& variantPack,

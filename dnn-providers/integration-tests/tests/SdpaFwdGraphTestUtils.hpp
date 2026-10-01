@@ -94,8 +94,7 @@ inline flatbuffers::FlatBufferBuilder
     return builder;
 }
 
-// BSHD-layout element strides for a packed rank-4 [B, H, S, D] SDPA tensor: the sequence axis is
-// the outermost non-batch run, so stride = [S*H*D, D, H*D, 1] (seq stride = strides[2] = H*D).
+// Element strides for a packed [B, H, S, D] tensor stored in BSHD order: [S*H*D, D, H*D, 1].
 inline std::vector<int64_t> bshdStrides(const std::vector<int64_t>& dims)
 {
     const auto h = dims[1];
@@ -104,26 +103,26 @@ inline std::vector<int64_t> bshdStrides(const std::vector<int64_t>& dims)
     return {s * h * d, d, h * d, 1};
 }
 
-// Layout of the optional stats (LSE) tensor of a ragged SDPA graph.
+// Layout of the optional stats (LSE) output of a ragged SDPA graph.
 enum class RaggedStatsLayout
 {
-    // Dense [B, H, Sq_max, 1] with contiguous strides and no ragged_offset: the frontend's
-    // default stats layout (SdpaFwdNode fills generateStrides when strides are unset).
+    // [B, H, Sq_max, 1], contiguous, no ragged_offset. The frontend produces this when stats
+    // strides are unset.
     DENSE,
-    // Packed [B, H, Sq_max, 1] with BSHD strides (seq stride = H) carrying its own ragged_offset.
+    // [B, H, Sq_max, 1] in BSHD order (seq stride = H) with its own ragged_offset.
     PACKED,
 };
 
-// Storage mode of a FLOAT operand tensor (attention scale, fp8 descale) in a graph.
+// How a FLOAT operand (attention scale, fp8 descale) is stored.
 enum class OperandStorage
 {
-    DEVICE, // ordinary tensor; the variant pack carries a device pointer
-    BAKED, // value stored in the graph; the variant pack may omit the uid
-    RUNTIME_PASS_BY_VALUE, // is_runtime_pass_by_value; the variant pack carries a host pointer
+    DEVICE, // device pointer in the variant pack
+    BAKED, // value lives in the graph; the variant pack may omit it
+    RUNTIME_PASS_BY_VALUE, // host pointer in the variant pack
 };
 
-// A FLOAT operand tensor of a graph. BAKED/RUNTIME_PASS_BY_VALUE operands must be scalars ([1]);
-// DEVICE operands may be e.g. per-KV-head descales [B, H_kv, 1, 1].
+// BAKED and RUNTIME_PASS_BY_VALUE operands must be scalars ([1]). DEVICE operands may be larger,
+// e.g. per-KV-head descales [B, H_kv, 1, 1].
 struct FloatOperandSpec
 {
     int64_t uid = 0;
@@ -132,38 +131,34 @@ struct FloatOperandSpec
     std::vector<int64_t> dims = {1};
 };
 
-// Optional features of createRaggedSdpaFwdGraph. Every field defaults to "absent".
+// Optional parts of a ragged SDPA graph. Defaults leave each one out.
 struct RaggedSdpaFwdGraphOptions
 {
-    // Behavior fields (bounds, scale, unsupported-mode uids/flags); tensor uids are filled in.
+    // Node attributes such as bounds and scale. Tensor uids are filled in by the builder.
     hipdnn_flatbuffers_sdk::data_objects::SdpaAttributesT attrs{};
-    // Output dtype; UNSET means the shared input dtype (fp8 graphs use a distinct bf16 output).
+    // Output dtype. UNSET means the input dtype. fp8 graphs use bf16 here.
     hipdnn_flatbuffers_sdk::data_objects::DataType oDataType
         = hipdnn_flatbuffers_sdk::data_objects::DataType::UNSET;
-    // FLOAT LSE output [B, H, Sq, 1] wired into attrs.stats_tensor_uid.
+    // FLOAT LSE output [B, H, Sq, 1].
     std::optional<int64_t> statsUid;
     RaggedStatsLayout statsLayout = RaggedStatsLayout::DENSE;
-    // uid of the stats tensor's own INT32 ragged_offset aux; required for PACKED stats.
+    // INT32 ragged_offset uid for the stats tensor. Required for PACKED stats.
     std::optional<int64_t> raggedOffsetStatsUid;
-    // FLOAT fp8 descale tensors wired into attrs.descale_q/k/v_tensor_uid.
+    // fp8 Q/K/V descales.
     std::optional<FloatOperandSpec> descaleQ;
     std::optional<FloatOperandSpec> descaleK;
     std::optional<FloatOperandSpec> descaleV;
-    // FLOAT attention scale tensor wired into attrs.scale_tensor_uid.
+    // Attention scale tensor.
     std::optional<FloatOperandSpec> scale;
-    // uids of separate INT32 ragged_offset aux tensors for V and O. Absent: V shares K's aux and O
-    // shares Q's (valid only when the pair has equal per-token widths, Hv*Dv == Hk*D, H*Dv == H*D).
+    // Separate ragged_offset uids for V and O. If absent, V reuses K's and O reuses Q's, which is
+    // only valid when per-token widths match (Hv*Dv == Hk*D, H*Dv == H*D).
     std::optional<int64_t> raggedOffsetVUid;
     std::optional<int64_t> raggedOffsetOUid;
 };
 
-// Creates a single-node RAGGED (RFC-0014: packed [B,H,S,D] + ragged_offset) SDPA-forward graph.
-//
-// q/k/v/o are rank-4 [B,H,S,D] with BSHD-layout strides, each carrying a ragged_offset_tensor_uid
-// (which routes the node to the ragged reference). INT32 ragged_offset aux tensors of shape
-// [batch+1,1,1,1] are added for Q and K, and for V and O when `options` gives them their own uids
-// (otherwise V uses K's aux and O uses Q's). Optional stats/descale/scale tensors come from
-// `options`.
+// Builds a one-node ragged SDPA forward graph (RFC-0014: packed [B,H,S,D] plus ragged_offset).
+// Q/K/V/O use BSHD strides and each carries a ragged_offset uid, which routes the node to the
+// ragged reference. Each ragged_offset aux is INT32 [batch+1,1,1,1].
 inline flatbuffers::FlatBufferBuilder
     createRaggedSdpaFwdGraph(int64_t qUid,
                              int64_t kUid,
@@ -181,7 +176,6 @@ inline flatbuffers::FlatBufferBuilder
 {
     using namespace hipdnn_flatbuffers_sdk::data_objects;
 
-    // Output dtype defaults to the shared dtype; fp8 uses a distinct bf16 output.
     const DataType outputDataType
         = (options.oDataType == DataType::UNSET) ? dataType : options.oDataType;
 
@@ -221,7 +215,6 @@ inline flatbuffers::FlatBufferBuilder
     const auto raggedOffsetVUid = options.raggedOffsetVUid.value_or(raggedOffsetKvUid);
     const auto raggedOffsetOUid = options.raggedOffsetOUid.value_or(raggedOffsetQUid);
 
-    // Primaries carry ragged_offset_tensor_uid.
     std::vector<flatbuffers::Offset<TensorAttributes>> tensors;
     tensors.push_back(CreateTensorAttributesDirect(builder,
                                                    qUid,
@@ -268,7 +261,6 @@ inline flatbuffers::FlatBufferBuilder
                                                    /*is_runtime_pass_by_value=*/false,
                                                    raggedOffsetOUid));
 
-    // ragged_offset aux tensors: INT32, rank-4 [batch+1, 1, 1, 1].
     const std::vector<int64_t> offsetDims = {batch + 1, 1, 1, 1};
     const auto offsetStrides = generateStrides(offsetDims);
     tensors.push_back(CreateTensorAttributesDirect(
@@ -298,7 +290,6 @@ inline flatbuffers::FlatBufferBuilder
                                                        &offsetDims));
     }
 
-    // LSE output tensor: rank-4 [B, H, Sq, 1], FLOAT typed; dense or packed (own ragged_offset).
     if(options.statsUid.has_value())
     {
         const std::vector<int64_t> statsDims = {qDims[0], qDims[1], qDims[2], 1};
@@ -335,7 +326,7 @@ inline flatbuffers::FlatBufferBuilder
         }
     }
 
-    // FLOAT operand tensor in the requested storage mode (see OperandStorage).
+    // Adds a FLOAT operand in the storage mode its spec asks for.
     const auto addFloatOperand = [&](const FloatOperandSpec& spec, const char* name) {
         const auto strides = generateStrides(spec.dims);
         const bool baked = spec.storage == OperandStorage::BAKED;

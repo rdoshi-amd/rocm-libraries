@@ -1,20 +1,13 @@
 // Copyright © Advanced Micro Devices, Inc., or its affiliates.
 // SPDX-License-Identifier: MIT
 
-// ============================================================================
-// Validates the ragged CPU reference (CpuFpReferenceSdpaRagged) against the
-// trusted dense CpuFpReferenceSdpa. Inputs are RFC-0014 ragged tensors
-// (ShallowRaggedTensor over packed buffers + per-primary ragged_offset aux);
-// each batch is extracted into a dense [1,H,seqlen_b,D] tensor, the dense
-// reference is run on it, and its output (and LSE) is compared with the ragged
-// reference. This is the middle link of the validation chain: dense CPU
-// (trusted) -> CPU ragged (here) -> GPU ragged (TestGpuFpReferenceSdpaRagged).
+// Checks CpuFpReferenceSdpaRagged against the dense CpuFpReferenceSdpa. Each batch of the ragged
+// inputs is copied to a dense [1, H, seqlen_b, D] tensor and run through the dense reference.
+// Chain: dense CPU (trusted) -> ragged CPU (here) -> ragged GPU (TestGpuFpReferenceSdpaRagged).
 //
-// This suite deliberately covers the fp8/descale, LSE, and fully-masked branches
-// on a CPU-only path (the GPU-vs-CPU suite that also exercises them is
-// SKIP_IF_NO_DEVICES and does not run in the coverage lane), and gives fp8 +
-// descale an independent dense oracle via dequantize-to-float. CPU-only.
-// ============================================================================
+// The fp8/descale, LSE and fully-masked paths are covered here too, because the GPU suite is
+// skipped without a device (as in the coverage lane). fp8 is checked against a dequantized
+// dense run.
 
 #include <gtest/gtest.h>
 
@@ -50,7 +43,7 @@ int64_t maxOf(const std::vector<int64_t>& v)
     return *std::max_element(v.begin(), v.end());
 }
 
-// Deterministic fill of a packed backing buffer in [-1, 1); avoids <random> cross-TU drift.
+// Deterministic fill in [-1, 1). A local LCG avoids <random> drift between builds.
 template <typename T>
 void fillPacked(std::vector<T>& buf, unsigned int seed)
 {
@@ -63,7 +56,7 @@ void fillPacked(std::vector<T>& buf, unsigned int seed)
     }
 }
 
-// Wrap a borrowed packed backing buffer as an RFC-0014 ragged tensor ([B,H,S,D], seqAxis=2, BSHD).
+// Wraps a borrowed packed buffer as a ragged tensor ([B, H, S, D], seqAxis 2, BSHD strides).
 template <typename T>
 ShallowRaggedTensor<T> wrapRagged(T* buf,
                                   const std::vector<int64_t>& dims,
@@ -74,10 +67,8 @@ ShallowRaggedTensor<T> wrapRagged(T* buf,
         buf, dims, bshd(dims), SEQ_AXIS, makeRaggedOffsetAux(cum, seqStride));
 }
 
-// Build a valid rank-4 ragged tensor over a caller-owned backing buffer, for the negative-validation
-// tests below where forward() is expected to throw in validateInput() before any ragged addressing.
-// seqStride is H*D in int64_t (avoids the implicit-widening tidy warning); the backing is sized to
-// the packed token count so construction always succeeds.
+// Valid ragged tensor over a caller-owned buffer sized for the packed tokens. The negative tests
+// use it so that only the one thing under test is wrong.
 ShallowRaggedTensor<float> makeValidRagged(std::vector<float>& backing,
                                            const std::vector<int64_t>& dims,
                                            const std::vector<int64_t>& seqLens)
@@ -95,7 +86,7 @@ Tensor<float> makeScalarDescale(float value)
     return d;
 }
 
-// Per-KV-head descale [B, heads, 1, 1] with a distinct value per (b, head).
+// Per-KV-head descale [B, heads, 1, 1], distinct per (b, head).
 Tensor<float> makePerHeadDescale(int64_t batch, int64_t heads, float base)
 {
     Tensor<float> d({batch, heads, 1, 1});
@@ -108,7 +99,7 @@ Tensor<float> makePerHeadDescale(int64_t batch, int64_t heads, float base)
     return d;
 }
 
-// Descale value for (batch, head): scalar [1] or per-head [B, heads, 1, 1].
+// Descale for (batch, head), from a scalar [1] or a [B, heads, 1, 1] tensor.
 float descaleValue(TensorBase<float>& descale, int64_t b, int64_t head)
 {
     if(descale.elementCount() == 1)
@@ -118,8 +109,7 @@ float descaleValue(TensorBase<float>& descale, int64_t b, int64_t head)
     return descale.getHostValue(std::vector<int64_t>{b, head, 0, 0});
 }
 
-// Extract a dense [1, heads, seqLen, dim] slice for batch b from a ragged tensor (batch-relative
-// seq index; ragged addressing handles the packing).
+// Copies batch b of a ragged tensor into a dense [1, heads, seqLen, dim] tensor.
 template <typename T>
 Tensor<float> extractDenseSlice(TensorBase<T>& ragged, int64_t b, int64_t seqLen)
 {
@@ -141,10 +131,9 @@ Tensor<float> extractDenseSlice(TensorBase<T>& ragged, int64_t b, int64_t seqLen
     return dense;
 }
 
-// Like extractDenseSlice but dequantizes fp8 -> float and folds in the per-(batch, KV-head) descale.
-// Folding descale into the inputs is algebraically the reference's score*=dQ*dK; out*=dV. Descales
-// are per KV head, so tensor head h reads descale head h / headsPerDescaleHead (H_q / H_kv for Q,
-// 1 for K/V).
+// Like extractDenseSlice, but dequantizes fp8 and multiplies in the descale. Scaling the inputs is
+// equivalent to the reference's score *= dQ * dK and out *= dV. Head h reads descale head
+// h / headsPerDescaleHead (H_q / H_kv for Q, 1 for K/V).
 template <typename FP8>
 Tensor<float> dequantDenseSlice(TensorBase<FP8>& ragged,
                                 int64_t b,
@@ -172,9 +161,8 @@ Tensor<float> dequantDenseSlice(TensorBase<FP8>& ragged,
     return dense;
 }
 
-// Build packed ragged float inputs (ShallowRaggedTensor), run the ragged CPU reference (with LSE),
-// then validate each batch's output and LSE against the dense CPU reference on [1,H,seqlen_b,D]
-// slices.
+// Runs the ragged reference (with a ragged LSE) and checks each batch's output and LSE against
+// the dense reference.
 void checkRaggedVsDense(const std::vector<int64_t>& seqQ,
                         const std::vector<int64_t>& seqKv,
                         int64_t numHeads,
@@ -225,7 +213,7 @@ void checkRaggedVsDense(const std::vector<int64_t>& seqQ,
         const auto sKv = seqKv[static_cast<size_t>(b)];
         if(sQ == 0)
         {
-            continue; // no rows to check, and the dense oracle rejects an empty slice
+            continue; // nothing to check, and the dense reference rejects empty dims
         }
         auto qd = extractDenseSlice(q, b, sQ);
         auto kd = extractDenseSlice(k, b, sKv);
@@ -264,7 +252,7 @@ void checkRaggedVsDense(const std::vector<int64_t>& seqQ,
     }
 }
 
-// fp8 (E4M3) + descale vs an independent dense oracle (dequantize-to-float). bf16 output.
+// fp8 E4M3 inputs with descales and bf16 output, checked against a dequantized dense run.
 void checkRaggedFp8VsDense(const std::vector<int64_t>& seqQ,
                            const std::vector<int64_t>& seqKv,
                            int64_t numHeads,
@@ -386,18 +374,17 @@ TEST(TestCpuFpReferenceSdpaRaggedFp32, RaggedGqa)
 
 TEST(TestCpuFpReferenceSdpaRaggedFp32, RaggedAsymmetricHeadDim)
 {
-    // hdim_q = 192, hdim_v = 128 (asymmetric head dims, as on the ASM v3 path).
+    // Asymmetric head dims (192 / 128), as on the ASM v3 path.
     checkRaggedVsDense({3, 5}, {3, 5}, 2, 2, 192, 128);
 }
 
 TEST(TestCpuFpReferenceSdpaRaggedFp32, RaggedExplicitAttnScale)
 {
-    // Caller-provided attnScale (not the default 1/sqrt(headDim)); the dense oracle uses the same
-    // value, so a match confirms the explicit-scale path is honored.
+    // Explicit attnScale instead of 1/sqrt(headDim). Both references get the same value.
     checkRaggedVsDense({4, 6}, {4, 6}, 2, 2, 16, 16, -1, -1, true, /*attnScale=*/0.125f);
 }
 
-// --- fp8 (E4M3) + descale vs the dense reference (dequantize-to-float oracle) ---
+// --- fp8 (E4M3) + descale vs a dequantized dense reference ---
 
 TEST(TestCpuFpReferenceSdpaRaggedFp8, RaggedPerTensorDescale)
 {
@@ -418,8 +405,8 @@ TEST(TestCpuFpReferenceSdpaRaggedFp8, RaggedCausalGqaPerKvHeadDescale)
         {4, 6}, {4, 6}, 4, numHeadsKv, 128, descaleQ, descaleK, descaleV, -1, 0, true);
 }
 
-// GQA with per-KV-head descales on all of Q/K/V (AITER's [B, H_kv] shape). Distinct values per
-// (batch, KV head) on Q catch a Q descale indexed by the query head instead of its KV head.
+// Per-KV-head descales on Q, K and V under GQA (AITER's [B, H_kv] shape). Distinct Q values catch
+// a Q descale indexed by query head instead of KV head.
 TEST(TestCpuFpReferenceSdpaRaggedFp8, RaggedGqaPerKvHeadDescaleQkv)
 {
     const int64_t batch = 2;
@@ -431,10 +418,9 @@ TEST(TestCpuFpReferenceSdpaRaggedFp8, RaggedGqaPerKvHeadDescaleQkv)
         {4, 6}, {5, 3}, 4, numHeadsKv, 128, descaleQ, descaleK, descaleV, -1, -1, true);
 }
 
-// --- Dense LSE (the frontend's default [B, H, Sq_max, 1] stats layout) ---
-// The ragged LSE path is validated against the dense reference in checkRaggedVsDense; a dense LSE
-// written through the same forward() must carry the identical per-(b, h, sq) values, with padding
-// rows (sq >= seqQ[b]) left untouched. This is the contract the GPU reference mirrors.
+// --- Dense LSE ([B, H, Sq_max, 1], the frontend's default stats layout) ---
+// A dense LSE must match the ragged LSE on valid rows and leave padding rows untouched. The GPU
+// reference follows the same contract.
 TEST(TestCpuFpReferenceSdpaRaggedFp32, DenseLseMatchesRaggedLse)
 {
     const std::vector<int64_t> seqQ = {3, 5, 1};
@@ -499,12 +485,12 @@ TEST(TestCpuFpReferenceSdpaRaggedFp32, DenseLseMatchesRaggedLse)
     }
 }
 
-// --- Fully-masked branch: a zero-length-KV batch yields zero output and LSE = -inf ---
+// --- Fully-masked rows: a batch with no keys gives zero output and LSE = -inf ---
 
 TEST(TestCpuFpReferenceSdpaRaggedFp32, ZeroLengthKvFullyMasked)
 {
     const std::vector<int64_t> seqQ = {3, 2};
-    const std::vector<int64_t> seqKv = {3, 0}; // batch 1: queries but no keys -> fully masked
+    const std::vector<int64_t> seqKv = {3, 0}; // batch 1 has queries but no keys
     const int64_t numHeads = 2;
     const int64_t headDim = 16;
     const auto batch = static_cast<int64_t>(seqQ.size());
@@ -537,7 +523,6 @@ TEST(TestCpuFpReferenceSdpaRaggedFp32, ZeroLengthKvFullyMasked)
     CpuFpReferenceSdpaRagged::forward<float, float, float, float, float>(
         q, k, v, o, std::nullopt, -1, -1, true, &lse);
 
-    // Batch 1 has seqKv == 0: every query is fully masked -> output 0, LSE -inf.
     const int64_t b = 1;
     for(int64_t s = 0; s < seqQ[static_cast<size_t>(b)]; ++s)
     {
@@ -595,7 +580,7 @@ TEST(TestCpuFpReferenceSdpaRaggedFp32, AllQueriesEmpty)
 
 TEST(TestCpuFpReferenceSdpaRaggedFp32, ThrowsOnNonRaggedInput)
 {
-    // Plain (non-ragged) tensors: raggedIterationInfo() is nullopt -> reference rejects them.
+    // Plain tensors have no raggedIterationInfo(), so they are rejected.
     Tensor<float> q({1, 2, 4, 16});
     Tensor<float> k({1, 2, 4, 16});
     Tensor<float> v({1, 2, 4, 16});
@@ -644,7 +629,7 @@ TEST(TestCpuFpReferenceSdpaRaggedFp32, ThrowsOnBadDescaleShape)
 
 TEST(TestCpuFpReferenceSdpaRaggedFp32, ThrowsOnPerQueryHeadQDescaleUnderGqa)
 {
-    // Q descale is per KV head: under GQA (H_q = 4, H_kv = 2) a [B, H_q, 1, 1] Q descale is invalid.
+    // Q descale is per KV head, so a [B, H_q, 1, 1] Q descale is rejected under GQA.
     std::vector<float> qB;
     std::vector<float> kB;
     std::vector<float> vB;
@@ -660,8 +645,7 @@ TEST(TestCpuFpReferenceSdpaRaggedFp32, ThrowsOnPerQueryHeadQDescaleUnderGqa)
                  std::invalid_argument);
 }
 
-// --- validateInput() negative cases: each builds valid rank-4 ragged q/k/v/o with exactly one
-//     dimension wrong so forward() throws in validateInput() before any addressing. ---
+// --- validateInput() cases: one dimension wrong, everything else valid ---
 
 TEST(TestCpuFpReferenceSdpaRaggedFp32, ThrowsOnBatchMismatch)
 {
@@ -707,8 +691,8 @@ TEST(TestCpuFpReferenceSdpaRaggedFp32, ThrowsOnKvSeqExtentMismatch)
 
 // --- Tensors sharing a packing must describe the same per-batch sequence lengths ---
 
-// Reviewer repro: K lengths {2, 1} and V lengths {1, 2} with the same S_max, zero Q/K, packed V
-// {10, 20, 30}. Unchecked, batch 0 averaged in batch 1's V row (output {15, 20}).
+// Reviewer repro: K lengths {2, 1} and V lengths {1, 2} with the same S_max. Without the check,
+// batch 0 averaged in batch 1's V row and returned {15, 20}.
 TEST(TestCpuFpReferenceSdpaRaggedFp32, ThrowsOnKvSequenceLengthMismatch)
 {
     std::vector<float> qB;
@@ -774,8 +758,8 @@ TEST(TestCpuFpReferenceSdpaRaggedFp32, ThrowsOnNonRaggedOutput)
 namespace
 {
 
-// Overwrites a ragged tensor's offset table after construction. The tensor checked only the
-// original table, so the reference has to catch a bad edited one itself.
+// Rewrites a ragged tensor's offset table after construction. The tensor only checked the
+// original table, so the reference must catch a bad one itself.
 void setTokenOffsets(ITensor& aux, const std::vector<int64_t>& tokens, int64_t seqStride)
 {
     auto& offsets = static_cast<Tensor<int32_t>&>(aux);
@@ -786,8 +770,8 @@ void setTokenOffsets(ITensor& aux, const std::vector<int64_t>& tokens, int64_t s
     }
 }
 
-// B = 2, H = 1, D = 16, S_max = 2 over 4-token buffers, built valid with lengths {2, 2}. Q's and
-// O's offsets are then replaced by qTokens. Returns whether forward() threw std::invalid_argument.
+// Builds valid B = 2, S_max = 2 ragged inputs, then rewrites Q's and O's offsets to qTokens.
+// Returns whether forward() threw std::invalid_argument.
 bool throwsOnEditedQTokens(const std::vector<int64_t>& qTokens)
 {
     const std::vector<int64_t> dims = {2, 1, 2, 16};

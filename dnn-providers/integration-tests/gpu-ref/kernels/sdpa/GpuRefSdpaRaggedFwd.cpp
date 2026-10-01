@@ -1,27 +1,23 @@
 // Copyright © Advanced Micro Devices, Inc., or its affiliates.
 // SPDX-License-Identifier:  MIT
 
-// GPU reference ragged (RFC-0014: packed [B,H,S,D] + ragged_offset) SDPA forward kernel.
-// Compiled via HipRTC with -DQ_TYPE=<type> -DK_TYPE=<type> -DV_TYPE=<type>
-// -DO_TYPE=<type> -DCOMPUTE_TYPE=<type>.
+// GPU reference SDPA forward for ragged tensors (RFC-0014: packed [B,H,S,D] + ragged_offset).
+// Compiled via HipRTC with -DQ_TYPE, -DK_TYPE, -DV_TYPE, -DO_TYPE and -DCOMPUTE_TYPE.
 //
-// Logical rank-4 dims [B, H, S, D] with BSHD-layout strides (seq stride = s[2] = H*D):
-//   q=[B,H,Sq,D]  k=[B,Hk,Skv,D]  v=[B,Hv,Skv,Dv]  o=[B,H,Sq,Dv].
-// The physical buffer is packed in global-token order, so globalToken*seqStride + h*headStride + d
-// addresses every tensor. raggedOffsetQ / raggedOffsetKv are cumulative ELEMENT offsets (RFC-0014);
-// dividing by the per-tensor seq stride recovers token boundaries. One thread per output element
-// (tokenGlobalQ, h, dv). Each thread maps its global Q token to a batch via raggedOffsetQ and
-// bounds/aligns the key loop by that batch's own seqQ_b / seqKv_b. Numerics (fp32 softmax,
-// provider-attuned P storage) mirror GpuRefSdpaFwd.cpp exactly.
+// Tensors are logical [B, H, S, D] with BSHD strides, packed by token with no per-batch padding:
+// q=[B,H,Sq,D], k=[B,Hk,Skv,D], v=[B,Hv,Skv,Dv], o=[B,H,Sq,Dv].
+// raggedOffsetQ/raggedOffsetKv are cumulative element offsets. Dividing by the seq stride gives
+// token boundaries. One thread per output element (tokenGlobalQ, h, dv). Each thread finds its
+// batch and uses that batch's own seqQ/seqKv for the key loop and mask alignment.
+// Numerics match GpuRefSdpaFwd.cpp.
 
 #include "GpuRefSdpaArgs.h"
 #include "GpuRefTypes.h"
 
 using namespace gpu_ref;
 
-// The kernel computes in float: expf, -__builtin_huge_valf(), and the std::exp-matching
-// softmax all assume it. COMPUTE_TYPE is float by design (see buildSdpaDefines); enforce it
-// so a non-float compute path fails loudly at compile time instead of silently truncating.
+// expf, -__builtin_huge_valf() and the softmax below assume float. Fail at compile time
+// rather than silently truncate.
 static_assert(__is_same(COMPUTE_TYPE, float), "GpuRefSdpaRaggedFwd requires COMPUTE_TYPE == float");
 
 #define SDPA_SOFTMAX_PROBABILITY_FLOAT 0
@@ -37,8 +33,7 @@ namespace
 
 __device__ inline float truncatePositiveFloatToBfloat16(float value)
 {
-    // Softmax probabilities are non-negative, so clearing the low 16 mantissa bits
-    // is exactly round-toward-zero for the bf16 P-storage cast.
+    // Softmax probabilities are non-negative, so clearing the low 16 bits rounds toward zero.
     unsigned int bits = __builtin_bit_cast(unsigned int, value) & 0xFFFF0000U;
     return __builtin_bit_cast(float, bits);
 }
@@ -50,16 +45,14 @@ __device__ inline COMPUTE_TYPE storeSoftmaxProbability(COMPUTE_TYPE probability)
 #elif SDPA_SOFTMAX_PROBABILITY_MODE == SDPA_SOFTMAX_PROBABILITY_BFLOAT16_RTNE
     return static_cast<COMPUTE_TYPE>(static_cast<__bf16>(probability));
 #elif SDPA_SOFTMAX_PROBABILITY_MODE == SDPA_SOFTMAX_PROBABILITY_BFLOAT16_RTZ
-    // Softmax probabilities are non-negative, so truncating the low 16 mantissa bits
-    // implements round-toward-zero for the provider's P-storage cast.
     return static_cast<COMPUTE_TYPE>(truncatePositiveFloatToBfloat16(probability));
 #else
 #error "Unsupported SDPA_SOFTMAX_PROBABILITY_MODE"
 #endif
 }
 
-// Where each batch's queries and keys live. All per-batch addressing goes through the helpers
-// below, so paged KV only has to swap in seq_len_kv and a page-table lookup here.
+// Per-batch Q and K/V token ranges. All per-batch addressing goes through the helpers below,
+// so paged KV only has to add seq_len_kv and a page-table lookup here.
 struct BatchRange
 {
     long long b;
@@ -74,8 +67,8 @@ __device__ inline long long tokenAt(const int* offsets, long long i, long long s
     return static_cast<long long>(offsets[i]) / seqStride;
 }
 
-// Batch that owns a global Q token. A linear scan is fine for a reference. Empty batches own no
-// tokens, so they are never returned.
+// Batch that owns a global Q token. A linear scan is fine for a reference. Empty batches own
+// no tokens, so they are never returned.
 __device__ inline long long findBatch(const SdpaRaggedFwdArgs& args, long long tokenGlobalQ)
 {
     long long b = 0;
@@ -116,8 +109,7 @@ extern "C" __global__ void sdpaRaggedFwdRef(SdpaRaggedFwdArgs args)
     auto* k = static_cast<const K_TYPE*>(args.k);
     auto* v = static_cast<const V_TYPE*>(args.v);
     auto* o = static_cast<O_TYPE*>(args.o);
-    // LSE is always float, logical [B, H, Sq, 1]; nullptr disables it. Written once per
-    // (tokenGlobalQ, h) by the dv == 0 thread (see below).
+    // LSE is float, logical [B, H, Sq, 1]. nullptr disables it.
     auto* lse = static_cast<float*>(args.lse);
 
     long long totalOutputElements = args.totalQ * args.numHeads * args.headDimV;
@@ -128,7 +120,7 @@ extern "C" __global__ void sdpaRaggedFwdRef(SdpaRaggedFwdArgs args)
         return;
     }
 
-    // Decompose linear index into (tokenGlobalQ, h, dv) for the packed [total_q, H, Dv] output.
+    // Linear index -> (tokenGlobalQ, h, dv) in the packed [total_q, H, Dv] output.
     long long dv = idx % args.headDimV;
     long long tmp = idx / args.headDimV;
     long long h = tmp % args.numHeads;
@@ -144,10 +136,8 @@ extern "C" __global__ void sdpaRaggedFwdRef(SdpaRaggedFwdArgs args)
     long long kvHeadK = h / (args.numHeads / args.numHeadsK);
     long long kvHeadV = h / (args.numHeads / args.numHeadsV);
 
-    // Optional fp8 Q/K/V descale, constant per thread (b, h, kvHead* are fixed). 1 when absent.
-    // Q and K are indexed by the K head, V by the V head (AITER's [B, H_kv] contract). Applied as
-    // score *= descaleQ*descaleK and output *= descaleV (AITER fp8 fwd contract: Q/K/V descale
-    // only, no softmax/output requant).
+    // fp8 descale, 1 when absent. Q and K use the K head, V uses the V head (AITER [B, H_kv]
+    // contract). No softmax or output requant.
     const COMPUTE_TYPE descaleQ
         = args.descaleQ != nullptr
               ? args.descaleQ[b * args.descaleQBatchStride + kvHeadK * args.descaleQHeadStride]
@@ -162,18 +152,14 @@ extern "C" __global__ void sdpaRaggedFwdRef(SdpaRaggedFwdArgs args)
               : static_cast<COMPUTE_TYPE>(1);
     const COMPUTE_TYPE descaleQK = descaleQ * descaleK;
 
-    // Per-batch sliding-window offset (matches CpuFpReferenceSdpa Step 3), using this
-    // batch's own seqQ/seqKv rather than global lengths.
+    // Window alignment uses this batch's seqQ/seqKv, as in CpuFpReferenceSdpa step 3.
     long long windowOffset = args.topLeftAlignment ? 0 : (seqKv - seqQ);
 
-    // Negative infinity sentinel for masked scores. INFINITY (a <math.h> macro)
-    // is unavailable under HipRTC's self-contained preinclude, so use the clang
-    // builtin (matches the __builtin_* idiom in GpuRefTypes.h).
+    // INFINITY from <math.h> is not available under HipRTC, so use the clang builtin.
     const COMPUTE_TYPE negInf = -__builtin_huge_valf();
 
-    // Lambda computing the masked, scaled score for a single within-batch kv position.
-    // Recomputed in both softmax passes (correctness over speed for a reference). Rank-4 BSHD
-    // strides: s[2] = seq/token, s[1] = head, s[3] = dim.
+    // Masked, scaled score for within-batch key skv. Recomputed in each pass to keep the
+    // reference simple. BSHD strides: s[1] head, s[2] token, s[3] dim.
     auto score = [&](long long skv) -> COMPUTE_TYPE {
         const long long kRowBase = kRow(args, range, skv);
         COMPUTE_TYPE dot = static_cast<COMPUTE_TYPE>(0);
@@ -184,11 +170,11 @@ extern "C" __global__ void sdpaRaggedFwdRef(SdpaRaggedFwdArgs args)
             long long kIdx = kRowBase + kvHeadK * args.kStr.s[1] + d * args.kStr.s[3];
             dot += toAccum(q[qIdx]) * toAccum(k[kIdx]);
         }
-        // descaleQK folds the fp8 Q/K dequant scalars into the score (both constant over d).
+        // Fold in the fp8 Q/K descale.
         COMPUTE_TYPE s = dot * descaleQK * static_cast<COMPUTE_TYPE>(args.scale);
 
-        // Sliding-window mask, per-batch aligned. Asymmetric: +1 on the right bound,
-        // none on the left bound. No additive bias (gated off on the ASM v3 path).
+        // Sliding-window mask, aligned per batch. Only the right bound gets the +1.
+        // No additive bias: it is gated off on the ASM v3 path.
         if(args.rightBound >= 0)
         {
             long long startKv = sq + 1 + windowOffset + args.rightBound;
@@ -211,7 +197,7 @@ extern "C" __global__ void sdpaRaggedFwdRef(SdpaRaggedFwdArgs args)
         return s;
     };
 
-    // PASS 1: numerically stable softmax maximum over this batch's key range.
+    // Pass 1: row max for a stable softmax.
     COMPUTE_TYPE maxVal = negInf;
     for(long long skv = 0; skv < seqKv; ++skv)
     {
@@ -225,21 +211,19 @@ extern "C" __global__ void sdpaRaggedFwdRef(SdpaRaggedFwdArgs args)
     long long oIdx = tokenGlobalQ * args.oStr.s[2] + h * args.oStr.s[1] + dv * args.oStr.s[3];
     O_TYPE* tag = nullptr;
 
-    // LSE is per (tokenGlobalQ, h); only the dv == 0 thread writes it, so every output
-    // row has exactly one writer and there is no contention. Batch b starts at its own
-    // ragged_offset[b] for a ragged (packed) LSE, else at b * lseStr.s[0] for a dense
-    // [B, H, Sq_max, 1] LSE; within the batch, the query row is the batch-relative sq.
+    // Only the dv == 0 thread writes LSE, so each (token, h) has one writer. A ragged LSE
+    // starts batch b at raggedOffsetLse[b], a dense one at b * lseStr.s[0].
     const long long lseBatchBase = args.raggedOffsetLse != nullptr
                                        ? static_cast<long long>(args.raggedOffsetLse[b])
                                        : b * args.lseStr.s[0];
     long long lseIdx = lseBatchBase + h * args.lseStr.s[1] + sq * args.lseStr.s[2];
 
-    // Fully-masked row (no keys in range, incl. seqKv == 0): probabilities are all zero,
-    // so the output is zero. Matches CpuFpReferenceSdpa (avoids a 0/0 NaN).
+    // Fully masked row, including seqKv == 0: write zero to match CpuFpReferenceSdpa and
+    // avoid a 0/0 NaN.
     if(maxVal == negInf)
     {
         o[oIdx] = fromAccum(static_cast<COMPUTE_TYPE>(0), tag);
-        // CPU writes maxVal + log(sumExp) = -inf + log(0) = -inf for masked rows.
+        // Matches the CPU's -inf + log(0) = -inf.
         if(lse != nullptr && dv == 0)
         {
             lse[lseIdx] = negInf;
@@ -247,20 +231,17 @@ extern "C" __global__ void sdpaRaggedFwdRef(SdpaRaggedFwdArgs args)
         return;
     }
 
-    // PASS 2: softmax denominator.
+    // Pass 2: softmax denominator.
     COMPUTE_TYPE sumExp = static_cast<COMPUTE_TYPE>(0);
     for(long long skv = 0; skv < seqKv; ++skv)
     {
         COMPUTE_TYPE s = score(skv);
-        // COMPUTE_TYPE is float (enforced by the static_assert above), so expf is the
-        // correct-precision call; device expf and the oracle's host std::exp<float> agree
-        // to within the test tolerance, not bit-for-bit.
+        // Device expf and host std::exp<float> agree within test tolerance, not bit-for-bit.
         sumExp += expf(s - maxVal);
     }
 
-    // PASS 3: weighted sum over V. Provider-attuned modes round the normalized
-    // softmax probability before P@V, matching matrix-core SDPA kernels that
-    // materialize P in bf16 before the second matmul.
+    // Pass 3: P @ V. Provider-attuned modes round P to bf16 first, as matrix-core kernels do
+    // before the second matmul.
     COMPUTE_TYPE weighted = static_cast<COMPUTE_TYPE>(0);
     for(long long skv = 0; skv < seqKv; ++skv)
     {
@@ -272,13 +253,13 @@ extern "C" __global__ void sdpaRaggedFwdRef(SdpaRaggedFwdArgs args)
         weighted += probability * toAccum(v[vIdx]);
     }
 
-    // descaleV folds the fp8 V dequant scalar into the output (constant over the P@V sum).
+    // Fold in the fp8 V descale.
     weighted *= descaleV;
 
     o[oIdx] = fromAccum(weighted, tag);
 
-    // LSE = maxVal + log(sumExp), matching CpuFpReferenceSdpa. sumExp is the
-    // pre-normalization softmax denominator (>= 1, since exp(maxVal-maxVal)=1).
+    // LSE = maxVal + log(sumExp), as in CpuFpReferenceSdpa. sumExp >= 1 because the max term
+    // contributes exp(0).
     if(lse != nullptr && dv == 0)
     {
         lse[lseIdx] = static_cast<float>(maxVal) + logf(sumExp);

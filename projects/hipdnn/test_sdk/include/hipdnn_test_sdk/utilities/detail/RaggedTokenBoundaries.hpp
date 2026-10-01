@@ -11,11 +11,11 @@
 namespace hipdnn_test_sdk::detail
 {
 
-// Turns an RFC-0014 ragged_offset table (B+1 cumulative element offsets) into token boundaries:
-// offset[b] / seqStride. Tensors with different per-token widths share a packing but not their
-// element offsets, so cross-tensor checks compare token boundaries, never raw offsets.
-// Throws std::invalid_argument unless offset[0] == 0, every offset is a whole number of tokens,
-// offsets never decrease, and no batch is longer than sMax (the tensor's dims()[2]).
+// Converts an RFC-0014 ragged_offset table (B + 1 element offsets) to token boundaries,
+// offset[b] / seqStride. Tensors with different token widths share a packing but not element
+// offsets, so cross-tensor checks compare tokens.
+// Throws std::invalid_argument unless seqStride > 0, offset[0] == 0, each offset is a whole
+// number of tokens, offsets never decrease, and no batch is longer than sMax (dims()[2]).
 inline std::vector<int64_t> raggedTokenBoundaries(const std::vector<int64_t>& elementOffsets,
                                                   int64_t seqStride,
                                                   int64_t sMax,
@@ -64,8 +64,8 @@ inline std::vector<int64_t> raggedTokenBoundaries(const std::vector<int64_t>& el
     return tokens;
 }
 
-// Throws std::invalid_argument unless two tensors that must share a packing (Q/O, K/V, Q/LSE) have
-// identical token boundaries, i.e. the same per-batch sequence lengths at the same positions.
+// Throws std::invalid_argument unless two tensors that share a packing (Q/O, K/V, Q/LSE) have the
+// same token boundaries.
 inline void requireMatchingTokenBoundaries(const std::vector<int64_t>& a,
                                            const char* aName,
                                            const std::vector<int64_t>& b,

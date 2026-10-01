@@ -57,8 +57,8 @@ struct HipRtcTypeName<int32_t>
     static constexpr const char* VALUE = "int";
 };
 
-// fp8 E4M3 (OCP) maps to the self-contained device decode type defined in GpuRefTypes.h
-// (gpu_ref::GpuRefFp8E4M3); the SDPA kernel's `using namespace gpu_ref` brings it into scope.
+// fp8 E4M3 (OCP) maps to the device type gpu_ref::GpuRefFp8E4M3 from GpuRefTypes.h. The SDPA
+// kernel's `using namespace gpu_ref` brings it into scope.
 template <>
 struct HipRtcTypeName<hipdnn_data_sdk::types::fp8_e4m3>
 {

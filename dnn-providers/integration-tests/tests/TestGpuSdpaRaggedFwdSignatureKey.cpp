@@ -27,8 +27,7 @@ constexpr int64_t O_UID = 13;
 constexpr int64_t RAGGED_OFFSET_Q_UID = 20;
 constexpr int64_t RAGGED_OFFSET_KV_UID = 21;
 
-// Packed rank-4 [B=1, H=2, S=8, D=16] for a single ragged batch. Shape is irrelevant to keying/
-// dispatch; only dtypes and the presence of ragged_offset on the primaries matter here.
+// One ragged batch. Only dtypes and ragged_offset matter here, not the shape.
 const std::vector<int64_t> DIMS = {1, 2, 8, 16};
 
 flatbuffers::FlatBufferBuilder makeRaggedGraph(DataType dataType)
@@ -93,11 +92,8 @@ TEST(TestGpuSdpaRaggedFwdSignatureKey, CreateFromNodeAndTensorMap)
     EXPECT_TRUE(keyFromNode == expectedKey);
 }
 
-// The core dispatch contract, observed through the public executor surface: a bf16 node whose Q
-// primary carries a ragged_offset_tensor_uid is applicable, and it can ONLY be applicable via the
-// ragged plan because the dense plan rejects any primary with ragged_offset set. So applicability
-// here proves the node was routed to (and accepted by) the ragged reference rather than the dense
-// one.
+// The dense plan rejects any primary with ragged_offset, so an applicable node here must have
+// been taken by the ragged plan.
 TEST(TestGpuSdpaRaggedFwdSignatureKey, ExecutorRoutesRaggedBf16NodeToRaggedPlan)
 {
     using hipdnn_integration_tests::gpu_graph_executor::GpuReferenceGraphExecutor;
@@ -112,8 +108,7 @@ TEST(TestGpuSdpaRaggedFwdSignatureKey, ExecutorRoutesRaggedBf16NodeToRaggedPlan)
     EXPECT_TRUE(executor.isApplicable(denseBuilder.GetBufferPointer(), denseBuilder.GetSize()));
 }
 
-// The fp8 combo (FP8_E4M3 Q/K/V -> BFLOAT16 O, with Q/K/V descale) keys and routes to the ragged
-// plan the same way. Descale tensors are scalar [1] FLOAT.
+// fp8 Q/K/V with bf16 O and scalar descales keys and routes to the ragged plan too.
 TEST(TestGpuSdpaRaggedFwdSignatureKey, Fp8NodeKeyAndRouting)
 {
     using hipdnn_integration_tests::gpu_graph_executor::GpuReferenceGraphExecutor;

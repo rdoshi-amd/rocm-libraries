@@ -160,10 +160,8 @@ private:
                 node, tensorMap, node.compute_data_type());
         case NodeAttrs::SdpaAttributes:
         {
-            // Ragged (RFC-0014: packed [B,H,S,D] + ragged_offset) SDPA nodes carry a
-            // ragged_offset_tensor_uid on their Q primary and use a distinct packed reference; dense
-            // nodes go to GpuSdpaFwdSignatureKey. The two keys are separate registry buckets, so this
-            // is the single dispatch point they share.
+            // A ragged SDPA node (RFC-0014 packed layout) has a ragged_offset_tensor_uid on Q.
+            // Dense and ragged keys live in separate registry buckets, and this is where we pick.
             const auto* sdpaAttributes = node.attributes_as_SdpaAttributes();
             if(sdpaAttributes != nullptr)
             {

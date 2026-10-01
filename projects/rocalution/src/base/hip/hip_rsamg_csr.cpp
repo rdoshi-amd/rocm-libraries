@@ -741,6 +741,13 @@ namespace rocalution
         }
         CHECK_HIP_ERROR(__FILE__, __LINE__);
 
+        cast_pi->CreateSpMatDescr_();
+
+        if(global == true)
+        {
+            cast_pg->CreateSpMatDescr_();
+        }
+
         return true;
     }
 
@@ -1408,6 +1415,13 @@ namespace rocalution
         }
         CHECK_HIP_ERROR(__FILE__, __LINE__);
 
+        cast_pi->CreateSpMatDescr_();
+
+        if(global == true)
+        {
+            cast_pg->CreateSpMatDescr_();
+        }
+
         return true;
     }
 
@@ -1552,6 +1566,11 @@ namespace rocalution
                                                               cast_fc->mat_.col,
                                                               cast_fc->mat_.val);
         CHECK_HIP_ERROR(__FILE__, __LINE__);
+
+        // The blocks are handed to rocSPARSE, which needs a descriptor over the arrays we
+        // just filled
+        cast_ff->CreateSpMatDescr_();
+        cast_fc->CreateSpMatDescr_();
 
         return true;
     }
@@ -1824,6 +1843,8 @@ namespace rocalution
                                                               cast_p->mat_.col,
                                                               cast_p->mat_.val);
         CHECK_HIP_ERROR(__FILE__, __LINE__);
+
+        cast_p->CreateSpMatDescr_();
 
         return true;
     }

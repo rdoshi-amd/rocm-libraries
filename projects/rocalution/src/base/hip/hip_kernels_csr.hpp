@@ -1616,6 +1616,7 @@ namespace rocalution
         }
         // The row this thread operates on
         I row = blockIdx.x * BLOCKSIZE / WFSIZE + wid;
+
         // Do not run out of bounds
         if(row >= nrow)
         {

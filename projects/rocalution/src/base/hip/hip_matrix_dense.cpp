@@ -492,10 +492,10 @@ namespace rocalution
             this->Clear();
 
             if(csr_to_dense_hip(&this->local_backend_,
+                                cast_mat_csr->nnz_,
                                 cast_mat_csr->nrow_,
                                 cast_mat_csr->ncol_,
                                 cast_mat_csr->mat_,
-                                cast_mat_csr->mat_descr_,
                                 &this->mat_)
                == true)
             {

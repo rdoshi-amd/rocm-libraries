@@ -781,9 +781,7 @@ namespace rocalution
                               cast_mat_ell->nrow_,
                               cast_mat_ell->ncol_,
                               cast_mat_ell->mat_,
-                              cast_mat_ell->mat_descr_,
                               &this->mat_,
-                              this->mat_descr_,
                               &nnz)
                == true)
             {
@@ -807,7 +805,6 @@ namespace rocalution
                                 cast_mat_dense->ncol_,
                                 cast_mat_dense->mat_,
                                 &this->mat_,
-                                this->mat_descr_,
                                 &nnz)
                == true)
             {
@@ -829,14 +826,8 @@ namespace rocalution
             int64_t nnz  = cast_mat_bcsr->mat_.nnzb * cast_mat_bcsr->mat_.blockdim
                           * cast_mat_bcsr->mat_.blockdim;
 
-            if(bcsr_to_csr_hip(&this->local_backend_,
-                               nnz,
-                               nrow,
-                               ncol,
-                               cast_mat_bcsr->mat_,
-                               cast_mat_bcsr->mat_descr_,
-                               &this->mat_,
-                               this->mat_descr_)
+            if(bcsr_to_csr_hip(
+                   &this->local_backend_, nnz, nrow, ncol, cast_mat_bcsr->mat_, &this->mat_)
                == true)
             {
                 this->nrow_ = nrow;

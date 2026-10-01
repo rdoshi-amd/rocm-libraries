@@ -717,9 +717,7 @@ namespace rocalution
                                cast_mat_csr->nrow_,
                                cast_mat_csr->ncol_,
                                cast_mat_csr->mat_,
-                               cast_mat_csr->mat_descr_,
-                               &this->mat_,
-                               this->mat_descr_)
+                               &this->mat_)
                == true)
             {
                 this->nrow_ = this->mat_.nrowb * this->mat_.blockdim;

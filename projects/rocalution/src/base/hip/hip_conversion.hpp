@@ -54,9 +54,7 @@ namespace rocalution
                          IndexType                                           nrow,
                          IndexType                                           ncol,
                          const MatrixCSR<ValueType, IndexType, PointerType>& src,
-                         const rocsparse_mat_descr                           src_descr,
-                         MatrixBCSR<ValueType, IndexType, PointerType>*      dst,
-                         const rocsparse_mat_descr                           dst_descr);
+                         MatrixBCSR<ValueType, IndexType, PointerType>*      dst);
 
     template <typename ValueType, typename IndexType, typename PointerType>
     bool bcsr_to_csr_hip(const Rocalution_Backend_Descriptor*                 backend,
@@ -64,9 +62,7 @@ namespace rocalution
                          IndexType                                            nrow,
                          IndexType                                            ncol,
                          const MatrixBCSR<ValueType, IndexType, PointerType>& src,
-                         const rocsparse_mat_descr                            src_descr,
-                         MatrixCSR<ValueType, IndexType, PointerType>*        dst,
-                         rocsparse_mat_descr                                  dst_descr);
+                         MatrixCSR<ValueType, IndexType, PointerType>*        dst);
 
     template <typename ValueType, typename IndexType, typename PointerType>
     bool csr_to_ell_hip(const Rocalution_Backend_Descriptor*                backend,
@@ -74,9 +70,7 @@ namespace rocalution
                         IndexType                                           nrow,
                         IndexType                                           ncol,
                         const MatrixCSR<ValueType, IndexType, PointerType>& src,
-                        const rocsparse_mat_descr                           src_descr,
                         MatrixELL<ValueType, IndexType>*                    dst,
-                        const rocsparse_mat_descr                           dst_descr,
                         int64_t*                                            nnz_ell);
 
     template <typename ValueType, typename IndexType, typename PointerType>
@@ -85,9 +79,7 @@ namespace rocalution
                         IndexType                                     nrow,
                         IndexType                                     ncol,
                         const MatrixELL<ValueType, IndexType>&        src,
-                        const rocsparse_mat_descr                     src_descr,
                         MatrixCSR<ValueType, IndexType, PointerType>* dst,
-                        const rocsparse_mat_descr                     dst_descr,
                         int64_t*                                      nnz_csr);
 
     template <typename ValueType, typename IndexType, typename PointerType>
@@ -113,10 +105,10 @@ namespace rocalution
 
     template <typename ValueType, typename IndexType, typename PointerType>
     bool csr_to_dense_hip(const Rocalution_Backend_Descriptor*                backend,
+                          int64_t                                             nnz,
                           IndexType                                           nrow,
                           IndexType                                           ncol,
                           const MatrixCSR<ValueType, IndexType, PointerType>& src,
-                          const rocsparse_mat_descr                           src_descr,
                           MatrixDENSE<ValueType>*                             dst);
 
     template <typename ValueType, typename IndexType, typename PointerType>
@@ -125,7 +117,6 @@ namespace rocalution
                           IndexType                                     ncol,
                           const MatrixDENSE<ValueType>&                 src,
                           MatrixCSR<ValueType, IndexType, PointerType>* dst,
-                          const rocsparse_mat_descr                     dst_descr,
                           int64_t*                                      nnz_csr);
 
 } // namespace rocalution

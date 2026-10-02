@@ -7607,8 +7607,9 @@ namespace rocalution
             copy_d2h(1, cast_pg->mat_.row_offset + this->nrow_, &pg_nnz);
             cast_pg->nnz_ = pg_nnz;
 
-            // Initialize ncol of P
-            cast_pg->ncol_ = this->nrow_; // Need to fix this!!!!
+            // Ghost columns are global until RenumberGlobalToLocal(), their number is
+            // bounded by nnz
+            cast_pg->ncol_ = static_cast<int>(cast_pg->nnz_);
 
             // Allocate column and value arrays
             allocate_hip(cast_pg->nnz_, &cast_pg->mat_.col);
@@ -8522,8 +8523,9 @@ namespace rocalution
             copy_d2h(1, cast_pg->mat_.row_offset + this->nrow_, &pg_nnz);
             cast_pg->nnz_ = pg_nnz;
 
-            // Initialize ncol of P
-            cast_pg->ncol_ = this->nrow_; // Need to fix this!!!!
+            // Ghost columns are global until RenumberGlobalToLocal(), their number is
+            // bounded by nnz
+            cast_pg->ncol_ = static_cast<int>(cast_pg->nnz_);
 
             // Allocate column and value arrays
             allocate_hip(cast_pg->nnz_, &cast_pg->mat_.col);
@@ -8930,8 +8932,12 @@ namespace rocalution
         cast_int->SetDataPtrCSR(
             &int_csr_row_ptr, &int_csr_col_ind, &int_csr_val, int_nnz, this->nrow_, this->nrow_);
 
-        cast_gst->SetDataPtrCSR(
-            &gst_csr_row_ptr, &gst_csr_col_ind, &gst_csr_val, gst_nnz, this->nrow_, this->nrow_);
+        cast_gst->SetDataPtrCSR(&gst_csr_row_ptr,
+                                &gst_csr_col_ind,
+                                &gst_csr_val,
+                                gst_nnz,
+                                this->nrow_,
+                                this->ncol_ - this->nrow_);
 
         return true;
     }
@@ -9279,9 +9285,21 @@ namespace rocalution
         free_hip(&int_workspace);
         free_hip(&gst_workspace);
 
-        this->SetDataPtrCSR(&int_csr_row_ptr, &int_csr_col_ind, &int_csr_val, int_nnz, nrow, nrow);
-        cast_gst->SetDataPtrCSR(
-            &gst_csr_row_ptr, &gst_csr_col_ind, &gst_csr_val, gst_nnz, nrow, nrow);
+        // The received rows are not assembled and may hold duplicate entries, so nnz can exceed
+        // nrow * nrow. Ghost columns are global until RenumberGlobalToLocal(), their number is
+        // bounded by nnz.
+        this->SetDataPtrCSR(&int_csr_row_ptr,
+                            &int_csr_col_ind,
+                            &int_csr_val,
+                            int_nnz,
+                            nrow,
+                            std::max(nrow, static_cast<int>(int_nnz)));
+        cast_gst->SetDataPtrCSR(&gst_csr_row_ptr,
+                                &gst_csr_col_ind,
+                                &gst_csr_val,
+                                gst_nnz,
+                                nrow,
+                                static_cast<int>(gst_nnz));
 
         return true;
     }
@@ -10174,9 +10192,15 @@ namespace rocalution
             }
             CHECK_HIP_ERROR(__FILE__, __LINE__);
 
-            // Update matrix
+            // Update matrix, ghost columns are global until RenumberGlobalToLocal(), their
+            // number is bounded by nnz
             this->Clear();
-            this->SetDataPtrCSR(&csr_row_ptr, &csr_col_ind, &csr_val, nnz, nrow, ncol);
+            this->SetDataPtrCSR(&csr_row_ptr,
+                                &csr_col_ind,
+                                &csr_val,
+                                nnz,
+                                nrow,
+                                interior ? ncol : static_cast<int>(nnz));
         }
 
         return true;

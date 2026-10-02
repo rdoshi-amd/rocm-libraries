@@ -669,8 +669,9 @@ namespace rocalution
             copy_d2h(1, cast_pg->mat_.row_offset + this->nrow_, &tmp);
             cast_pg->nnz_ = tmp;
 
-            // Initialize ncol of P ghost
-            cast_pg->ncol_ = this->nrow_;
+            // Ghost columns are global until RenumberGlobalToLocal(), their number is
+            // bounded by nnz
+            cast_pg->ncol_ = static_cast<int>(cast_pg->nnz_);
 
             // Allocate P ghost
             allocate_hip(cast_pg->nnz_, &cast_pg->mat_.col);
@@ -1315,8 +1316,9 @@ namespace rocalution
             copy_d2h(1, cast_pg->mat_.row_offset + this->nrow_, &tmp);
             cast_pg->nnz_ = tmp;
 
-            // Initialize ncol of P ghost
-            cast_pg->ncol_ = this->nrow_;
+            // Ghost columns are global until RenumberGlobalToLocal(), their number is
+            // bounded by nnz
+            cast_pg->ncol_ = static_cast<int>(cast_pg->nnz_);
 
             // Allocate P ghost
             allocate_hip(cast_pg->nnz_, &cast_pg->mat_.col);

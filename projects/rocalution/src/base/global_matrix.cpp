@@ -1268,7 +1268,7 @@ namespace rocalution
 
             // Allocate T ghost
             T->matrix_ghost_.AllocateCSR(
-                "ghost", nnz_recv, T->pm_self_->local_nrow_, T->pm_self_->local_ncol_);
+                "ghost", nnz_recv, T->pm_self_->local_nrow_, T->pm_self_->recv_index_size_);
 
             // Finally generate the ghost of T (global columns)
             LocalVector<int64_t> T_ext_cols;

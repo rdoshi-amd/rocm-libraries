@@ -29,9 +29,9 @@
 namespace rocalution
 {
 
-    template <unsigned int WF_SIZE, typename ValueType, typename IndexType>
+    template <unsigned int WF_SIZE, typename ValueType, typename IndexType, typename PointerType>
     __global__ void kernel_mcsr_spmv(IndexType nrow,
-                                     const IndexType* __restrict__ row_offset,
+                                     const PointerType* __restrict__ row_offset,
                                      const IndexType* __restrict__ col,
                                      const ValueType* __restrict__ val,
                                      const ValueType* __restrict__ in,
@@ -45,12 +45,12 @@ namespace rocalution
 
         for(IndexType ai = warpid; ai < nrow; ai += nwarps)
         {
-            IndexType row_start = row_offset[ai];
-            IndexType row_end   = row_offset[ai + 1];
+            PointerType row_start = row_offset[ai];
+            PointerType row_end   = row_offset[ai + 1];
 
             ValueType sum = static_cast<ValueType>(0);
 
-            for(IndexType aj = row_start + laneid; aj < row_end; aj += WF_SIZE)
+            for(PointerType aj = row_start + laneid; aj < row_end; aj += WF_SIZE)
             {
                 sum = sum + val[aj] * in[col[aj]];
             }
@@ -64,9 +64,9 @@ namespace rocalution
         }
     }
 
-    template <unsigned int WF_SIZE, typename ValueType, typename IndexType>
+    template <unsigned int WF_SIZE, typename ValueType, typename IndexType, typename PointerType>
     __global__ void kernel_mcsr_add_spmv(IndexType nrow,
-                                         const IndexType* __restrict__ row_offset,
+                                         const PointerType* __restrict__ row_offset,
                                          const IndexType* __restrict__ col,
                                          const ValueType* __restrict__ val,
                                          ValueType scalar,
@@ -83,7 +83,7 @@ namespace rocalution
         {
             ValueType sum = static_cast<ValueType>(0);
 
-            for(IndexType aj = row_offset[ai] + laneid; aj < row_offset[ai + 1]; aj += WF_SIZE)
+            for(PointerType aj = row_offset[ai] + laneid; aj < row_offset[ai + 1]; aj += WF_SIZE)
             {
                 sum = sum + scalar * val[aj] * in[col[aj]];
             }

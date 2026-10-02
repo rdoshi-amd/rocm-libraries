@@ -831,7 +831,7 @@ namespace rocalution
                                             const I* __restrict__ csr_col_ind,
                                             const J* __restrict__ gst_csr_row_ptr,
                                             const I* __restrict__ gst_csr_col_ind,
-                                            const I* __restrict__ ext_csr_row_ptr,
+                                            const J* __restrict__ ext_csr_row_ptr,
                                             const bool* __restrict__ S,
                                             const int* __restrict__ cf,
                                             J* __restrict__ row_max)
@@ -990,8 +990,8 @@ namespace rocalution
                     // This is a fine point, check for strongly connected coarse points
 
                     // Row entry and exit of this fine point
-                    I row_begin_j = ext_csr_row_ptr[col_j];
-                    I row_end_j   = ext_csr_row_ptr[col_j + 1];
+                    J row_begin_j = ext_csr_row_ptr[col_j];
+                    J row_end_j   = ext_csr_row_ptr[col_j + 1];
 
                     row_nnz += row_end_j - row_begin_j;
                 }
@@ -1025,7 +1025,7 @@ namespace rocalution
                                             const I* __restrict__ csr_col_ind,
                                             const J* __restrict__ gst_csr_row_ptr,
                                             const I* __restrict__ gst_csr_col_ind,
-                                            const I* __restrict__ ext_csr_row_ptr,
+                                            const J* __restrict__ ext_csr_row_ptr,
                                             const K* __restrict__ ext_csr_col_ind,
                                             const bool* __restrict__ S,
                                             const int* __restrict__ cf,
@@ -1220,11 +1220,11 @@ namespace rocalution
                     // This is a fine point, check for strongly connected coarse points
 
                     // Row entry and exit of this fine point
-                    I row_begin_j = ext_csr_row_ptr[col_j];
-                    I row_end_j   = ext_csr_row_ptr[col_j + 1];
+                    J row_begin_j = ext_csr_row_ptr[col_j];
+                    J row_end_j   = ext_csr_row_ptr[col_j + 1];
 
                     // Loop over all columns of the fine point
-                    for(I k = row_begin_j; k < row_end_j; ++k)
+                    for(J k = row_begin_j; k < row_end_j; ++k)
                     {
                         // Get the (global) column index
                         K gcol_k = ext_csr_col_ind[k];
@@ -1294,9 +1294,9 @@ namespace rocalution
                                              const J* __restrict__ gst_csr_row_ptr,
                                              const I* __restrict__ gst_csr_col_ind,
                                              const T* __restrict__ gst_csr_val,
-                                             const I* __restrict__ dummy_row_ptr,
+                                             const J* __restrict__ dummy_row_ptr,
                                              const K* __restrict__ dummy_col_ind,
-                                             const I* __restrict__ ext_csr_row_ptr,
+                                             const J* __restrict__ ext_csr_row_ptr,
                                              const K* __restrict__ ext_csr_col_ind,
                                              const T* __restrict__ ext_csr_val,
                                              const K* __restrict__ l2g,
@@ -1487,11 +1487,11 @@ namespace rocalution
                     // This is a fine point, check for strongly connected coarse points
 
                     // Row entry and exit of this fine point
-                    I ext_row_begin_k = dummy_row_ptr[col_ik];
-                    I ext_row_end_k   = dummy_row_ptr[col_ik + 1];
+                    J ext_row_begin_k = dummy_row_ptr[col_ik];
+                    J ext_row_end_k   = dummy_row_ptr[col_ik + 1];
 
                     // Loop over all columns of the fine point
-                    for(I l = ext_row_begin_k; l < ext_row_end_k; ++l)
+                    for(J l = ext_row_begin_k; l < ext_row_end_k; ++l)
                     {
                         // Get the (global) column index
                         K gcol_kl = dummy_col_ind[l];
@@ -1744,14 +1744,14 @@ namespace rocalution
                 {
                     T sum_l = zero;
 
-                    I row_begin_k = ext_csr_row_ptr[col_ik];
-                    I row_end_k   = ext_csr_row_ptr[col_ik + 1];
+                    J row_begin_k = ext_csr_row_ptr[col_ik];
+                    J row_end_k   = ext_csr_row_ptr[col_ik + 1];
 
                     // Diagonal element // TODO outside of kernel!!
                     T val_kk = zero;
                     K grow_k = l2g[col_ik];
 
-                    for(I l = row_begin_k; l < row_end_k; ++l)
+                    for(J l = row_begin_k; l < row_end_k; ++l)
                     {
                         // Get the (global) column index
                         K gcol_kl = ext_csr_col_ind[l];
@@ -1813,7 +1813,7 @@ namespace rocalution
                     sum_l = val_ik / sum_l;
 
                     // Aext
-                    for(I l = row_begin_k; l < row_end_k; ++l)
+                    for(J l = row_begin_k; l < row_end_k; ++l)
                     {
                         // Get the column index
                         K gcol_kl = ext_csr_col_ind[l];
@@ -1976,7 +1976,7 @@ namespace rocalution
                                                             const I* __restrict__ gst_csr_col_ind,
                                                             const int* __restrict__ cf,
                                                             const bool* __restrict__ S,
-                                                            I* __restrict__ row_nnz)
+                                                            J* __restrict__ row_nnz)
     {
         I gid = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -2054,7 +2054,7 @@ namespace rocalution
         const K* __restrict__ l2g,
         const I* __restrict__ cf,
         const bool* __restrict__ S,
-        const I* __restrict__ ext_csr_row_ptr,
+        const J* __restrict__ ext_csr_row_ptr,
         K* __restrict__ ext_csr_col_ind)
     {
         I gid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -2067,7 +2067,7 @@ namespace rocalution
 
         // Get boundary row and index into A_ext
         I row = boundary_index[gid];
-        I idx = ext_csr_row_ptr[gid];
+        J idx = ext_csr_row_ptr[gid];
 
         // Extract interior part
         J row_begin = int_csr_row_ptr[row];

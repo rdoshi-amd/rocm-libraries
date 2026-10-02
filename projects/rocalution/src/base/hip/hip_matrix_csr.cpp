@@ -3913,7 +3913,8 @@ namespace rocalution
     {
         assert(row_nnz != NULL);
 
-        HIPAcceleratorVector<int>* cast_vec = dynamic_cast<HIPAcceleratorVector<int>*>(row_nnz);
+        HIPAcceleratorVector<PtrType>* cast_vec
+            = dynamic_cast<HIPAcceleratorVector<PtrType>*>(row_nnz);
         const HIPAcceleratorVector<int>* cast_idx
             = dynamic_cast<const HIPAcceleratorVector<int>*>(&boundary_index);
         const HIPAcceleratorMatrixCSR<ValueType>* cast_gst
@@ -3957,8 +3958,8 @@ namespace rocalution
         assert(bnd_csr_col_ind != NULL);
         assert(bnd_csr_val != NULL);
 
-        const HIPAcceleratorVector<int>* cast_ptr
-            = dynamic_cast<const HIPAcceleratorVector<int>*>(&bnd_csr_row_ptr);
+        const HIPAcceleratorVector<PtrType>* cast_ptr
+            = dynamic_cast<const HIPAcceleratorVector<PtrType>*>(&bnd_csr_row_ptr);
         HIPAcceleratorVector<int64_t>* cast_col
             = dynamic_cast<HIPAcceleratorVector<int64_t>*>(bnd_csr_col_ind);
         HIPAcceleratorVector<ValueType>* cast_val
@@ -9039,8 +9040,8 @@ namespace rocalution
     {
         const HIPAcceleratorVector<int>* cast_bnd
             = dynamic_cast<const HIPAcceleratorVector<int>*>(&boundary);
-        const HIPAcceleratorVector<int>* cast_ptr
-            = dynamic_cast<const HIPAcceleratorVector<int>*>(&recv_csr_row_ptr);
+        const HIPAcceleratorVector<PtrType>* cast_ptr
+            = dynamic_cast<const HIPAcceleratorVector<PtrType>*>(&recv_csr_row_ptr);
         const HIPAcceleratorVector<int64_t>* cast_col
             = dynamic_cast<const HIPAcceleratorVector<int64_t>*>(&recv_csr_col_ind);
         const HIPAcceleratorVector<ValueType>* cast_val
@@ -9079,7 +9080,7 @@ namespace rocalution
                                     this->mat_.row_offset,
                                     0,
                                     this->nrow_ + 1,
-                                    rocprim::plus<int>(),
+                                    rocprim::plus<PtrType>(),
                                     HIPSTREAM(_get_backend_descriptor()->HIP_stream_current)));
         CHECK_HIP_ERROR(__FILE__, __LINE__);
 
@@ -9092,7 +9093,7 @@ namespace rocalution
                                     this->mat_.row_offset,
                                     0,
                                     this->nrow_ + 1,
-                                    rocprim::plus<int>(),
+                                    rocprim::plus<PtrType>(),
                                     HIPSTREAM(_get_backend_descriptor()->HIP_stream_current)));
         CHECK_HIP_ERROR(__FILE__, __LINE__);
 
@@ -9146,8 +9147,8 @@ namespace rocalution
 
         const HIPAcceleratorVector<int>* cast_bnd
             = dynamic_cast<const HIPAcceleratorVector<int>*>(&boundary);
-        const HIPAcceleratorVector<int>* cast_ptr
-            = dynamic_cast<const HIPAcceleratorVector<int>*>(&recv_csr_row_ptr);
+        const HIPAcceleratorVector<PtrType>* cast_ptr
+            = dynamic_cast<const HIPAcceleratorVector<PtrType>*>(&recv_csr_row_ptr);
         const HIPAcceleratorVector<int64_t>* cast_col
             = dynamic_cast<const HIPAcceleratorVector<int64_t>*>(&recv_csr_col_ind);
         const HIPAcceleratorVector<ValueType>* cast_val

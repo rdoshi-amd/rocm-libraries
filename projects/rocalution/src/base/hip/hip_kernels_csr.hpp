@@ -298,7 +298,7 @@ namespace rocalution
     // Calculates the number of non-zero elements per row
     template <typename I, typename J>
     __global__ void
-        kernel_calc_row_nnz(I nrow, const J* __restrict__ row_offset, I* __restrict__ row_nnz)
+        kernel_calc_row_nnz(I nrow, const J* __restrict__ row_offset, J* __restrict__ row_nnz)
     {
         I ai = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -3136,7 +3136,7 @@ namespace rocalution
                                                          const I* __restrict__ boundary_index,
                                                          const J* __restrict__ int_csr_row_ptr,
                                                          const J* __restrict__ gst_csr_row_ptr,
-                                                         I* __restrict__ row_nnz)
+                                                         J* __restrict__ row_nnz)
     {
         I gid = blockIdx.x * blockDim.x + threadIdx.x;
         // Do not run out of bounds
@@ -3160,7 +3160,7 @@ namespace rocalution
                                                      const J* __restrict__ ghost_csr_row_ptr,
                                                      const I* __restrict__ ghost_csr_col_ind,
                                                      const K* __restrict__ l2g,
-                                                     const I* __restrict__ send_row_ptr,
+                                                     const J* __restrict__ send_row_ptr,
                                                      K* __restrict__ send_col_ind)
     {
         I gid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -3175,7 +3175,7 @@ namespace rocalution
         I row = boundary_index[gid];
 
         // Index into send array
-        I send_row = send_row_ptr[gid];
+        J send_row = send_row_ptr[gid];
 
         // Extract interior part
         J row_begin = csr_row_ptr[row];
@@ -3212,7 +3212,7 @@ namespace rocalution
                                                      const I* __restrict__ ghost_csr_col_ind,
                                                      const T* __restrict__ ghost_csr_val,
                                                      const K* __restrict__ l2g,
-                                                     const I* __restrict__ send_row_ptr,
+                                                     const J* __restrict__ send_row_ptr,
                                                      K* __restrict__ send_col_ind,
                                                      T* __restrict__ send_val)
     {
@@ -3228,7 +3228,7 @@ namespace rocalution
         I row = boundary_index[gid];
 
         // Index into send array
-        I send_row = send_row_ptr[gid];
+        J send_row = send_row_ptr[gid];
 
         // Extract interior part
         J row_begin = csr_row_ptr[row];
@@ -3259,7 +3259,7 @@ namespace rocalution
     template <typename I, typename J>
     __global__ void kernel_csr_copy_ghost_from_global_nnz(I boundary_size,
                                                           const I* __restrict__ boundary_index,
-                                                          const I* __restrict__ csr_row_ptr,
+                                                          const J* __restrict__ csr_row_ptr,
                                                           J* __restrict__ row_nnz)
     {
         I gid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -3280,7 +3280,7 @@ namespace rocalution
     template <typename T, typename I, typename J, typename K>
     __global__ void kernel_csr_copy_ghost_from_global(I boundary_size,
                                                       const I* __restrict__ boundary_index,
-                                                      const I* __restrict__ csr_row_ptr,
+                                                      const J* __restrict__ csr_row_ptr,
                                                       const K* __restrict__ csr_col_ind,
                                                       const T* __restrict__ csr_val,
                                                       J* __restrict__ ext_row_ptr,
@@ -3298,14 +3298,14 @@ namespace rocalution
         // This row is a boundary row
         I row = boundary_index[gid];
 
-        I row_begin = csr_row_ptr[gid];
-        I row_end   = csr_row_ptr[gid + 1];
+        J row_begin = csr_row_ptr[gid];
+        J row_end   = csr_row_ptr[gid + 1];
 
         // Index into extracted matrix, we have to use atomics here, because other
         // blocks might also update this row
         J idx = atomicAdd(ext_row_ptr + row, row_end - row_begin);
 
-        for(I j = row_begin; j < row_end; ++j)
+        for(J j = row_begin; j < row_end; ++j)
         {
             ext_col_ind[idx] = csr_col_ind[j];
             ext_val[idx]     = csr_val[j];
@@ -3318,7 +3318,7 @@ namespace rocalution
                                                     K global_column_begin,
                                                     K global_column_end,
                                                     const I* __restrict__ boundary_index,
-                                                    const I* __restrict__ csr_row_ptr,
+                                                    const J* __restrict__ csr_row_ptr,
                                                     const K* __restrict__ csr_col_ind,
                                                     J* __restrict__ int_row_nnz,
                                                     J* __restrict__ gst_row_nnz)
@@ -3337,10 +3337,10 @@ namespace rocalution
         I int_nnz = 0;
         I gst_nnz = 0;
 
-        I row_begin = csr_row_ptr[gid];
-        I row_end   = csr_row_ptr[gid + 1];
+        J row_begin = csr_row_ptr[gid];
+        J row_end   = csr_row_ptr[gid + 1];
 
-        for(I j = row_begin; j < row_end; ++j)
+        for(J j = row_begin; j < row_end; ++j)
         {
             K col = csr_col_ind[j];
 
@@ -3366,7 +3366,7 @@ namespace rocalution
                                                 K global_column_begin,
                                                 K global_column_end,
                                                 const I* __restrict__ boundary_index,
-                                                const I* __restrict__ csr_row_ptr,
+                                                const J* __restrict__ csr_row_ptr,
                                                 const K* __restrict__ csr_col_ind,
                                                 const T* __restrict__ csr_val,
                                                 J* __restrict__ int_csr_row_ptr,
@@ -3387,14 +3387,14 @@ namespace rocalution
         // This row is a boundary row
         I row = boundary_index[gid];
 
-        I row_begin = csr_row_ptr[gid];
-        I row_end   = csr_row_ptr[gid + 1];
+        J row_begin = csr_row_ptr[gid];
+        J row_end   = csr_row_ptr[gid + 1];
 
         // Pre-determine, how many nnz we are going to add for this boundary row
         I int_nnz = 0;
         I gst_nnz = 0;
 
-        for(I j = row_begin; j < row_end; ++j)
+        for(J j = row_begin; j < row_end; ++j)
         {
             K col = csr_col_ind[j];
 
@@ -3412,10 +3412,10 @@ namespace rocalution
 
         // Index into extracted matrix, we have to use atomics here, because other
         // blocks might also update this row
-        I idx_int = atomicAdd(int_csr_row_ptr + row, int_nnz);
-        I idx_gst = atomicAdd(gst_csr_row_ptr + row, gst_nnz);
+        J idx_int = atomicAdd(int_csr_row_ptr + row, int_nnz);
+        J idx_gst = atomicAdd(gst_csr_row_ptr + row, gst_nnz);
 
-        for(I j = row_begin; j < row_end; ++j)
+        for(J j = row_begin; j < row_end; ++j)
         {
             K col = csr_col_ind[j];
 

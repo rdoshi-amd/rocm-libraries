@@ -50,7 +50,7 @@
                     this->mat_.col,                                             \
                     (PtrType*)NULL,                                             \
                     (int*)NULL,                                                 \
-                    (int*)NULL,                                                 \
+                    (PtrType*)NULL,                                             \
                     (int*)NULL,                                                 \
                     cast_S->vec_,                                               \
                     cast_cf->vec_,                                              \
@@ -108,9 +108,9 @@
                     (PtrType*)NULL,                                              \
                     (int*)NULL,                                                  \
                     (ValueType*)NULL,                                            \
+                    (PtrType*)NULL,                                              \
                     (int*)NULL,                                                  \
-                    (int*)NULL,                                                  \
-                    (int*)NULL,                                                  \
+                    (PtrType*)NULL,                                              \
                     (int*)NULL,                                                  \
                     (ValueType*)NULL,                                            \
                     (int*)NULL,                                                  \
@@ -767,7 +767,8 @@ namespace rocalution
             = dynamic_cast<const HIPAcceleratorVector<bool>*>(&S);
         const HIPAcceleratorMatrixCSR<ValueType>* cast_gst
             = dynamic_cast<const HIPAcceleratorMatrixCSR<ValueType>*>(&ghost);
-        HIPAcceleratorVector<int>* cast_nnz = dynamic_cast<HIPAcceleratorVector<int>*>(row_nnz);
+        HIPAcceleratorVector<PtrType>* cast_nnz
+            = dynamic_cast<HIPAcceleratorVector<PtrType>*>(row_nnz);
 
         assert(cast_bnd != NULL);
         assert(cast_cf != NULL);
@@ -822,8 +823,8 @@ namespace rocalution
             = dynamic_cast<const HIPAcceleratorVector<bool>*>(&S);
         const HIPAcceleratorMatrixCSR<ValueType>* cast_gst
             = dynamic_cast<const HIPAcceleratorMatrixCSR<ValueType>*>(&ghost);
-        const HIPAcceleratorVector<int>* cast_ptr
-            = dynamic_cast<const HIPAcceleratorVector<int>*>(&bnd_csr_row_ptr);
+        const HIPAcceleratorVector<PtrType>* cast_ptr
+            = dynamic_cast<const HIPAcceleratorVector<PtrType>*>(&bnd_csr_row_ptr);
         HIPAcceleratorVector<int64_t>* cast_col
             = dynamic_cast<HIPAcceleratorVector<int64_t>*>(bnd_csr_col_ind);
 
@@ -885,8 +886,8 @@ namespace rocalution
             = dynamic_cast<const HIPAcceleratorVector<bool>*>(&S);
         const HIPAcceleratorMatrixCSR<ValueType>* cast_gst
             = dynamic_cast<const HIPAcceleratorMatrixCSR<ValueType>*>(&ghost);
-        const HIPAcceleratorVector<int>* cast_ptr
-            = dynamic_cast<const HIPAcceleratorVector<int>*>(&bnd_csr_row_ptr);
+        const HIPAcceleratorVector<PtrType>* cast_ptr
+            = dynamic_cast<const HIPAcceleratorVector<PtrType>*>(&bnd_csr_row_ptr);
         const HIPAcceleratorVector<int64_t>* cast_col
             = dynamic_cast<const HIPAcceleratorVector<int64_t>*>(&bnd_csr_col_ind);
         HIPAcceleratorVector<int>* cast_f2c = dynamic_cast<HIPAcceleratorVector<int>*>(f2c);
@@ -951,7 +952,7 @@ namespace rocalution
                     this->mat_.col,
                     (PtrType*)NULL,
                     (int*)NULL,
-                    (int*)NULL,
+                    (PtrType*)NULL,
                     cast_S->vec_,
                     cast_cf->vec_,
                     cast_pi->mat_.row_offset);
@@ -1151,12 +1152,12 @@ namespace rocalution
             = dynamic_cast<const HIPAcceleratorVector<bool>*>(&S);
         const HIPAcceleratorMatrixCSR<ValueType>* cast_gst
             = dynamic_cast<const HIPAcceleratorMatrixCSR<ValueType>*>(&ghost);
-        const HIPAcceleratorVector<int>* cast_ptr
-            = dynamic_cast<const HIPAcceleratorVector<int>*>(&bnd_csr_row_ptr);
+        const HIPAcceleratorVector<PtrType>* cast_ptr
+            = dynamic_cast<const HIPAcceleratorVector<PtrType>*>(&bnd_csr_row_ptr);
         const HIPAcceleratorVector<int64_t>* cast_col
             = dynamic_cast<const HIPAcceleratorVector<int64_t>*>(&bnd_csr_col_ind);
-        const HIPAcceleratorVector<int>* cast_ext_ptr
-            = dynamic_cast<const HIPAcceleratorVector<int>*>(&ext_csr_row_ptr);
+        const HIPAcceleratorVector<PtrType>* cast_ext_ptr
+            = dynamic_cast<const HIPAcceleratorVector<PtrType>*>(&ext_csr_row_ptr);
         const HIPAcceleratorVector<int64_t>* cast_ext_col
             = dynamic_cast<const HIPAcceleratorVector<int64_t>*>(&ext_csr_col_ind);
         const HIPAcceleratorVector<ValueType>* cast_ext_val

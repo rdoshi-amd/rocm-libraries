@@ -4788,7 +4788,7 @@ namespace rocalution
                                     prolong_row_offset,
                                     0,
                                     this->nrow_ + 1,
-                                    rocprim::plus<int>(),
+                                    rocprim::plus<PtrType>(),
                                     HIPSTREAM(_get_backend_descriptor()->HIP_stream_current)));
         CHECK_HIP_ERROR(__FILE__, __LINE__);
 
@@ -4801,7 +4801,7 @@ namespace rocalution
                                     prolong_row_offset,
                                     0,
                                     this->nrow_ + 1,
-                                    rocprim::plus<int>(),
+                                    rocprim::plus<PtrType>(),
                                     HIPSTREAM(_get_backend_descriptor()->HIP_stream_current)));
         CHECK_HIP_ERROR(__FILE__, __LINE__);
 

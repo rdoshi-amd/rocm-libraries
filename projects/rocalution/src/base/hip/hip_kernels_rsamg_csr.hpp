@@ -641,7 +641,7 @@ namespace rocalution
         }
 
         // The row of P this thread operates on
-        I row_P = prolong_csr_row_ptr[row];
+        J row_P = prolong_csr_row_ptr[row];
 
         // If this is a coarse point, we can fill P and return
         if(cf[row] == 1)

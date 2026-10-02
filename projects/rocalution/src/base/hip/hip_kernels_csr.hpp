@@ -1554,11 +1554,11 @@ namespace rocalution
         I nnz = 0;
 
         // Row entry and exit points
-        I row_begin = csr_row_ptr[row];
-        I row_end   = csr_row_ptr[row + 1];
+        J row_begin = csr_row_ptr[row];
+        J row_end   = csr_row_ptr[row + 1];
 
         // Loop over all columns of the i-th row, whereas each lane processes a column
-        for(I j = row_begin + lid; j < row_end; j += WFSIZE)
+        for(J j = row_begin + lid; j < row_end; j += WFSIZE)
         {
             // Get the column index
             I col = csr_col_ind[j];

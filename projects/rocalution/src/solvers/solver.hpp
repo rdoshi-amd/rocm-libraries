@@ -347,6 +347,14 @@ namespace rocalution
         ROCALUTION_EXPORT
         virtual void Verbose(int verb = 1);
 
+        /** \brief Move all data (i.e. move the solver) to the accelerator
+      * \details
+      * If the solver has been built, the operator is analysed again, as an analysis
+      * done during Build() on the host does not carry over to the accelerator.
+      */
+        ROCALUTION_EXPORT
+        virtual void MoveToAccelerator(void);
+
         /** \brief Solve Operator x = rhs */
         ROCALUTION_EXPORT
         virtual void Solve(const VectorType& rhs, VectorType* x);

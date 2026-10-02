@@ -320,6 +320,19 @@ namespace rocalution
     }
 
     template <class OperatorType, class VectorType, typename ValueType>
+    void IterativeLinearSolver<OperatorType, VectorType, ValueType>::MoveToAccelerator(void)
+    {
+        log_debug(this, "IterativeLinearSolver::MoveToAccelerator()");
+
+        Solver<OperatorType, VectorType, ValueType>::MoveToAccelerator();
+
+        if(this->build_ == true && this->op_ != NULL)
+        {
+            this->op_->ApplyAnalyse();
+        }
+    }
+
+    template <class OperatorType, class VectorType, typename ValueType>
     void IterativeLinearSolver<OperatorType, VectorType, ValueType>::Init(double abs_tol,
                                                                           double rel_tol,
                                                                           double div_tol,

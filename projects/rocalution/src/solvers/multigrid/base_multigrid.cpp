@@ -513,6 +513,10 @@ namespace rocalution
                     this->op_level_[i]->MoveToAccelerator();
                     this->restrict_op_level_[i]->MoveToAccelerator();
                     this->prolong_op_level_[i]->MoveToAccelerator();
+
+                    this->op_level_[i]->ApplyAnalyse();
+                    this->restrict_op_level_[i]->ApplyAnalyse();
+                    this->prolong_op_level_[i]->ApplyAnalyse();
                 }
             }
 

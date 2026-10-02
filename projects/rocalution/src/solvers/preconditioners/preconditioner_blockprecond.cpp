@@ -456,6 +456,7 @@ namespace rocalution
                 for(int j = 0; j < this->num_blocks_; ++j)
                 {
                     this->A_block_[i][j]->MoveToAccelerator();
+                    this->A_block_[i][j]->ApplyAnalyse();
                 }
             }
 

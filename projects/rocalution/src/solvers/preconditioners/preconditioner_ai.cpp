@@ -190,6 +190,7 @@ namespace rocalution
         log_debug(this, "AIChebyshev::MoveToAcceleratorLocalData_()", this->build_);
 
         this->AIChebyshev_.MoveToAccelerator();
+        this->AIChebyshev_.ApplyAnalyse();
     }
 
     template <class OperatorType, class VectorType, typename ValueType>
@@ -351,6 +352,9 @@ namespace rocalution
         this->FSAI_L_.MoveToAccelerator();
         this->FSAI_LT_.MoveToAccelerator();
 
+        this->FSAI_L_.ApplyAnalyse();
+        this->FSAI_LT_.ApplyAnalyse();
+
         this->t_.MoveToAccelerator();
     }
 
@@ -470,6 +474,7 @@ namespace rocalution
         log_debug(this, "SPAI::MoveToAcceleratorLocalData_()", this->build_);
 
         this->SPAI_.MoveToAccelerator();
+        this->SPAI_.ApplyAnalyse();
     }
 
     template <class OperatorType, class VectorType, typename ValueType>
@@ -683,6 +688,10 @@ namespace rocalution
         this->TNS_.MoveToHost();
         this->L_.MoveToAccelerator();
         this->LT_.MoveToAccelerator();
+
+        this->L_.ApplyAnalyse();
+        this->LT_.ApplyAnalyse();
+
         this->Dinv_.MoveToAccelerator();
         this->tmp1_.MoveToAccelerator();
         this->tmp2_.MoveToAccelerator();

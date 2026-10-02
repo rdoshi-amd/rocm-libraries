@@ -475,6 +475,7 @@ namespace rocalution
                     for(int j = 0; j < this->num_blocks_; ++j)
                     {
                         this->preconditioner_block_[i][j]->MoveToAccelerator();
+                        this->preconditioner_block_[i][j]->ApplyAnalyse();
                     }
                 }
             }

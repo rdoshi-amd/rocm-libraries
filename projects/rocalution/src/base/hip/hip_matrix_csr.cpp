@@ -1445,11 +1445,12 @@ namespace rocalution
             set_to_zero_hip(this->local_backend_.HIP_block_size, this->nnz_, ilu0);
             assert(ilu0 != NULL);
 
-            status = rocsparseTcsritilu0_compute(
+            status = rocsparseTcsritilu0_compute_ex(
                 ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
                 itilu0_alg,
                 itilu0_option,
                 &max_iter,
+                0,
                 tolerance,
                 this->nrow_,
                 this->nnz_,

@@ -294,20 +294,21 @@ namespace rocalution
 
     // rocsparse csritilu0 compute
     template <typename ValueType>
-    rocsparse_status rocsparseTcsritilu0_compute(rocsparse_handle            handle,
-                                                 rocsparse_itilu0_alg        alg,
-                                                 rocsparse_int               option,
-                                                 rocsparse_int*              nmaxiter,
-                                                 numeric_traits_t<ValueType> tol,
-                                                 rocsparse_int               m,
-                                                 rocsparse_int               nnz,
-                                                 const rocsparse_int*        csr_row_ptr,
-                                                 const rocsparse_int*        csr_col_ind,
-                                                 const ValueType*            csr_val,
-                                                 ValueType*                  ilu0,
-                                                 rocsparse_index_base        idx_base,
-                                                 size_t                      buffer_size,
-                                                 void*                       buffer);
+    rocsparse_status rocsparseTcsritilu0_compute_ex(rocsparse_handle            handle,
+                                                    rocsparse_itilu0_alg        alg,
+                                                    rocsparse_int               option,
+                                                    rocsparse_int*              nmaxiter,
+                                                    rocsparse_int               nfreeiter,
+                                                    numeric_traits_t<ValueType> tol,
+                                                    rocsparse_int               m,
+                                                    rocsparse_int               nnz,
+                                                    const rocsparse_int*        csr_row_ptr,
+                                                    const rocsparse_int*        csr_col_ind,
+                                                    const ValueType*            csr_val,
+                                                    ValueType*                  ilu0,
+                                                    rocsparse_index_base        idx_base,
+                                                    size_t                      buffer_size,
+                                                    void*                       buffer);
 
     // rocsparse csritilu0 history
     template <typename ValueType>

@@ -317,9 +317,9 @@ namespace rocalution
         this->r_level_[0]->CloneBackend(*this->op_);
         this->r_level_[0]->Allocate("residual", this->op_->GetM());
 
+        // No cycle reads the finest level temporary, so it is left empty
         this->t_level_[0] = new VectorType;
         this->t_level_[0]->CloneBackend(*this->op_);
-        this->t_level_[0]->Allocate("temporary", this->op_->GetM());
 
         log_debug(this, "BaseMultiGrid::Initialize()", " #*# end");
     }

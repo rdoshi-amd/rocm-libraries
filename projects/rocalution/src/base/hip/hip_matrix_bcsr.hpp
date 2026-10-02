@@ -118,7 +118,6 @@ namespace rocalution
 
         rocsparse_mat_descr L_mat_descr_;
         rocsparse_mat_descr U_mat_descr_;
-        rocsparse_mat_descr mat_descr_;
 
         rocsparse_spmat_descr spmat_descr_;
 
@@ -126,7 +125,7 @@ namespace rocalution
 
         rocsparse_mat_info mat_info_;
 
-        // Matrix buffer (bsrilu0, bsric0, bsrsv)
+        // Matrix buffer (bsrsv)
         size_t mat_buffer_size_;
         char*  mat_buffer_;
 

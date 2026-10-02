@@ -93,16 +93,7 @@ namespace rocalution
         this->set_backend(local_backend);
 
         this->spmat_descr_ = 0;
-
-        this->L_mat_descr_ = 0;
-        this->U_mat_descr_ = 0;
-
-        this->mat_descr_     = 0;
-        this->mat_info_      = 0;
-        this->mat_info_itsv_ = 0;
-
-        this->mat_buffer_size_ = 0;
-        this->mat_buffer_      = NULL;
+        this->mat_descr_   = 0;
 
         this->tmp_vec_ = NULL;
 
@@ -117,12 +108,6 @@ namespace rocalution
         CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
 
         status = rocsparse_set_mat_type(this->mat_descr_, rocsparse_matrix_type_general);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        status = rocsparse_create_mat_info(&this->mat_info_);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        status = rocsparse_create_mat_info(&this->mat_info_itsv_);
         CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
     }
 
@@ -146,6 +131,14 @@ namespace rocalution
                                              rocsparse_index_base_zero,
                                              rocalution_datatype_traits<ValueType>::value);
             CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+
+            this->L_sptrsv_.Update(this->spmat_descr_);
+            this->LT_sptrsv_.Update(this->spmat_descr_);
+            this->U_sptrsv_.Update(this->spmat_descr_);
+
+            this->L_spitsv_.Update(this->spmat_descr_);
+            this->LT_spitsv_.Update(this->spmat_descr_);
+            this->U_spitsv_.Update(this->spmat_descr_);
         }
     }
 
@@ -173,12 +166,6 @@ namespace rocalution
         rocsparse_status status;
 
         status = rocsparse_destroy_mat_descr(this->mat_descr_);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        status = rocsparse_destroy_mat_info(this->mat_info_);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        status = rocsparse_destroy_mat_info(this->mat_info_itsv_);
         CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
     }
 
@@ -1350,62 +1337,8 @@ namespace rocalution
     {
         if(this->nnz_ > 0)
         {
-            rocsparse_status status;
-
-            assert(this->nnz_ <= std::numeric_limits<int>::max());
-
-            // Create buffer, if not already available
-            size_t buffer_size = 0;
-            status             = rocsparseTcsrilu0_buffer_size(
-                ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                this->nrow_,
-                this->nnz_,
-                this->mat_descr_,
-                this->mat_.val,
-                this->mat_.row_offset,
-                this->mat_.col,
-                this->mat_info_,
-                &buffer_size);
-
-            // Buffer is shared with ILU0 and other solve functions
-            if(this->mat_buffer_ == NULL)
-            {
-                this->mat_buffer_size_ = buffer_size;
-                allocate_hip(buffer_size, &this->mat_buffer_);
-            }
-
-            assert(this->mat_buffer_size_ >= buffer_size);
-            assert(this->mat_buffer_ != NULL);
-
-            status = rocsparseTcsrilu0_analysis(
-                ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                this->nrow_,
-                this->nnz_,
-                this->mat_descr_,
-                this->mat_.val,
-                this->mat_.row_offset,
-                this->mat_.col,
-                this->mat_info_,
-                rocsparse_analysis_policy_reuse,
-                rocsparse_solve_policy_auto,
-                this->mat_buffer_);
-            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-            status = rocsparseTcsrilu0(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                                       this->nrow_,
-                                       this->nnz_,
-                                       this->mat_descr_,
-                                       this->mat_.val,
-                                       this->mat_.row_offset,
-                                       this->mat_.col,
-                                       this->mat_info_,
-                                       rocsparse_solve_policy_auto,
-                                       this->mat_buffer_);
-            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-            status = rocsparse_csrilu0_clear(
-                ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle), this->mat_info_);
-            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+            HIPSpILU0<ValueType>(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
+                                 this->spmat_descr_);
         }
 
         return true;
@@ -1578,69 +1511,8 @@ namespace rocalution
     {
         if(this->nnz_ > 0)
         {
-            rocsparse_status status;
-
-            assert(this->nnz_ <= std::numeric_limits<int>::max());
-
-            // Create buffer, if not already available
-            size_t buffer_size = 0;
-            status             = rocsparseTcsric0_buffer_size(
-                ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                this->nrow_,
-                this->nnz_,
-                this->mat_descr_,
-                this->mat_.val,
-                this->mat_.row_offset,
-                this->mat_.col,
-                this->mat_info_,
-                &buffer_size);
-            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-            // Buffer is shared with IC0 and other solve functions
-            if(this->mat_buffer_ == NULL)
-            {
-                this->mat_buffer_size_ = buffer_size;
-                allocate_hip(buffer_size, &this->mat_buffer_);
-            }
-            else if(this->mat_buffer_size_ < buffer_size)
-            {
-                this->mat_buffer_size_ = buffer_size;
-                free_hip(&this->mat_buffer_);
-                allocate_hip(buffer_size, &this->mat_buffer_);
-            }
-
-            assert(this->mat_buffer_size_ >= buffer_size);
-            assert(this->mat_buffer_ != NULL);
-
-            status = rocsparseTcsric0_analysis(
-                ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                this->nrow_,
-                this->nnz_,
-                this->mat_descr_,
-                this->mat_.val,
-                this->mat_.row_offset,
-                this->mat_.col,
-                this->mat_info_,
-                rocsparse_analysis_policy_reuse,
-                rocsparse_solve_policy_auto,
-                this->mat_buffer_);
-            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-            status = rocsparseTcsric0(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                                      this->nrow_,
-                                      this->nnz_,
-                                      this->mat_descr_,
-                                      this->mat_.val,
-                                      this->mat_.row_offset,
-                                      this->mat_.col,
-                                      this->mat_info_,
-                                      rocsparse_solve_policy_auto,
-                                      this->mat_buffer_);
-            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-            status = rocsparse_csric0_clear(
-                ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle), this->mat_info_);
-            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+            HIPSpIC0<ValueType>(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
+                                this->spmat_descr_);
         }
 
         return true;
@@ -1652,153 +1524,30 @@ namespace rocalution
         assert(this->ncol_ == this->nrow_);
         assert(this->tmp_vec_ == NULL);
 
-        this->tmp_vec_ = new HIPAcceleratorVector<ValueType>(this->local_backend_);
-
-        assert(this->tmp_vec_ != NULL);
-
-        // Status
-        rocsparse_status status;
-
-        // L part
-        status = rocsparse_create_mat_descr(&this->L_mat_descr_);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        status = rocsparse_set_mat_type(this->L_mat_descr_, rocsparse_matrix_type_general);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        status = rocsparse_set_mat_index_base(this->L_mat_descr_, rocsparse_index_base_zero);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        status = rocsparse_set_mat_fill_mode(this->L_mat_descr_, rocsparse_fill_mode_lower);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        status = rocsparse_set_mat_diag_type(this->L_mat_descr_, rocsparse_diag_type_unit);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        // U part
-        status = rocsparse_create_mat_descr(&this->U_mat_descr_);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        status = rocsparse_set_mat_type(this->U_mat_descr_, rocsparse_matrix_type_general);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        status = rocsparse_set_mat_index_base(this->U_mat_descr_, rocsparse_index_base_zero);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        status = rocsparse_set_mat_fill_mode(this->U_mat_descr_, rocsparse_fill_mode_upper);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        status = rocsparse_set_mat_diag_type(this->U_mat_descr_, rocsparse_diag_type_non_unit);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        assert(this->nnz_ <= std::numeric_limits<int>::max());
-
-        // Create buffer, if not already available
-        size_t buffer_size = 0;
-
-        status
-            = rocsparseTcsrsv_buffer_size(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                                          rocsparse_operation_none,
-                                          this->nrow_,
-                                          this->nnz_,
-                                          this->L_mat_descr_,
-                                          this->mat_.val,
-                                          this->mat_.row_offset,
-                                          this->mat_.col,
-                                          this->mat_info_,
-                                          &buffer_size);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        // Buffer is shared with ILU0 and other solve functions
-        if(this->mat_buffer_ == NULL)
+        if(this->nnz_ > 0)
         {
-            this->mat_buffer_size_ = buffer_size;
-            allocate_hip(buffer_size, &this->mat_buffer_);
+            this->L_sptrsv_.Analyse(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
+                                    this->spmat_descr_,
+                                    rocsparse_operation_none,
+                                    rocsparse_fill_mode_lower,
+                                    rocsparse_diag_type_unit);
+            this->U_sptrsv_.Analyse(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
+                                    this->spmat_descr_,
+                                    rocsparse_operation_none,
+                                    rocsparse_fill_mode_upper,
+                                    rocsparse_diag_type_non_unit);
         }
 
-        assert(this->mat_buffer_size_ >= buffer_size);
-        assert(this->mat_buffer_ != NULL);
-
-        // L part analysis
-        status = rocsparseTcsrsv_analysis(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                                          rocsparse_operation_none,
-                                          this->nrow_,
-                                          this->nnz_,
-                                          this->L_mat_descr_,
-                                          this->mat_.val,
-                                          this->mat_.row_offset,
-                                          this->mat_.col,
-                                          this->mat_info_,
-                                          rocsparse_analysis_policy_reuse,
-                                          rocsparse_solve_policy_auto,
-                                          this->mat_buffer_);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        // U part analysis
-        status = rocsparseTcsrsv_analysis(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                                          rocsparse_operation_none,
-                                          this->nrow_,
-                                          this->nnz_,
-                                          this->U_mat_descr_,
-                                          this->mat_.val,
-                                          this->mat_.row_offset,
-                                          this->mat_.col,
-                                          this->mat_info_,
-                                          rocsparse_analysis_policy_reuse,
-                                          rocsparse_solve_policy_auto,
-                                          this->mat_buffer_);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
         // Allocate temporary vector
+        this->tmp_vec_ = new HIPAcceleratorVector<ValueType>(this->local_backend_);
         this->tmp_vec_->Allocate(this->nrow_);
     }
 
     template <typename ValueType>
     void HIPAcceleratorMatrixCSR<ValueType>::LUAnalyseClear(void)
     {
-        rocsparse_status status;
-
-        // Clear analysis info
-        if(this->L_mat_descr_ != NULL)
-        {
-            status = rocsparse_csrsv_clear(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                                           this->L_mat_descr_,
-                                           this->mat_info_);
-            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-        }
-
-        if(this->U_mat_descr_ != NULL)
-        {
-            status = rocsparse_csrsv_clear(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                                           this->U_mat_descr_,
-                                           this->mat_info_);
-            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-        }
-
-        // Clear matrix descriptor
-        if(this->L_mat_descr_ != NULL)
-        {
-            status = rocsparse_destroy_mat_descr(this->L_mat_descr_);
-            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-        }
-
-        if(this->U_mat_descr_ != NULL)
-        {
-            status = rocsparse_destroy_mat_descr(this->U_mat_descr_);
-            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-        }
-
-        this->L_mat_descr_ = 0;
-        this->U_mat_descr_ = 0;
-
-        // Clear buffer
-        if(this->mat_buffer_ != NULL)
-        {
-            free_hip(&this->mat_buffer_);
-            this->mat_buffer_ = NULL;
-        }
-
-        this->mat_buffer_size_ = 0;
+        this->L_sptrsv_.Clear();
+        this->U_sptrsv_.Clear();
 
         // Clear temporary vector
         if(this->tmp_vec_ != NULL)
@@ -1815,9 +1564,8 @@ namespace rocalution
         if(this->nnz_ > 0)
         {
             assert(out != NULL);
-            assert(this->L_mat_descr_ != 0);
-            assert(this->U_mat_descr_ != 0);
-            assert(this->mat_info_ != 0);
+            assert(this->L_sptrsv_.IsAnalysed());
+            assert(this->U_sptrsv_.IsAnalysed());
             assert(this->ncol_ == this->nrow_);
             assert(this->tmp_vec_ != NULL);
 
@@ -1831,45 +1579,17 @@ namespace rocalution
             assert(cast_in->size_ == this->ncol_);
             assert(cast_out->size_ == this->nrow_);
 
-            rocsparse_status status;
-
-            ValueType alpha = static_cast<ValueType>(1);
-
-            assert(this->nnz_ <= std::numeric_limits<int>::max());
-
             // Solve L
-            status = rocsparseTcsrsv(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                                     rocsparse_operation_none,
-                                     this->nrow_,
-                                     this->nnz_,
-                                     &alpha,
-                                     this->L_mat_descr_,
-                                     this->mat_.val,
-                                     this->mat_.row_offset,
-                                     this->mat_.col,
-                                     this->mat_info_,
-                                     cast_in->vec_,
-                                     this->tmp_vec_->vec_,
-                                     rocsparse_solve_policy_auto,
-                                     this->mat_buffer_);
-            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+            this->L_sptrsv_.Solve(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
+                                  static_cast<ValueType>(1),
+                                  cast_in->dnvec_descr_,
+                                  this->tmp_vec_->dnvec_descr_);
 
             // Solve U
-            status = rocsparseTcsrsv(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                                     rocsparse_operation_none,
-                                     this->nrow_,
-                                     this->nnz_,
-                                     &alpha,
-                                     this->U_mat_descr_,
-                                     this->mat_.val,
-                                     this->mat_.row_offset,
-                                     this->mat_.col,
-                                     this->mat_info_,
-                                     this->tmp_vec_->vec_,
-                                     cast_out->vec_,
-                                     rocsparse_solve_policy_auto,
-                                     this->mat_buffer_);
-            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+            this->U_sptrsv_.Solve(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
+                                  static_cast<ValueType>(1),
+                                  this->tmp_vec_->dnvec_descr_,
+                                  cast_out->dnvec_descr_);
         }
 
         return true;
@@ -1881,179 +1601,30 @@ namespace rocalution
         assert(this->ncol_ == this->nrow_);
         assert(this->tmp_vec_ == NULL);
 
-        this->tmp_vec_ = new HIPAcceleratorVector<ValueType>(this->local_backend_);
-
-        assert(this->tmp_vec_ != NULL);
-
-        // Status
-        rocsparse_status status;
-
-        // L part
-        status = rocsparse_create_mat_descr(&this->L_mat_descr_);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        status = rocsparse_set_mat_type(this->L_mat_descr_, rocsparse_matrix_type_general);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        status = rocsparse_set_mat_index_base(this->L_mat_descr_, rocsparse_index_base_zero);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        status = rocsparse_set_mat_fill_mode(this->L_mat_descr_, rocsparse_fill_mode_lower);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        status = rocsparse_set_mat_diag_type(this->L_mat_descr_, rocsparse_diag_type_unit);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        // U part
-        status = rocsparse_create_mat_descr(&this->U_mat_descr_);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        status = rocsparse_set_mat_type(this->U_mat_descr_, rocsparse_matrix_type_general);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        status = rocsparse_set_mat_index_base(this->U_mat_descr_, rocsparse_index_base_zero);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        status = rocsparse_set_mat_fill_mode(this->U_mat_descr_, rocsparse_fill_mode_upper);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        status = rocsparse_set_mat_diag_type(this->U_mat_descr_, rocsparse_diag_type_non_unit);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        assert(this->nnz_ <= std::numeric_limits<int>::max());
-
-        // Create buffer, if not already available
-        size_t buffer_size   = 0;
-        size_t L_buffer_size = 0;
-        size_t U_buffer_size = 0;
-
-        status = rocsparseTcsritsv_buffer_size(
-            ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-            rocsparse_operation_none,
-            this->nrow_,
-            this->nnz_,
-            this->L_mat_descr_,
-            this->mat_.val,
-            this->mat_.row_offset,
-            this->mat_.col,
-            this->mat_info_itsv_,
-            &L_buffer_size);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-        status = rocsparseTcsritsv_buffer_size(
-            ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-            rocsparse_operation_none,
-            this->nrow_,
-            this->nnz_,
-            this->U_mat_descr_,
-            this->mat_.val,
-            this->mat_.row_offset,
-            this->mat_.col,
-            this->mat_info_itsv_,
-            &U_buffer_size);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        buffer_size = std::max(L_buffer_size, U_buffer_size);
-
-        // Check buffer size
-        if(this->mat_buffer_ != NULL && buffer_size > this->mat_buffer_size_)
+        if(this->nnz_ > 0)
         {
-            free_hip(&this->mat_buffer_);
-            this->mat_buffer_ = NULL;
+            this->L_spitsv_.Analyse(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
+                                    this->spmat_descr_,
+                                    rocsparse_operation_none,
+                                    rocsparse_fill_mode_lower,
+                                    rocsparse_diag_type_unit);
+            this->U_spitsv_.Analyse(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
+                                    this->spmat_descr_,
+                                    rocsparse_operation_none,
+                                    rocsparse_fill_mode_upper,
+                                    rocsparse_diag_type_non_unit);
         }
-
-        if(this->mat_buffer_ == NULL)
-        {
-            this->mat_buffer_size_ = buffer_size;
-            allocate_hip(buffer_size, &this->mat_buffer_);
-        }
-
-        assert(this->mat_buffer_size_ >= buffer_size);
-        assert(this->mat_buffer_ != NULL);
-
-        // L part analysis
-        status
-            = rocsparseTcsritsv_analysis(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                                         rocsparse_operation_none,
-                                         this->nrow_,
-                                         this->nnz_,
-                                         this->L_mat_descr_,
-                                         this->mat_.val,
-                                         this->mat_.row_offset,
-                                         this->mat_.col,
-                                         this->mat_info_itsv_,
-                                         rocsparse_analysis_policy_reuse,
-                                         rocsparse_solve_policy_auto,
-                                         this->mat_buffer_);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        // U part analysis
-        status
-            = rocsparseTcsritsv_analysis(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                                         rocsparse_operation_none,
-                                         this->nrow_,
-                                         this->nnz_,
-                                         this->U_mat_descr_,
-                                         this->mat_.val,
-                                         this->mat_.row_offset,
-                                         this->mat_.col,
-                                         this->mat_info_itsv_,
-                                         rocsparse_analysis_policy_reuse,
-                                         rocsparse_solve_policy_auto,
-                                         this->mat_buffer_);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
 
         // Allocate temporary vector
+        this->tmp_vec_ = new HIPAcceleratorVector<ValueType>(this->local_backend_);
         this->tmp_vec_->Allocate(this->nrow_);
     }
 
     template <typename ValueType>
     void HIPAcceleratorMatrixCSR<ValueType>::ItLUAnalyseClear(void)
     {
-        rocsparse_status status;
-
-        // Clear analysis info
-        if(this->L_mat_descr_ != NULL)
-        {
-            status
-                = rocsparse_csritsv_clear(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                                          this->L_mat_descr_,
-                                          this->mat_info_itsv_);
-            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-        }
-
-        if(this->U_mat_descr_ != NULL)
-        {
-            status
-                = rocsparse_csritsv_clear(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                                          this->U_mat_descr_,
-                                          this->mat_info_itsv_);
-            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-        }
-
-        // Clear matrix descriptor
-        if(this->L_mat_descr_ != NULL)
-        {
-            status = rocsparse_destroy_mat_descr(this->L_mat_descr_);
-            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-        }
-
-        if(this->U_mat_descr_ != NULL)
-        {
-            status = rocsparse_destroy_mat_descr(this->U_mat_descr_);
-            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-        }
-
-        this->L_mat_descr_ = 0;
-        this->U_mat_descr_ = 0;
-
-        // Clear buffer
-        if(this->mat_buffer_ != NULL)
-        {
-            free_hip(&this->mat_buffer_);
-            this->mat_buffer_ = NULL;
-        }
-
-        this->mat_buffer_size_ = 0;
+        this->L_spitsv_.Clear();
+        this->U_spitsv_.Clear();
 
         // Clear temporary vector
         if(this->tmp_vec_ != NULL)
@@ -2073,9 +1644,8 @@ namespace rocalution
         if(this->nnz_ > 0)
         {
             assert(out != NULL);
-            assert(this->L_mat_descr_ != 0);
-            assert(this->U_mat_descr_ != 0);
-            assert(this->mat_info_itsv_ != 0);
+            assert(this->L_spitsv_.IsAnalysed());
+            assert(this->U_spitsv_.IsAnalysed());
             assert(this->ncol_ == this->nrow_);
             assert(this->tmp_vec_ != NULL);
 
@@ -2089,57 +1659,23 @@ namespace rocalution
             assert(cast_in->size_ == this->ncol_);
             assert(cast_out->size_ == this->nrow_);
 
-            rocsparse_status status;
-
-            const ValueType                   alpha = static_cast<ValueType>(1);
-            const numeric_traits_t<ValueType> temp_tol
-                = static_cast<numeric_traits_t<ValueType>>(tolerance);
-
-            const numeric_traits_t<ValueType>* tol_ptr = (use_tol == false) ? nullptr : &temp_tol;
-
-            assert(this->nnz_ <= std::numeric_limits<int>::max());
-
             // Solve L
-            status
-                = rocsparseTcsritsv_solve(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                                          &max_iter,
-                                          tol_ptr,
-                                          nullptr,
-                                          rocsparse_operation_none,
-                                          this->nrow_,
-                                          this->nnz_,
-                                          &alpha,
-                                          this->L_mat_descr_,
-                                          this->mat_.val,
-                                          this->mat_.row_offset,
-                                          this->mat_.col,
-                                          this->mat_info_itsv_,
-                                          cast_in->vec_,
-                                          this->tmp_vec_->vec_,
-                                          rocsparse_solve_policy_auto,
-                                          this->mat_buffer_);
-            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+            this->L_spitsv_.Solve(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
+                                  max_iter,
+                                  tolerance,
+                                  use_tol,
+                                  static_cast<ValueType>(1),
+                                  cast_in->dnvec_descr_,
+                                  this->tmp_vec_->dnvec_descr_);
 
             // Solve U
-            status
-                = rocsparseTcsritsv_solve(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                                          &max_iter,
-                                          tol_ptr,
-                                          nullptr,
-                                          rocsparse_operation_none,
-                                          this->nrow_,
-                                          this->nnz_,
-                                          &alpha,
-                                          this->U_mat_descr_,
-                                          this->mat_.val,
-                                          this->mat_.row_offset,
-                                          this->mat_.col,
-                                          this->mat_info_itsv_,
-                                          this->tmp_vec_->vec_,
-                                          cast_out->vec_,
-                                          rocsparse_solve_policy_auto,
-                                          this->mat_buffer_);
-            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+            this->U_spitsv_.Solve(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
+                                  max_iter,
+                                  tolerance,
+                                  use_tol,
+                                  static_cast<ValueType>(1),
+                                  this->tmp_vec_->dnvec_descr_,
+                                  cast_out->dnvec_descr_);
         }
 
         return true;
@@ -2151,142 +1687,30 @@ namespace rocalution
         assert(this->ncol_ == this->nrow_);
         assert(this->tmp_vec_ == NULL);
 
-        this->tmp_vec_ = new HIPAcceleratorVector<ValueType>(this->local_backend_);
-
-        assert(this->tmp_vec_ != NULL);
-
-        rocsparse_status status;
-
-        status = rocsparse_create_mat_descr(&this->L_mat_descr_);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        status = rocsparse_set_mat_type(this->L_mat_descr_, rocsparse_matrix_type_general);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        status = rocsparse_set_mat_index_base(this->L_mat_descr_, rocsparse_index_base_zero);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        status = rocsparse_set_mat_fill_mode(this->L_mat_descr_, rocsparse_fill_mode_lower);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        status = rocsparse_set_mat_diag_type(this->L_mat_descr_, rocsparse_diag_type_non_unit);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        assert(this->nnz_ <= std::numeric_limits<int>::max());
-
-        // Create buffer, if not already available
-        size_t buffer_size_L  = 0;
-        size_t buffer_size_Lt = 0;
-
-        status
-            = rocsparseTcsrsv_buffer_size(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                                          rocsparse_operation_none,
-                                          this->nrow_,
-                                          this->nnz_,
-                                          this->L_mat_descr_,
-                                          this->mat_.val,
-                                          this->mat_.row_offset,
-                                          this->mat_.col,
-                                          this->mat_info_,
-                                          &buffer_size_L);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        status
-            = rocsparseTcsrsv_buffer_size(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                                          rocsparse_operation_transpose,
-                                          this->nrow_,
-                                          this->nnz_,
-                                          this->L_mat_descr_,
-                                          this->mat_.val,
-                                          this->mat_.row_offset,
-                                          this->mat_.col,
-                                          this->mat_info_,
-                                          &buffer_size_Lt);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        size_t buffer_size = std::max(buffer_size_L, buffer_size_Lt);
-
-        // Buffer is shared with ILU0, IC0 and other solve functions
-        if(this->mat_buffer_ == NULL)
+        if(this->nnz_ > 0)
         {
-            this->mat_buffer_size_ = buffer_size;
-            allocate_hip(buffer_size, &this->mat_buffer_);
+            this->L_sptrsv_.Analyse(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
+                                    this->spmat_descr_,
+                                    rocsparse_operation_none,
+                                    rocsparse_fill_mode_lower,
+                                    rocsparse_diag_type_non_unit);
+            this->LT_sptrsv_.Analyse(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
+                                     this->spmat_descr_,
+                                     rocsparse_operation_transpose,
+                                     rocsparse_fill_mode_lower,
+                                     rocsparse_diag_type_non_unit);
         }
-        else if(this->mat_buffer_size_ < buffer_size)
-        {
-            this->mat_buffer_size_ = buffer_size;
-            free_hip(&this->mat_buffer_);
-            allocate_hip(buffer_size, &this->mat_buffer_);
-        }
-
-        assert(this->mat_buffer_size_ >= buffer_size);
-        assert(this->mat_buffer_ != NULL);
-
-        // L part analysis
-        status = rocsparseTcsrsv_analysis(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                                          rocsparse_operation_none,
-                                          this->nrow_,
-                                          this->nnz_,
-                                          this->L_mat_descr_,
-                                          this->mat_.val,
-                                          this->mat_.row_offset,
-                                          this->mat_.col,
-                                          this->mat_info_,
-                                          rocsparse_analysis_policy_reuse,
-                                          rocsparse_solve_policy_auto,
-                                          this->mat_buffer_);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        // L^T part analysis
-        status = rocsparseTcsrsv_analysis(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                                          rocsparse_operation_transpose,
-                                          this->nrow_,
-                                          this->nnz_,
-                                          this->L_mat_descr_,
-                                          this->mat_.val,
-                                          this->mat_.row_offset,
-                                          this->mat_.col,
-                                          this->mat_info_,
-                                          rocsparse_analysis_policy_reuse,
-                                          rocsparse_solve_policy_auto,
-                                          this->mat_buffer_);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
 
         // Allocate temporary vector
+        this->tmp_vec_ = new HIPAcceleratorVector<ValueType>(this->local_backend_);
         this->tmp_vec_->Allocate(this->nrow_);
     }
 
     template <typename ValueType>
     void HIPAcceleratorMatrixCSR<ValueType>::LLAnalyseClear(void)
     {
-        rocsparse_status status;
-
-        // Clear analysis info
-        if(this->L_mat_descr_ != 0)
-        {
-            status = rocsparse_csrsv_clear(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                                           this->L_mat_descr_,
-                                           this->mat_info_);
-            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-        }
-
-        // Clear matrix descriptor
-        if(this->L_mat_descr_ != NULL)
-        {
-            status = rocsparse_destroy_mat_descr(this->L_mat_descr_);
-            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-        }
-
-        this->L_mat_descr_ = 0;
-
-        // Clear buffer
-        if(this->mat_buffer_ != NULL)
-        {
-            free_hip(&this->mat_buffer_);
-            this->mat_buffer_ = NULL;
-        }
-
-        this->mat_buffer_size_ = 0;
+        this->L_sptrsv_.Clear();
+        this->LT_sptrsv_.Clear();
 
         // Clear temporary vector
         if(this->tmp_vec_ != NULL)
@@ -2303,11 +1727,10 @@ namespace rocalution
         if(this->nnz_ > 0)
         {
             assert(out != NULL);
-            assert(this->L_mat_descr_ != 0);
-            assert(this->mat_info_ != 0);
+            assert(this->L_sptrsv_.IsAnalysed());
+            assert(this->LT_sptrsv_.IsAnalysed());
             assert(this->ncol_ == this->nrow_);
             assert(this->tmp_vec_ != NULL);
-            assert(this->mat_buffer_ != NULL);
 
             const HIPAcceleratorVector<ValueType>* cast_in
                 = dynamic_cast<const HIPAcceleratorVector<ValueType>*>(&in);
@@ -2319,45 +1742,17 @@ namespace rocalution
             assert(cast_in->size_ == this->ncol_);
             assert(cast_out->size_ == this->nrow_);
 
-            rocsparse_status status;
-
-            ValueType alpha = static_cast<ValueType>(1);
-
-            assert(this->nnz_ <= std::numeric_limits<int>::max());
-
             // Solve L
-            status = rocsparseTcsrsv(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                                     rocsparse_operation_none,
-                                     this->nrow_,
-                                     this->nnz_,
-                                     &alpha,
-                                     this->L_mat_descr_,
-                                     this->mat_.val,
-                                     this->mat_.row_offset,
-                                     this->mat_.col,
-                                     this->mat_info_,
-                                     cast_in->vec_,
-                                     this->tmp_vec_->vec_,
-                                     rocsparse_solve_policy_auto,
-                                     this->mat_buffer_);
-            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+            this->L_sptrsv_.Solve(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
+                                  static_cast<ValueType>(1),
+                                  cast_in->dnvec_descr_,
+                                  this->tmp_vec_->dnvec_descr_);
 
             // Solve L^T
-            status = rocsparseTcsrsv(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                                     rocsparse_operation_transpose,
-                                     this->nrow_,
-                                     this->nnz_,
-                                     &alpha,
-                                     this->L_mat_descr_,
-                                     this->mat_.val,
-                                     this->mat_.row_offset,
-                                     this->mat_.col,
-                                     this->mat_info_,
-                                     this->tmp_vec_->vec_,
-                                     cast_out->vec_,
-                                     rocsparse_solve_policy_auto,
-                                     this->mat_buffer_);
-            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+            this->LT_sptrsv_.Solve(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
+                                   static_cast<ValueType>(1),
+                                   this->tmp_vec_->dnvec_descr_,
+                                   cast_out->dnvec_descr_);
         }
 
         return true;
@@ -2377,145 +1772,30 @@ namespace rocalution
         assert(this->ncol_ == this->nrow_);
         assert(this->tmp_vec_ == NULL);
 
-        this->tmp_vec_ = new HIPAcceleratorVector<ValueType>(this->local_backend_);
-
-        assert(this->tmp_vec_ != NULL);
-
-        rocsparse_status status;
-
-        status = rocsparse_create_mat_descr(&this->L_mat_descr_);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        status = rocsparse_set_mat_type(this->L_mat_descr_, rocsparse_matrix_type_general);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        status = rocsparse_set_mat_index_base(this->L_mat_descr_, rocsparse_index_base_zero);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        status = rocsparse_set_mat_fill_mode(this->L_mat_descr_, rocsparse_fill_mode_lower);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        status = rocsparse_set_mat_diag_type(this->L_mat_descr_, rocsparse_diag_type_non_unit);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        assert(this->nnz_ <= std::numeric_limits<int>::max());
-
-        // Create buffer, if not already available
-        size_t buffer_size_L  = 0;
-        size_t buffer_size_Lt = 0;
-
-        status = rocsparseTcsritsv_buffer_size(
-            ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-            rocsparse_operation_none,
-            this->nrow_,
-            this->nnz_,
-            this->L_mat_descr_,
-            this->mat_.val,
-            this->mat_.row_offset,
-            this->mat_.col,
-            this->mat_info_itsv_,
-            &buffer_size_L);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        status = rocsparseTcsritsv_buffer_size(
-            ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-            rocsparse_operation_transpose,
-            this->nrow_,
-            this->nnz_,
-            this->L_mat_descr_,
-            this->mat_.val,
-            this->mat_.row_offset,
-            this->mat_.col,
-            this->mat_info_itsv_,
-            &buffer_size_Lt);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        size_t buffer_size = std::max(buffer_size_L, buffer_size_Lt);
-
-        // Check buffer size
-        if(this->mat_buffer_ != NULL && buffer_size > this->mat_buffer_size_)
+        if(this->nnz_ > 0)
         {
-            free_hip(&this->mat_buffer_);
-            this->mat_buffer_ = NULL;
+            this->L_spitsv_.Analyse(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
+                                    this->spmat_descr_,
+                                    rocsparse_operation_none,
+                                    rocsparse_fill_mode_lower,
+                                    rocsparse_diag_type_non_unit);
+            this->LT_spitsv_.Analyse(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
+                                     this->spmat_descr_,
+                                     rocsparse_operation_transpose,
+                                     rocsparse_fill_mode_lower,
+                                     rocsparse_diag_type_non_unit);
         }
-
-        if(this->mat_buffer_ == NULL)
-        {
-            this->mat_buffer_size_ = buffer_size;
-            allocate_hip(buffer_size, &this->mat_buffer_);
-        }
-
-        assert(this->mat_buffer_size_ >= buffer_size);
-        assert(this->mat_buffer_ != NULL);
-
-        // L part analysis
-        status
-            = rocsparseTcsritsv_analysis(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                                         rocsparse_operation_none,
-                                         this->nrow_,
-                                         this->nnz_,
-                                         this->L_mat_descr_,
-                                         this->mat_.val,
-                                         this->mat_.row_offset,
-                                         this->mat_.col,
-                                         this->mat_info_itsv_,
-                                         rocsparse_analysis_policy_reuse,
-                                         rocsparse_solve_policy_auto,
-                                         this->mat_buffer_);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        // L^T part analysis
-        status
-            = rocsparseTcsritsv_analysis(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                                         rocsparse_operation_transpose,
-                                         this->nrow_,
-                                         this->nnz_,
-                                         this->L_mat_descr_,
-                                         this->mat_.val,
-                                         this->mat_.row_offset,
-                                         this->mat_.col,
-                                         this->mat_info_itsv_,
-                                         rocsparse_analysis_policy_reuse,
-                                         rocsparse_solve_policy_auto,
-                                         this->mat_buffer_);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
 
         // Allocate temporary vector
+        this->tmp_vec_ = new HIPAcceleratorVector<ValueType>(this->local_backend_);
         this->tmp_vec_->Allocate(this->nrow_);
     }
 
     template <typename ValueType>
     void HIPAcceleratorMatrixCSR<ValueType>::ItLLAnalyseClear(void)
     {
-        rocsparse_status status;
-
-        // Clear analysis info
-        if(this->L_mat_descr_ != 0)
-        {
-            status
-                = rocsparse_csritsv_clear(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                                          this->L_mat_descr_,
-                                          this->mat_info_itsv_);
-            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-        }
-
-        // Clear matrix descriptor
-        if(this->L_mat_descr_ != NULL)
-        {
-            status = rocsparse_destroy_mat_descr(this->L_mat_descr_);
-            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-        }
-
-        this->L_mat_descr_ = 0;
-
-        // Clear buffer
-        if(this->mat_buffer_ != NULL)
-        {
-            free_hip(&this->mat_buffer_);
-            this->mat_buffer_ = NULL;
-        }
-
-        this->mat_buffer_size_ = 0;
+        this->L_spitsv_.Clear();
+        this->LT_spitsv_.Clear();
 
         // Clear temporary vector
         if(this->tmp_vec_ != NULL)
@@ -2535,11 +1815,10 @@ namespace rocalution
         if(this->nnz_ > 0)
         {
             assert(out != NULL);
-            assert(this->L_mat_descr_ != 0);
-            assert(this->mat_info_itsv_ != 0);
+            assert(this->L_spitsv_.IsAnalysed());
+            assert(this->LT_spitsv_.IsAnalysed());
             assert(this->ncol_ == this->nrow_);
             assert(this->tmp_vec_ != NULL);
-            assert(this->mat_buffer_ != NULL);
 
             const HIPAcceleratorVector<ValueType>* cast_in
                 = dynamic_cast<const HIPAcceleratorVector<ValueType>*>(&in);
@@ -2551,57 +1830,23 @@ namespace rocalution
             assert(cast_in->size_ == this->ncol_);
             assert(cast_out->size_ == this->nrow_);
 
-            rocsparse_status status;
-
-            const ValueType                   alpha = static_cast<ValueType>(1);
-            const numeric_traits_t<ValueType> temp_tol
-                = static_cast<numeric_traits_t<ValueType>>(tolerance);
-
-            const numeric_traits_t<ValueType>* tol_ptr = (use_tol == false) ? nullptr : &temp_tol;
-
-            assert(this->nnz_ <= std::numeric_limits<int>::max());
-
             // Solve L
-            status
-                = rocsparseTcsritsv_solve(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                                          &max_iter,
-                                          tol_ptr,
-                                          nullptr,
-                                          rocsparse_operation_none,
-                                          this->nrow_,
-                                          this->nnz_,
-                                          &alpha,
-                                          this->L_mat_descr_,
-                                          this->mat_.val,
-                                          this->mat_.row_offset,
-                                          this->mat_.col,
-                                          this->mat_info_itsv_,
-                                          cast_in->vec_,
-                                          this->tmp_vec_->vec_,
-                                          rocsparse_solve_policy_auto,
-                                          this->mat_buffer_);
-            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+            this->L_spitsv_.Solve(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
+                                  max_iter,
+                                  tolerance,
+                                  use_tol,
+                                  static_cast<ValueType>(1),
+                                  cast_in->dnvec_descr_,
+                                  this->tmp_vec_->dnvec_descr_);
 
             // Solve L^T
-            status
-                = rocsparseTcsritsv_solve(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                                          &max_iter,
-                                          tol_ptr,
-                                          nullptr,
-                                          rocsparse_operation_transpose,
-                                          this->nrow_,
-                                          this->nnz_,
-                                          &alpha,
-                                          this->L_mat_descr_,
-                                          this->mat_.val,
-                                          this->mat_.row_offset,
-                                          this->mat_.col,
-                                          this->mat_info_itsv_,
-                                          this->tmp_vec_->vec_,
-                                          cast_out->vec_,
-                                          rocsparse_solve_policy_auto,
-                                          this->mat_buffer_);
-            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+            this->LT_spitsv_.Solve(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
+                                   max_iter,
+                                   tolerance,
+                                   use_tol,
+                                   static_cast<ValueType>(1),
+                                   this->tmp_vec_->dnvec_descr_,
+                                   cast_out->dnvec_descr_);
         }
 
         return true;
@@ -2621,208 +1866,41 @@ namespace rocalution
     template <typename ValueType>
     void HIPAcceleratorMatrixCSR<ValueType>::LAnalyse(bool diag_unit)
     {
-        rocsparse_status status;
-
-        // L part
-        status = rocsparse_create_mat_descr(&this->L_mat_descr_);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        status = rocsparse_set_mat_type(this->L_mat_descr_, rocsparse_matrix_type_general);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        status = rocsparse_set_mat_index_base(this->L_mat_descr_, rocsparse_index_base_zero);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        status = rocsparse_set_mat_fill_mode(this->L_mat_descr_, rocsparse_fill_mode_lower);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        if(diag_unit == true)
+        if(this->nnz_ > 0)
         {
-            status = rocsparse_set_mat_diag_type(this->L_mat_descr_, rocsparse_diag_type_unit);
-            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+            this->L_sptrsv_.Analyse(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
+                                    this->spmat_descr_,
+                                    rocsparse_operation_none,
+                                    rocsparse_fill_mode_lower,
+                                    diag_unit ? rocsparse_diag_type_unit
+                                              : rocsparse_diag_type_non_unit);
         }
-        else
-        {
-            status = rocsparse_set_mat_diag_type(this->L_mat_descr_, rocsparse_diag_type_non_unit);
-            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-        }
-
-        assert(this->nnz_ <= std::numeric_limits<int>::max());
-
-        // Create buffer, if not already available
-        size_t buffer_size = 0;
-        status
-            = rocsparseTcsrsv_buffer_size(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                                          rocsparse_operation_none,
-                                          this->nrow_,
-                                          this->nnz_,
-                                          this->L_mat_descr_,
-                                          this->mat_.val,
-                                          this->mat_.row_offset,
-                                          this->mat_.col,
-                                          this->mat_info_,
-                                          &buffer_size);
-
-        // Buffer is shared with ILU0 and other solve functions
-        if(this->mat_buffer_ == NULL)
-        {
-            this->mat_buffer_size_ = buffer_size;
-            allocate_hip(buffer_size, &this->mat_buffer_);
-        }
-
-        assert(this->mat_buffer_size_ >= buffer_size);
-        assert(this->mat_buffer_ != NULL);
-
-        status = rocsparseTcsrsv_analysis(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                                          rocsparse_operation_none,
-                                          this->nrow_,
-                                          this->nnz_,
-                                          this->L_mat_descr_,
-                                          this->mat_.val,
-                                          this->mat_.row_offset,
-                                          this->mat_.col,
-                                          this->mat_info_,
-                                          rocsparse_analysis_policy_reuse,
-                                          rocsparse_solve_policy_auto,
-                                          this->mat_buffer_);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
     }
 
     template <typename ValueType>
     void HIPAcceleratorMatrixCSR<ValueType>::UAnalyse(bool diag_unit)
     {
-        rocsparse_status status;
-
-        // U part
-        status = rocsparse_create_mat_descr(&this->U_mat_descr_);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        status = rocsparse_set_mat_type(this->U_mat_descr_, rocsparse_matrix_type_general);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        status = rocsparse_set_mat_index_base(this->U_mat_descr_, rocsparse_index_base_zero);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        status = rocsparse_set_mat_fill_mode(this->U_mat_descr_, rocsparse_fill_mode_upper);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        if(diag_unit == true)
+        if(this->nnz_ > 0)
         {
-            status = rocsparse_set_mat_diag_type(this->U_mat_descr_, rocsparse_diag_type_unit);
-            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+            this->U_sptrsv_.Analyse(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
+                                    this->spmat_descr_,
+                                    rocsparse_operation_none,
+                                    rocsparse_fill_mode_upper,
+                                    diag_unit ? rocsparse_diag_type_unit
+                                              : rocsparse_diag_type_non_unit);
         }
-        else
-        {
-            status = rocsparse_set_mat_diag_type(this->U_mat_descr_, rocsparse_diag_type_non_unit);
-            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-        }
-
-        assert(this->nnz_ <= std::numeric_limits<int>::max());
-
-        // Create buffer, if not already available
-        size_t buffer_size = 0;
-        status
-            = rocsparseTcsrsv_buffer_size(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                                          rocsparse_operation_none,
-                                          this->nrow_,
-                                          this->nnz_,
-                                          this->U_mat_descr_,
-                                          this->mat_.val,
-                                          this->mat_.row_offset,
-                                          this->mat_.col,
-                                          this->mat_info_,
-                                          &buffer_size);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        // Buffer is shared with ILU0 and other solve functions
-        if(this->mat_buffer_ == NULL)
-        {
-            this->mat_buffer_size_ = buffer_size;
-            allocate_hip(buffer_size, &this->mat_buffer_);
-        }
-
-        assert(this->mat_buffer_size_ >= buffer_size);
-        assert(this->mat_buffer_ != NULL);
-
-        status = rocsparseTcsrsv_analysis(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                                          rocsparse_operation_none,
-                                          this->nrow_,
-                                          this->nnz_,
-                                          this->U_mat_descr_,
-                                          this->mat_.val,
-                                          this->mat_.row_offset,
-                                          this->mat_.col,
-                                          this->mat_info_,
-                                          rocsparse_analysis_policy_reuse,
-                                          rocsparse_solve_policy_auto,
-                                          this->mat_buffer_);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
     }
 
     template <typename ValueType>
     void HIPAcceleratorMatrixCSR<ValueType>::LAnalyseClear(void)
     {
-        rocsparse_status status;
-
-        // Clear analysis info
-        if(this->L_mat_descr_ != NULL)
-        {
-            status = rocsparse_csrsv_clear(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                                           this->L_mat_descr_,
-                                           this->mat_info_);
-            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-        }
-
-        // Clear buffer
-        if(this->mat_buffer_ != NULL)
-        {
-            free_hip(&this->mat_buffer_);
-            this->mat_buffer_ = NULL;
-        }
-
-        this->mat_buffer_size_ = 0;
-
-        // Clear matrix descriptor
-        if(this->L_mat_descr_ != NULL)
-        {
-            status = rocsparse_destroy_mat_descr(this->L_mat_descr_);
-            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-        }
-
-        this->L_mat_descr_ = 0;
+        this->L_sptrsv_.Clear();
     }
 
     template <typename ValueType>
     void HIPAcceleratorMatrixCSR<ValueType>::UAnalyseClear(void)
     {
-        rocsparse_status status;
-
-        // Clear analysis info
-        if(this->U_mat_descr_ != NULL)
-        {
-            status = rocsparse_csrsv_clear(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                                           this->U_mat_descr_,
-                                           this->mat_info_);
-            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-        }
-
-        // Clear buffer
-        if(this->mat_buffer_ != NULL)
-        {
-            free_hip(&this->mat_buffer_);
-            this->mat_buffer_ = NULL;
-        }
-
-        this->mat_buffer_size_ = 0;
-
-        // Clear matrix descriptor
-        if(this->U_mat_descr_ != NULL)
-        {
-            status = rocsparse_destroy_mat_descr(this->U_mat_descr_);
-            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-        }
-
-        this->U_mat_descr_ = 0;
+        this->U_sptrsv_.Clear();
     }
 
     template <typename ValueType>
@@ -2832,11 +1910,8 @@ namespace rocalution
         if(this->nnz_ > 0)
         {
             assert(out != NULL);
-            assert(this->L_mat_descr_ != 0);
-            assert(this->mat_info_ != 0);
+            assert(this->L_sptrsv_.IsAnalysed());
             assert(this->ncol_ == this->nrow_);
-            assert(this->mat_buffer_size_ > 0);
-            assert(this->mat_buffer_ != NULL);
 
             const HIPAcceleratorVector<ValueType>* cast_in
                 = dynamic_cast<const HIPAcceleratorVector<ValueType>*>(&in);
@@ -2848,28 +1923,11 @@ namespace rocalution
             assert(cast_in->size_ == this->ncol_);
             assert(cast_out->size_ == this->nrow_);
 
-            rocsparse_status status;
-
-            ValueType alpha = static_cast<ValueType>(1);
-
-            assert(this->nnz_ <= std::numeric_limits<int>::max());
-
             // Solve L
-            status = rocsparseTcsrsv(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                                     rocsparse_operation_none,
-                                     this->nrow_,
-                                     this->nnz_,
-                                     &alpha,
-                                     this->L_mat_descr_,
-                                     this->mat_.val,
-                                     this->mat_.row_offset,
-                                     this->mat_.col,
-                                     this->mat_info_,
-                                     cast_in->vec_,
-                                     cast_out->vec_,
-                                     rocsparse_solve_policy_auto,
-                                     this->mat_buffer_);
-            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+            this->L_sptrsv_.Solve(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
+                                  static_cast<ValueType>(1),
+                                  cast_in->dnvec_descr_,
+                                  cast_out->dnvec_descr_);
         }
 
         return true;
@@ -2882,11 +1940,8 @@ namespace rocalution
         if(this->nnz_ > 0)
         {
             assert(out != NULL);
-            assert(this->U_mat_descr_ != 0);
-            assert(this->mat_info_ != 0);
+            assert(this->U_sptrsv_.IsAnalysed());
             assert(this->ncol_ == this->nrow_);
-            assert(this->mat_buffer_size_ > 0);
-            assert(this->mat_buffer_ != NULL);
 
             const HIPAcceleratorVector<ValueType>* cast_in
                 = dynamic_cast<const HIPAcceleratorVector<ValueType>*>(&in);
@@ -2898,28 +1953,11 @@ namespace rocalution
             assert(cast_in->size_ == this->ncol_);
             assert(cast_out->size_ == this->nrow_);
 
-            rocsparse_status status;
-
-            ValueType alpha = static_cast<ValueType>(1);
-
-            assert(this->nnz_ <= std::numeric_limits<int>::max());
-
             // Solve U
-            status = rocsparseTcsrsv(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                                     rocsparse_operation_none,
-                                     this->nrow_,
-                                     this->nnz_,
-                                     &alpha,
-                                     this->U_mat_descr_,
-                                     this->mat_.val,
-                                     this->mat_.row_offset,
-                                     this->mat_.col,
-                                     this->mat_info_,
-                                     cast_in->vec_,
-                                     cast_out->vec_,
-                                     rocsparse_solve_policy_auto,
-                                     this->mat_buffer_);
-            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+            this->U_sptrsv_.Solve(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
+                                  static_cast<ValueType>(1),
+                                  cast_in->dnvec_descr_,
+                                  cast_out->dnvec_descr_);
         }
 
         return true;
@@ -2928,112 +1966,21 @@ namespace rocalution
     template <typename ValueType>
     void HIPAcceleratorMatrixCSR<ValueType>::ItLAnalyse(bool diag_unit)
     {
-        rocsparse_status status;
-
-        // L part
-        status = rocsparse_create_mat_descr(&this->L_mat_descr_);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        status = rocsparse_set_mat_type(this->L_mat_descr_, rocsparse_matrix_type_general);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        status = rocsparse_set_mat_index_base(this->L_mat_descr_, rocsparse_index_base_zero);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        status = rocsparse_set_mat_fill_mode(this->L_mat_descr_, rocsparse_fill_mode_lower);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        if(diag_unit == true)
+        if(this->nnz_ > 0)
         {
-            status = rocsparse_set_mat_diag_type(this->L_mat_descr_, rocsparse_diag_type_unit);
-            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+            this->L_spitsv_.Analyse(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
+                                    this->spmat_descr_,
+                                    rocsparse_operation_none,
+                                    rocsparse_fill_mode_lower,
+                                    diag_unit ? rocsparse_diag_type_unit
+                                              : rocsparse_diag_type_non_unit);
         }
-        else
-        {
-            status = rocsparse_set_mat_diag_type(this->L_mat_descr_, rocsparse_diag_type_non_unit);
-            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-        }
-
-        assert(this->nnz_ <= std::numeric_limits<int>::max());
-
-        // Create buffer, if not already available
-        size_t buffer_size = 0;
-        status             = rocsparseTcsritsv_buffer_size(
-            ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-            rocsparse_operation_none,
-            this->nrow_,
-            this->nnz_,
-            this->L_mat_descr_,
-            this->mat_.val,
-            this->mat_.row_offset,
-            this->mat_.col,
-            this->mat_info_itsv_,
-            &buffer_size);
-
-        // Check buffer size
-        if(this->mat_buffer_ != NULL && buffer_size > this->mat_buffer_size_)
-        {
-            free_hip(&this->mat_buffer_);
-            this->mat_buffer_ = NULL;
-        }
-
-        if(this->mat_buffer_ == NULL)
-        {
-            this->mat_buffer_size_ = buffer_size;
-            allocate_hip(buffer_size, &this->mat_buffer_);
-        }
-
-        assert(this->mat_buffer_size_ >= buffer_size);
-        assert(this->mat_buffer_ != NULL);
-
-        status
-            = rocsparseTcsritsv_analysis(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                                         rocsparse_operation_none,
-                                         this->nrow_,
-                                         this->nnz_,
-                                         this->L_mat_descr_,
-                                         this->mat_.val,
-                                         this->mat_.row_offset,
-                                         this->mat_.col,
-                                         this->mat_info_itsv_,
-                                         rocsparse_analysis_policy_reuse,
-                                         rocsparse_solve_policy_auto,
-                                         this->mat_buffer_);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
     }
 
     template <typename ValueType>
     void HIPAcceleratorMatrixCSR<ValueType>::ItLAnalyseClear(void)
     {
-        rocsparse_status status;
-
-        // Clear analysis info
-        if(this->L_mat_descr_ != NULL)
-        {
-            status
-                = rocsparse_csritsv_clear(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                                          this->L_mat_descr_,
-                                          this->mat_info_itsv_);
-            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-        }
-
-        // Clear buffer
-        if(this->mat_buffer_ != NULL)
-        {
-            free_hip(&this->mat_buffer_);
-            this->mat_buffer_ = NULL;
-        }
-
-        this->mat_buffer_size_ = 0;
-
-        // Clear matrix descriptor
-        if(this->L_mat_descr_ != NULL)
-        {
-            status = rocsparse_destroy_mat_descr(this->L_mat_descr_);
-            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-        }
-
-        this->L_mat_descr_ = 0;
+        this->L_spitsv_.Clear();
     }
 
     template <typename ValueType>
@@ -3046,11 +1993,8 @@ namespace rocalution
         if(this->nnz_ > 0)
         {
             assert(out != NULL);
-            assert(this->L_mat_descr_ != 0);
-            assert(this->mat_info_itsv_ != 0);
+            assert(this->L_spitsv_.IsAnalysed());
             assert(this->ncol_ == this->nrow_);
-            assert(this->mat_buffer_size_ > 0);
-            assert(this->mat_buffer_ != NULL);
 
             const HIPAcceleratorVector<ValueType>* cast_in
                 = dynamic_cast<const HIPAcceleratorVector<ValueType>*>(&in);
@@ -3062,36 +2006,14 @@ namespace rocalution
             assert(cast_in->size_ == this->ncol_);
             assert(cast_out->size_ == this->nrow_);
 
-            rocsparse_status status;
-
-            const ValueType                   alpha = static_cast<ValueType>(1);
-            const numeric_traits_t<ValueType> temp_tol
-                = static_cast<numeric_traits_t<ValueType>>(tolerance);
-
-            const numeric_traits_t<ValueType>* tol_ptr = (use_tol == false) ? nullptr : &temp_tol;
-
-            assert(this->nnz_ <= std::numeric_limits<int>::max());
-
             // Solve L
-            status
-                = rocsparseTcsritsv_solve(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                                          &max_iter,
-                                          tol_ptr,
-                                          nullptr,
-                                          rocsparse_operation_none,
-                                          this->nrow_,
-                                          this->nnz_,
-                                          &alpha,
-                                          this->L_mat_descr_,
-                                          this->mat_.val,
-                                          this->mat_.row_offset,
-                                          this->mat_.col,
-                                          this->mat_info_itsv_,
-                                          cast_in->vec_,
-                                          cast_out->vec_,
-                                          rocsparse_solve_policy_auto,
-                                          this->mat_buffer_);
-            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+            this->L_spitsv_.Solve(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
+                                  max_iter,
+                                  tolerance,
+                                  use_tol,
+                                  static_cast<ValueType>(1),
+                                  cast_in->dnvec_descr_,
+                                  cast_out->dnvec_descr_);
         }
 
         return true;
@@ -3100,113 +2022,21 @@ namespace rocalution
     template <typename ValueType>
     void HIPAcceleratorMatrixCSR<ValueType>::ItUAnalyse(bool diag_unit)
     {
-        rocsparse_status status;
-
-        // U part
-        status = rocsparse_create_mat_descr(&this->U_mat_descr_);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        status = rocsparse_set_mat_type(this->U_mat_descr_, rocsparse_matrix_type_general);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        status = rocsparse_set_mat_index_base(this->U_mat_descr_, rocsparse_index_base_zero);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        status = rocsparse_set_mat_fill_mode(this->U_mat_descr_, rocsparse_fill_mode_upper);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        if(diag_unit == true)
+        if(this->nnz_ > 0)
         {
-            status = rocsparse_set_mat_diag_type(this->U_mat_descr_, rocsparse_diag_type_unit);
-            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+            this->U_spitsv_.Analyse(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
+                                    this->spmat_descr_,
+                                    rocsparse_operation_none,
+                                    rocsparse_fill_mode_upper,
+                                    diag_unit ? rocsparse_diag_type_unit
+                                              : rocsparse_diag_type_non_unit);
         }
-        else
-        {
-            status = rocsparse_set_mat_diag_type(this->U_mat_descr_, rocsparse_diag_type_non_unit);
-            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-        }
-
-        assert(this->nnz_ <= std::numeric_limits<int>::max());
-
-        // Create buffer, if not already available
-        size_t buffer_size = 0;
-        status             = rocsparseTcsritsv_buffer_size(
-            ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-            rocsparse_operation_none,
-            this->nrow_,
-            this->nnz_,
-            this->U_mat_descr_,
-            this->mat_.val,
-            this->mat_.row_offset,
-            this->mat_.col,
-            this->mat_info_itsv_,
-            &buffer_size);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        // Check buffer size
-        if(this->mat_buffer_ != NULL && buffer_size > this->mat_buffer_size_)
-        {
-            free_hip(&this->mat_buffer_);
-            this->mat_buffer_ = NULL;
-        }
-
-        if(this->mat_buffer_ == NULL)
-        {
-            this->mat_buffer_size_ = buffer_size;
-            allocate_hip(buffer_size, &this->mat_buffer_);
-        }
-
-        assert(this->mat_buffer_size_ >= buffer_size);
-        assert(this->mat_buffer_ != NULL);
-
-        status
-            = rocsparseTcsritsv_analysis(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                                         rocsparse_operation_none,
-                                         this->nrow_,
-                                         this->nnz_,
-                                         this->U_mat_descr_,
-                                         this->mat_.val,
-                                         this->mat_.row_offset,
-                                         this->mat_.col,
-                                         this->mat_info_itsv_,
-                                         rocsparse_analysis_policy_reuse,
-                                         rocsparse_solve_policy_auto,
-                                         this->mat_buffer_);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
     }
 
     template <typename ValueType>
     void HIPAcceleratorMatrixCSR<ValueType>::ItUAnalyseClear(void)
     {
-        rocsparse_status status;
-
-        // Clear analysis info
-        if(this->U_mat_descr_ != NULL)
-        {
-            status
-                = rocsparse_csritsv_clear(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                                          this->U_mat_descr_,
-                                          this->mat_info_itsv_);
-            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-        }
-
-        // Clear buffer
-        if(this->mat_buffer_ != NULL)
-        {
-            free_hip(&this->mat_buffer_);
-            this->mat_buffer_ = NULL;
-        }
-
-        this->mat_buffer_size_ = 0;
-
-        // Clear matrix descriptor
-        if(this->U_mat_descr_ != NULL)
-        {
-            status = rocsparse_destroy_mat_descr(this->U_mat_descr_);
-            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-        }
-
-        this->U_mat_descr_ = 0;
+        this->U_spitsv_.Clear();
     }
 
     template <typename ValueType>
@@ -3219,11 +2049,8 @@ namespace rocalution
         if(this->nnz_ > 0)
         {
             assert(out != NULL);
-            assert(this->U_mat_descr_ != 0);
-            assert(this->mat_info_itsv_ != 0);
+            assert(this->U_spitsv_.IsAnalysed());
             assert(this->ncol_ == this->nrow_);
-            assert(this->mat_buffer_size_ > 0);
-            assert(this->mat_buffer_ != NULL);
 
             const HIPAcceleratorVector<ValueType>* cast_in
                 = dynamic_cast<const HIPAcceleratorVector<ValueType>*>(&in);
@@ -3235,36 +2062,14 @@ namespace rocalution
             assert(cast_in->size_ == this->ncol_);
             assert(cast_out->size_ == this->nrow_);
 
-            rocsparse_status status;
-
-            const ValueType                   alpha = static_cast<ValueType>(1);
-            const numeric_traits_t<ValueType> temp_tol
-                = static_cast<numeric_traits_t<ValueType>>(tolerance);
-
-            const numeric_traits_t<ValueType>* tol_ptr = (use_tol == false) ? nullptr : &temp_tol;
-
-            assert(this->nnz_ <= std::numeric_limits<int>::max());
-
             // Solve U
-            status
-                = rocsparseTcsritsv_solve(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                                          &max_iter,
-                                          tol_ptr,
-                                          nullptr,
-                                          rocsparse_operation_none,
-                                          this->nrow_,
-                                          this->nnz_,
-                                          &alpha,
-                                          this->U_mat_descr_,
-                                          this->mat_.val,
-                                          this->mat_.row_offset,
-                                          this->mat_.col,
-                                          this->mat_info_itsv_,
-                                          cast_in->vec_,
-                                          cast_out->vec_,
-                                          rocsparse_solve_policy_auto,
-                                          this->mat_buffer_);
-            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+            this->U_spitsv_.Solve(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
+                                  max_iter,
+                                  tolerance,
+                                  use_tol,
+                                  static_cast<ValueType>(1),
+                                  cast_in->dnvec_descr_,
+                                  cast_out->dnvec_descr_);
         }
 
         return true;

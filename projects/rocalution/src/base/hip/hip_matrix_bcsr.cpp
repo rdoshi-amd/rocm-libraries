@@ -66,8 +66,7 @@ namespace rocalution
         this->L_mat_descr_ = 0;
         this->U_mat_descr_ = 0;
 
-        this->mat_descr_ = 0;
-        this->mat_info_  = 0;
+        this->mat_info_ = 0;
 
         this->spmat_descr_ = 0;
 
@@ -78,18 +77,7 @@ namespace rocalution
 
         CHECK_HIP_ERROR(__FILE__, __LINE__);
 
-        rocsparse_status status;
-
-        status = rocsparse_create_mat_descr(&this->mat_descr_);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        status = rocsparse_set_mat_index_base(this->mat_descr_, rocsparse_index_base_zero);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        status = rocsparse_set_mat_type(this->mat_descr_, rocsparse_matrix_type_general);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        status = rocsparse_create_mat_info(&this->mat_info_);
+        rocsparse_status status = rocsparse_create_mat_info(&this->mat_info_);
         CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
     }
 
@@ -100,12 +88,7 @@ namespace rocalution
 
         this->Clear();
 
-        rocsparse_status status;
-
-        status = rocsparse_destroy_mat_descr(this->mat_descr_);
-        CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-        status = rocsparse_destroy_mat_info(this->mat_info_);
+        rocsparse_status status = rocsparse_destroy_mat_info(this->mat_info_);
         CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
     }
 
@@ -799,70 +782,8 @@ namespace rocalution
     {
         if(this->nnz_ > 0)
         {
-            rocsparse_status status;
-
-            // Determine whether we are using row or column major for the blocks
-            rocsparse_direction dir
-                = BCSR_IND_BASE ? rocsparse_direction_row : rocsparse_direction_column;
-
-            // Create buffer, if not already available
-            size_t buffer_size = 0;
-            status             = rocsparseTbsrilu0_buffer_size(
-                ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                dir,
-                this->mat_.nrowb,
-                this->mat_.nnzb,
-                this->mat_descr_,
-                this->mat_.val,
-                this->mat_.row_offset,
-                this->mat_.col,
-                this->mat_.blockdim,
-                this->mat_info_,
-                &buffer_size);
-
-            // Buffer is shared with ILU0 and other solve functions
-            if(this->mat_buffer_ == NULL)
-            {
-                this->mat_buffer_size_ = buffer_size;
-                allocate_hip(buffer_size, &this->mat_buffer_);
-            }
-
-            assert(this->mat_buffer_size_ >= buffer_size);
-            assert(this->mat_buffer_ != NULL);
-
-            status = rocsparseTbsrilu0_analysis(
-                ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                dir,
-                this->mat_.nrowb,
-                this->mat_.nnzb,
-                this->mat_descr_,
-                this->mat_.val,
-                this->mat_.row_offset,
-                this->mat_.col,
-                this->mat_.blockdim,
-                this->mat_info_,
-                rocsparse_analysis_policy_reuse,
-                rocsparse_solve_policy_auto,
-                this->mat_buffer_);
-            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-            status = rocsparseTbsrilu0(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
-                                       dir,
-                                       this->mat_.nrowb,
-                                       this->mat_.nnzb,
-                                       this->mat_descr_,
-                                       this->mat_.val,
-                                       this->mat_.row_offset,
-                                       this->mat_.col,
-                                       this->mat_.blockdim,
-                                       this->mat_info_,
-                                       rocsparse_solve_policy_auto,
-                                       this->mat_buffer_);
-            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
-
-            status = rocsparse_bsrilu0_clear(
-                ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle), this->mat_info_);
-            CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
+            HIPSpILU0<ValueType>(ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
+                                 this->spmat_descr_);
         }
 
         return true;
@@ -932,7 +853,7 @@ namespace rocalution
                                           this->mat_info_,
                                           &buffer_size);
 
-        // Buffer is shared with ILU0 and other solve functions
+        // Buffer is shared with the other solve functions
         if(this->mat_buffer_ == NULL)
         {
             this->mat_buffer_size_ = buffer_size;
@@ -1176,7 +1097,7 @@ namespace rocalution
 
         size_t buffer_size = std::max(buffer_size_L, buffer_size_Lt);
 
-        // Buffer is shared with ILU0, IC0 and other solve functions
+        // Buffer is shared with the other solve functions
         if(this->mat_buffer_ == NULL)
         {
             this->mat_buffer_size_ = buffer_size;
@@ -1402,7 +1323,7 @@ namespace rocalution
                                           this->mat_info_,
                                           &buffer_size);
 
-        // Buffer is shared with ILU0 and other solve functions
+        // Buffer is shared with the other solve functions
         if(this->mat_buffer_ == NULL)
         {
             this->mat_buffer_size_ = buffer_size;
@@ -1478,7 +1399,7 @@ namespace rocalution
                                           this->mat_info_,
                                           &buffer_size);
 
-        // Buffer is shared with ILU0 and other solve functions
+        // Buffer is shared with the other solve functions
         if(this->mat_buffer_ == NULL)
         {
             this->mat_buffer_size_ = buffer_size;

@@ -131,98 +131,106 @@ namespace rocalution
         char*                buffer_;
     };
 
-    // rocsparse csrsv buffer size
+    // rocsparse sptrsv, solves op(T) * y = alpha * x, where T is the triangle of a sparse
+    // matrix that is selected by fill_mode and diag_type. rocsparse supports CSR, COO and
+    // ELL matrices. The triangle is kept in its own sparse matrix descriptor on the arrays
+    // of the matrix, so the matrix descriptor can be used for other operations meanwhile.
+    // Update() has to be called whenever the matrix descriptor is recreated, e.g. after
+    // the arrays of the matrix have been reallocated.
     template <typename ValueType>
-    rocsparse_status rocsparseTcsrsv_buffer_size(rocsparse_handle          handle,
-                                                 rocsparse_operation       trans,
-                                                 int                       m,
-                                                 int                       nnz,
-                                                 const rocsparse_mat_descr descr,
-                                                 const ValueType*          csr_val,
-                                                 const int*                csr_row_ptr,
-                                                 const int*                csr_col_ind,
-                                                 rocsparse_mat_info        info,
-                                                 size_t*                   buffer_size);
+    class HIPSpTRSV
+    {
+    public:
+        HIPSpTRSV(void);
+        ~HIPSpTRSV(void);
 
-    // rocsparse csrsv analysis
-    template <typename ValueType>
-    rocsparse_status rocsparseTcsrsv_analysis(rocsparse_handle          handle,
-                                              rocsparse_operation       trans,
-                                              int                       m,
-                                              int                       nnz,
-                                              const rocsparse_mat_descr descr,
-                                              const ValueType*          csr_val,
-                                              const int*                csr_row_ptr,
-                                              const int*                csr_col_ind,
-                                              rocsparse_mat_info        info,
-                                              rocsparse_analysis_policy analysis,
-                                              rocsparse_solve_policy    solve,
-                                              void*                     temp_buffer);
+        HIPSpTRSV(const HIPSpTRSV&)            = delete;
+        HIPSpTRSV& operator=(const HIPSpTRSV&) = delete;
 
-    // rocsparse csrsv
-    template <typename ValueType>
-    rocsparse_status rocsparseTcsrsv(rocsparse_handle          handle,
-                                     rocsparse_operation       trans,
-                                     int                       m,
-                                     int                       nnz,
-                                     const ValueType*          alpha,
-                                     const rocsparse_mat_descr descr,
-                                     const ValueType*          csr_val,
-                                     const int*                csr_row_ptr,
-                                     const int*                csr_col_ind,
-                                     rocsparse_mat_info        info,
-                                     const ValueType*          x,
-                                     ValueType*                y,
-                                     rocsparse_solve_policy    policy,
-                                     void*                     temp_buffer);
+        bool IsAnalysed(void) const;
 
-    // rocsprarse csritsv buffer size
-    template <typename ValueType>
-    rocsparse_status rocsparseTcsritsv_buffer_size(rocsparse_handle          handle,
-                                                   rocsparse_operation       trans,
-                                                   rocsparse_int             m,
-                                                   rocsparse_int             nnz,
-                                                   const rocsparse_mat_descr descr,
-                                                   const ValueType*          csr_val,
-                                                   const rocsparse_int*      csr_row_ptr,
-                                                   const rocsparse_int*      csr_col_ind,
-                                                   rocsparse_mat_info        info,
-                                                   size_t*                   buffer_size);
+        void Analyse(rocsparse_handle            handle,
+                     rocsparse_const_spmat_descr mat,
+                     rocsparse_operation         trans,
+                     rocsparse_fill_mode         fill_mode,
+                     rocsparse_diag_type         diag_type);
 
-    // rocsprarse csritsv analysis
-    template <typename ValueType>
-    rocsparse_status rocsparseTcsritsv_analysis(rocsparse_handle          handle,
-                                                rocsparse_operation       trans,
-                                                rocsparse_int             m,
-                                                rocsparse_int             nnz,
-                                                const rocsparse_mat_descr descr,
-                                                const ValueType*          csr_val,
-                                                const rocsparse_int*      csr_row_ptr,
-                                                const rocsparse_int*      csr_col_ind,
-                                                rocsparse_mat_info        info,
-                                                rocsparse_analysis_policy analysis,
-                                                rocsparse_solve_policy    solve,
-                                                void*                     temp_buffer);
+        // Points the triangle to the arrays of mat. The analysis is kept if the sizes of
+        // mat did not change, and cleared otherwise.
+        void Update(rocsparse_const_spmat_descr mat);
 
-    // rocsprarse csritsv solve
+        void Solve(rocsparse_handle            handle,
+                   ValueType                   alpha,
+                   rocsparse_const_dnvec_descr x,
+                   rocsparse_dnvec_descr       y) const;
+
+        void Clear(void);
+
+    private:
+        rocsparse_spmat_descr triangle_;
+        rocsparse_fill_mode   fill_mode_;
+        rocsparse_diag_type   diag_type_;
+
+        rocsparse_sptrsv_descr descr_;
+        size_t                 buffer_size_;
+        char*                  buffer_;
+    };
+
+    // rocsparse spitsv, solves op(T) * y = alpha * x with Jacobi iterations, starting from
+    // the initial guess in y, where T is the triangle of a sparse matrix that is selected by
+    // fill_mode and diag_type. rocsparse supports CSR matrices only. As for HIPSpTRSV, the
+    // triangle is kept in its own sparse matrix descriptor on the arrays of the matrix, and
+    // rocsparse stores the analysis in this descriptor. Update() has to be called whenever
+    // the matrix descriptor is recreated.
     template <typename ValueType>
-    rocsparse_status rocsparseTcsritsv_solve(rocsparse_handle                   handle,
-                                             rocsparse_int*                     host_nmaxiter,
-                                             const numeric_traits_t<ValueType>* host_tol,
-                                             numeric_traits_t<ValueType>*       host_history,
-                                             rocsparse_operation                trans,
-                                             rocsparse_int                      m,
-                                             rocsparse_int                      nnz,
-                                             const ValueType*                   alpha,
-                                             const rocsparse_mat_descr          descr,
-                                             const ValueType*                   csr_val,
-                                             const rocsparse_int*               csr_row_ptr,
-                                             const rocsparse_int*               csr_col_ind,
-                                             rocsparse_mat_info                 info,
-                                             const ValueType*                   x,
-                                             ValueType*                         y,
-                                             rocsparse_solve_policy             policy,
-                                             void*                              temp_buffer);
+    class HIPSpITSV
+    {
+    public:
+        HIPSpITSV(void);
+        ~HIPSpITSV(void);
+
+        HIPSpITSV(const HIPSpITSV&)            = delete;
+        HIPSpITSV& operator=(const HIPSpITSV&) = delete;
+
+        bool IsAnalysed(void) const;
+
+        void Analyse(rocsparse_handle            handle,
+                     rocsparse_const_spmat_descr mat,
+                     rocsparse_operation         trans,
+                     rocsparse_fill_mode         fill_mode,
+                     rocsparse_diag_type         diag_type);
+
+        // Points the triangle to the arrays of mat. The analysis is kept if the sizes of
+        // mat did not change, and cleared otherwise.
+        void Update(rocsparse_const_spmat_descr mat);
+
+        // Iterates until the residual norm drops below tolerance, or for max_iter
+        // iterations if use_tol is false
+        void Solve(rocsparse_handle      handle,
+                   int                   max_iter,
+                   double                tolerance,
+                   bool                  use_tol,
+                   ValueType             alpha,
+                   rocsparse_dnvec_descr x,
+                   rocsparse_dnvec_descr y) const;
+
+        void Clear(void);
+
+    private:
+        rocsparse_spmat_descr triangle_;
+        rocsparse_operation   trans_;
+
+        size_t buffer_size_;
+        char*  buffer_;
+    };
+
+    // In-place incomplete LU and incomplete Cholesky factorizations with zero fill-in.
+    // rocsparse supports CSR and BSR matrices.
+    template <typename ValueType>
+    void HIPSpILU0(rocsparse_handle handle, rocsparse_spmat_descr mat);
+
+    template <typename ValueType>
+    void HIPSpIC0(rocsparse_handle handle, rocsparse_spmat_descr mat);
 
     // rocsparse bsrsv buffer size
     template <typename ValueType>
@@ -274,129 +282,6 @@ namespace rocalution
                                      ValueType*                y,
                                      rocsparse_solve_policy    policy,
                                      void*                     temp_buffer);
-
-    // rocsparse csric0 buffer size
-    template <typename ValueType>
-    rocsparse_status rocsparseTcsric0_buffer_size(rocsparse_handle          handle,
-                                                  int                       m,
-                                                  int                       nnz,
-                                                  const rocsparse_mat_descr descr,
-                                                  ValueType*                csr_val,
-                                                  const int*                csr_row_ptr,
-                                                  const int*                csr_col_ind,
-                                                  rocsparse_mat_info        info,
-                                                  size_t*                   buffer_size);
-
-    // rocsparse csric0 analysis
-    template <typename ValueType>
-    rocsparse_status rocsparseTcsric0_analysis(rocsparse_handle          handle,
-                                               int                       m,
-                                               int                       nnz,
-                                               const rocsparse_mat_descr descr,
-                                               ValueType*                csr_val,
-                                               const int*                csr_row_ptr,
-                                               const int*                csr_col_ind,
-                                               rocsparse_mat_info        info,
-                                               rocsparse_analysis_policy analysis,
-                                               rocsparse_solve_policy    solve,
-                                               void*                     temp_buffer);
-
-    // rocsparse csric0
-    template <typename ValueType>
-    rocsparse_status rocsparseTcsric0(rocsparse_handle          handle,
-                                      int                       m,
-                                      int                       nnz,
-                                      const rocsparse_mat_descr descr,
-                                      ValueType*                csr_val,
-                                      const int*                csr_row_ptr,
-                                      const int*                csr_col_ind,
-                                      rocsparse_mat_info        info,
-                                      rocsparse_solve_policy    policy,
-                                      void*                     temp_buffer);
-
-    // rocsparse csrilu0 buffer size
-    template <typename ValueType>
-    rocsparse_status rocsparseTcsrilu0_buffer_size(rocsparse_handle          handle,
-                                                   int                       m,
-                                                   int                       nnz,
-                                                   const rocsparse_mat_descr descr,
-                                                   ValueType*                csr_val,
-                                                   const int*                csr_row_ptr,
-                                                   const int*                csr_col_ind,
-                                                   rocsparse_mat_info        info,
-                                                   size_t*                   buffer_size);
-
-    // rocsparse csrilu0 analysis
-    template <typename ValueType>
-    rocsparse_status rocsparseTcsrilu0_analysis(rocsparse_handle          handle,
-                                                int                       m,
-                                                int                       nnz,
-                                                const rocsparse_mat_descr descr,
-                                                ValueType*                csr_val,
-                                                const int*                csr_row_ptr,
-                                                const int*                csr_col_ind,
-                                                rocsparse_mat_info        info,
-                                                rocsparse_analysis_policy analysis,
-                                                rocsparse_solve_policy    solve,
-                                                void*                     temp_buffer);
-
-    // rocsparse csrilu0
-    template <typename ValueType>
-    rocsparse_status rocsparseTcsrilu0(rocsparse_handle          handle,
-                                       int                       m,
-                                       int                       nnz,
-                                       const rocsparse_mat_descr descr,
-                                       ValueType*                csr_val,
-                                       const int*                csr_row_ptr,
-                                       const int*                csr_col_ind,
-                                       rocsparse_mat_info        info,
-                                       rocsparse_solve_policy    policy,
-                                       void*                     temp_buffer);
-
-    // rocsparse bsrilu0 buffer size
-    template <typename ValueType>
-    rocsparse_status rocsparseTbsrilu0_buffer_size(rocsparse_handle          handle,
-                                                   rocsparse_direction       dir,
-                                                   int                       mb,
-                                                   int                       nnzb,
-                                                   const rocsparse_mat_descr descr,
-                                                   ValueType*                bsr_val,
-                                                   const int*                bsr_row_ptr,
-                                                   const int*                bsr_col_ind,
-                                                   int                       bsr_dim,
-                                                   rocsparse_mat_info        info,
-                                                   size_t*                   buffer_size);
-
-    // rocsparse bsrilu0 analysis
-    template <typename ValueType>
-    rocsparse_status rocsparseTbsrilu0_analysis(rocsparse_handle          handle,
-                                                rocsparse_direction       dir,
-                                                int                       mb,
-                                                int                       nnzb,
-                                                const rocsparse_mat_descr descr,
-                                                ValueType*                bsr_val,
-                                                const int*                bsr_row_ptr,
-                                                const int*                bsr_col_ind,
-                                                int                       bsr_dim,
-                                                rocsparse_mat_info        info,
-                                                rocsparse_analysis_policy analysis,
-                                                rocsparse_solve_policy    solve,
-                                                void*                     temp_buffer);
-
-    // rocsparse bsrilu0
-    template <typename ValueType>
-    rocsparse_status rocsparseTbsrilu0(rocsparse_handle          handle,
-                                       rocsparse_direction       dir,
-                                       int                       mb,
-                                       int                       nnzb,
-                                       const rocsparse_mat_descr descr,
-                                       ValueType*                bsr_val,
-                                       const int*                bsr_row_ptr,
-                                       const int*                bsr_col_ind,
-                                       int                       bsr_dim,
-                                       rocsparse_mat_info        info,
-                                       rocsparse_solve_policy    policy,
-                                       void*                     temp_buffer);
 
     // rocsparse gthr
     template <typename ValueType>

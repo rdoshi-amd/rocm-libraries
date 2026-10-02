@@ -494,16 +494,17 @@ namespace rocalution
 
         mutable HIPSpMV<ValueType> spmv_;
 
-        rocsparse_mat_descr L_mat_descr_;
-        rocsparse_mat_descr U_mat_descr_;
+        // Triangular solves with the lower (L, L^T) and upper (U) triangle
+        HIPSpTRSV<ValueType> L_sptrsv_;
+        HIPSpTRSV<ValueType> LT_sptrsv_;
+        HIPSpTRSV<ValueType> U_sptrsv_;
+
+        // Iterative triangular solves with the lower (L, L^T) and upper (U) triangle
+        HIPSpITSV<ValueType> L_spitsv_;
+        HIPSpITSV<ValueType> LT_spitsv_;
+        HIPSpITSV<ValueType> U_spitsv_;
+
         rocsparse_mat_descr mat_descr_;
-
-        rocsparse_mat_info mat_info_;
-        rocsparse_mat_info mat_info_itsv_;
-
-        // Matrix buffer (csrilu0, csric0, csrsv)
-        size_t mat_buffer_size_;
-        char*  mat_buffer_;
 
         HIPAcceleratorVector<ValueType>* tmp_vec_;
 

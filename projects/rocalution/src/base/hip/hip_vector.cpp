@@ -1784,10 +1784,11 @@ namespace rocalution
                 allocate_hip(this->size_, &workspace);
 
                 // Create identity permutation
-                rocsparse_status status = rocsparse_create_identity_permutation(
+                rocsparse_status status = rocsparse_set_identity_permutation(
                     ROCSPARSE_HANDLE(this->local_backend_.ROC_sparse_handle),
                     this->size_,
-                    workspace);
+                    workspace,
+                    rocalution_indextype_traits<int>::value);
                 CHECK_ROCSPARSE_ERROR(status, __FILE__, __LINE__);
 
                 // Radix sort pairs

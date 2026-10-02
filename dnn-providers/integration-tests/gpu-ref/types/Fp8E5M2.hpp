@@ -3,10 +3,9 @@
 
 #pragma once
 
-#include "Common.hpp"
-#include <cstdint>
-#include <limits>
 #include <type_traits>
+
+#include "Common.hpp"
 
 namespace hipdnn_gpu_ref::types
 {
@@ -262,6 +261,16 @@ struct fp8_e5m2
     {
     }
 
+    HOST_DEVICE explicit fp8_e5m2(_Float16 h) noexcept
+        : fp8_e5m2(static_cast<float>(h))
+    {
+    }
+
+    HOST_DEVICE explicit fp8_e5m2(__bf16 b) noexcept
+        : fp8_e5m2(static_cast<float>(b))
+    {
+    }
+
     template <typename T, typename = std::enable_if_t<std::is_integral_v<T>>>
     HOST_DEVICE explicit fp8_e5m2(T value) noexcept
         : fp8_e5m2(static_cast<float>(value))
@@ -284,6 +293,16 @@ struct fp8_e5m2
     HOST_DEVICE explicit operator double() const noexcept
     {
         return static_cast<double>(detail::fp8_e5m2_bits_to_float(data));
+    }
+
+    HOST_DEVICE explicit operator _Float16() const noexcept
+    {
+        return static_cast<_Float16>(detail::fp8_e5m2_bits_to_float(data));
+    }
+
+    HOST_DEVICE explicit operator __bf16() const noexcept
+    {
+        return static_cast<__bf16>(detail::fp8_e5m2_bits_to_float(data));
     }
 
     HOST_DEVICE fp8_e5m2 operator-() const noexcept
@@ -334,74 +353,3 @@ HOST_DEVICE inline bool isfinite(fp8_e5m2 x)
 }
 
 } // namespace hipdnn_gpu_ref::types
-
-// std::numeric_limits specialization
-// NOLINTBEGIN(readability-identifier-naming) - standard library names must match exactly
-template <>
-class std::numeric_limits<hipdnn_gpu_ref::types::fp8_e5m2>
-{
-    using T = hipdnn_gpu_ref::types::fp8_e5m2;
-
-public:
-    static constexpr bool is_specialized = true;
-    static constexpr bool is_signed = true;
-    static constexpr bool is_integer = false;
-    static constexpr bool is_exact = false;
-    static constexpr bool has_infinity = true;
-    static constexpr bool has_quiet_NaN = true;
-    static constexpr bool has_signaling_NaN = false; // OCP E5M2 does not distinguish signaling NaN
-    static constexpr std::float_denorm_style has_denorm = std::denorm_present;
-    static constexpr bool has_denorm_loss = false;
-    static constexpr std::float_round_style round_style = std::round_to_nearest;
-    static constexpr bool is_iec559 = false;
-    static constexpr bool is_bounded = true;
-    static constexpr bool is_modulo = false;
-    static constexpr int digits = 3; // 2 mantissa + 1 implicit
-    static constexpr int digits10 = 0;
-    static constexpr int max_digits10 = 2;
-    static constexpr int radix = 2;
-    static constexpr int min_exponent = -13;
-    static constexpr int min_exponent10 = -4;
-    static constexpr int max_exponent = 16;
-    static constexpr int max_exponent10 = 4;
-    static constexpr bool traps = false;
-    static constexpr bool tinyness_before = false;
-
-    HOST_DEVICE static constexpr T min() noexcept
-    {
-        return T::from_bits(hipdnn_gpu_ref::types::detail::FP8_E5M2_MIN_NORMAL);
-    }
-    HOST_DEVICE static constexpr T lowest() noexcept
-    {
-        return T::from_bits(hipdnn_gpu_ref::types::detail::FP8_E5M2_LOWEST);
-    }
-    HOST_DEVICE static constexpr T max() noexcept
-    {
-        return T::from_bits(hipdnn_gpu_ref::types::detail::FP8_E5M2_MAX);
-    }
-    HOST_DEVICE static constexpr T epsilon() noexcept
-    {
-        return T::from_bits(hipdnn_gpu_ref::types::detail::FP8_E5M2_EPSILON);
-    }
-    HOST_DEVICE static constexpr T round_error() noexcept
-    {
-        return T::from_bits(hipdnn_gpu_ref::types::detail::FP8_E5M2_ROUND_ERROR);
-    }
-    HOST_DEVICE static constexpr T infinity() noexcept
-    {
-        return T::from_bits(hipdnn_gpu_ref::types::detail::FP8_E5M2_POS_INF);
-    }
-    HOST_DEVICE static constexpr T quiet_NaN() noexcept
-    {
-        return T::from_bits(hipdnn_gpu_ref::types::detail::FP8_E5M2_NAN);
-    }
-    HOST_DEVICE static constexpr T signaling_NaN() noexcept
-    {
-        return T::from_bits(hipdnn_gpu_ref::types::detail::FP8_E5M2_NAN);
-    }
-    HOST_DEVICE static constexpr T denorm_min() noexcept
-    {
-        return T::from_bits(hipdnn_gpu_ref::types::detail::FP8_E5M2_DENORM_MIN);
-    }
-};
-// NOLINTEND(readability-identifier-naming)

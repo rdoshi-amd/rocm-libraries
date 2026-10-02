@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <cstdint>
+
 #if !defined(HOST_DEVICE)
 #if defined(__HIPCC__) || defined(__HIP__)
 #define HOST_DEVICE __host__ __device__
@@ -14,24 +16,24 @@
 namespace hipdnn_gpu_ref::types::detail
 {
 
-HOST_DEVICE inline unsigned int floatToBits(float f) noexcept
+HOST_DEVICE inline uint32_t floatToBits(float f) noexcept
 {
 #if defined(__has_builtin)
 #if __has_builtin(__builtin_bit_cast)
-    return __builtin_bit_cast(unsigned int, f);
+    return __builtin_bit_cast(uint32_t, f);
 #else
-    unsigned int b;
+    uint32_t b;
     std::memcpy(&b, &f, sizeof(b));
     return b;
 #endif
 #else
-    unsigned int b;
+    uint32_t b;
     std::memcpy(&b, &f, sizeof(b));
     return b;
 #endif
 }
 
-HOST_DEVICE inline float bitsToFloat(unsigned int b) noexcept
+HOST_DEVICE inline float bitsToFloat(uint32_t b) noexcept
 {
 #if defined(__has_builtin)
 #if __has_builtin(__builtin_bit_cast)

@@ -20,7 +20,7 @@ import re
 from typing import NamedTuple
 
 from ..Common.DataType import DataType
-from ..Common.Utilities import effectiveMatrixInstMN
+from ..Common.Utilities import clusterEnabled, effectiveMatrixInstMN
 from .TDMFuse import liveGroups, tdmGroupingSeparatesAB, tdmSeparateABDescriptors
 
 PGR_SPECIAL_AUTO = -1
@@ -262,6 +262,8 @@ def pgrAutoPairRanking(pgr, state, problemType=None, fixedA=None, fixedB=None):
     """Rank legal LDS-feasible pairs; retain successors for post-padding retries."""
     candidates = [pair for pair in pgrAutoPairCandidates(pgr)
                   if autoPairCandidateIsLegal(*pair)]
+    if clusterEnabled(state.get("ClusterDim", [1, 1])):
+        candidates = [pair for pair in candidates if pair[0] == pair[1]]
     if fixedA is not None:
         candidates = [pair for pair in candidates if pair[0] == fixedA]
     if fixedB is not None:
@@ -355,12 +357,14 @@ def resolvePrefetchGlobalReadSpecialValues(state, skip=0):
     ranking = pgrAutoPairRanking(start, state, state.get("ProblemType"),
                                  fixedA=fixedA, fixedB=fixedB)
     if skip >= len(ranking):
+        clusterNote = ("; ClusterDim %s limits auto to equal pairs" % state["ClusterDim"]
+                       if clusterEnabled(state.get("ClusterDim", [1, 1])) else "")
         if oneSided:
             return ("PrefetchGlobalReadA/B: auto found no LDS-feasible pair with "
                     "PrefetchGlobalRead%s held at %d, starting from %d; lower DepthU "
-                    "or the macro tile" % (heldTc, held, start))
+                    "or the macro tile%s" % (heldTc, held, start, clusterNote))
         return ("PrefetchGlobalReadA/B: auto found no LDS-feasible pair starting from "
-                "PrefetchGlobalRead=%s; lower DepthU or the macro tile" % pgr)
+                "PrefetchGlobalRead=%s; lower DepthU or the macro tile%s" % (pgr, clusterNote))
     state["PrefetchGlobalReadA"], state["PrefetchGlobalReadB"] = ranking[skip]
     return None
 
@@ -430,6 +434,33 @@ def divergentPairUnsupportedReason(ks):
                 "remains" % (ks["PrefetchLocalRead"], loopIters))
     if ks["NumWaves"] <= 1:
         return "wave-separated TDM requires NumWaves > 1; got %u" % ks["NumWaves"]
+    return None
+
+
+def dcpThinSideAndAxis(ks):
+    """(single-buffered side, ClusterDim axis whose peers share it), or None for equal blocks."""
+    _, numLdsBlkA, numLdsBlkB = decouplePGRBlocks(ks)
+    if numLdsBlkA == numLdsBlkB:
+        return None
+    # ClusterDim[1] peers share A, ClusterDim[0] peers share B.
+    return ("A", 1) if numLdsBlkA < numLdsBlkB else ("B", 0)
+
+
+def dcpClusterRejectReason(ks):
+    """Why a divergent pair cannot run at its ClusterDim, or None.
+
+    The single-buffered tensor refills the block its own reads still use, so it
+    stays self-only; the double-buffered tensor may multicast along its axis.
+    """
+    thin = dcpThinSideAndAxis(ks)
+    if thin is None or not clusterEnabled(ks["ClusterDim"]):
+        return None
+    thinTc, thinAxis = thin
+    if ks["ClusterDim"][thinAxis] != 1:
+        return ("the single-buffered %s cannot have cluster peers; set ClusterDim[%u]=1"
+                % (thinTc, thinAxis))
+    if ks["Multicast"] and not ks["ClusterBarrier"]:
+        return "multicast into the double-buffered tensor needs ClusterBarrier"
     return None
 
 
@@ -513,6 +544,7 @@ def dcpThickGateFromTokenPasses(ks):
 
 # Public: KernelWriter._dcpRelaxThickTextGate matches on it too.
 DCP_TENSORCNT_RE = re.compile(r"^s_wait_tensorcnt\s+(\d+)(?:\s|$)")
+DCP_DSCNT_DRAIN_RE = re.compile(r"^\s*s_wait_(?:\w+_)?dscnt\s+(?:0x0|0)\b")
 
 
 _DCP_LDS_READ_RE = re.compile(r"^ds_(?:load|read)\w*\s")
@@ -522,6 +554,227 @@ def dcpIsFillLabel(line):
     """True for a DcpEarlyFill/DcpLateFill scan boundary."""
     return (("DcpEarlyFill" in line or "DcpLateFill" in line)
             and line.rstrip().endswith(":"))
+
+
+_DCP_CLUSTER_SIGNAL = "s_barrier_signal -3"
+_DCP_CLUSTER_WAIT = "s_barrier_wait -3"
+_DCP_ASM_LABEL_RE = re.compile(r"^([A-Za-z_.$][\w.$]*):")
+_DCP_LC_CMP_RE = re.compile(r"^s_cmp_(eq_[iu]32|lg_[iu]32|le_u32) s\[sgprLoopCounterL\], (?:0x0|0)$")
+_DCP_LC_WRITE_RE = re.compile(r"^(\S+) s\[sgprLoopCounterL\],")
+_DCP_WAVE_CMP_RE = re.compile(r"^s_(cmp_eq_u32|cmp_lg_u32|bitcmp1_b32|bitcmp0_b32) s\[sgprWaveIdx\], "
+                              r"(0x[0-9a-fA-F]+|\d+)$")
+_DCP_ELECTION_CMP = "s_cmp_eq_u32 s[sgprWaveIdx], 0"
+_DCP_LONG_JUMP_RE = re.compile(r"^s_add_i32 s\d+, (label_\w+), 4$")
+_DCP_SCC_KEEPER_RE = re.compile(r"^(s_barrier|s_wait|s_nop|s_cbranch|s_branch|s_mov_b|s_cmov|s_set|"
+                                r"s_sleep|s_delay|s_cselect|s_getpc|s_setpc|s_endpgm|s_load|"
+                                r"s_buffer_load|s_prefetch|s_clause|s_dcache|s_icache|s_sendmsg)")
+
+
+def _dcpAsmInstructions(asm):
+    """(instructions, label -> instruction index) of kernel text; comments and directives dropped."""
+    insts, labels, block = [], {}, None
+    for raw in re.sub(r"/\*.*?\*/", " ", asm, flags=re.S).splitlines():
+        line = raw.split("//")[0].strip()
+        if not line:
+            continue
+        if block:
+            if line.startswith(block):
+                block = None
+            continue
+        if line.startswith(".amdgpu_metadata"):
+            block = ".end_amdgpu_metadata"
+            continue
+        if line.startswith(".amdhsa_kernel"):
+            block = ".end_amdhsa_kernel"
+            continue
+        label = _DCP_ASM_LABEL_RE.match(line)
+        if label:
+            labels[label.group(1)] = len(insts)
+            line = line[label.end():].strip()
+            if not line:
+                continue
+        if not line.startswith("."):
+            insts.append(" ".join(line.replace(",", ", ").split()).replace(" ,", ","))
+    return insts, labels
+
+
+def _dcpAsmBranchTarget(insts, labels, idx):
+    """(label name, instruction index) that instruction `idx` may jump to, or (None, None)."""
+    parts = insts[idx].split()
+    if parts[0] == "s_branch" or parts[0].startswith("s_cbranch_"):
+        name = parts[1] if len(parts) > 1 else None
+    elif parts[0] == "s_setpc_b64":
+        jump = next((_DCP_LONG_JUMP_RE.match(insts[j]) for j in range(idx - 1, max(idx - 17, -1), -1)
+                     if _DCP_LONG_JUMP_RE.match(insts[j])), None)
+        name = jump.group(1) if jump else None
+    else:
+        return None, None
+    return name, labels.get(name)
+
+
+def _dcpWaveZeroSccAfter(inst):
+    """SCC wave 0 leaves after `inst` when it compares WaveIdx against a constant, else None."""
+    cmp = _DCP_WAVE_CMP_RE.match(inst)
+    if not cmp:
+        return None
+    op, value = cmp.group(1), int(cmp.group(2), 0)
+    return {"cmp_eq_u32": value == 0, "cmp_lg_u32": value != 0,
+            "bitcmp1_b32": False, "bitcmp0_b32": True}[op]
+
+
+def _dcpWaveZeroPathProblems(insts, labels, signals, heads):
+    """Wave 0 must alternate cluster signal and wait on every path through the kernel, and
+    execute one of `signals` between a loop head in `heads` and any back-edge to it."""
+    problems, seen, work = {}, set(), [(0, 0, "U", None, False)]
+    while work:
+        state = work.pop()
+        if state in seen:
+            continue
+        seen.add(state)
+        idx, posted, lc, scc, signaled = state
+        if idx >= len(insts):
+            if posted:
+                problems.setdefault(("end", idx), "a cluster signal is still posted at the end")
+            continue
+        if idx in heads:
+            signaled = False
+        inst = insts[idx]
+        mnemonic = inst.split(None, 1)[0]
+        if inst == _DCP_CLUSTER_SIGNAL:
+            if posted:
+                problems.setdefault(("sig", idx), "instruction %d signals twice" % idx)
+            posted = 1
+            signaled = signaled or idx in signals
+        elif inst == _DCP_CLUSTER_WAIT:
+            if not posted:
+                problems.setdefault(("wait", idx), "instruction %d waits with no signal posted" % idx)
+            posted = 0
+        if mnemonic == "s_endpgm":
+            if posted:
+                problems.setdefault(("end", idx), "instruction %d ends with a signal posted" % idx)
+            continue
+        wave = _dcpWaveZeroSccAfter(inst)
+        lcCmp = _DCP_LC_CMP_RE.match(inst)
+        if wave is not None:
+            scc = ("wave", wave)
+        elif lcCmp:
+            scc = ("lc", not lcCmp.group(1).startswith("lg"))
+        elif mnemonic.startswith("s_") and not _DCP_SCC_KEEPER_RE.match(mnemonic):
+            scc = None
+        lcWrite = _DCP_LC_WRITE_RE.match(inst)
+        if lcWrite and not lcWrite.group(1).startswith(("s_cmp", "s_bitcmp")):
+            lc = "U"
+        _, target = _dcpAsmBranchTarget(insts, labels, idx)
+        if mnemonic in ("s_branch", "s_setpc_b64"):
+            edges = [(target, lc)]
+        elif mnemonic in ("s_cbranch_scc0", "s_cbranch_scc1"):
+            takenIf = mnemonic == "s_cbranch_scc1"
+            if scc is not None and scc[0] == "wave":
+                edges = [(target, lc)] if scc[1] == takenIf else [(idx + 1, lc)]
+            elif scc is not None:
+                zeroWhenTaken = scc[1] == takenIf
+                taken, fall = ("Z", "NZ") if zeroWhenTaken else ("NZ", "Z")
+                edges = [(t, l) for t, l in ((target, taken), (idx + 1, fall)) if lc in ("U", l)]
+            else:
+                edges = [(target, lc), (idx + 1, lc)]
+        elif mnemonic.startswith("s_cbranch_"):
+            edges = [(target, lc), (idx + 1, lc)]
+        else:
+            edges = [(idx + 1, lc)]
+        for nxt, nextLc in edges:
+            if nxt is None:
+                problems.setdefault(("target", idx), "instruction %d jumps to an unknown label" % idx)
+                continue
+            if nxt in heads and nxt <= idx and not signaled:
+                problems.setdefault(("loop", nxt), "loop %s takes its back-edge on a wave-0 path that "
+                                    "skips its cluster signal" % heads[nxt])
+            work.append((nxt, posted, nextLc, scc, signaled))
+    return list(problems.values())
+
+
+def dcpClusterHandshakeViolations(asm, thinTc):
+    """Why emitted kernel text breaks the decoupled-PGR cluster handshake; empty when it holds.
+
+    `thinTc` names the single-buffered tensor, the only one that may load inside the handshake.
+    """
+    insts, labels = _dcpAsmInstructions(asm)
+    joins = set(labels.values())
+    signals = [i for i, inst in enumerate(insts) if inst == _DCP_CLUSTER_SIGNAL and i >= 2
+               and insts[i - 1].startswith("s_cbranch_scc0 ") and "DcpCSigSkip" in insts[i - 1]]
+    loops = []
+    for b in range(len(insts)):
+        name, begin = _dcpAsmBranchTarget(insts, labels, b)
+        if name is None or "LoopBegin" not in name or "TailLoop" in name or begin is None or begin >= b:
+            continue
+        loads = [i for i in range(begin, b) if insts[i].startswith("tensor_load_to_lds")]
+        if loads:
+            loops.append((name, begin, b, loads))
+    problems = _dcpWaveZeroPathProblems(insts, labels, set(signals),
+                                        {begin: name for name, begin, _, _ in loops})
+    for i, inst in enumerate(insts):
+        if not inst.startswith(("s_cbranch_scc0 ", "s_cbranch_scc1 ")) or i == 0:
+            continue
+        j = i - 1
+        while (j > 0 and j not in joins and not insts[j].startswith(("s_cbranch", "s_branch"))
+               and (not insts[j].startswith("s_") or _DCP_SCC_KEEPER_RE.match(insts[j]))):
+            j -= 1
+        wave = _dcpWaveZeroSccAfter(insts[j])
+        end = labels.get(inst.split()[1], -1)
+        if wave is None or end <= i:
+            continue
+        election = (inst.startswith("s_cbranch_scc0 ") and insts[i - 1] == _DCP_ELECTION_CMP
+                    and end == i + 2 and insts[i + 1] == _DCP_CLUSTER_SIGNAL)
+        if not election and any(t in (_DCP_CLUSTER_SIGNAL, _DCP_CLUSTER_WAIT) for t in insts[i + 1:end]):
+            problems.append("instruction %d: a cluster barrier depends on the wave index" % i)
+
+    if not signals:
+        problems.append("no decoupled-PGR cluster signal")
+    thinLoad = re.compile(r"tdm(?:MXS)?%sGroup" % thinTc)
+    for s in signals:
+        if s in joins or s - 1 in joins:
+            problems.append("cluster signal %d: a branch lands inside its election" % s)
+            continue
+        if insts[s - 2] != _DCP_ELECTION_CMP:
+            problems.append("cluster signal %d: %s sits in the election slot" % (s, insts[s - 2].split()[0]))
+            continue
+        k, stage = s - 3, "barrier"
+        while k >= 0:
+            inst = insts[k]
+            if (k + 1 in joins or inst.startswith(("s_cbranch", "s_branch", "tensor_load"))
+                    or _DCP_LDS_READ_RE.match(inst)):
+                problems.append("cluster signal %d: %s before its read barrier" % (s, inst.split()[0]))
+                break
+            if stage == "barrier" and inst == "s_barrier_wait -1":
+                stage = "signal"
+            elif stage == "signal" and inst == "s_barrier_signal -1":
+                stage = "drain"
+            elif stage == "drain" and DCP_DSCNT_DRAIN_RE.match(inst):
+                break
+            k -= 1
+        else:
+            problems.append("cluster signal %d: no drained workgroup barrier ahead of it" % s)
+        wait = next((j for j in range(s, len(insts)) if insts[j] == _DCP_CLUSTER_WAIT), len(insts))
+        # Wave-separated TDM uses one descriptor name for both tensors, so a load inside the
+        # single-buffered late-fill branch is not classified by name.
+        guards = [(j, labels[t]) for j in range(s, wait) for t in insts[j].split()[1:2]
+                  if insts[j].startswith("s_cbranch") and "DcpLateFill%sEnd" % thinTc in t
+                  and labels.get(t, -1) > j]
+        if any(insts[j].startswith("tensor_load")
+               and not (any(b < j < e for b, e in guards) if guards else thinLoad.search(insts[j]))
+               for j in range(s + 1, wait)):
+            problems.append("cluster signal %d: a double-buffered tensor load precedes its cluster wait" % s)
+
+    for name, begin, b, loads in loops:
+        mine = [s for s in signals if begin <= s < b]
+        if len(mine) != 1:
+            problems.append("loop %s holds %d cluster handshakes" % (name, len(mine)))
+            continue
+        wait = next((i for i in range(mine[0], b) if insts[i] == _DCP_CLUSTER_WAIT), None)
+        if wait is None:
+            problems.append("loop %s has no cluster wait after its signal" % name)
+        elif any(i > wait for i in loads):
+            problems.append("loop %s issues a tensor load after its cluster wait" % name)
+    return problems
 
 
 def dcpThickGateUncoveredSites(lines, marker, relaxed, accepted):

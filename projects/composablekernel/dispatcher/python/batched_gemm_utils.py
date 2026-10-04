@@ -766,6 +766,7 @@ def expand_sweep(
     arch: Optional[str] = None,
     dtype: str = "fp16",
     layout: str = "rcr",
+    **vector_kwargs,
 ) -> List[BatchedGemmKernelConfig]:
     """Expand a Tile Engine batched GEMM JSON sweep config into
     [BatchedGemmKernelConfig]. Reuses gemm_utils.expand_sweep (same tile/trait
@@ -773,7 +774,8 @@ def expand_sweep(
 
     ``arch`` is resolved via ``_get_arch()`` (rocminfo) when omitted and
     validated against the supported set otherwise -- never a silent gfx942
-    default."""
+    default. ``vector_kwargs`` (``vector_sizes``/``rejects``) is forwarded to
+    gemm_utils.expand_sweep for misaligned-problem vector widths."""
     arch = _resolve_arch(arch)
     # Match Old-TE's validated set EXACTLY (the batched_gemm instance builder's
     # --datatype/--layout choices, kept equal by a unit test) so the bridge never
@@ -786,7 +788,9 @@ def expand_sweep(
             raise ValueError(
                 f"batched_gemm bridge supports {name} {list(supported)}; got {value!r}"
             )
-    base_configs = _gu.expand_sweep(config_path, arch, dtype=dtype, layout=layout)
+    base_configs = _gu.expand_sweep(
+        config_path, arch, dtype=dtype, layout=layout, variant="batched", **vector_kwargs
+    )
     out: List[BatchedGemmKernelConfig] = []
     seen: set = set()
     for b in base_configs:
@@ -830,6 +834,9 @@ def expand_sweep(
             pad_k=b.pad_k,
             persistent=b.persistent,
             gfx_arch=b.gfx_arch,
+            vector_size_a=b.vector_size_a,
+            vector_size_b=b.vector_size_b,
+            vector_size_c=b.vector_size_c,
             variant="batched",
         )
         if c.name in seen:

@@ -398,6 +398,17 @@ TEST_P(GPU_UnitTestConvSolverConvHipConvWrwNchw_TF32, ConvHipConv)
     this->RunTest(miopen::solver::conv::ConvHipConv{});
 };
 
+// A kernel label contains commas, which field-wise perf-config serialization would split on.
+TEST(CPU_UnitTestConvSolverConvHipConvPerfConfig_NONE, SerializeRoundTrip)
+{
+    miopen::solver::conv::PerformanceConfigConvHipConv stored;
+    stored.descriptor = "direct[tile_size_k=256,tile_size_n=1,tile_size_h=16,tile_size_w=16]";
+
+    miopen::solver::conv::PerformanceConfigConvHipConv loaded;
+    ASSERT_TRUE(loaded.Deserialize(stored.ToString()));
+    EXPECT_EQ(loaded.descriptor, stored.descriptor);
+}
+
 INSTANTIATE_TEST_SUITE_P(
     Smoke,
     GPU_UnitTestConvSolverConvHipConvFwdNhwc_FP16,

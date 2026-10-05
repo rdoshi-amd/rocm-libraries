@@ -13,6 +13,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <hipdnn_test_sdk/utilities/FileUtilities.hpp>
@@ -514,11 +515,11 @@ TEST_F(TestVerificationModePathsFixture, CpuModeCapabilityMissSkips)
     EXPECT_FALSE(testing_support::anyFailed(results));
 }
 
-// ── Oracle resolved before the engine runs ──────────────────────────────────
-// Golden data and isApplicable() are both known before runEngine(), so the chain
-// is resolved there; a reference that said no up front is never executed. The
-// engine still runs and answers first -- a decline is a SKIP whatever the oracles
-// said. An engine that ran with no oracle left SKIPs without --fail-on-no-oracle
+// ── No oracle ────────────────────────────────────────────────────────────────
+// The engine runs and answers first -- a decline is a SKIP and a break a FAIL,
+// with no oracle consulted. Only then is the chain walked; a reference whose
+// isApplicable() says no is never executed. An engine that ran with no oracle
+// left SKIPs without --fail-on-no-oracle
 // and FAILs with it. So does one where a reference errored and the chain then
 // fell through to a decline: the error is on the reference-error report either
 // way. A chain whose last oracle errored fails regardless -- the oracle the
@@ -861,8 +862,8 @@ TEST_F(TestVerificationModePathsFixture, CpuModeLateCapabilityMissFailsUnderFail
     EXPECT_FALSE(testing_support::anySkipped(results));
 }
 
-// A declined engine is still reported as a decline: the oracle is only settled
-// for a graph the engine would actually run.
+// A declined engine is still reported as a decline: the oracles are only consulted
+// for an engine that ran.
 TEST_F(TestVerificationModePathsFixture, DeclinedEngineSkipsEvenWithNoOracle)
 {
     using ::testing::_;
@@ -931,6 +932,44 @@ TEST_F(TestVerificationModePathsFixture, EngineErrorFailsAsEngineEvenWithNoOracl
     const std::string messages = testing_support::allMessages(results);
     EXPECT_THAT(messages, ::testing::HasSubstr("stub: engine crashed"));
     EXPECT_THAT(messages, ::testing::Not(::testing::HasSubstr("no oracle")));
+}
+
+// A bundle the engine never ran is never graded, so no reference is created or
+// probed for it -- and one that would throw doing so cannot put an ungraded
+// bundle on the reference-error report.
+TEST_F(TestVerificationModePathsFixture, UngradedBundleNeverTouchesAReference)
+{
+    using ::testing::_;
+    const std::vector<std::pair<std::string, EngineOpResult>> engineAnswers{
+        {"late_decline", EngineOpResult::declinedBy("stub: provider declined late")},
+        {"engine_error", EngineOpResult::failed("stub: engine crashed")},
+    };
+    for(const auto& [label, answer] : engineAnswers)
+    {
+        SCOPED_TRACE(label);
+        testing_support::HarnessMocks mocks;
+        ON_CALL(mocks.engineRunner, execute(_, _, _)).WillByDefault(::testing::Return(answer));
+        int referenceLookups = 0;
+        ON_CALL(mocks.referenceExecutors, get(_))
+            .WillByDefault([&referenceLookups](ReferenceExecutorType) -> IReferenceGraphExecutor& {
+                ++referenceLookups;
+                throw std::runtime_error("stub: reference must not be created");
+            });
+        std::vector<std::string> refErrors;
+        testing_support::captureReferenceErrors(mocks.reporter, refErrors);
+
+        IntegrationBundleVerificationHarness harness(
+            mocks.dependencies(testing_support::hostPolicy(VerificationMode::AUTO)));
+        harness.setBundle(loadBundle("ungraded_" + label, /*includeGoldenOutput=*/false),
+                          "vmode-test-bundle");
+        ::testing::TestPartResultArray results;
+        testing_support::driveHarness(harness, &results);
+
+        EXPECT_EQ(referenceLookups, 0) << "an ungraded bundle must not create a reference";
+        EXPECT_TRUE(refErrors.empty());
+        EXPECT_THAT(testing_support::allMessages(results),
+                    ::testing::Not(::testing::HasSubstr("must not be created")));
+    }
 }
 
 // ── Enforcement-level gate ──────────────────────────────────────────────────

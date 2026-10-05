@@ -69,11 +69,11 @@ struct ClaimPhase
 
 /// Runs one bundle against the engine under test and decides what that says.
 ///
-/// Fallback chain: golden → GPU ref → CPU ref (RFC 0010 §4.4). Oracle availability is
-/// resolved before the engine runs, but the engine still answers first: a decline is
-/// a SKIP whatever the oracles said. An engine that ran with nothing left to verify it
-/// SKIPs, or FAILs under policy.failOnNoOracle. A chain whose last oracle errored
-/// rather than declined is a FAIL either way.
+/// Fallback chain: golden → GPU ref → CPU ref (RFC 0010 §4.4). The engine runs first,
+/// and a decline is a SKIP and a break a FAIL without consulting any oracle; the chain
+/// is only walked for an engine that ran. One with nothing left to verify it SKIPs,
+/// or FAILs under policy.failOnNoOracle. A chain whose last oracle errored rather
+/// than declined is a FAIL either way.
 ///
 /// Inputs are read-only (shared); outputs are separate allocations per executor.
 ///
@@ -394,7 +394,7 @@ private:
     // APPLICABILITY and BUILDABLE come here; FULL takes the comparison path.
     VerificationOutcome enforceAtLevel(EnforcementLevel level, GraphSession& session);
 
-    /// A reference executor that said, before the engine ran, that it can take this graph.
+    /// A reference executor whose isApplicable() said it can take this graph.
     struct ResolvedReference
     {
         ReferenceExecutorType type;
@@ -402,9 +402,9 @@ private:
     };
 
     /// The oracles a non-golden mode may use, in fallback order, and what became of
-    /// each one tried. Probed lazily: only as far as the first applicable reference
-    /// up front, so a working GPU reference never instantiates the CPU one; the rest
-    /// are probed only if the ones before them fail at execute().
+    /// each one tried. Probed lazily: only as far as the first applicable reference,
+    /// so a working GPU reference never instantiates the CPU one; the rest are probed
+    /// only if the ones before them fail at execute().
     struct OracleChain
     {
         bool golden = false;
@@ -431,7 +431,7 @@ private:
 
     VerificationOutcome runComparison(GraphSession& session);
     VerificationOutcome runGoldenMode(GraphSession& session);
-    VerificationOutcome runReferenceMode(GraphSession& session, OracleChain& oracles);
+    VerificationOutcome runReferenceMode(GraphSession& session);
     VerificationOutcome runOracleChain(OutputTensors& engineOutputs, OracleChain& chain);
 
     // Every oracle in `chain` declined. Recorded as unverifiable; SKIPs, or FAILs

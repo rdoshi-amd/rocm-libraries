@@ -307,17 +307,8 @@ VerificationOutcome IntegrationBundleVerificationHarness::runComparison(GraphSes
     // allocation and RNG fill for its tensors, which on a 57M-element sweep case is
     // seconds per skip, and reading a golden bundle's blobs first made it pay for
     // those too.
-    //
-    // Which oracle will judge the engine is resolved here too, before the engine runs:
-    // golden data and isApplicable() are both knowable now. The verdict still waits
-    // for the engine, which can decline from execute() as well as at ranking -- see
-    // runReferenceMode(). Golden mode has its own, stricter, demand for its one
-    // oracle -- see runGoldenMode().
-    OracleChain oracles;
     if(session.engines.accepted)
     {
-        oracles = resolveOracles(_deps.policy.mode);
-
         if(auto unavailable = prepareInputs())
         {
             return *unavailable;
@@ -331,7 +322,7 @@ VerificationOutcome IntegrationBundleVerificationHarness::runComparison(GraphSes
     case VerificationMode::GPU:
     case VerificationMode::CPU:
     case VerificationMode::AUTO:
-        return runReferenceMode(session, oracles);
+        return runReferenceMode(session);
     default:
         return VerificationOutcome::failed(
             VerificationDepth::NOT_REACHED, FailureOrigin::HARNESS, "Unknown verification mode");
@@ -473,18 +464,20 @@ VerificationOutcome IntegrationBundleVerificationHarness::runGoldenMode(GraphSes
     return compareAgainstGolden(engine.outputs);
 }
 
-VerificationOutcome IntegrationBundleVerificationHarness::runReferenceMode(GraphSession& session,
-                                                                           OracleChain& oracles)
+VerificationOutcome IntegrationBundleVerificationHarness::runReferenceMode(GraphSession& session)
 {
-    // The engine answers first, even when no oracle is left to check it. A decline
-    // -- from ranking or from execute() -- is a SKIP and a break is the engine's
-    // FAIL, whatever the oracles said up front; only an engine that ran is owed an
-    // oracle, and runOracleChain() reports it unverifiable when none is left.
+    // The engine runs first, whether or not any oracle could check it: a decline --
+    // from ranking or from execute() -- is a SKIP and a break is the engine's FAIL,
+    // and neither needs an oracle to see. Only an engine that ran is owed one, so the
+    // oracles are not looked at until then; a bundle that never gets graded never
+    // creates or probes a reference. runOracleChain() reports it unverifiable when
+    // none can verify it.
     auto engine = runEngine(session);
     if(engine.status != EngineStatus::RAN)
     {
         return engineDidNotRun(engine);
     }
+    auto oracles = resolveOracles(_deps.policy.mode);
     return runOracleChain(engine.outputs, oracles);
 }
 
@@ -497,8 +490,8 @@ VerificationOutcome
         return compareAgainstGolden(engineOutputs);
     }
 
-    // isApplicable() said yes before the engine ran, but execute() can still find a
-    // capability gap the up-front check could not see, or crash. Either way the next
+    // isApplicable() said yes, but execute() can still find a capability gap that
+    // check could not see, or crash. Either way the next
     // candidate gets its turn; only once the chain is spent does the bundle go
     // without a verdict.
     for(auto ref = std::exchange(chain.ready, std::nullopt); ref.has_value();

@@ -19,8 +19,8 @@ namespace hipdnn_integration_tests
 //
 // A case-A miss falls through to the next reference; when none is left the bundle
 // has no oracle and SKIPs (FAILs under --fail-on-no-oracle). Most misses are
-// caught by isApplicable() before the engine runs; this exception covers the ones
-// only execute() can see. A case-C error is loud (fall through + loud report, and
+// caught by isApplicable() before the reference executes; this exception covers
+// the ones only execute() can see. A case-C error is loud (fall through + loud report, and
 // FAIL if nothing after it verifies the bundle). Throwing the right type at the
 // source is what lets the harness tell A from C.
 //

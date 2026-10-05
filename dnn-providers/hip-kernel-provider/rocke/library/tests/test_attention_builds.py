@@ -1099,8 +1099,8 @@ class TestAttentionHelpers(unittest.TestCase):
         )
         k = build_unified_attention_2d_tiled(spec)
         ll = lower_kernel_to_llvm(k)
-        # Additive-bias ABI: f32 pointer + 3 stride scalars.
-        self.assertIn("f32* %additive_bias_ptr", ll)
+        # Additive-bias ABI: f32 pointer (opaque ptr in LLVM IR) + 3 stride scalars.
+        self.assertIn("%additive_bias_ptr", ll)
         self.assertIn("i32 %additive_bias_batch_stride", ll)
         self.assertIn("i32 %additive_bias_head_stride", ll)
         self.assertIn("i32 %additive_bias_sq_stride", ll)

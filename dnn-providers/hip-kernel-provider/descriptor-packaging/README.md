@@ -336,8 +336,8 @@ ctest names that must run; the junit check fails unless every one ran with no fa
 error or skip. Configuring without the option and running the same build and ctest lines
 fails (unknown target, then "No tests were found").
 
-Locally on Linux the build takes about 35 s (the wheel environment plus a one-instance-per-group
-pack) and the two ctest entries about 3 s. There is no local Windows reproduction.
+Locally on Linux the build is quick (the wheel environment plus a one-instance-per-group
+pack) and the ctest entries a few seconds. There is no local Windows reproduction.
 
 ### `hkp_add_packaging_probe` arguments
 
@@ -355,9 +355,11 @@ A probe has no producer-kind or per-KDP argument: the producer kinds present in 
 are discovered from its descriptors, and the assertion expects each UKD's provenance by
 its authored `kernel_source.kind`. Probes cover `hip`, `rocke` and `hsaco`, the kinds registered in `tools/hkp_probe_kinds.py`
 (per kind: the `kernel_source` fields that define a compile group, and the provenance
-checks a shipped UKD must satisfy). Any other kind in a UKD kept for the probed arch is
-rejected at configure, and fails `no-rules-for-kind` in the assertion, until it gets
-one entry there.
+checks a shipped UKD must satisfy). Any other kind in a UKD kept for the probed arch makes
+configure fail. A kind the packer packs to kpack becomes probeable with one entry there.
+Pass-through kinds (`embedded_source`, which the packer ships as authored, not as kpack) and
+kinds the packer does not pack to kpack cannot be probed by adding an entry: such a UKD must
+live in a KDP that does not ship for a probed arch, or the probe needs a design decision.
 
 Configuration fails, never skips, when: `ARCH` is missing; `ROOT` is not a directory;
 no KDP under the root ships for `ARCH`; a
@@ -377,11 +379,11 @@ themselves ship for `ARCH`. The group is the part of a UKD that selects its comp
 |---|---|
 | `rocke` | `(kind, builder)` |
 | `hip` | `(kind, source, build)` |
-| `hsaco`, `kpack`, `embedded_source` | one per kind |
+| `hsaco` | one per KDP (compiles nothing) |
 
 The kept UKD is the first by sorted `name`. The probe therefore packs the real
 descriptors and compiles every distinct compile path once instead of every variant.
-Today the production gfx950 KDP (840 `rocke` UKDs sharing one builder) keeps one.
+A production KDP whose UKDs share one builder keeps one UKD.
 
 - **Variants inside a group are not compiled.** Breakage specific to one spec of a shared
   builder is not caught; that is the accepted gap of the design.

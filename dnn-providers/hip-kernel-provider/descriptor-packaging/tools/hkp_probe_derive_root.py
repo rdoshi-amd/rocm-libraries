@@ -6,7 +6,7 @@ Copies every file under `--from` to `--out`, except that each KDP shipping for
 among the UKDs that themselves ship for `--arch`:
 
     one entry per kind in hkp_probe_kinds.py: rocke (kind, builder), hip (kind, source,
-    build), hsaco (kind), i.e. one per KDP
+    build), hsaco (kind: compiles nothing, so one UKD per KDP)
 
 The pick within a group is the first by sorted UKD `name`. Packing the derived
 root therefore exercises every compile path once instead of every variant.
@@ -67,9 +67,12 @@ def _group_key(ukd, where):
     kind = source.get("kind") if isinstance(source, dict) else None
     if kind not in KINDS:
         raise DeriveError(
-            f"{where} kind {kind!r} has no probe support: add an entry to "
-            "KINDS in hkp_probe_kinds.py, once the packer produces kpack output "
-            "for it"
+            f"{where} kind {kind!r} has no probe support. A kind the packer packs to "
+            "kpack needs one entry in KINDS (hkp_probe_kinds.py). A pass-through kind "
+            "(embedded_source: shipped as authored, not as kpack) or any kind the "
+            "packer does not pack to kpack cannot be probed by adding an entry: keep "
+            "such UKDs in a KDP that does not ship for the probed arch, or decide how "
+            "the probe should cover them"
         )
     return (kind,) + tuple(
         json.dumps(source.get(f), sort_keys=True) for f in KINDS[kind].group_by

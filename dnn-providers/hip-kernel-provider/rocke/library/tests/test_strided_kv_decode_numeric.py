@@ -155,39 +155,41 @@ def test_strided_kv_decode(
     )
     stream = torch.cuda.default_stream() if default_stream else torch.cuda.Stream()
     torch.cuda.synchronize()
-    from dispatch.attention import AttentionRequest, dispatch_attention
+    # Paged cases exercise the direct runtime; strided cases also test dispatch.
+    if kv_layout == "strided":
+        from dispatch.attention import AttentionRequest, dispatch_attention
 
-    request = AttentionRequest(
-        batch=batch,
-        nhead_q=q_heads,
-        nhead_k=kv_heads,
-        seqlen_q=1,
-        seqlen_k=capacity,
-        hdim_q=dim,
-        hdim_v=dim,
-        arch=arch,
-        dtype=dtype,
-        kv_layout="strided",
-        kv_block_size=block_size,
-        sliding_window=window,
-        target_ctas=8,
-    )
-    result = dispatch_attention(request)
-    assert result.candidate.name == "attention_strided_decode"
-    binding = result.candidate.bind_torch(
-        request,
-        result.spec,
-        dict(
-            problem=problem,
-            q=q,
-            k=k,
-            v=v,
-            out=output,
-            cu_seqlens_q=cu_q,
-            seqused_k=lengths,
-        ),
-        stream=stream.cuda_stream,
-    )
+        request = AttentionRequest(
+            batch=batch,
+            nhead_q=q_heads,
+            nhead_k=kv_heads,
+            seqlen_q=1,
+            seqlen_k=capacity,
+            hdim_q=dim,
+            hdim_v=dim,
+            arch=arch,
+            dtype=dtype,
+            kv_layout="strided",
+            kv_block_size=block_size,
+            sliding_window=window,
+            target_ctas=8,
+        )
+        result = dispatch_attention(request)
+        assert result.candidate.name == "attention_strided_decode"
+        binding = result.candidate.bind_torch(
+            request,
+            result.spec,
+            dict(
+                problem=problem,
+                q=q,
+                k=k,
+                v=v,
+                out=output,
+                cu_seqlens_q=cu_q,
+                seqused_k=lengths,
+            ),
+            stream=stream.cuda_stream,
+        )
     for step in range(3):
         if step:
             lengths_host = (

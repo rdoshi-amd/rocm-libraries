@@ -33,7 +33,7 @@ overlapping or unaligned views and K/V/output scaling are not supported. This ch
 
 ## Usage and validation
 
-Use the existing [runtime entry point](attention_unified.py) with the following
+Use the existing [runtime entry point](../library/kernels/common/attention_unified.py) with the following
 arguments, after creating the problem and device tensors described above:
 
 ```python
@@ -55,17 +55,17 @@ run_unified_attention_torch(
 ```
 
 For registry consumers, set `AttentionRequest.kv_layout="strided"`; the
-[candidate](../../dispatch/attention/strided_decode.py) provides spec building
+[candidate](../library/dispatch/attention/strided_decode.py) provides spec building
 and `bind_torch`. Direct and dispatched launches share the same spec policy.
 The binding accepts only `softmax_scale` and `stream` keyword overrides; it
 rejects softcap, bias/sinks tensors, and unknown arguments. Explicit segment
 and reducer specs must agree with the runtime problem's shapes, dtype, window,
-and enabled features. The low-level [layout adapter](attention_kv_cache.py) packs
+and enabled features. The low-level [layout adapter](../library/kernels/common/attention_kv_cache.py) packs
 independent K/V batch/head strides as i64 byte offsets and token strides/span
 as i32 bytes. Separate C builder entry points preserve installed paged spec
 structs; strided symbols carry `_stridedkv`.
 
-The [numeric tests](../../tests/test_strided_kv_decode_numeric.py) compare
+The [numeric tests](../library/tests/test_strided_kv_decode_numeric.py) compare
 the direct runtime and registered binding against an independent CPU FP32
 reference after input quantization. They include batched BHSD/BSHD, different
 K/V strides, padding, unpadded capacity tails, changing valid lengths, empty

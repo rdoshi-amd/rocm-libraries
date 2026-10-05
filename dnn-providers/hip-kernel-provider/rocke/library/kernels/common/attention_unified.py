@@ -2993,28 +2993,33 @@ def _num_segments(problem: UnifiedAttentionProblem) -> int:
 
 
 def _gfx942_3d_tile_size_override(
-    problem: UnifiedAttentionProblem, *, arch: Optional[str] = None
-) -> Optional[int]:
-    arch = arch or _resolve_attention_arch()
+    problem: UnifiedAttentionProblem, *, arch: str | None = None
+) -> int | None:
+    if arch is None:
+        arch = _resolve_attention_arch()
     if not (arch == "gfx942" and problem.head_size >= 128 and problem.block_size >= 32):
         return None
     return problem.block_size // 2
 
 
 def _select_3d_waves_per_eu(
-    problem: UnifiedAttentionProblem, *, arch: Optional[str] = None
-) -> Optional[int]:
+    problem: UnifiedAttentionProblem, *, arch: str | None = None
+) -> int | None:
     if problem.waves_per_eu is not None:
         return problem.waves_per_eu
-    if (arch or _resolve_attention_arch()) == "gfx1250":
+    if arch is None:
+        arch = _resolve_attention_arch()
+    if arch == "gfx1250":
         return 2
     return None
 
 
 def _enable_gfx942_3d_invariant_hoist(
-    problem: UnifiedAttentionProblem, *, arch: Optional[str] = None
+    problem: UnifiedAttentionProblem, *, arch: str | None = None
 ) -> bool:
-    if (arch or _resolve_attention_arch()) != "gfx942":
+    if arch is None:
+        arch = _resolve_attention_arch()
+    if arch != "gfx942":
         return False
     env = __import__("os").environ.get("HIPDNN_GFX942_3D_HOIST", "").strip().lower()
     return env in ("1", "on", "enable", "enabled", "yes", "true")

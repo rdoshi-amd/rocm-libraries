@@ -113,6 +113,26 @@ def test_one_ukd_per_compile_group(tmp_path):
     assert sorted(_kept(tmp_path / "w" / "root")) == sorted(e["name"] for e in expect)
 
 
+def test_hsaco_compiles_nothing_so_one_per_kdp(tmp_path):
+    ukds = [_other("hsaco", "z_hsaco"), _other("hsaco", "y_hsaco"), _rocke("r")]
+    _write_root(tmp_path / "src", ukds)
+    expect = _derive(tmp_path / "src", "gfx950", tmp_path / "w" / "root")
+    assert {(e["kind"], e["name"]) for e in expect} == {
+        ("hsaco", "y_hsaco"),
+        ("rocke", "r"),
+    }
+
+
+def test_hsaco_ukd_for_other_arch_is_ignored(tmp_path):
+    ukds = [
+        dict(_other("hsaco", "a_942"), arch=["gfx942"]),
+        dict(_other("hsaco", "b_950"), arch=["gfx950"]),
+    ]
+    _write_root(tmp_path / "src", ukds, kdp_arch=("gfx942", "gfx950"))
+    expect = _derive(tmp_path / "src", "gfx950", tmp_path / "w" / "root")
+    assert [e["name"] for e in expect] == ["b_950"]
+
+
 def test_pick_is_independent_of_authored_order(tmp_path):
     ukds = [_rocke(n) for n in ("m", "c", "x", "a2", "a1")]
     for i, order in enumerate(itertools.permutations(ukds, 3)):
@@ -208,7 +228,7 @@ def test_standalone_reference_in_other_arch_kdp_is_ignored(tmp_path):
     assert _derive(tmp_path / "src", "gfx950", tmp_path / "w" / "root") == []
 
 
-@pytest.mark.parametrize("kind", ["hsaco", "embedded_source", "kpack", "mystery"])
+@pytest.mark.parametrize("kind", ["embedded_source", "kpack", "mystery"])
 def test_kind_without_probe_support_exits_2(tmp_path, kind):
     _refused(
         tmp_path,
@@ -218,7 +238,7 @@ def test_kind_without_probe_support_exits_2(tmp_path, kind):
 
 
 def test_unsupported_kind_for_other_arch_is_ignored(tmp_path):
-    ukds = [_rocke("a"), dict(_other("hsaco", "m"), arch=["gfx942"])]
+    ukds = [_rocke("a"), dict(_other("embedded_source", "m"), arch=["gfx942"])]
     _write_root(tmp_path / "src", ukds, kdp_arch=("gfx942", "gfx950"))
     assert [
         e["name"] for e in _derive(tmp_path / "src", "gfx950", tmp_path / "w" / "root")
@@ -323,3 +343,26 @@ def test_arch_subset_agrees_with_packer(ukd_arch, kdp_arch):
 
     got = _derive_module().arch_subset_ok(ukd_arch or [], kdp_arch or [])
     assert got == descriptors._arch_subset_ok(ukd_arch or [], kdp_arch or [])
+
+
+# --- the kinds registry -----------------------------------------------------
+def _tool_module(name):
+    sys.path.insert(0, str(PROBE_DERIVE.parent))
+    try:
+        return __import__(name)
+    finally:
+        sys.path.pop(0)
+
+
+def test_kinds_registry_is_complete():
+    kinds = _tool_module("hkp_probe_kinds").KINDS
+    checks = _tool_module("hkp_probe_assert")._PROVENANCE_CHECKS
+    assert kinds
+    used = set()
+    for kind, entry in kinds.items():
+        assert all(isinstance(f, str) and f for f in entry.group_by), kind
+        # Every named provenance check has an implementation in the assert tool.
+        assert set(entry.provenance) <= set(checks), kind
+        used |= set(entry.provenance)
+    # ... and no implementation is dead.
+    assert used == set(checks)

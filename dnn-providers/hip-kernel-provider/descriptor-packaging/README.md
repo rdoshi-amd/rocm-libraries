@@ -353,16 +353,17 @@ normal declaration is one line per architecture: `hkp_add_packaging_probe(ARCH g
 
 A probe has no producer-kind or per-KDP argument: the producer kinds present in the root
 are discovered from its descriptors, and the assertion expects each UKD's provenance by
-its authored `kernel_source.kind`. Probes cover `hip` and `rocke`, the kinds the packer
-compiles to kpack output today. Any other kind in a UKD kept for the probed arch is
-rejected at configure until its row is added in both tables: `_GROUP_FIELDS` in
-`tools/hkp_probe_derive_root.py` and `_PROVENANCE_RULES` in `tools/hkp_probe_assert.py`.
+its authored `kernel_source.kind`. Probes cover `hip`, `rocke` and `hsaco`, the kinds registered in `tools/hkp_probe_kinds.py`
+(per kind: the `kernel_source` fields that define a compile group, and the provenance
+checks a shipped UKD must satisfy). Any other kind in a UKD kept for the probed arch is
+rejected at configure, and fails `no-rules-for-kind` in the assertion, until it gets
+one entry there.
 
 Configuration fails, never skips, when: `ARCH` is missing; `ROOT` is not a directory;
 no KDP under the root ships for `ARCH`; a
 KDP shipping for `ARCH` references a standalone UKD (a `kernelDescriptors` entry that is
 not an object; derive supports inline UKDs only); the probe output root would sit under a
-shipped descriptor tree; a UKD kept for `ARCH` has a kind other than `hip` or `rocke`; no probe is declared; or pytest is not importable by
+shipped descriptor tree; a UKD kept for `ARCH` has a kind not registered in `tools/hkp_probe_kinds.py`; no probe is declared; or pytest is not importable by
 `Python3_EXECUTABLE`.
 
 ### The derived-root compile-group rule
@@ -412,7 +413,7 @@ Today the production gfx950 KDP (840 `rocke` UKDs sharing one builder) keeps one
 | `signature` | A UKD has an empty `signature`. |
 | `symbol` | A UKD's `symbol` does not appear in its blob. |
 | `provenance-origin` | `origin_kind` differs from the UKD's expected kind (the authored `kernel_source.kind`). |
-| `no-rules-for-kind` | A UKD's expected kind has no row in the provenance rules table of `tools/hkp_probe_assert.py`: a new producer kind must add its row (and its compile-group row in `tools/hkp_probe_derive_root.py`). |
+| `no-rules-for-kind` | A UKD's expected kind has no entry in `tools/hkp_probe_kinds.py`: a new producer kind must add its entry. |
 | `provenance-wheel` | `rocke_wheel_sha256` is missing or empty: the wheel did not supply rocKE. |
 | `provenance-comgr` | The comgr recorded at pack time is not the expected library (or is empty). Catches a stale system comgr shadowing the intended one. |
 | `ukd-count` | The number of kpack-kind UKDs differs from the expected list (`expect.json`, written by derive), is zero, or a shipped UKD is not in the list. |

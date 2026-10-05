@@ -13,6 +13,9 @@ import sys
 import pytest
 
 from conftest import (
+    ARCH,
+    EMPTY_ARCH_FIXTURE,
+    HSACO_FIXTURES,
     MAIN_FIXTURE,
     PROBE_DERIVE,
     ROCKE_FIXTURE,
@@ -42,6 +45,23 @@ def _hip_source(dst):
         u for u in kdp["kernelDescriptors"] if isinstance(u, dict)
     ]
     (dst / "pointwise.kdp.json").write_text(json.dumps(kdp, indent=2))
+    return dst
+
+
+def _hsaco_source(dst, arch=ARCH):
+    """empty_arch's single UKD rewritten to an authored hsaco for `arch`."""
+    shutil.copytree(EMPTY_ARCH_FIXTURE, dst)
+    shutil.copyfile(HSACO_FIXTURES / arch / "HsacoFixture.co", dst / "HsacoFixture.co")
+    kdp = json.loads((dst / "solo.kdp.json").read_text())
+    kdp["arch"] = [arch]
+    ukd = kdp["kernelDescriptors"][0]
+    ukd["arch"] = [arch]
+    ukd["kernel_source"] = {
+        "kind": "hsaco",
+        "file": "HsacoFixture.co",
+        "symbol": "HsacoFixtureAdd",
+    }
+    (dst / "solo.kdp.json").write_text(json.dumps(kdp, indent=2))
     return dst
 
 
@@ -136,3 +156,41 @@ def test_mixed_root_origin_is_checked_per_ukd(mixed_probe, rocm_kpack_dir, tmp_p
     assert "FAIL provenance-origin:" in result.stderr
     assert "rocke/attention.kdp.json" in result.stderr
     assert "hip/pointwise" not in result.stderr
+
+
+def test_hsaco_root_passes(tmp_path, rocm_kpack_dir, hipcc, comgr_lib):
+    src = _hsaco_source(tmp_path / "src")
+    out, expect = _derive_and_pack(src, tmp_path, rocm_kpack_dir, hipcc, comgr_lib)
+    entries = json.loads(expect.read_text())
+    assert [(e["kdp"], e["kind"]) for e in entries] == [("solo.kdp.json", "hsaco")]
+    result = run_assert(out, expect, rocm_kpack_dir)
+    assert result.returncode == 0, result.stderr
+
+
+def test_hip_and_hsaco_mixed_root_passes(tmp_path, rocm_kpack_dir, hipcc, comgr_lib):
+    src = tmp_path / "src"
+    _hip_source(src / "hip")
+    _hsaco_source(src / "hsaco")
+    out, expect = _derive_and_pack(src, tmp_path, rocm_kpack_dir, hipcc, comgr_lib)
+    kinds = {e["kdp"]: e["kind"] for e in json.loads(expect.read_text())}
+    assert kinds == {
+        "hip/pointwise.kdp.json": "hip",
+        "hip/pointwise_wild.kdp.json": "hip",
+        "hsaco/solo.kdp.json": "hsaco",
+    }
+    result = run_assert(out, expect, rocm_kpack_dir)
+    assert result.returncode == 0, result.stderr
+
+
+def test_hsaco_ukd_for_other_arch_is_not_packed_or_expected(
+    tmp_path, rocm_kpack_dir, hipcc, comgr_lib
+):
+    # gfx942-only hsaco beside a gfx950 hip root: derive ignores it, the pack ships
+    # nothing for it, and the assertion still passes on the hip UKDs alone.
+    src = tmp_path / "src"
+    _hip_source(src / "hip")
+    _hsaco_source(src / "hsaco", arch="gfx942")
+    out, expect = _derive_and_pack(src, tmp_path, rocm_kpack_dir, hipcc, comgr_lib)
+    assert {e["kind"] for e in json.loads(expect.read_text())} == {"hip"}
+    result = run_assert(out, expect, rocm_kpack_dir)
+    assert result.returncode == 0, result.stderr

@@ -22,6 +22,8 @@ PROBE_DERIVE = _PKG_DIR / "tools" / "hkp_probe_derive_root.py"
 FIXTURES = _PKG_DIR / "tests" / "fixtures"
 ROCKE_FIXTURE = FIXTURES / "rocke"
 MAIN_FIXTURE = FIXTURES / "main"
+EMPTY_ARCH_FIXTURE = FIXTURES / "empty_arch"
+HSACO_FIXTURES = FIXTURES / "hsaco"
 _ROCKE_SOURCE_DIRS = (
     _HKP_DIR / "rocke" / "platform" / "python",
     _HKP_DIR / "rocke" / "library",

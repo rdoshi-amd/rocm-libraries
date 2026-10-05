@@ -7,7 +7,7 @@ failure, unless every shipped descriptor is a well-formed kpack-backed kernel an
 the shipped set is the one `--expect` lists (hkp_probe_derive_root.py writes it):
 a JSON list of {"kdp": <KDP path relative to the arch directory>, "name": <UKD
 name>, "kind": <authored kernel_source.kind>}. Each UKD's provenance is checked
-against the rules of its expected kind (_PROVENANCE_RULES).
+against the rules of its expected kind (hkp_probe_kinds.KINDS).
 
     hkp_probe_assert: FAIL <assertion-id>: <detail>
 
@@ -31,10 +31,10 @@ Assertion ids:
     sha256             the archive blob's sha256 differs from kernel_source.sha256
     signature          a UKD's signature is not a non-empty list
     symbol             a UKD's symbol does not appear in its archive blob
-    no-rules-for-kind  a UKD's expected kind has no entry in _PROVENANCE_RULES
+    no-rules-for-kind  a UKD's expected kind has no entry in hkp_probe_kinds.KINDS
     provenance-origin  provenance.origin_kind is not the UKD's expected kind
-    provenance-wheel   rocke only: provenance.rocke_wheel_sha256 absent or empty
-    provenance-comgr   rocke only: provenance.comgr_path is not the expected comgr
+    provenance-wheel   kinds with the wheel check (rocke): provenance.rocke_wheel_sha256 absent or empty
+    provenance-comgr   kinds with the comgr check (rocke): provenance.comgr_path is not the expected comgr
                        library
 """
 
@@ -45,17 +45,9 @@ import os
 import sys
 from pathlib import Path
 
-_PREFIX = "hkp_probe_assert"
+from hkp_probe_kinds import KINDS
 
-# Provenance checks required per producer kind (the authored kernel_source.kind,
-# which the packer records as provenance.origin_kind). The kinds are those the packer
-# compiles to kpack output. A new producer needs one row here AND one row in
-# hkp_probe_derive_root.py's _GROUP_FIELDS; a kind with no row fails
-# `no-rules-for-kind`. hip's `hipcc_version` is optional and unchecked.
-_PROVENANCE_RULES = {
-    "rocke": ("wheel", "comgr"),
-    "hip": (),
-}
+_PREFIX = "hkp_probe_assert"
 
 
 class _Failures:
@@ -158,9 +150,31 @@ def _check_kpack(args, arch_dir, failures):
     return kpack_path
 
 
+def _check_wheel(args, label, prov, failures):
+    wheel = prov.get("rocke_wheel_sha256")
+    if not isinstance(wheel, str) or not wheel:
+        failures.add("provenance-wheel", f"{label} rocke_wheel_sha256 is {wheel!r}")
+
+
+def _check_comgr(args, label, prov, failures):
+    comgr = prov.get("comgr_path")
+    if args.expect_comgr is None:
+        if not isinstance(comgr, str) or not comgr:
+            failures.add("provenance-comgr", f"{label} comgr_path is {comgr!r}")
+    elif not isinstance(comgr, str) or not _same_path(comgr, args.expect_comgr):
+        failures.add(
+            "provenance-comgr",
+            f"{label} comgr_path is {comgr!r}, expected {args.expect_comgr}",
+        )
+
+
+# Implementations of the check names listed in hkp_probe_kinds.Kind.provenance.
+_PROVENANCE_CHECKS = {"wheel": _check_wheel, "comgr": _check_comgr}
+
+
 def _check_provenance(args, label, ukd, kind, failures):
-    rules = _PROVENANCE_RULES.get(kind)
-    if rules is None:
+    entry = KINDS.get(kind)
+    if entry is None:
         failures.add(
             "no-rules-for-kind", f"{label} expected kind {kind!r} has no rules"
         )
@@ -171,20 +185,8 @@ def _check_provenance(args, label, ukd, kind, failures):
         failures.add(
             "provenance-origin", f"{label} origin_kind is {origin!r}, not {kind!r}"
         )
-    if "wheel" in rules:
-        wheel = prov.get("rocke_wheel_sha256")
-        if not isinstance(wheel, str) or not wheel:
-            failures.add("provenance-wheel", f"{label} rocke_wheel_sha256 is {wheel!r}")
-    if "comgr" in rules:
-        comgr = prov.get("comgr_path")
-        if args.expect_comgr is None:
-            if not isinstance(comgr, str) or not comgr:
-                failures.add("provenance-comgr", f"{label} comgr_path is {comgr!r}")
-        elif not isinstance(comgr, str) or not _same_path(comgr, args.expect_comgr):
-            failures.add(
-                "provenance-comgr",
-                f"{label} comgr_path is {comgr!r}, expected {args.expect_comgr}",
-            )
+    for name in entry.provenance:
+        _PROVENANCE_CHECKS[name](args, label, prov, failures)
 
 
 def _check_ukd(args, kdp_name, ukd, archive, failures):

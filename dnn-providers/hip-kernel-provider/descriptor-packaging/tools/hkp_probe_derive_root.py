@@ -5,8 +5,8 @@ Copies every file under `--from` to `--out`, except that each KDP shipping for
 `--arch` has its inline `kernelDescriptors` reduced to one UKD per compile group
 among the UKDs that themselves ship for `--arch`:
 
-    rocke                                     (kind, builder)
-    hip                                       (kind, source, build)
+    one entry per kind in hkp_probe_kinds.py: rocke (kind, builder), hip (kind, source,
+    build), hsaco (kind), i.e. one per KDP
 
 The pick within a group is the first by sorted UKD `name`. Packing the derived
 root therefore exercises every compile path once instead of every variant.
@@ -26,7 +26,7 @@ Arch rules are the packer's (`hkp_pack.descriptors.arch_matches` and
 Exit code 0 on success. Exit code 2, with a `hkp_probe_derive: ...` message on
 stderr, when the root cannot be derived: a KDP shipping for `--arch` references
 a standalone UKD (`kernelDescriptors` entry that is not an object), a kept UKD
-has a kind other than rocke or hip, a UKD is malformed, or the source is unreadable.
+has a kind not in hkp_probe_kinds.KINDS, a UKD is malformed, or the source is unreadable.
 """
 
 from __future__ import annotations
@@ -40,13 +40,7 @@ from pathlib import Path
 
 _PREFIX = "hkp_probe_derive:"
 
-# The kinds the packer compiles to kpack output, and the kernel_source fields that
-# define a compile group within a KDP. A new producer needs one row here AND one row
-# in hkp_probe_assert.py's _PROVENANCE_RULES; any other kind is rejected.
-_GROUP_FIELDS = {
-    "rocke": ("builder",),
-    "hip": ("source", "build"),
-}
+from hkp_probe_kinds import KINDS
 
 
 class DeriveError(Exception):
@@ -71,14 +65,14 @@ def arch_subset_ok(ukd_arch, kdp_arch):
 def _group_key(ukd, where):
     source = ukd.get("kernel_source")
     kind = source.get("kind") if isinstance(source, dict) else None
-    if kind not in _GROUP_FIELDS:
+    if kind not in KINDS:
         raise DeriveError(
-            f"{where} kind {kind!r} has no probe support: add its compile-group "
-            "fields here and its provenance rules in hkp_probe_assert.py, once "
-            "the packer produces kpack output for it"
+            f"{where} kind {kind!r} has no probe support: add an entry to "
+            "KINDS in hkp_probe_kinds.py, once the packer produces kpack output "
+            "for it"
         )
     return (kind,) + tuple(
-        json.dumps(source.get(f), sort_keys=True) for f in _GROUP_FIELDS[kind]
+        json.dumps(source.get(f), sort_keys=True) for f in KINDS[kind].group_by
     )
 
 

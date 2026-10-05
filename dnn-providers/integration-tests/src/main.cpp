@@ -524,8 +524,8 @@ int main(int argc, char** argv) noexcept
 
         // Print bundles that ended without a verdict (no oracle / reference bug).
         // Informational only — the tests themselves already carry the verdict (SKIP, or
-        // FAIL under --fail-on-no-oracle or for a reference error), so this does not
-        // touch `result`.
+        // FAIL under --fail-on-no-oracle or when the last reference errored), so this
+        // does not touch `result`.
         hipdnn_integration_tests::bundle::UnverifiableBundleReport::get().print();
         if(!hipdnn_integration_tests::TestConfig::get().writeSupportClaims())
         {

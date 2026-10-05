@@ -228,14 +228,19 @@ is chosen with `--verification-mode` (or `HIPDNN_TEST_VERIFICATION_MODE`):
 
 | Mode | Behavior |
 |------|----------|
-| `auto` (default) | golden → GPU ref → CPU ref → skip, in that order |
+| `auto` (default) | golden → GPU ref → CPU ref → skip (FAIL under `--fail-on-no-oracle`), in that order |
 | `golden` | compare against DVC-fetched golden tensors only; **FAIL if a bundle has none** |
-| `gpu` | compute the reference on the GPU ref executor |
-| `cpu` | compute the reference on the CPU ref executor |
+| `gpu` | compute the reference on the GPU ref executor; skip (FAIL under `--fail-on-no-oracle`) if it cannot run the op |
+| `cpu` | compute the reference on the CPU ref executor; skip (FAIL under `--fail-on-no-oracle`) if it cannot run the op |
 
 `auto` is the mode with a fallback chain. An explicit mode is a demand for a
 specific oracle, so `golden` on a bundle with no golden data is a failure, not a
 skip — `dvc pull` the op, or use `auto`.
+
+A reference that cannot run an op declines, and the chain moves on. A reference
+that errors is listed under "REFERENCE EXECUTOR ERRORS" and the chain also moves on,
+but if it was the last one tried (the only one in `gpu`/`cpu` mode, the CPU
+reference in `auto`), the bundle FAILs whatever `--fail-on-no-oracle` says.
 
 Each verification test body prints the oracle that graded it, between its
 `[ RUN ]` and result lines, and the coverage summary totals them:

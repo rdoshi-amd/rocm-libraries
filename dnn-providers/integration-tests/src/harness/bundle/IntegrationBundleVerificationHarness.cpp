@@ -388,15 +388,18 @@ std::optional<IntegrationBundleVerificationHarness::ResolvedReference>
                 return ResolvedReference{type, &executor};
             }
             chain.tried.push_back(label + " (not applicable)");
+            chain.endedInError = false;
         }
         catch(const ReferenceCapabilityError& e)
         {
             chain.tried.push_back(label + " (not applicable: " + e.what() + ")");
+            chain.endedInError = false;
         }
         catch(const std::exception& e)
         {
             recordRefError(label + " errored checking applicability: " + e.what());
             chain.refErrored = true;
+            chain.endedInError = true;
             chain.tried.push_back(label + " (errored checking applicability: " + e.what() + ")");
         }
     }
@@ -500,16 +503,17 @@ VerificationOutcome
             return compareOutputs(engineOutputs, refOutputs, result.site, verifierFor(ref->type));
         case RefStatus::CAPABILITY_MISS:
             chain.tried.push_back(label + " (cannot run this op: " + result.message + ")");
+            chain.endedInError = false;
             break;
         case RefStatus::RUNTIME_ERROR:
         {
             const bool fallsThrough = chain.next < chain.candidates.size();
             // "the next reference", not a name: the next candidate has not been probed
             // yet and may turn out not to be applicable.
-            const char* context = "auto mode, last resort";
+            std::string context = "auto mode, last resort";
             if(!chain.autoMode)
             {
-                context = "verification-mode explicit";
+                context = "verification-mode=" + chain.explicitMode;
             }
             else if(fallsThrough)
             {
@@ -519,6 +523,7 @@ VerificationOutcome
             reason.append(" errored (").append(context).append("): ").append(result.message);
             recordRefError(reason);
             chain.refErrored = true;
+            chain.endedInError = true;
             chain.tried.push_back(label + " (errored: " + result.message + ")");
             break;
         }
@@ -551,26 +556,30 @@ VerificationOutcome IntegrationBundleVerificationHarness::noOracle(const OracleC
     const std::string verdict = chain.autoMode ? "no oracle can verify this bundle"
                                                : "the requested oracle cannot verify this bundle";
 
-    // A reference that errored is a bug in the oracle, not a gap in coverage, and is
-    // already in the reference-error report. It fails regardless of the opt-in below.
+    std::string reason = verdict;
+    reason.append("; tried: ").append(tried);
     if(chain.refErrored)
     {
-        return VerificationOutcome::failed(reached,
-                                           FailureOrigin::ORACLE,
-                                           "a reference executor errored and " + verdict
-                                               + "; tried: " + tried + " (" + _bundlePath.string()
-                                               + ")");
+        reason.insert(0, "a reference executor errored (see the reference-error report) and ");
     }
 
-    const std::string reason = verdict + "; tried: " + tried;
+    // The chain's last word was an error -- an explicit mode's only oracle, or auto
+    // mode's last resort, broke. That is a bug in the oracle, already in the
+    // reference-error report, and FAILs whatever the opt-in below says. An error
+    // followed by a decline is treated like any other decline.
+    if(chain.endedInError)
+    {
+        return VerificationOutcome::failed(
+            reached, FailureOrigin::ORACLE, unverifiableMessage(reason));
+    }
+
+    VerificationOutcome outcome = unverifiable(reason, reached);
     if(!_deps.policy.failOnNoOracle)
     {
-        return unverifiable(reason, reached);
+        return outcome;
     }
-
-    _deps.reporter->recordUnverifiable(_bundlePath.string(), reason);
-    return VerificationOutcome::failed(
-        reached, FailureOrigin::HARNESS, unverifiableMessage(reason));
+    const FailureOrigin origin = chain.refErrored ? FailureOrigin::ORACLE : FailureOrigin::HARNESS;
+    return VerificationOutcome::failed(reached, origin, std::move(outcome.message));
 }
 
 // ---- inputs ----------------------------------------------------------------

@@ -72,8 +72,8 @@ struct ClaimPhase
 /// Fallback chain: golden → GPU ref → CPU ref (RFC 0010 §4.4). Oracle availability is
 /// resolved before the engine runs, but the engine still answers first: a decline is
 /// a SKIP whatever the oracles said. An engine that ran with nothing left to verify it
-/// SKIPs, or FAILs under policy.failOnNoOracle. A reference that errored is a FAIL
-/// either way. Inputs are read-only (shared); outputs are separate allocations
+/// SKIPs, or FAILs under policy.failOnNoOracle. A chain whose last oracle errored
+/// rather than declined is a FAIL either way. Inputs are read-only (shared); outputs are separate allocations
 /// per executor.
 ///
 /// **This class has no virtual members.** Everything that needs a GPU, a handle, a
@@ -416,9 +416,13 @@ private:
         std::optional<ResolvedReference> ready;
         /// One entry per oracle tried and why it could not verify, for the message.
         std::vector<std::string> tried;
-        /// A reference errored rather than declined. That is a bug in the oracle, not
-        /// a coverage gap, so the bundle fails whatever policy.failOnNoOracle says.
+        /// Some reference errored rather than declined; it is in the reference-error
+        /// report, and the no-oracle message says so.
         bool refErrored = false;
+        /// The last reference tried errored rather than declined: the oracle the
+        /// verdict rested on broke. The bundle fails whatever policy.failOnNoOracle
+        /// says. An error followed by a decline further down the chain is not.
+        bool endedInError = false;
     };
 
     OracleChain resolveOracles(VerificationMode mode);
@@ -430,7 +434,7 @@ private:
     VerificationOutcome runOracleChain(OutputTensors& engineOutputs, OracleChain& chain);
 
     // Every oracle in `chain` declined. Recorded as unverifiable; SKIPs, or FAILs
-    // under policy.failOnNoOracle -- unless one errored, which always FAILs.
+    // under policy.failOnNoOracle -- unless the last one errored, which always FAILs.
     VerificationOutcome noOracle(const OracleChain& chain, VerificationDepth reached);
 
     // nullopt when the inputs are ready; otherwise the outcome to return.

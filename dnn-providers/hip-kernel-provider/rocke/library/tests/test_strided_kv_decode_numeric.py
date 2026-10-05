@@ -4,6 +4,8 @@
 """Actual tiled split-KV launches on contiguous and padded non-paged caches.
 
 Set ROCKE_REQUIRE_DECODE_GPU=gfx942/gfx950 to require hardware (no skips).
+For shared paged graph coverage on gfx1250, set that target and select
+``-k 'graph_replay and paged and bf16'`` (D64, GQA-8).
 Reference attention is computed independently in FP32 on the CPU from logical
 KV tensors, after rounding inputs to the tested fp16/bf16 dtype.
 """
@@ -30,8 +32,10 @@ def gpu():
     arch = get_device_arch()
     if required and arch != required:
         pytest.fail(f"requested {required}, found {arch}")
-    if arch not in ("gfx942", "gfx950"):
-        pytest.skip("decode validation targets gfx942/gfx950")
+    if arch not in ("gfx942", "gfx950", "gfx1250"):
+        if required:
+            pytest.fail(f"unsupported required decode target {arch}")
+        pytest.skip("decode validation targets gfx942/gfx950/gfx1250")
     return torch, arch
 
 
@@ -114,8 +118,16 @@ def test_strided_kv_decode(
     torch, arch = gpu
     from kernels.common import attention_unified as au
 
+    if arch == "gfx1250" and (
+        kv_layout == "strided"
+        or dtype != "bf16"
+        or case[1] != 64
+        or case[3] // case[2] != 8
+    ):
+        pytest.skip("gfx1250 coverage is paged BF16 D64 GQA-8 decode")
     monkeypatch.setenv("HIPDNN_GFX942_3D_GRAPH", str(int(graph)))
     monkeypatch.setenv("HIPDNN_GFX950_3D_GRAPH", str(int(graph)))
+    monkeypatch.setenv("HIPDNN_GFX1250_3D_GRAPH", str(int(graph)))
     capacity, dim, kv_heads, q_heads, k_layout, v_layout, window = case
     batch = 3
     tdtype = torch.float16 if dtype == "fp16" else torch.bfloat16
@@ -190,6 +202,8 @@ def test_strided_kv_decode(
             ),
             stream=stream.cuda_stream,
         )
+    graphs_before = set(au._3D_GRAPHS)
+    captured_graphs = {}
     for step in range(3):
         if step:
             lengths_host = (
@@ -218,6 +232,15 @@ def test_strided_kv_decode(
                 stream=stream.cuda_stream,
             )
         stream.synchronize()
+        if graph:
+            graph_keys = set(au._3D_GRAPHS) - graphs_before
+            # Direct and explicit-spec launches have separate cache identities.
+            assert len(graph_keys) == (2 if kv_layout == "strided" and step else 1)
+            current_graphs = {key: au._3D_GRAPHS[key] for key in graph_keys}
+            assert all(
+                current_graphs[key] is value for key, value in captured_graphs.items()
+            )
+            captured_graphs = current_graphs
         expected = _reference(torch, q_host, k_host, v_host, lengths_host, window)
         atol, rtol = (0.01, 0.02) if dtype == "bf16" else (0.003, 0.005)
         torch.testing.assert_close(output.cpu().float(), expected, atol=atol, rtol=rtol)
@@ -235,11 +258,12 @@ def test_strided_kv_decode(
 def test_strided_decode_graph_replay(
     gpu, monkeypatch, dtype, kv_layout, default_stream
 ):
+    case = (17, 64, 2, 16, "bshd", "bshd", 0) if gpu[1] == "gfx1250" else _CASES[1]
     test_strided_kv_decode(
         gpu,
         monkeypatch,
         dtype,
-        _CASES[1],
+        case,
         kv_layout,
         graph=True,
         default_stream=default_stream,

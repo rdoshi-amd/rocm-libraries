@@ -3,7 +3,7 @@
 
 """CPU contracts for non-paged KV metadata and the tiled decode ABI."""
 
-from dataclasses import replace
+from dataclasses import fields, make_dataclass, replace
 from importlib import import_module
 import hashlib
 import json
@@ -161,7 +161,8 @@ def test_strided_dispatch_is_exclusive(arch):
 
 @pytest.mark.parametrize("arch", ["gfx942", "gfx950"])
 @pytest.mark.parametrize("flavor", ["llvm20", "llvm22", "llvm23"])
-def test_native_strided_builder_matches_python(arch, flavor, monkeypatch):
+@pytest.mark.parametrize("waves_per_eu", [None, 3])
+def test_native_strided_builder_matches_python(arch, flavor, waves_per_eu, monkeypatch):
     from dataclasses import asdict
 
     engine = pytest.importorskip("rocke_engine")
@@ -181,6 +182,7 @@ def test_native_strided_builder_matches_python(arch, flavor, monkeypatch):
         num_segments=4,
         num_seqs=3,
         kv_layout="strided",
+        waves_per_eu=waves_per_eu,
     )
     kernel = module.build_unified_attention_3d_tiled(spec, arch=arch)
     expected = _lower_kernel_to_llvm_python(kernel, arch=arch)
@@ -191,6 +193,7 @@ def test_native_strided_builder_matches_python(arch, flavor, monkeypatch):
             num_kv_heads=2,
             dtype="fp16",
             num_segments=4,
+            waves_per_eu=waves_per_eu,
         )
         expected += _lower_kernel_to_llvm_python(
             module.build_unified_attention_reduce_tiled(reduce, arch=arch), arch=arch
@@ -265,6 +268,48 @@ def test_strided_selection_uses_runtime_policy(arch, block_size, monkeypatch):
         replace(problem, waves_per_eu=3), arch=arch
     )
     assert explicit.waves_per_eu == explicit_reduce.waves_per_eu == 3
+
+
+@pytest.mark.parametrize("arch", ["gfx942", "gfx950"])
+def test_strided_selection_ignores_hoist_environment(arch, monkeypatch):
+    from dispatch.attention import dispatch_attention
+    from dispatch.attention.common import _problem
+    from kernels.common import attention_unified as au
+
+    req = _strided_request(arch)
+    problem = _problem(req)
+    monkeypatch.delenv("HIPDNN_GFX942_3D_HOIST", raising=False)
+    expected = dispatch_attention(req).spec
+    for value in ("0", "1"):
+        monkeypatch.setenv("HIPDNN_GFX942_3D_HOIST", value)
+        selected = dispatch_attention(req).spec
+        assert selected == expected
+        assert not selected.kernel_spec.use_invariant_hoist
+        assert au._strided_3d_specs_from_problem(problem, arch=arch) == (
+            expected.kernel_spec,
+            expected.reduce_spec,
+        )
+    # Explicit tuning retains the existing knob.
+    explicit = replace(
+        expected, kernel_spec=replace(expected.kernel_spec, use_invariant_hoist=True)
+    )
+    au._validate_strided_3d_spec(problem, explicit)
+
+
+@pytest.mark.parametrize("arch", ["gfx942", "gfx950"])
+def test_strided_spec_policy_rejects_conflicting_clamp_arch(arch):
+    from dispatch.attention.common import _problem
+    from kernels.common import attention_unified as au
+
+    problem = _problem(_strided_request(arch))
+    expected = au._strided_3d_specs_from_problem(problem, arch=arch)
+    assert (
+        au._strided_3d_specs_from_problem(replace(problem, clamp_arch=None), arch=arch)
+        == expected
+    )
+    other = "gfx950" if arch == "gfx942" else "gfx942"
+    with pytest.raises(ValueError, match="clamp_arch.*conflicts"):
+        au._strided_3d_specs_from_problem(replace(problem, clamp_arch=other), arch=arch)
 
 
 @pytest.fixture
@@ -390,4 +435,52 @@ def test_strided_runtime_rejects_ignored_scaling(
             tuning_spec=result.spec,
             kv_layout="strided",
             **{"softcap": 0, **overrides},
+        )
+
+
+def test_strided_runtime_rejects_missing_storage_dtype(
+    strided_binding_case, monkeypatch
+):
+    from kernels.common import attention_unified as au
+
+    _, result, tensors = strided_binding_case
+    segment = result.spec.kernel_spec
+    values = {
+        f.name: getattr(segment, f.name)
+        for f in fields(segment)
+        if f.name != "kv_storage_dtype"
+    }
+    malformed_type = make_dataclass(
+        "MissingStorageDtype", [(name, object) for name in values], frozen=True
+    )
+    spec = replace(result.spec, kernel_spec=malformed_type(**values))
+    monkeypatch.setattr(au, "_resolve_attention_arch", lambda: "gfx942")
+    with pytest.raises(ValueError, match="missing kv_storage_dtype"):
+        au.run_unified_attention_torch(
+            **tensors,
+            block_table=None,
+            softmax_scale=0.125,
+            softcap=0,
+            tuning_spec=spec,
+            kv_layout="strided",
+        )
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_strided_runtime_rejects_conflicting_clamp_arch(
+    strided_binding_case, monkeypatch, explicit
+):
+    from kernels.common import attention_unified as au
+
+    _, result, tensors = strided_binding_case
+    tensors = dict(tensors, problem=replace(tensors["problem"], clamp_arch="gfx950"))
+    monkeypatch.setattr(au, "_resolve_attention_arch", lambda: "gfx942")
+    with pytest.raises(ValueError, match="clamp_arch.*conflicts"):
+        au.run_unified_attention_torch(
+            **tensors,
+            block_table=None,
+            softmax_scale=0.125,
+            softcap=0,
+            tuning_spec=result.spec if explicit else None,
+            kv_layout="strided",
         )

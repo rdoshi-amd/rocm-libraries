@@ -3184,7 +3184,11 @@ def _strided_3d_specs_from_problem(problem: UnifiedAttentionProblem, *, arch: st
     if arch not in ("gfx942", "gfx950"):
         raise ValueError("strided KV decode targets gfx942/gfx950")
     segment_type, reduce_type, *_ = _tiled_3d_impl(arch)
-    if problem.clamp_arch != arch:
+    if problem.clamp_arch not in (None, arch):
+        raise ValueError(
+            f"strided clamp_arch {problem.clamp_arch!r} conflicts with {arch}"
+        )
+    if problem.clamp_arch is None:
         problem = replace(problem, clamp_arch=arch)
     waves = _select_3d_waves_per_eu(problem, arch=arch)
     segment = segment_type(
@@ -3202,7 +3206,7 @@ def _strided_3d_specs_from_problem(problem: UnifiedAttentionProblem, *, arch: st
         num_seqs=problem.num_seqs,
         waves_per_eu=waves,
         tile_size_override=_gfx942_3d_tile_size_override(problem, arch=arch),
-        use_invariant_hoist=_enable_gfx942_3d_invariant_hoist(problem, arch=arch),
+        use_invariant_hoist=False,
         kv_layout="strided",
     )
     reduce = reduce_type(
@@ -3237,7 +3241,9 @@ def _validate_strided_3d_spec(problem: UnifiedAttentionProblem, tuning_spec) -> 
         ("use_qq_bias", False),
         ("kv_storage_dtype", None),
     ):
-        if getattr(segment, name, None) != expected:
+        if not hasattr(segment, name):
+            raise ValueError(f"strided kernel_spec is missing {name}")
+        if getattr(segment, name) != expected:
             raise ValueError(f"strided kernel_spec.{name} disagrees with problem")
     for name in (
         "head_size",
@@ -4566,7 +4572,11 @@ def run_unified_attention_torch(
         if tuning_spec is not None:
             _validate_strided_3d_spec(problem, tuning_spec)
         arch = _resolve_attention_arch()
-        if problem.clamp_arch != arch:
+        if problem.clamp_arch not in (None, arch):
+            raise ValueError(
+                f"strided clamp_arch {problem.clamp_arch!r} conflicts with {arch}"
+            )
+        if problem.clamp_arch is None:
             problem = replace(problem, clamp_arch=arch)
         layout = StridedKvCacheLayout.from_tensors(k, v)
         batch, heads, capacity, dim = layout.key.shape

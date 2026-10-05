@@ -15,8 +15,9 @@ A UKD may instead name a prebuilt code object (`kernel_source` kind `hsaco`):
 its descriptor-relative file is packed as-is, with no compile, into the same
 archive, and its signature is read from the object's AMDGPU metadata, as for a
 compiled object. The packer does not check the object's format or target
-processor. Each such UKD must list the arch(es) its object runs on (a generic-target
-object lists every arch it runs on); a wildcard is rejected. The author's own load test
+processor. Each such UKD must list the arch(es) its object runs on, which may be a
+generic target spelling of the generic target table (the object is then packed under
+that spelling); a wildcard is rejected. The author's own load test
 on the target arch is the only check; no in-tree load test covers hsaco.
 """
 

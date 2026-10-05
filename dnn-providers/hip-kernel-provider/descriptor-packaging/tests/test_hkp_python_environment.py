@@ -17,6 +17,7 @@ import zipfile
 from pathlib import Path
 
 import pytest
+from conftest import GENERIC_TARGETS_JSON
 
 pytestmark = pytest.mark.quick
 PKG = Path(__file__).resolve().parent.parent
@@ -172,6 +173,7 @@ project(HkpPythonEnvironment NONE)
 list(APPEND CMAKE_MODULE_PATH "{(PKG.parent / 'cmake').as_posix()}")
 include("{MODULE.as_posix()}")
 set(ROCKE_WHEEL_VERSION 0.1.0)
+set(HIPDNN_PLUGIN_SDK_GPU_GENERIC_TARGETS_JSON "{GENERIC_TARGETS_JSON.as_posix()}")
 hkp_rocke_wheel_stamp(wheel_stamp)
 hkp_rocke_wheel_python_interp(interp ready python_dir "${{wheel_stamp}}")
 set(HKP_TOOL "${{CMAKE_CURRENT_SOURCE_DIR}}/consumer.py")

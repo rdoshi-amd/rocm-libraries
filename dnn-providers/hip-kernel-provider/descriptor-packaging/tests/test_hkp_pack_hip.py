@@ -4,6 +4,7 @@ import shutil
 
 import pytest
 
+from conftest import GENERIC_TARGETS, GENERIC_TARGETS_JSON
 from hkp_pack import agreement
 from hkp_pack.hip_compile import hip_variant_key as variant_key
 from hkp_pack.descriptors import load_flat_input, reachable_generic_ids
@@ -37,6 +38,7 @@ def built(tmp_path_factory, main_fixture, hipcc, rocm_kpack_dir):
     """Compile + prune + pack the main fixture once for the 3-arch matrix."""
     base = tmp_path_factory.mktemp("built")
     results = run_pipeline(
+        generic_targets_json=GENERIC_TARGETS_JSON,
         source_root=main_fixture,
         arches=ARCHES,
         out_root=base / "out",
@@ -188,6 +190,7 @@ def test_prn3_exact_post_prune_set(built):
 def test_prn4_empty_arch_skip(tmp_path, empty_arch_fixture, hipcc, rocm_kpack_dir):
     logs = []
     results = run_pipeline(
+        generic_targets_json=GENERIC_TARGETS_JSON,
         source_root=empty_arch_fixture,
         arches=["gfx942", "gfx950"],
         out_root=tmp_path / "out",
@@ -356,6 +359,7 @@ def test_self_describing_ukd(built, rocm_kpack_dir):
 # --- D. Negatives: compile-spec --------------------------------------------
 def _run(source_root, tmp_path, hipcc, rocm_kpack_dir, arches=("gfx942",)):
     return run_pipeline(
+        generic_targets_json=GENERIC_TARGETS_JSON,
         source_root=source_root,
         arches=list(arches),
         out_root=tmp_path / "out",
@@ -447,7 +451,7 @@ def test_neg_kpack_source_missing_field(tmp_path, main_fixture, field):
     src = _copy_fixture(tmp_path, main_fixture)
     _author_kpack_source(src, drop=field)
     with pytest.raises(HkpPackError, match=f"missing required field '{field}'"):
-        load_flat_input(src)
+        load_flat_input(src, GENERIC_TARGETS)
 
 
 @pytest.mark.quick
@@ -456,7 +460,7 @@ def test_kpack_source_complete_is_accepted(tmp_path, main_fixture):
     # rejected for some reason of its own would read as the drop being caught.
     src = _copy_fixture(tmp_path, main_fixture)
     _author_kpack_source(src)
-    flat = load_flat_input(src)
+    flat = load_flat_input(src, GENERIC_TARGETS)
     kdp = next(d for d in flat.kdps() if d.path.name == "copy.kdp.json")
     assert kdp.doc["kernelDescriptors"][0]["kernel_source"]["kind"] == "kpack"
 
@@ -485,6 +489,7 @@ def test_neg_sha256_mismatch(tmp_path, main_fixture, hipcc, rocm_kpack_dir):
     with pytest.raises(HkpPackError, match="sha256 mismatch"):
         # An expected digest that cannot match the freshly compiled blob.
         run_pipeline(
+            generic_targets_json=GENERIC_TARGETS_JSON,
             source_root=main_fixture,
             arches=["gfx942"],
             out_root=tmp_path / "out",
@@ -527,6 +532,7 @@ def test_cli1_single_arch(tmp_path, main_fixture, hipcc, rocm_kpack_dir):
 @pytest.mark.quick
 def test_cli2_empty_gpu_targets(tmp_path, main_fixture, hipcc, rocm_kpack_dir):
     results = run_pipeline(
+        generic_targets_json=GENERIC_TARGETS_JSON,
         source_root=main_fixture,
         arches=[],
         out_root=tmp_path / "out",
@@ -541,7 +547,7 @@ def test_cli2_empty_gpu_targets(tmp_path, main_fixture, hipcc, rocm_kpack_dir):
 # --- Unit: pruning reachability + wildcard ---------------------------------
 @pytest.mark.quick
 def test_wildcard_arch_matches(main_fixture):
-    flat = load_flat_input(main_fixture)
+    flat = load_flat_input(main_fixture, GENERIC_TARGETS)
     wild = next(k for k in flat.kdps() if k.id == "kdp-pointwise-wild")
     from hkp_pack.descriptors import arch_matches
 
@@ -601,6 +607,7 @@ def test_determinism_same_variant_twice(tmp_path, main_fixture, hipcc, rocm_kpac
         return result
 
     run_pipeline(
+        generic_targets_json=GENERIC_TARGETS_JSON,
         source_root=main_fixture,
         arches=["gfx942"],
         out_root=tmp_path / "out1",
@@ -609,6 +616,7 @@ def test_determinism_same_variant_twice(tmp_path, main_fixture, hipcc, rocm_kpac
         inter_root=tmp_path / "inter1",
     )
     run_pipeline(
+        generic_targets_json=GENERIC_TARGETS_JSON,
         source_root=main_fixture,
         arches=["gfx942"],
         out_root=tmp_path / "out2",
@@ -1020,7 +1028,7 @@ def test_neg_duplicate_standalone_ukd_ids(tmp_path, main_fixture):
     dup = _read(src / _STANDALONE_UKD_FILE)
     (src / "dup.ukd.json").write_text(json.dumps(dup), encoding="utf-8")
     with pytest.raises(HkpPackError, match="duplicate"):
-        load_flat_input(src)
+        load_flat_input(src, GENERIC_TARGETS)
 
 
 @pytest.mark.quick
@@ -1031,7 +1039,7 @@ def test_neg_duplicate_kdp_ids(tmp_path, main_fixture):
     doc["id"] = "kdp-pointwise"  # already the id of pointwise.kdp.json
     p.write_text(json.dumps(doc), encoding="utf-8")
     with pytest.raises(HkpPackError, match="duplicate"):
-        load_flat_input(src)
+        load_flat_input(src, GENERIC_TARGETS)
 
 
 @pytest.mark.quick
@@ -1042,7 +1050,7 @@ def test_neg_duplicate_generic_ids(tmp_path, main_fixture):
     doc["id"] = "kmd-pointwise"  # already the id of pointwise.kmd.json
     p.write_text(json.dumps(doc), encoding="utf-8")
     with pytest.raises(HkpPackError, match="duplicate"):
-        load_flat_input(src)
+        load_flat_input(src, GENERIC_TARGETS)
 
 
 @pytest.mark.quick
@@ -1055,7 +1063,7 @@ def test_neg_cross_type_id_reuse_rejected(tmp_path, main_fixture):
     doc["id"] = "kmd-pointwise"  # a KMD id, different type
     p.write_text(json.dumps(doc), encoding="utf-8")
     with pytest.raises(HkpPackError, match="duplicate"):
-        load_flat_input(src)
+        load_flat_input(src, GENERIC_TARGETS)
 
 
 # --- H. Version enforcement --------------------------
@@ -1067,7 +1075,7 @@ def test_neg_file_backed_missing_version(tmp_path, main_fixture):
     del doc["version"]
     p.write_text(json.dumps(doc), encoding="utf-8")
     with pytest.raises(HkpPackError, match="missing required field 'version'"):
-        load_flat_input(src)
+        load_flat_input(src, GENERIC_TARGETS)
 
 
 @pytest.mark.quick
@@ -1079,7 +1087,7 @@ def test_neg_malformed_version(tmp_path, main_fixture, bad):
     doc["version"] = bad
     p.write_text(json.dumps(doc), encoding="utf-8")
     with pytest.raises(HkpPackError, match="invalid version"):
-        load_flat_input(src)
+        load_flat_input(src, GENERIC_TARGETS)
 
 
 @pytest.mark.quick
@@ -1091,7 +1099,7 @@ def test_neg_inline_ukd_missing_version(tmp_path, main_fixture):
     del doc["kernelDescriptors"][0]["version"]
     p.write_text(json.dumps(doc), encoding="utf-8")
     with pytest.raises(HkpPackError, match="missing required field 'version'"):
-        load_flat_input(src)
+        load_flat_input(src, GENERIC_TARGETS)
 
 
 # --- I. UED scoped name ------------------------------
@@ -1103,13 +1111,13 @@ def test_neg_ued_name_not_scoped(tmp_path, main_fixture):
     doc["name"] = "Pointwise engine"  # unscoped
     p.write_text(json.dumps(doc), encoding="utf-8")
     with pytest.raises(HkpPackError, match="scoped"):
-        load_flat_input(src)
+        load_flat_input(src, GENERIC_TARGETS)
 
 
 @pytest.mark.quick
 def test_scoped_ued_name_loads_clean(main_fixture):
     # The renamed fixture UED (test_fixture:pointwise) validates without error.
-    flat = load_flat_input(main_fixture)
+    flat = load_flat_input(main_fixture, GENERIC_TARGETS)
     ued = next(d for d in flat.by_type("ued") if d.id == "ued-pointwise")
     assert ued.doc["name"] == "test_fixture:pointwise"
 
@@ -1151,7 +1159,7 @@ def test_non_object_provenance_is_refused_at_load(tmp_path, main_fixture):
     doc["provenance"] = "HIJACKED"
     p.write_text(json.dumps(doc), encoding="utf-8")
     with pytest.raises(HkpPackError, match="provenance must be an object"):
-        load_flat_input(src)
+        load_flat_input(src, GENERIC_TARGETS)
 
 
 def _share_contract_onto_kdp(kdp_path):
@@ -1210,7 +1218,7 @@ def test_effective_spec_on_a_kdp_is_refused_at_load(tmp_path, main_fixture):
     doc["provenance"] = {"effective_spec": {"schema_version": 1}}
     p.write_text(json.dumps(doc), encoding="utf-8")
     with pytest.raises(HkpPackError, match="effective_spec is reserved"):
-        load_flat_input(src)
+        load_flat_input(src, GENERIC_TARGETS)
 
 
 @pytest.mark.quick
@@ -1223,7 +1231,7 @@ def test_a_malformed_kdp_contract_is_refused_at_load(tmp_path, main_fixture):
     doc["provenance"] = {"specialization_contract": {"schema_version": 1}}
     p.write_text(json.dumps(doc), encoding="utf-8")
     with pytest.raises(HkpPackError, match="specialization_contract must be"):
-        load_flat_input(src)
+        load_flat_input(src, GENERIC_TARGETS)
 
 
 # --- K. Drop diagnostics + arch warning --------------
@@ -1235,7 +1243,7 @@ def test_orphan_standalone_ukd_warns(tmp_path, main_fixture):
     orphan["id"] = "ukd-orphan"
     (src / "orphan.ukd.json").write_text(json.dumps(orphan), encoding="utf-8")
     logs = []
-    load_flat_input(src, log=logs.append)
+    load_flat_input(src, GENERIC_TARGETS, log=logs.append)
     assert any("orphan.ukd.json" in m and "not referenced" in m for m in logs)
 
 
@@ -1249,6 +1257,7 @@ def test_empty_pruned_kdp_is_logged(tmp_path, main_fixture, hipcc, rocm_kpack_di
     p.write_text(json.dumps(doc), encoding="utf-8")
     logs = []
     run_pipeline(
+        generic_targets_json=GENERIC_TARGETS_JSON,
         source_root=src,
         arches=["gfx950"],
         out_root=tmp_path / "out",
@@ -1284,6 +1293,7 @@ def test_nonbare_arch_is_rejected(tmp_path, main_fixture, hipcc, rocm_kpack_dir)
     p.write_text(json.dumps(doc), encoding="utf-8")
     with pytest.raises(HkpPackError, match="feature suffix"):
         run_pipeline(
+            generic_targets_json=GENERIC_TARGETS_JSON,
             source_root=src,
             arches=["gfx942"],
             out_root=tmp_path / "out",

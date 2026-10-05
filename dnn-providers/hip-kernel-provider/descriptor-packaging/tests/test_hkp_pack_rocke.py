@@ -8,7 +8,14 @@ from typing import Literal, Optional
 
 import pytest
 
-from conftest import _arg, _kernel, _object, requires_msgpack
+from conftest import (
+    GENERIC_TARGETS,
+    GENERIC_TARGETS_JSON,
+    _arg,
+    _kernel,
+    _object,
+    requires_msgpack,
+)
 from hkp_pack.descriptors import load_flat_input
 from hkp_pack.errors import HkpPackError
 from hkp_pack.pipeline import run_pipeline
@@ -33,6 +40,7 @@ def _copy_fixture(tmp_path, fixture):
 
 def _run(source_root, tmp_path, hipcc, rocm_kpack_dir, arches=(ARCH,)):
     return run_pipeline(
+        generic_targets_json=GENERIC_TARGETS_JSON,
         source_root=source_root,
         arches=list(arches),
         out_root=tmp_path / "out",
@@ -460,7 +468,7 @@ def test_variant_key_stem_is_source_stem():
 # --- D. rocke validation accept/reject (quick, comgr-free) ------------------
 @pytest.mark.quick
 def test_validation_accepts_rocke_ukd(tmp_path, rocke_fixture, rocke_ukd):
-    flat = load_flat_input(_copy_fixture(tmp_path, rocke_fixture))
+    flat = load_flat_input(_copy_fixture(tmp_path, rocke_fixture), GENERIC_TARGETS)
     kdp = next(k for k in flat.kdps() if k.id == "kdp-attention")
     ks = kdp.doc["kernelDescriptors"][0]["kernel_source"]
     assert ks["kind"] == "rocke"
@@ -475,7 +483,7 @@ def test_validation_rejects_missing_builder(tmp_path, rocke_fixture):
     del doc["kernelDescriptors"][0]["kernel_source"]["builder"]
     p.write_text(json.dumps(doc), encoding="utf-8")
     with pytest.raises(HkpPackError, match="missing required field 'builder'"):
-        load_flat_input(src)
+        load_flat_input(src, GENERIC_TARGETS)
 
 
 @pytest.mark.quick
@@ -486,7 +494,7 @@ def test_validation_rejects_missing_spec(tmp_path, rocke_fixture):
     del doc["kernelDescriptors"][0]["kernel_source"]["spec"]
     p.write_text(json.dumps(doc), encoding="utf-8")
     with pytest.raises(HkpPackError, match="missing required field 'spec'"):
-        load_flat_input(src)
+        load_flat_input(src, GENERIC_TARGETS)
 
 
 @pytest.mark.quick
@@ -497,7 +505,7 @@ def test_validation_rejects_non_object_spec(tmp_path, rocke_fixture):
     doc["kernelDescriptors"][0]["kernel_source"]["spec"] = "not-an-object"
     p.write_text(json.dumps(doc), encoding="utf-8")
     with pytest.raises(HkpPackError, match="invalid spec"):
-        load_flat_input(src)
+        load_flat_input(src, GENERIC_TARGETS)
 
 
 @pytest.mark.quick
@@ -511,7 +519,7 @@ def test_validation_standalone_rocke_admitted(tmp_path, rocke_fixture):
     doc["kernelDescriptors"] = [standalone_id]
     kdp_path.write_text(json.dumps(doc), encoding="utf-8")
     (src / "attention.ukd.json").write_text(json.dumps(inline), encoding="utf-8")
-    flat = load_flat_input(src)
+    flat = load_flat_input(src, GENERIC_TARGETS)
     assert standalone_id in flat.ukd_by_id()
 
 
@@ -751,6 +759,7 @@ def test_rocke_toc_key_collision_is_detected(tmp_path, monkeypatch, rocm_kpack_d
 
     with pytest.raises(HkpPackError, match="toc_key collision"):
         pipeline.run_pipeline(
+            generic_targets_json=GENERIC_TARGETS_JSON,
             source_root=root,
             arches=[ARCH],
             out_root=tmp_path / "out",

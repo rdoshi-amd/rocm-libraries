@@ -3,6 +3,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path, PureWindowsPath
 
+from . import generic_targets as gtmod
 from .errors import HkpPackError
 
 KDP_TYPE = "kdp"
@@ -65,6 +66,9 @@ class Descriptor:
 @dataclass
 class FlatInput:
     descriptors: list = field(default_factory=list)
+    # The generic target table the root was validated against; every arch rule
+    # downstream (kdp_survives, the pipeline's selection) reads it from here.
+    generic_targets: object = None
 
     def by_type(self, dtype):
         return [d for d in self.descriptors if d.type == dtype]
@@ -127,16 +131,30 @@ def arch_matches(kdp_doc, arch):
     return arch in archs
 
 
-def _arch_subset_ok(ukd_arch, kdp_arch):
+def kdp_arch_matches(kdp_doc, arch, generic_targets):
+    """Whether a KDP is emitted into the pass for @arch.
+
+    A generic pass (@arch is a table generic) takes literal membership only: an
+    empty-arch KDP is a concrete-shard wildcard and is NOT emitted into the
+    generic copy. Any other arch follows arch_matches.
+    """
+    if generic_targets.has(arch):
+        return arch in (kdp_doc.get("arch") or [])
+    return arch_matches(kdp_doc, arch)
+
+
+def _arch_subset_ok(ukd_arch, kdp_arch, generic_targets):
     """A UKD's arch is admissible under a referencing KDP's arch.
 
     An empty list on either side is a wildcard: a wildcard KDP admits any UKD,
     and a wildcard UKD is admissible under any KDP. Two explicit lists require
-    the UKD's arches to be a subset of the KDP's.
+    the UKD's expanded device set to lie within the KDP's (a generic stands for
+    its members). The stricter literal rules for generic KDPs live in
+    validate_generic_arch.
     """
     if not ukd_arch or not kdp_arch:
         return True
-    return set(ukd_arch) <= set(kdp_arch)
+    return gtmod.covers(kdp_arch, ukd_arch, generic_targets)
 
 
 def kdp_survives(kdp_doc, flat, arch):
@@ -146,7 +164,7 @@ def kdp_survives(kdp_doc, flat, arch):
     (an inline dict or a standalone resolved by id) also applies to that arch.
     A KDP whose UKDs all filter out for this arch is dropped from the shard.
     """
-    if not arch_matches(kdp_doc, arch):
+    if not kdp_arch_matches(kdp_doc, arch, flat.generic_targets):
         return False
     ukd_by_id = flat.ukd_by_id()
     for entry in kdp_doc.get("kernelDescriptors", []):
@@ -502,7 +520,7 @@ def _validate_shape(desc, log=print):
         _validate_kmd(desc)
 
 
-def load_flat_input(root, log=print):
+def load_flat_input(root, generic_targets, log=print):
     """Load and structurally validate every *.json descriptor under a root.
 
     Walks the root recursively: a descriptor's authored subpath is meaningful
@@ -514,7 +532,9 @@ def load_flat_input(root, log=print):
     is not one of ours: warn and skip it rather than aborting the pack, so an
     incidental file in the source folder is tolerated. A hidden path -- any
     dot-prefixed segment, or a dot-prefixed filename -- is warned and skipped
-    the same way, so nothing the walk passes over is invisible. Raises
+    the same way, so nothing the walk passes over is invisible. `generic_targets`
+    is the loaded GenericTargets table the arch rules are checked against and
+    that the returned FlatInput carries. Raises
     HkpPackError on any malformed / missing-field / unknown-type /
     dangling-reference descriptor that IS type-tagged.
 
@@ -570,12 +590,127 @@ def load_flat_input(root, log=print):
         _validate_shape(desc, log)
         descriptors.append(desc)
 
-    flat = FlatInput(descriptors=descriptors)
+    flat = FlatInput(descriptors=descriptors, generic_targets=generic_targets)
     _reject_inline_standalone_collision(flat)
     _reject_duplicate_ids(flat)
+    validate_generic_arch(flat)
     _validate_references(flat)
     _warn_orphan_standalone_ukds(flat, log)
     return flat
+
+
+def _arch_entries(doc):
+    """The `arch` list of a descriptor document (empty when absent)."""
+    return list(doc.get("arch") or [])
+
+
+def _reject_unknown_generics(archs, file_name, table):
+    for entry in archs:
+        if gtmod.is_generic_shaped(entry) and not table.has(entry):
+            raise HkpPackError(
+                f"{file_name}: arch entry '{entry}' is a generic target name absent "
+                f"from the generic target table {table.path} "
+                f"(known: {', '.join(table.names())})"
+            )
+
+
+def _reject_mixed_generic_list(archs, file_name, table):
+    """S5: one list may not hold a generic together with a member it contains, nor
+    two generics that share a member."""
+    advice = (
+        "list one, or author two KDPs (an explicit override plus a generic "
+        "fallback are separate packs)"
+    )
+    for i, x in enumerate(archs):
+        for y in archs[i + 1 :]:
+            if table.has(x) and table.has(y):
+                shared = [m for m in table.members(x) if m in table.members(y)]
+                if shared:
+                    raise HkpPackError(
+                        f"{file_name}: 'arch' lists '{x}' and '{y}': the two "
+                        f"generics share member {shared[0]}; {advice}"
+                    )
+                continue
+            generic, member = (x, y) if table.has(x) else (y, x)
+            if table.has(generic) and member in table.members(generic):
+                raise HkpPackError(
+                    f"{file_name}: 'arch' lists '{x}' and '{y}': {generic} contains "
+                    f"{member}; {advice}"
+                )
+
+
+def validate_generic_arch(flat):
+    """Generic-target rules over every KDP/UKD `arch` in the root.
+
+    Per list: names that look generic but are not in the table are errors, and a
+    list may not mix a generic with a member it contains or two generics sharing
+    a member (S5). Per KDP holding a generic: a UKD with its own arch must list
+    every generic of the KDP and only entries the KDP lists (S6), and a
+    standalone UKD must carry such an arch. Per KDP of any shape: a UKD may not
+    name a generic the KDP does not list. rocKE does not support generics yet.
+    The loader accepts the lenient forms; this is the stricter packer-side layer.
+    """
+    table = flat.generic_targets
+    ukd_by_id = flat.ukd_by_id()
+    for desc in flat.descriptors:
+        if desc.type not in (KDP_TYPE, UKD_TYPE):
+            continue
+        name = desc.path.name
+        _reject_unknown_generics(_arch_entries(desc.doc), name, table)
+        _reject_mixed_generic_list(_arch_entries(desc.doc), name, table)
+        if desc.type == KDP_TYPE:
+            for entry in desc.doc.get("kernelDescriptors", []):
+                if isinstance(entry, dict):
+                    _reject_unknown_generics(_arch_entries(entry), name, table)
+                    _reject_mixed_generic_list(_arch_entries(entry), name, table)
+
+    for kdp in flat.kdps():
+        file_name = kdp.path.name
+        kdp_arch = _arch_entries(kdp.doc)
+        kdp_generics = [a for a in kdp_arch if gtmod.is_generic_shaped(a)]
+        for entry in kdp.doc.get("kernelDescriptors", []):
+            if isinstance(entry, str):
+                sdesc = ukd_by_id.get(entry)
+                if sdesc is None:
+                    continue  # reported by _validate_references
+                ukd, standalone = sdesc.doc, sdesc
+            else:
+                ukd, standalone = entry, None
+            ukd_arch = _arch_entries(ukd)
+            ukd_generics = [a for a in ukd_arch if gtmod.is_generic_shaped(a)]
+            kind = ukd.get("kernel_source", {}).get("kind")
+            if kind == "rocke" and (kdp_generics or ukd_generics):
+                generic = (kdp_generics or ukd_generics)[0]
+                raise HkpPackError(
+                    f"{file_name}: rocKE does not support generic targets yet "
+                    f"(arch '{generic}')"
+                )
+            ukd_label = f"UKD '{ukd.get('id', '?')}'"
+            for generic in ukd_generics:
+                if generic not in kdp_arch:
+                    raise HkpPackError(
+                        f"{file_name}: {ukd_label} declares generic target "
+                        f"'{generic}' but the KDP does not list '{generic}'; it "
+                        "would ship in no shard"
+                    )
+            if not kdp_generics:
+                continue
+            if standalone is not None:
+                who = f"standalone UKD '{ukd.get('id')}' ({standalone.path.name})"
+            else:
+                who = f"inline UKD '{ukd.get('name', ukd.get('id', '?'))}'"
+            if standalone is None and not ukd_arch:
+                continue  # an inline UKD with no arch inherits the pack
+            lists_all = all(g in ukd_arch for g in kdp_generics)
+            only_listed = all(a in kdp_arch for a in ukd_arch)
+            if not ukd_arch or not lists_all or not only_listed:
+                declared = f"arch {ukd_arch}" if ukd_arch else "no arch"
+                raise HkpPackError(
+                    f"{file_name}: KDP lists generic target(s) {kdp_generics} "
+                    f"(arch {kdp_arch}) but {who} declares {declared}; a UKD under "
+                    "a generic KDP must list every generic of the KDP and only "
+                    "entries the KDP lists"
+                )
 
 
 def _reject_inline_standalone_collision(flat):
@@ -666,7 +801,9 @@ def _validate_references(flat):
                 udoc = ukd_by_id[entry].doc
             else:
                 udoc = entry
-            if not _arch_subset_ok(udoc.get("arch") or [], kdp_arch):
+            if not _arch_subset_ok(
+                udoc.get("arch") or [], kdp_arch, flat.generic_targets
+            ):
                 raise HkpPackError(
                     f"UKD '{udoc.get('id')}' arch {udoc.get('arch')} is not a "
                     f"subset of KDP {kdp.path.name} arch {doc.get('arch')}"

@@ -12,6 +12,7 @@ include_guard(GLOBAL)
 set(HKP_PKG_DIR "${CMAKE_CURRENT_LIST_DIR}/..")
 set(HKP_PYTHON_ROOT "${HKP_PKG_DIR}/python")
 set(HKP_TOOL "${HKP_PKG_DIR}/tools/hkp_pack.py")
+set(HKP_ARCH_PROBE_TOOL "${HKP_PKG_DIR}/tools/hkp_arch_probe.py")
 set(HKP_WHEEL_DIGEST_TOOL "${HKP_PKG_DIR}/tools/hkp_wheel_digest.py")
 set(HKP_FIXTURES "${HKP_PKG_DIR}/tests/fixtures")
 
@@ -313,11 +314,12 @@ function(hkp_wire_pack_target)
                 --inter-root "${_inter_root}"
                 --kpack-python-dir "${ARG_ROCM_KPACK_DIR}"
                 --source-label "${ARG_NAME}"
+                --generic-targets-json "${HIPDNN_PLUGIN_SDK_GPU_GENERIC_TARGETS_JSON}"
                 ${_wheel_stamp_arg}
         COMMAND "${CMAKE_COMMAND}" -E make_directory "${ARG_OUT_ROOT}"
         COMMAND "${CMAKE_COMMAND}" -E touch "${_stamp}"
         DEPENDS "${HKP_TOOL}" ${_source_inputs} ${_tool_sources}
-                "${_input_manifest}"
+                "${_input_manifest}" "${HIPDNN_PLUGIN_SDK_GPU_GENERIC_TARGETS_JSON}"
                 ${_interp_dep} ${_wheel_dep}
         COMMENT "hkp: packing root '${ARG_NAME}' for ${ARG_ARCHES}"
         VERBATIM)
@@ -1024,13 +1026,12 @@ endfunction()
 # ---------------------------------------------------------------------------
 # _hkp_root_covers_any_arch(<out_var> <root> <arches>)
 #   TRUE when at least one non-hidden *.kdp.json under <root> would survive
-#   arch_matches() for at least one arch in <arches>. Mirrors that predicate exactly: an
-#   absent `arch` key and an empty `arch` array are both wildcards, anything else is
-#   exact string membership in the wired arch list. Consulted for the default root alone
-#   (hkp_add_packaging below).
+#   admit at least one arch in <arches> (_hkp_kdp_arch_matches: an absent or empty `arch`
+#   is a wildcard; an entry admits a target it names or a table generic containing it).
+#   Consulted for the default root alone (hkp_add_packaging below).
 #
-#   Only FALSE is authoritative. kdp_survives() tests arch_matches() first, so a root no
-#   arch matches is provably empty; TRUE claims nothing beyond "not provably empty",
+#   Only FALSE is authoritative. kdp_survives() tests the KDP-level arch rule first, so a
+#   root no arch reaches is provably empty; TRUE claims nothing beyond "not provably empty",
 #   since a matching KDP can still prune on its UKD entries. Every ambiguous case
 #   therefore resolves to TRUE -- an unparseable KDP, or an `arch` that is not an array,
 #   counts as covering, so the root stays wired and the packer reports what is wrong
@@ -1059,8 +1060,7 @@ function(_hkp_root_covers_any_arch out_var root arches)
             DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
             APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_kdp}")
 
-        file(READ "${_kdp}" _kdp_json)
-        _hkp_kdp_arch_matches(_matches "${_kdp_json}" "${arches}")
+        _hkp_kdp_arch_matches(_matches "${_kdp}" "${arches}")
         if(_matches)
             set(${out_var} TRUE PARENT_SCOPE)
             return()
@@ -1069,42 +1069,41 @@ function(_hkp_root_covers_any_arch out_var root arches)
 endfunction()
 
 # ---------------------------------------------------------------------------
-# _hkp_kdp_arch_matches(<out> <kdp-json> <arches>)
-#   TRUE when <kdp-json> ships for any architecture in <arches>.
+# _hkp_kdp_arch_matches(<out> <kdp-path> <arches>)
+#   TRUE when the KDP at <kdp-path> ships for any architecture in <arches>.
 #
-#   The packer's own arch_matches(): a KDP naming no architecture, or an empty list,
-#   wildcards and ships everywhere.
+#   Answered by tools/hkp_arch_probe.py, which runs the packer's own tier rule
+#   (hkp_pack.generic_targets.admits_target): a KDP naming no architecture, or an empty
+#   list, wildcards; an entry admits a target when it names it or is a generic target
+#   of the shared table that contains it. The generic table is the SDK's
+#   HIPDNN_PLUGIN_SDK_GPU_GENERIC_TARGETS_JSON, so the verdict and the packer read the
+#   same data.
 #
 #   Every ambiguous case also resolves TRUE, deliberately: only FALSE is authoritative.
 #   Resolving ambiguity the other way would let a malformed declaration read as a clean
 #   absence and silently withdraw the packaging whose validation would have reported it.
+#   A probe that exits non-zero (an unreadable table) is a configure error.
 # ---------------------------------------------------------------------------
-function(_hkp_kdp_arch_matches out_var kdp_json arches)
-    # cmake-lint: disable=E1120
-    #   cmake-lint carries no argument spec for foreach(... RANGE ...) and reports
-    #   every spelling of it as missing a positional argument. The index loop below
-    #   is valid CMake.
-    set(${out_var} TRUE PARENT_SCOPE)
-
-    string(JSON _arch_type ERROR_VARIABLE _type_err TYPE "${kdp_json}" arch)
-    if(_type_err OR NOT _arch_type STREQUAL "ARRAY")
-        return()
+function(_hkp_kdp_arch_matches out_var kdp_path arches)
+    execute_process(
+        COMMAND "${Python3_EXECUTABLE}" "${HKP_ARCH_PROBE_TOOL}"
+                --generic-targets-json "${HIPDNN_PLUGIN_SDK_GPU_GENERIC_TARGETS_JSON}"
+                --arches "${arches}"
+                --kdp "${kdp_path}"
+        RESULT_VARIABLE _probe_rc
+        OUTPUT_VARIABLE _probe_out
+        ERROR_VARIABLE _probe_err
+        OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if(NOT _probe_rc EQUAL 0)
+        message(FATAL_ERROR
+            "hkp: the arch probe failed (exit ${_probe_rc}) on '${kdp_path}': "
+            "${_probe_err}")
     endif()
-
-    string(JSON _arch_len ERROR_VARIABLE _len_err LENGTH "${kdp_json}" arch)
-    if(_len_err OR _arch_len EQUAL 0)
-        return()
+    if(_probe_out STREQUAL "FALSE")
+        set(${out_var} FALSE PARENT_SCOPE)
+    else()
+        set(${out_var} TRUE PARENT_SCOPE)
     endif()
-
-    math(EXPR _arch_last "${_arch_len} - 1")
-    foreach(_i RANGE ${_arch_last})
-        string(JSON _declared ERROR_VARIABLE _get_err GET "${kdp_json}" arch ${_i})
-        if(_get_err OR _declared IN_LIST arches)
-            return()
-        endif()
-    endforeach()
-
-    set(${out_var} FALSE PARENT_SCOPE)
 endfunction()
 
 # ---------------------------------------------------------------------------
@@ -1205,7 +1204,7 @@ function(_hkp_root_declares_engine_for_arch out_var root engine arch)
             continue()
         endif()
 
-        _hkp_kdp_arch_matches(_matches "${_kdp_json}" "${arch}")
+        _hkp_kdp_arch_matches(_matches "${_kdp}" "${arch}")
         if(_matches)
             set(${out_var} TRUE PARENT_SCOPE)
             return()
@@ -1324,6 +1323,15 @@ endfunction()
 #   regardless.
 # ---------------------------------------------------------------------------
 function(hkp_add_packaging)
+    if(NOT HIPDNN_PLUGIN_SDK_GPU_GENERIC_TARGETS_JSON
+       OR NOT EXISTS "${HIPDNN_PLUGIN_SDK_GPU_GENERIC_TARGETS_JSON}")
+        message(FATAL_ERROR
+            "hkp: HIPDNN_PLUGIN_SDK_GPU_GENERIC_TARGETS_JSON is empty or names a missing "
+            "file ('${HIPDNN_PLUGIN_SDK_GPU_GENERIC_TARGETS_JSON}'). The packer reads "
+            "the generic GPU target table that hipdnn_plugin_sdk ships "
+            "(gpu_generic_targets.json); an older installed hipdnn_plugin_sdk lacks it. "
+            "Build against a hipdnn_plugin_sdk that provides the table.")
+    endif()
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
     hkp_resolve_kpack(_rocm_kpack_dir "${Python3_EXECUTABLE}")
@@ -1345,8 +1353,8 @@ function(hkp_add_packaging)
 
     # Arch coverage is consulted for the DEFAULT root alone, which builds inherit without
     # asking for it; a named root reaches the packer and fails there. Safe in one
-    # direction only: arch_matches() runs first inside kdp_survives(), so "no KDP
-    # declares an arch this build packs for" proves no KDP survives, and a root this
+    # direction only: the KDP-level arch rule runs first inside kdp_survives(), so "no KDP
+    # reaches an arch this build packs for" proves no KDP survives, and a root this
     # misses stays wired for the packer to report.
     if(_product_has_content AND _source_root_is_default)
         _hkp_root_covers_any_arch(_product_covers_arch "${_source_root}" "${_arches}")

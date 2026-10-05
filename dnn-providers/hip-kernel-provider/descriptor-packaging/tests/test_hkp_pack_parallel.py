@@ -24,6 +24,7 @@ from pathlib import Path
 
 import pytest
 
+from conftest import GENERIC_TARGETS
 from hkp_pack import agreement, pipeline, rocke_compile
 from hkp_pack.descriptors import load_flat_input
 from hkp_pack.errors import HkpPackError
@@ -459,11 +460,13 @@ def _entry_identity(entry_id, ukd_doc, sdesc):
 
 
 def _observed_sequence(corpus_dir):
-    flat = load_flat_input(corpus_dir, log=_silent)
+    flat = load_flat_input(corpus_dir, GENERIC_TARGETS, log=_silent)
     ukd_by_id = flat.ukd_by_id()
     observed = []
     for kdp in flat.kdps():
-        for tup in pipeline._selected_entries(kdp.doc, TARGET_ARCH, ukd_by_id):
+        for tup in pipeline._selected_entries(
+            kdp.doc, TARGET_ARCH, ukd_by_id, GENERIC_TARGETS
+        ):
             observed.append(_entry_identity(*tup))
     return observed
 
@@ -509,17 +512,17 @@ def test_prewarm_jobs_are_deduped_on_variant_key(corpus):
     one standalone UKD from two KDPs, so a job list that failed to dedup would
     be longer than the set of keys it carries.
     """
-    flat = load_flat_input(corpus, log=_silent)
+    flat = load_flat_input(corpus, GENERIC_TARGETS, log=_silent)
     jobs = pipeline._prewarm_jobs(flat, corpus, TARGET_ARCH)
     assert jobs, "the corpus selects variants, so the job list cannot be empty"
     assert len({j.vk for j in jobs}) == len(jobs)
 
 
-def _arch_matches_call_sites():
-    """`arch_matches` call counts in pipeline.py, keyed by enclosing function.
+def _call_sites(callee):
+    """`callee` call counts in pipeline.py, keyed by enclosing function.
 
-    Parsed rather than counted as strings: an explanatory comment naming
-    `arch_matches` is not a call.
+    Parsed rather than counted as strings: an explanatory comment naming the
+    callee is not a call.
     """
     tree = ast.parse(inspect.getsource(pipeline))
     counts = {}
@@ -536,7 +539,7 @@ def _arch_matches_call_sites():
                 if isinstance(func, ast.Name)
                 else func.attr if isinstance(func, ast.Attribute) else None
             )
-            if name == "arch_matches":
+            if name == callee:
                 found += 1
         if found:
             counts[node.name] = found
@@ -545,16 +548,26 @@ def _arch_matches_call_sites():
 
 @pytest.mark.quick
 def test_arch_matches_call_sites_are_pinned():
-    """All three selection filters live in the generator and nowhere else.
+    """The two UKD-level selection filters live in the generator and nowhere else.
 
-    `compile_intermediate` keeps exactly one call, and it is not a filter: it
-    decides KDP disposition -- copy the authored KDP through verbatim -- before
-    the deepcopy the generator would consume. A call in any other function is a
-    fourth selection site, which is the divergence a single shared generator
-    exists to make impossible.
+    `arch_matches` is the empty-inherits filter on a UKD. `compile_intermediate`
+    no longer calls it: its KDP disposition call is `kdp_arch_matches`.
     """
-    assert _arch_matches_call_sites() == {
-        "_selected_entries": 3,
+    assert _call_sites("arch_matches") == {"_selected_entries": 2}
+
+
+@pytest.mark.quick
+def test_kdp_arch_matches_call_sites_are_pinned():
+    """The KDP-level filter is in the generator; `compile_intermediate` keeps one call.
+
+    That call is not a filter: it decides KDP disposition -- copy the authored KDP
+    through verbatim -- before the deepcopy the generator would consume. A call in
+    any other pipeline function is a further selection site, which is the
+    divergence a single shared generator exists to make impossible. The
+    `kdp_survives` call lives in descriptors.py, not pipeline.py.
+    """
+    assert _call_sites("kdp_arch_matches") == {
+        "_selected_entries": 1,
         "compile_intermediate": 1,
     }
 
@@ -755,7 +768,7 @@ def test_prewarm_skips_hsaco_kind(hsaco_corpus):
     `_variant_key_for` declines the kind, so the prewarm drops it and only the
     compilable hip sibling is scheduled; the walk keys the hsaco UKD itself.
     """
-    flat = load_flat_input(hsaco_corpus, log=_silent)
+    flat = load_flat_input(hsaco_corpus, GENERIC_TARGETS, log=_silent)
 
     hsaco_ukd = flat.kdps()[0].doc["kernelDescriptors"][0]
     assert pipeline._variant_key_for(hsaco_ukd, Path(".")) is None
@@ -814,7 +827,7 @@ def test_prewarm_pool_stops_at_first_failure(tmp_path, monkeypatch):
 
     jobs = [_synthetic_job(corpus, 64 + i) for i in range(24)]
     monkeypatch.setattr(pipeline, "_prewarm_jobs", lambda *_a, **_k: list(jobs))
-    flat = load_flat_input(corpus, log=_silent)
+    flat = load_flat_input(corpus, GENERIC_TARGETS, log=_silent)
 
     tally = tmp_path / "tally"
     tally.mkdir()
@@ -961,7 +974,7 @@ def test_prewarm_failure_names_variant(failing_corpus, tmp_path, monkeypatch):
     for.
     """
     monkeypatch.setenv("HKP_PACK_JOBS", "2")
-    flat = load_flat_input(failing_corpus, log=_silent)
+    flat = load_flat_input(failing_corpus, GENERIC_TARGETS, log=_silent)
 
     jobs = pipeline._prewarm_jobs(flat, failing_corpus, TARGET_ARCH)
     assert len(jobs) >= 2, "a single job returns before starting a pool"
@@ -1122,7 +1135,7 @@ def test_prewarm_pool_populates_both_caches(tmp_path, monkeypatch):
     variant_symbol = {}
     variant_observations = {}
     pipeline._prewarm_variants(
-        load_flat_input(corpus, log=_silent),
+        load_flat_input(corpus, GENERIC_TARGETS, log=_silent),
         corpus,
         TARGET_ARCH,
         _stub_hipcc(tmp_path),
@@ -1135,7 +1148,7 @@ def test_prewarm_pool_populates_both_caches(tmp_path, monkeypatch):
     )
 
     jobs = pipeline._prewarm_jobs(
-        load_flat_input(corpus, log=_silent), corpus, TARGET_ARCH
+        load_flat_input(corpus, GENERIC_TARGETS, log=_silent), corpus, TARGET_ARCH
     )
     expected_symbol = {job.vk: job.ukd["kernel_source"]["entry"] for job in jobs}
     assert len(expected_symbol) == HIP_ONLY_EXPECTED_CO_COUNT
@@ -1158,7 +1171,7 @@ def test_prewarm_pool_populates_both_caches(tmp_path, monkeypatch):
 def _staged_tree(corpus, out_dir):
     """Every staged file under `out_dir`, keyed by path relative to it."""
     pipeline.compile_intermediate(
-        load_flat_input(corpus, log=_silent),
+        load_flat_input(corpus, GENERIC_TARGETS, log=_silent),
         corpus,
         TARGET_ARCH,
         _stub_hipcc(out_dir.parent),
@@ -1253,7 +1266,7 @@ def test_pack_jobs_one_starts_no_pool(tmp_path, monkeypatch):
 
     variant_co = {}
     pipeline._prewarm_variants(
-        load_flat_input(corpus, log=_silent),
+        load_flat_input(corpus, GENERIC_TARGETS, log=_silent),
         corpus,
         TARGET_ARCH,
         _stub_hipcc(tmp_path),
@@ -1416,7 +1429,7 @@ def _serial_pool(monkeypatch, between=None):
 
 
 def _editable_jobs(corpus, out_dir):
-    flat = load_flat_input(corpus, log=_silent)
+    flat = load_flat_input(corpus, GENERIC_TARGETS, log=_silent)
     jobs = pipeline._prewarm_jobs(flat, corpus, TARGET_ARCH)
     return flat, [replace(job, out_dir=str(out_dir), hipcc="hipcc") for job in jobs]
 
@@ -1470,7 +1483,7 @@ def test_pool_rejects_variants_built_by_different_producer_revisions(
 
     with pytest.raises(HkpPackError) as excinfo:
         pipeline.compile_intermediate(
-            load_flat_input(corpus, log=_silent),
+            load_flat_input(corpus, GENERIC_TARGETS, log=_silent),
             corpus,
             TARGET_ARCH,
             "hipcc",
@@ -1496,7 +1509,7 @@ def test_pool_accepts_variants_built_by_one_producer_revision(
     _serial_pool(monkeypatch)
 
     inter = pipeline.compile_intermediate(
-        load_flat_input(corpus, log=_silent),
+        load_flat_input(corpus, GENERIC_TARGETS, log=_silent),
         corpus,
         TARGET_ARCH,
         "hipcc",

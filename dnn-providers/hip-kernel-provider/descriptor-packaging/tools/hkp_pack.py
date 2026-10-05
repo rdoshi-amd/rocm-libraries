@@ -113,6 +113,14 @@ def _parse_args(argv):
         "staged, installable directory.",
     )
     p.add_argument(
+        "--generic-targets-json",
+        required=True,
+        help="The generic GPU target table (gpu_generic_targets.json) shared with "
+        "the loader. GPU_TARGETS stays concrete: every table generic that a KDP "
+        "lists and that contains a selected arch is packed once and copied into "
+        "each selected member's folder.",
+    )
+    p.add_argument(
         "--kpack-python-dir",
         default=None,
         help="Path to the rocm-kpack 'python' directory (overrides any "
@@ -152,6 +160,7 @@ def main(argv=None):
         arches=arches,
         out_root=Path(args.out_root),
         hipcc=args.hipcc,
+        generic_targets_json=Path(args.generic_targets_json),
         rocm_kpack_dir=args.kpack_python_dir,
         inter_root=Path(args.inter_root),
         rocke_wheel_stamp=args.rocke_wheel_stamp,

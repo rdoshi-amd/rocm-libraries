@@ -79,12 +79,14 @@ compiled artifact. Authoring it would let the descriptor disagree with the kerne
 authored.** `file` resolves relative to the descriptor that names it, must stay
 inside the source root, and has no root-relative fallback, like a hip `source`.
 The object is packed as-is, with no compile. This tree contains no hsaco example.
-Each hsaco UKD must list in `arch` the arch(es) its object runs on (a
-generic-target object lists every arch it runs on); an absent or empty `arch`
-is rejected.
+Each hsaco UKD must list in `arch` the arch(es) its object runs on (it may
+be a generic spelling such as `gfx11-generic`, packed under that key); an absent
+or empty `arch` is rejected.
 
 **`arch` filters which shard a descriptor ships in.** It does not select a
-builder: naming `gfx942` does not make a gfx950 builder produce gfx942 code.
+builder: naming `gfx942` does not make a gfx950 builder produce gfx942 code. It
+may name a generic target (`gfx11-generic`): that pack is built once and copied
+into the folder of every selected member of the generic.
 
 **`library` is relative to the descriptor that declared it**, and the archive is
 one per arch at the arch root — so a descriptor in a child folder climbs back out

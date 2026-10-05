@@ -4,6 +4,43 @@ Build-time UKD/KMD/KDP -> kpack packaging. Provider-internal (`tools/hkp_pack.py
 see `python/hkp_pack/` for the pipeline and `examples/descriptors/` for a real,
 minimal authored source root.
 
+## Generic GPU targets
+
+`arch` may name a LLVM generic target (`gfx11-generic`) listed in the shared table
+`projects/hipdnn/plugin_sdk/data/gpu_generic_targets.json`; the packer reads it through
+the required `--generic-targets-json` (CMake passes
+`HIPDNN_PLUGIN_SDK_GPU_GENERIC_TARGETS_JSON`). `GPU_TARGETS` stays concrete. After the
+concrete passes, every table generic that a KDP lists and that contains a selected arch
+is compiled and packed once under its own spelling (`kpack/hip_kernel_provider_<G>.kpack`,
+every emitted document `arch: [<G>]`), and that one tree is copied into the folder of each
+selected member whose concrete pass succeeded. No folder is named for the generic, and an
+empty-`arch` KDP is never emitted into a generic copy. The copy is a pure function of the
+source tree, the generic's spelling, hipcc and the table, so the copies are byte-identical
+across member folders and across separate per-arch builds.
+
+Authoring rules (packer errors, stable substrings in parentheses):
+
+- A name ending `-generic` that the table does not list is an error (`generic target name
+  absent`).
+- One `arch` list may not hold a generic with a member it contains, nor two generics that
+  share a member (`lists '`). Author two KDPs instead: an explicit override plus a generic
+  fallback are separate packs.
+- Under a KDP whose list holds a generic, every UKD with its own `arch` must list every
+  generic of the KDP and only entries the KDP lists, and a standalone UKD must carry such an
+  `arch` (`must list every generic of the KDP`). An inline UKD with no `arch` inherits the
+  pack.
+- A UKD may not name a generic its KDP does not list, including under an empty-`arch` KDP
+  (`ship in no shard`).
+- rocKE does not support generics yet (`does not support generic targets yet`).
+- Two shards whose member sets intersect may not write one path with different bytes
+  (`would be written by shard`); identical shared descriptors merge.
+
+Duplicate matcher tuples are judged per arch tier (`hkp_desk_check`): an explicit arch
+beats a generic beats an arch-less kernel on a device, so an arch-less kernel and an
+explicit one do not collide, while two arch-less kernels, or two naming the same
+generic, do. `tools/hkp_arch_probe.py` answers the CMake configure's "does this KDP reach
+any selected arch" with the same rule.
+
 ## Source roots and what the walk accepts
 
 Each wired root is walked recursively and packs into **its own** `OUT_ROOT`; no two
@@ -52,8 +89,9 @@ object's AMDGPU metadata as for a compiled object, and the UKD ships as `kind: k
 The toc key derives from the file's resolved root-relative path, so one file serving
 several symbols is one archive entry, and one key claimed by two different files is a
 hard error. The packer does not check the object's format or target processor. An
-`hsaco` UKD must list the arch(es) its object runs on in `arch` (a generic-target
-object lists every arch it runs on); an absent or empty `arch` is rejected. The author's own load test on the target arch
+`hsaco` UKD must list the arch(es) its object runs on in `arch` (a generic spelling such
+as `gfx11-generic` is allowed and packs the authored bytes under that key, with the
+generic rules above and no ELF check); an absent or empty `arch` is rejected. The author's own load test on the target arch
 is the only check; no in-tree load test covers `hsaco`. The shipped provenance records
 `origin_kind: "hsaco"`, the root-relative `file`, its `sha256` and the `symbol`, and makes no
 toolchain claim. As for `hip`, the specialization contract must declare
@@ -284,8 +322,8 @@ Set `HIPKERNELPROVIDER_KPACK_REQUIRE_ROCM_KPACK=1` (mirroring `_REQUIRE_HIPCC` /
 ### Desk-check a variant set (`hkp_pack.desk_check`, `tools/hkp_desk_check.py`)
 
 ```
-tools/hkp_desk_check.py --mode {full,structural} [--kpack-python-dir D]
-                        [--field F] [--drift-field F] <path/to/*.kdp.json>
+tools/hkp_desk_check.py --mode {full,structural} --generic-targets-json J
+                        [--kpack-python-dir D] [--field F] [--drift-field F] <path/to/*.kdp.json>
 ```
 
 The desk check resolves KDP engine → UED metadata → KMD UUID within the selected

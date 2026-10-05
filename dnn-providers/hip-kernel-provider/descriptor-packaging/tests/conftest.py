@@ -12,6 +12,13 @@ _PKG_ROOT = _TESTS_DIR.parent / "python"
 if str(_PKG_ROOT) not in sys.path:
     sys.path.insert(0, str(_PKG_ROOT))
 
+# The in-repo generic GPU target table every pack in these tests is validated against.
+# Exported so a test names it once; a test needing a different table writes its own.
+from hkp_pack.generic_targets import DEFAULT_TABLE_PATH, GenericTargets  # noqa: E402
+
+GENERIC_TARGETS_JSON = DEFAULT_TABLE_PATH
+GENERIC_TARGETS = GenericTargets.load(GENERIC_TARGETS_JSON)
+
 # rocm_kpack location: CMake passes HIPKERNELPROVIDER_ROCM_KPACK_DIR; otherwise
 # rely on an installed rocm_kpack already importable. No skip on absence — the
 # compiler and kpack are load-bearing; a missing dependency is a hard failure.

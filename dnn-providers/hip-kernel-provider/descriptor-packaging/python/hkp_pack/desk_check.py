@@ -12,6 +12,7 @@ import collections
 from pathlib import Path
 
 from . import agreement, descriptor_context
+from . import generic_targets as gtmod
 from .errors import HkpPackError
 from .kpack_resolver import load_kpack
 
@@ -212,7 +213,7 @@ def _payload(
 
 
 def compiled_agreement(
-    kdp_path: Path, kpack_python_dir=None
+    kdp_path: Path, generic_targets, kpack_python_dir=None
 ) -> tuple[list[str], list[str], int]:
     """Compiled-specialization agreement over one shipped KDP.
 
@@ -249,7 +250,9 @@ def compiled_agreement(
             0,
         )
     arch = arches[0]
-    all_records = descriptor_context.consumer_records(bundles, schemas, arch)
+    all_records = descriptor_context.consumer_records(
+        bundles, schemas, arch, generic_targets
+    )
     failures: list[str] = []
     unclaimed: list[str] = []
     verified = 0
@@ -291,7 +294,13 @@ def compiled_agreement(
                     f"verified against a binary"
                 )
                 continue
-            payload = _payload(entry, arch, kpack_python_dir)
+            payload = _payload(
+                entry,
+                descriptor_context.archive_arch(
+                    entry.arch or [arch], arch, generic_targets
+                ),
+                kpack_python_dir,
+            )
             agreement.verify(kernel, records, payload)
             verified += 1
         except HkpPackError as exc:
@@ -366,25 +375,41 @@ def metadata_spec_drift(kernels: list[dict], fields=None) -> list[tuple[str, str
     return bad
 
 
-def _reachable_together(group: list[dict]) -> int:
-    """The largest number of kernels in `group` one device reaches.
+def _reachable_together(group: list[dict], generic_targets) -> int:
+    """The largest number of kernels in `group` that tie for one device.
 
-    A tuple shared across disjoint arches is no collision. An absent or empty
-    `arch` is a wildcard and counts against every arch in the group.
+    Per candidate device (every explicit id and every member of a table generic in
+    the group's lists; one synthetic device when every list is empty) the kernels
+    whose arch tier equals the group's best tier on that device are counted: an
+    arch-less kernel and an explicit one do not collide (the explicit one wins),
+    two arch-less ones do, and so do two kernels naming the same generic.
     """
-    sets = [frozenset(k.get("arch") or ()) for k in group]
-    named = frozenset().union(*sets) if sets else frozenset()
-    if not named:
+    lists = [list(k.get("arch") or ()) for k in group]
+    devices: set[str] = set()
+    for entries in lists:
+        for entry in entries:
+            if gtmod.is_generic_shaped(entry):
+                if generic_targets.has(entry):
+                    devices.update(generic_targets.members(entry))
+            else:
+                devices.add(entry)
+    if not devices:
         return len(group)
-    return max(sum(1 for s in sets if not s or arch in s) for arch in named)
+    best = 0
+    for device in devices:
+        tiers = [gtmod.list_tier(e, device, generic_targets) for e in lists]
+        reached = [t for t in tiers if t is not None]
+        if reached:
+            best = max(best, reached.count(min(reached)))
+    return best
 
 
 def duplicate_matcher_tuples(
-    kernels: list[dict], fields=DEFAULT_MATCHER_FIELDS
+    kernels: list[dict], fields, generic_targets
 ) -> dict[tuple, int]:
     """Invariant 2: no two kernels may share a matcher tuple on the same arch --
     one is unreachable. Returns {tuple: count} for every tuple two kernels reach
-    one device with, the scope the runtime refuses in.
+    one device at the same arch tier with, the scope the runtime refuses in.
 
     The compared set is the union of `fields` present in any kernel's metadata,
     never ``kernels[0]``'s, which would make the identity list-order dependent. A
@@ -395,7 +420,7 @@ def duplicate_matcher_tuples(
     for kernel in kernels:
         key = tuple(kernel.get("metadata", {}).get(f, _ABSENT) for f in present)
         groups[key].append(kernel)
-    counts = {t: _reachable_together(g) for t, g in groups.items()}
+    counts = {t: _reachable_together(g, generic_targets) for t, g in groups.items()}
     return {t: c for t, c in counts.items() if c > 1}
 
 
@@ -454,6 +479,7 @@ class DeskCheckReport:
         drift_fields=None,
         *,
         mode: str,
+        generic_targets,
         agreement_failures=None,
         agreement_unclaimed=None,
         agreement_verified=0,
@@ -486,7 +512,9 @@ class DeskCheckReport:
             self.drift = metadata_spec_drift(kernels, self.drift_fields)
         except DeskCheckNoSpecFound as exc:
             self.spec_drift_error = str(exc)
-        self.duplicate_tuples = duplicate_matcher_tuples(kernels, self.fields)
+        self.duplicate_tuples = duplicate_matcher_tuples(
+            kernels, self.fields, generic_targets
+        )
 
         self.toc_applicable = _field_applicable(kernels, "toc_key")
         self.toc_distinct, self.toc_total = (

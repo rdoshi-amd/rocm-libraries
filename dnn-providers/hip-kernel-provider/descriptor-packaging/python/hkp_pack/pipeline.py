@@ -18,11 +18,14 @@ from .rocke_compile import compile_rocke_variant, rocke_variant_key
 from .descriptors import (
     KPACK_DIR_NAME,
     arch_matches,
+    kdp_arch_matches,
     kdp_survives,
     load_flat_input,
     reachable_generic_ids,
+    type_from_filename,
 )
 from .errors import HkpPackError
+from .generic_targets import GenericTargets
 from .kernel_signature import kernel_signature
 from .kpack_resolver import load_kpack
 
@@ -124,6 +127,8 @@ class ArchResult:
     out_dir: Path
     kpack_path: Path
     skipped: bool = False
+    # Archives of the generic passes copied into this member's folder.
+    generic_kpack_paths: tuple = ()
 
 
 _EXC_TEXT_LIMIT = 200
@@ -406,7 +411,7 @@ class _VariantJob:
     requests: dict = field(default_factory=dict)
 
 
-def _selected_entries(doc, arch, ukd_by_id):
+def _selected_entries(doc, arch, ukd_by_id, generic_targets):
     """Yield the entries of doc that ship for arch.
 
     Yields `(entry_id, ukd_doc, sdesc)`: for a standalone-UKD id ref, the id
@@ -415,13 +420,14 @@ def _selected_entries(doc, arch, ukd_by_id):
     because the walk needs its `path.name` for the error context and for the
     shipped filename as well as its `rel_dir` for the variant key.
 
-    All three arch filters live here and nowhere else, so the prewarm and the
+    All three arch filters live here and nowhere else (the KDP-level one is
+    `kdp_arch_matches`, the two UKD-level ones `arch_matches`), so the prewarm and the
     serial walk cannot select different variant sets. `ukd_by_id` arrives as a
     parameter rather than being reached for through `flat`, which leaves the
     generator no way to enumerate a standalone UKD no KDP references: an orphan
     is legal input the walk never compiles.
     """
-    if not arch_matches(doc, arch):
+    if not kdp_arch_matches(doc, arch, generic_targets):
         return
     for entry in doc["kernelDescriptors"]:
         if isinstance(entry, str):
@@ -457,7 +463,9 @@ def _agreement_inputs(flat, arch):
                 )
             # The KDP declares nothing (just checked), so there is nothing for a
             # kernel to inherit and each speaks only for itself.
-            for _sid, ukd, _sdesc in _selected_entries(kdp.doc, arch, ukd_by_id):
+            for _sid, ukd, _sdesc in _selected_entries(
+                kdp.doc, arch, ukd_by_id, flat.generic_targets
+            ):
                 if agreement.resolved_contract(ukd) is not None:
                     raise HkpPackError(
                         f"UKD {ukd['id']} in {kdp.path.name}: a specialization "
@@ -477,7 +485,9 @@ def _agreement_inputs(flat, arch):
         kmd = schemas[kmd_id]
         header = _kdp_header(kdp.doc)
         header["arch"] = [arch]
-        for sid, ukd, sdesc in _selected_entries(kdp.doc, arch, ukd_by_id):
+        for sid, ukd, sdesc in _selected_entries(
+            kdp.doc, arch, ukd_by_id, flat.generic_targets
+        ):
             # Completion is checked against the KMD the chain actually resolved to,
             # so a mis-typed or missing mandatory value fails before a compile.
             agreement.complete_metadata(ukd["metadata"], kmd)
@@ -528,7 +538,9 @@ def _prewarm_jobs(flat, source_root, arch, observation_requests=None):
     jobs = []
     seen = set()
     for kdp in flat.kdps():
-        for sid, ukd, sdesc in _selected_entries(kdp.doc, arch, ukd_by_id):
+        for sid, ukd, sdesc in _selected_entries(
+            kdp.doc, arch, ukd_by_id, flat.generic_targets
+        ):
             rel_dir = sdesc.rel_dir if sid is not None else kdp.rel_dir
             vk = _variant_key_for(ukd, rel_dir)
             if vk is None or vk in seen:
@@ -903,7 +915,7 @@ def compile_intermediate(flat, source_root, arch, hipcc, inter_arch_dir, log=pri
 
     for kdp in flat.kdps():
         doc = kdp.doc
-        if not arch_matches(doc, arch):
+        if not kdp_arch_matches(doc, arch, flat.generic_targets):
             _write_bytes_at(
                 inter_arch_dir, kdp.rel_dir, kdp.path.name, kdp.path.read_bytes()
             )
@@ -913,7 +925,9 @@ def compile_intermediate(flat, source_root, arch, hipcc, inter_arch_dir, log=pri
         ukds = []
         entries = []
         new_kds = []
-        for sid, entry, sdesc in _selected_entries(new_doc, arch, ukd_by_id):
+        for sid, entry, sdesc in _selected_entries(
+            new_doc, arch, ukd_by_id, flat.generic_targets
+        ):
             if sid is not None:
                 # A reference to a standalone UKD: compile it once per arch and
                 # keep the string in the KDP; it ships as its own file. Listing
@@ -1447,11 +1461,71 @@ def pack_arch(
     return ArchResult(arch=arch, out_dir=out_arch_dir, kpack_path=kpack_path)
 
 
+def _merge_generic_into_member(generic_dir, member_dir, staging_dir):
+    """Merge one generic pass's tree into a member shard folder, atomically.
+
+    Builds `staging_dir` as a copy of `member_dir` (when it exists) plus every
+    file of `generic_dir`, then swaps it over `member_dir`. A destination that
+    already exists is skipped when its bytes equal the source's (the shared
+    engine/dispatch/matcher/KMD descriptors both passes emit verbatim) and
+    refused when they differ: two shards whose member sets intersect would then
+    write one path with different content. Any failure removes the staging dir
+    and leaves `member_dir` exactly as it was.
+    """
+    generic_dir, member_dir, staging_dir = (
+        Path(generic_dir),
+        Path(member_dir),
+        Path(staging_dir),
+    )
+    if staging_dir.exists():
+        shutil.rmtree(staging_dir)
+    try:
+        if member_dir.exists():
+            shutil.copytree(member_dir, staging_dir, copy_function=shutil.copyfile)
+        else:
+            staging_dir.mkdir(parents=True)
+        for src in sorted(p for p in generic_dir.rglob("*") if p.is_file()):
+            rel = src.relative_to(generic_dir)
+            dest = staging_dir / rel
+            if dest.exists():
+                if dest.read_bytes() == src.read_bytes():
+                    continue
+                described = ""
+                if src.suffix == ".json":
+                    try:
+                        doc = json.loads(src.read_text(encoding="utf-8"))
+                        token = type_from_filename(src)
+                        if isinstance(doc, dict) and doc.get("id") is not None:
+                            described = f" ({str(token).upper()} id '{doc['id']}')"
+                    except ValueError:
+                        pass
+                raise HkpPackError(
+                    f"{rel.as_posix()}{described} would be written by shard "
+                    f"'{member_dir.name}' ({member_dir / rel}) and shard "
+                    f"'{generic_dir.name}' ({src}) with different bytes; the "
+                    "shards' member sets intersect"
+                )
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(src, dest)
+        if member_dir.exists():
+            shutil.rmtree(member_dir)
+        staging_dir.rename(member_dir)
+    except HkpPackError:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        raise
+    except OSError as exc:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        raise HkpPackError(
+            f"cannot merge '{generic_dir.name}' into '{member_dir}': {exc}"
+        ) from exc
+
+
 def run_pipeline(
     source_root,
     arches,
     out_root,
     hipcc,
+    generic_targets_json,
     rocm_kpack_dir=None,
     inter_root=None,
     expected_sha256=None,
@@ -1474,6 +1548,13 @@ def run_pipeline(
     arch with no surviving KDP is skipped cleanly (no folder, no kpack) and
     logged with 'no kernels for <arch>, skipping'; every arch skipping is a
     failure, not a pack. Empty arch list installs nothing (exit 0).
+
+    `generic_targets_json` names the generic target table. After the concrete
+    passes, every table generic that some KDP lists and that contains a selected
+    arch is compiled and packed ONCE (a pure function of the source tree, the
+    generic's spelling, hipcc and the table), and that one tree is merged into
+    the folder of every selected member whose concrete pass did not fail. A
+    generic never gets a folder of its own under `out_root`.
     """
     out_root = Path(out_root)
     results = {}
@@ -1481,7 +1562,8 @@ def run_pipeline(
         return results
 
     kpack_mod, comp = load_kpack(rocm_kpack_dir)
-    flat = load_flat_input(source_root, log=log)
+    generic_targets = GenericTargets.load(generic_targets_json)
+    flat = load_flat_input(source_root, generic_targets, log=log)
 
     if inter_root is None:
         raise HkpPackError(
@@ -1563,15 +1645,75 @@ def run_pipeline(
                 arch=arch, out_dir=out_arch_dir, kpack_path=None, skipped=True
             )
 
+    for generic in generic_targets.names():
+        members = [a for a in arches if a in generic_targets.members(generic)]
+        if not members:
+            continue
+        if not any(kdp_survives(k.doc, flat, generic) for k in flat.kdps()):
+            continue
+        generic_out = inter_root / ".generic-out" / generic
+        try:
+            inter = compile_intermediate(
+                flat, source_root, generic, hipcc, inter_root / generic, log=log
+            )
+            if generic_out.exists():
+                shutil.rmtree(generic_out)
+            generic_result = pack_arch(
+                flat,
+                inter,
+                generic_out,
+                kpack_mod,
+                comp,
+                expected_sha256=expected_sha256,
+                hipcc=hipcc,
+                rocke_wheel_stamp=rocke_wheel_stamp,
+                group=group,
+                source_label=source_label,
+            )
+        except HkpPackError as exc:
+            failures[generic] = str(exc)
+            log(f"ERROR: {generic} failed: {exc}")
+            if generic_out.exists():
+                shutil.rmtree(generic_out)
+            continue
+        for member in members:
+            if member in failures:
+                continue
+            member_dir = out_root / member
+            try:
+                _merge_generic_into_member(
+                    generic_out, member_dir, out_root / f".{member}.merge.staging"
+                )
+            except HkpPackError as exc:
+                failures[member] = str(exc)
+                log(f"ERROR: {member} failed merging {generic}: {exc}")
+                break
+            previous = results.get(member)
+            kpack_path = None if previous is None else previous.kpack_path
+            copied = ()
+            if generic_result.kpack_path is not None:
+                copied = (
+                    member_dir / KPACK_DIR_NAME / _kpack_filename(generic, group),
+                )
+            results[member] = ArchResult(
+                arch=member,
+                out_dir=member_dir,
+                kpack_path=kpack_path,
+                skipped=False,
+                generic_kpack_paths=(
+                    (() if previous is None else previous.generic_kpack_paths) + copied
+                ),
+            )
+
     if failures:
         # Non-zero exit with partial output: the build fails loudly, but a
         # developer can still inspect what did succeed. Exiting 0 here would
         # resurrect the silent-empty-package class of defect.
         detail = "; ".join(f"{a}: {r}" for a, r in sorted(failures.items()))
         raise HkpPackError(
-            f"packing failed for {len(failures)} of {len(arches)} arch(es) "
-            f"[{detail}]. Arches that succeeded were written; the failed arches' "
-            "output was discarded."
+            f"packing failed for {len(failures)} failure(s) across {len(arches)} "
+            f"requested arch(es) [{detail}]. Arches that succeeded were written; "
+            "the failed arches' output was discarded."
         )
 
     # The archive clause keys on what the root holds rather than on what survived
@@ -1595,7 +1737,7 @@ def run_pipeline(
         )
 
     if _root_holds_compiling_source(flat) and not any(
-        r.kpack_path for r in results.values()
+        r.kpack_path or r.generic_kpack_paths for r in results.values()
     ):
         raise HkpPackError(
             f"packing '{source_root}' wrote descriptors but no archive, while "

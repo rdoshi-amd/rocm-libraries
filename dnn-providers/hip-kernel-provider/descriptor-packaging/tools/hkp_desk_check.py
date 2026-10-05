@@ -53,6 +53,7 @@ from hkp_pack.desk_check import (  # noqa: E402
     metadata_identity_fields,
 )
 from hkp_pack.errors import HkpPackError  # noqa: E402
+from hkp_pack.generic_targets import GenericTargets  # noqa: E402
 
 
 def _parse_args(argv):
@@ -78,6 +79,13 @@ def _parse_args(argv):
         "'structural' checks the descriptors against each other only and "
         "reports compiled agreement as NOT CHECKED. Required: a default would "
         "let a structural run read as a full one.",
+    )
+    p.add_argument(
+        "--generic-targets-json",
+        required=True,
+        help="The generic GPU target table (gpu_generic_targets.json). Duplicate "
+        "matcher tuples are judged per arch tier, and a generic stands for its "
+        "table members.",
     )
     p.add_argument(
         "--kpack-python-dir",
@@ -120,6 +128,11 @@ def main(argv=None):
     args = _parse_args(sys.argv[1:] if argv is None else argv)
     drift_fields = tuple(args.drift_fields) if args.drift_fields else None
     kdp = Path(args.kdp)
+    try:
+        generic_targets = GenericTargets.load(args.generic_targets_json)
+    except HkpPackError as exc:
+        print(f"FAIL: {exc}", file=sys.stderr)
+        return 1
     failures = None
     unclaimed: list = []
     verified = 0
@@ -129,7 +142,7 @@ def main(argv=None):
         # question with no.
         try:
             failures, unclaimed, verified = compiled_agreement(
-                kdp, args.kpack_python_dir
+                kdp, generic_targets, args.kpack_python_dir
             )
         except HkpPackError as exc:
             failures = [str(exc)]
@@ -150,6 +163,7 @@ def main(argv=None):
         fields,
         drift_fields,
         mode=args.mode,
+        generic_targets=generic_targets,
         agreement_failures=failures,
         agreement_unclaimed=unclaimed,
         agreement_verified=verified,

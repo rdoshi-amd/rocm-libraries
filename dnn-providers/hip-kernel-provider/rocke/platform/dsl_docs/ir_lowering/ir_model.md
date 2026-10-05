@@ -180,8 +180,9 @@ global_load_vN_f16(ptr, idx, n)        # n in {2,4,8}; aligned by default
 global_load_vN(ptr, idx, dtype, n, temporal_hint=TemporalHint.DEFAULT)   # 16-bit n in {2,4,6,8,16}; f32/i32 {2,3,4,8}; 8-bit {2,4,8,12,16}
 global_store_vN(ptr, idx, value, n, temporal_hint=TemporalHint.DEFAULT)  # vector stores
 # TemporalHint.STREAMING: semantic intent (data read/written once). Lowered today to LLVM
-# `!nontemporal` (HIP: __builtin_nontemporal_load/store); the backend chooses the bits per
-# arch (gfx942/gfx950: `nt` only = CACHE_STREAM, NOT NON_TEMPORAL; gfx90a: GLC+SLC).
+# `!nontemporal` (HIP: __builtin_nontemporal_load/store), and only for gfx942/gfx950
+# (`nt` only = CACHE_STREAM, NOT NON_TEMPORAL); every lowerer rejects it (ValueError /
+# ROCKE_ERR_VALUE) on other targets, whose cache bits differ or are unverified.
 # DEFAULT records nothing. C: rocke_b_global_{load,store}_vN_ex(..., const rocke_mem_opts_t*),
 # opts initialized with ROCKE_MEM_OPTS_INIT (records struct_size; see ir.h for the contract).
 global_atomic_add_f32(ptr, idx, value) # used by split-K paths

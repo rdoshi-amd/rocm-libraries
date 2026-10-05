@@ -934,10 +934,11 @@ rocke_value_t* rocke_b_global_load_vN(rocke_ir_builder_t* b,
 /* Like rocke_b_global_load_vN with options; opts == NULL means all defaults,
  * and the plain rocke_b_global_load_vN forwards here with NULL.
  * ROCKE_TEMPORAL_STREAMING records the `nontemporal=True` attr (lowered to
- * LLVM `!nontemporal`); the backend picks the cache bits per arch: on gfx942 /
- * gfx950 only `nt`, i.e. ROCKE_CACHE_STREAM, NOT ROCKE_NON_TEMPORAL (which
- * also sets SC0). An out-of-range temporal_hint puts the builder in its error
- * state (ROCKE_ERR_VALUE). */
+ * LLVM `!nontemporal`); on gfx942 / gfx950 the backend sets only `nt`, i.e.
+ * ROCKE_CACHE_STREAM, NOT ROCKE_NON_TEMPORAL (which also sets SC0). Lowering a
+ * streaming op for any other target fails with ROCKE_ERR_VALUE. An
+ * out-of-range temporal_hint puts the builder in its error state
+ * (ROCKE_ERR_VALUE). */
 rocke_value_t* rocke_b_global_load_vN_ex(rocke_ir_builder_t* b,
                                          rocke_value_t* ptr,
                                          rocke_value_t* idx,
@@ -1400,7 +1401,7 @@ void rocke_b_global_store_vN(rocke_ir_builder_t* b,
                              int align /* <=0 => default */);
 /* Like rocke_b_global_store_vN with options (NULL = all defaults); the plain
  * form forwards here with NULL. temporal_hint as for rocke_b_global_load_vN_ex
- * (gfx942 / gfx950: `nt` only). */
+ * (gfx942 / gfx950: `nt` only; other targets fail at lowering). */
 void rocke_b_global_store_vN_ex(rocke_ir_builder_t* b,
                                 rocke_value_t* ptr,
                                 rocke_value_t* idx,

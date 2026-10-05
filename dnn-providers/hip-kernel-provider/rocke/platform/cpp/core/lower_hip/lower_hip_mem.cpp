@@ -89,6 +89,14 @@ static int mem_nontemporal(const rocke_op_t* op)
     return v->u.b ? 1 : 0;
 }
 
+/* Python STREAMING_ARCHS (rocke/core/ir.py): the targets whose STREAMING
+ * lowering is validated. Other admitted targets map the nontemporal builtins
+ * to different cache bits or are unverified, so the hint is rejected there. */
+static bool mem_streaming_arch(const char* gfx)
+{
+    return gfx && (strcmp(gfx, "gfx942") == 0 || strcmp(gfx, "gfx950") == 0);
+}
+
 /* ================================ LDS alloc =============================== */
 
 /* Python _op_tile_smem_alloc */
@@ -567,6 +575,12 @@ static rocke_status_t _op_memref_global_load_vN(rocke_h_lowerer_t* lw, const roc
     if(nontemporal < 0)
         return rocke_h_fail(
             lw, ROCKE_ERR_VALUE, "memref.global_load_vN: nontemporal attr must be a bool");
+    if(nontemporal && !mem_streaming_arch(lw->arch.gfx))
+        return rocke_h_fail(
+            lw,
+            ROCKE_ERR_VALUE,
+            "memref.global_load_vN: temporal_hint STREAMING requires gfx942 or gfx950, got %s",
+            lw->arch.gfx ? lw->arch.gfx : "(unknown)");
     if(align < byte_count || (byte_count & (byte_count - 1)))
     {
         if(nontemporal)
@@ -674,6 +688,12 @@ static rocke_status_t _op_memref_global_store_vN(rocke_h_lowerer_t* lw, const ro
     if(nontemporal < 0)
         return rocke_h_fail(
             lw, ROCKE_ERR_VALUE, "memref.global_store_vN: nontemporal attr must be a bool");
+    if(nontemporal && !mem_streaming_arch(lw->arch.gfx))
+        return rocke_h_fail(
+            lw,
+            ROCKE_ERR_VALUE,
+            "memref.global_store_vN: temporal_hint STREAMING requires gfx942 or gfx950, got %s",
+            lw->arch.gfx ? lw->arch.gfx : "(unknown)");
     if(align < byte_count || (byte_count & (byte_count - 1)))
     {
         if(nontemporal)

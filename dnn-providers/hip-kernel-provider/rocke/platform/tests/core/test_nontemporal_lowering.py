@@ -140,6 +140,28 @@ def test_non_bool_attr_is_rejected_by_both_engines(which, monkeypatch):
         _lower_llvm_via_backend(kernel, arch="gfx950", backend="cpp", spec=None)
 
 
+# Admitted targets whose STREAMING lowering is not validated: each picks
+# different cache bits for !nontemporal (gfx90a glc slc, gfx1151 slc dlc,
+# gfx1201 th:TH_*_NT, gfx1250 unverified), so every lowerer refuses the hint.
+@pytest.mark.parametrize("arch", ["gfx90a", "gfx1151", "gfx1201", "gfx1250"])
+@pytest.mark.parametrize("which", ["load", "store"])
+def test_streaming_is_rejected_outside_gfx942_gfx950(which, arch, monkeypatch):
+    kernel = _copy_kernel(load_nt=which == "load", store_nt=which == "store")
+    expect = f"STREAMING requires gfx942 or gfx950, got {arch}"
+    with pytest.raises(ValueError, match=expect):
+        _lower_llvm_via_backend(kernel, arch=arch, backend="python", spec=None)
+    with pytest.raises(ValueError, match=expect):
+        lower_kernel_to_hip(kernel, arch=arch)
+    # The same kernel without the hint still lowers on that target.
+    plain = _copy_kernel(load_nt=False, store_nt=False)
+    _lower_llvm_via_backend(plain, arch=arch, backend="python", spec=None)
+    lower_kernel_to_hip(plain, arch=arch)
+    _require_cpp_engine(monkeypatch)
+    with pytest.raises(RuntimeError, match=expect):
+        _lower_llvm_via_backend(kernel, arch=arch, backend="cpp", spec=None)
+    _lower_llvm_via_backend(plain, arch=arch, backend="cpp", spec=None)
+
+
 # The bools of the earlier API included: True must not mean STREAMING.
 @pytest.mark.parametrize("value", [True, False, 1, 0, "streaming", None])
 @pytest.mark.parametrize("which", ["load", "store"])

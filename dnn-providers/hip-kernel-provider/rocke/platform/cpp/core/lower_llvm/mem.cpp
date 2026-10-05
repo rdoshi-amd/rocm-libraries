@@ -301,9 +301,18 @@ static void op_memref_global_atomic_add_pk_f16(rocke_lower_t* L, const rocke_op_
                    rocke_ll_operand(L, val));
 }
 
+/* Python STREAMING_ARCHS (rocke/core/ir.py): the targets whose STREAMING
+ * lowering is validated. Other admitted targets map !nontemporal to different
+ * cache bits or are unverified, so the hint is rejected there. */
+static bool ll_streaming_arch(const char* gfx)
+{
+    return gfx && (strcmp(gfx, "gfx942") == 0 || strcmp(gfx, "gfx950") == 0);
+}
+
 /* Python _Lowerer._nontemporal_md: ", !nontemporal !5" when the op carries
  * nontemporal=True, "" when the attr is absent/false. A non-bool attr is
- * rejected rather than coerced. */
+ * rejected rather than coerced, and so is a streaming op on a target outside
+ * gfx942 / gfx950. */
 static const char* ll_nontemporal_md(rocke_lower_t* L, const rocke_op_t* op)
 {
     const rocke_attr_value_t* v = rocke_attr_get(&op->attrs, "nontemporal");
@@ -316,6 +325,13 @@ static const char* ll_nontemporal_md(rocke_lower_t* L, const rocke_op_t* op)
                       rocke_opcode_name(op->opcode));
     if(!v->u.b)
         return "";
+    const char* gfx = L->backend ? L->backend->gfx : nullptr;
+    if(!ll_streaming_arch(gfx))
+        rocke_ll_fail(L,
+                      ROCKE_ERR_VALUE,
+                      "%s: temporal_hint STREAMING requires gfx942 or gfx950, got %s",
+                      rocke_opcode_name(op->opcode),
+                      gfx ? gfx : "(unknown)");
     L->needs_nontemporal_md = true;
     return ", !nontemporal !5";
 }

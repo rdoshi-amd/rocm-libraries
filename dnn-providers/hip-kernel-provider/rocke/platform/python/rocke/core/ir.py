@@ -113,11 +113,28 @@ class TemporalHint(enum.Enum):
     """Temporal-locality intent for ``global_load_vN`` / ``global_store_vN``.
 
     A semantic hint, not raw cache bits: the backend chooses the bits per
-    arch. C twin: ``rocke_temporal_hint_t`` in ``rocke/ir.h``.
+    arch. Lowering accepts STREAMING only on :data:`STREAMING_ARCHS`.
+    C twin: ``rocke_temporal_hint_t`` in ``rocke/ir.h``.
     """
 
     DEFAULT = "default"  # the existing cache policy; IR unchanged
     STREAMING = "streaming"  # read/written once; lowers to LLVM !nontemporal
+
+
+# Targets whose STREAMING lowering is validated (LLVM ``!nontemporal`` -> the
+# ``nt`` bit). Other admitted targets map ``!nontemporal`` to different cache
+# bits (gfx90a ``glc slc``, gfx1151 ``slc dlc``, gfx1201 ``th:TH_*_NT``) or
+# are unverified (gfx1250), so every lowerer rejects the hint there. Mirrored
+# in the C++ lowerers (``lower_llvm/mem.cpp``, ``lower_hip/lower_hip_mem.cpp``).
+STREAMING_ARCHS = ("gfx942", "gfx950")
+
+
+def require_streaming_arch(op_name: str, gfx: str) -> None:
+    """Reject a STREAMING op lowered for a target outside STREAMING_ARCHS."""
+    if gfx not in STREAMING_ARCHS:
+        raise ValueError(
+            f"{op_name}: temporal_hint STREAMING requires gfx942 or gfx950, got {gfx}"
+        )
 
 
 def _streaming(temporal_hint: TemporalHint) -> bool:
@@ -1658,7 +1675,8 @@ class IRBuilder:
         not displace reused lines. Today it lowers to LLVM ``!nontemporal``
         (HIP: ``__builtin_nontemporal_load``) and the AMDGPU backend chooses
         the cache-policy bits per arch -- on gfx942 / gfx950 the ``nt`` bit
-        (the bits of ``CACHE_STREAM``, NOT ``NON_TEMPORAL``). ``DEFAULT``
+        (the bits of ``CACHE_STREAM``, NOT ``NON_TEMPORAL``); lowering for
+        any target outside ``STREAMING_ARCHS`` raises ``ValueError``. ``DEFAULT``
         keeps the existing policy and records nothing, so default loads are
         unchanged. Any value that is not a ``TemporalHint`` raises
         ``TypeError``.
@@ -4288,7 +4306,8 @@ class IRBuilder:
         ``temporal_hint`` as for ``global_load_vN``: ``TemporalHint.STREAMING``
         means the data is written once; it lowers to LLVM ``!nontemporal``
         (HIP: ``__builtin_nontemporal_store``) and the backend chooses the
-        bits per arch (gfx942 / gfx950: ``nt``). ``DEFAULT`` records nothing.
+        bits per arch (gfx942 / gfx950: ``nt``; other targets are rejected at
+        lowering, see ``STREAMING_ARCHS``). ``DEFAULT`` records nothing.
         """
         if n not in (1, 2, 4, 8, 16):
             raise ValueError(f"global_store_vN n must be 1, 2, 4, 8, or 16 (got {n})")

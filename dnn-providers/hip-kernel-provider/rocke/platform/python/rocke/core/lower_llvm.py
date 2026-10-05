@@ -55,6 +55,7 @@ from .ir import (
     Type,
     Value,
     VectorType,
+    require_streaming_arch,
     split_loc,
 )
 
@@ -3114,13 +3115,15 @@ class _Lowerer:
         """``, !nontemporal !5`` for an op carrying ``nontemporal=True``.
 
         The attr is absent on ordinary ops; any non-bool value is rejected
-        rather than coerced.
+        rather than coerced, and so is a streaming op lowered for a target
+        outside ``STREAMING_ARCHS``.
         """
         nt = op.attrs.get("nontemporal", False)
         if not isinstance(nt, bool):
             raise ValueError(f"{op.name}: nontemporal attr must be a bool, got {nt!r}")
         if not nt:
             return ""
+        require_streaming_arch(op.name, self._backend.arch.gfx)
         self._needs_nontemporal_md = True
         return ", !nontemporal !5"
 

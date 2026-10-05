@@ -8,7 +8,8 @@
  * __builtin_nontemporal_load / __builtin_nontemporal_store, a default one
  * does not, the unaligned memcpy load and store paths do not yet lower the
  * hint (ROCKE_ERR_NOTIMPL; both still lower through memcpy without it), a
- * non-bool attr is rejected
+ * non-bool attr is rejected, a streaming op on a target other than gfx942 /
+ * gfx950 is rejected (ROCKE_ERR_VALUE; it lowers without the hint),
  * rather than coerced, an out-of-range hint or a struct_size of 0 (opts not
  * built with ROCKE_MEM_OPTS_INIT) puts the builder in its error state, a
  * temporal_hint lying past the caller's struct_size (an older, shorter struct)
@@ -425,6 +426,18 @@ void self_check(const char* arch)
         fail("original io helpers must equal the _ex helpers with DEFAULT", arch, __LINE__);
 }
 
+/* Admitted targets whose STREAMING lowering is not validated (each picks
+ * different cache bits for !nontemporal): the hint is refused on either op,
+ * and the same kernel without it still lowers. */
+void check_unvalidated_arch(const char* arch)
+{
+    for(const char* one : {"load", "store"})
+        if(lower(*find_case(one), arch, BadAttr::none, nullptr) != ROCKE_ERR_VALUE)
+            fail("STREAMING outside gfx942 / gfx950 must be ROCKE_ERR_VALUE", arch, __LINE__);
+    if(lower(*find_case("plain"), arch, BadAttr::none, nullptr) != ROCKE_OK)
+        fail("a default copy kernel must still lower", arch, __LINE__);
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -457,6 +470,8 @@ int main(int argc, char** argv)
         self_check(arch);
         check_short_struct(arch);
     }
+    for(const char* arch : {"gfx90a", "gfx1151", "gfx1201", "gfx1250"})
+        check_unvalidated_arch(arch);
     rocke_mem_opts_t out_of_range = ROCKE_MEM_OPTS_INIT;
     out_of_range.temporal_hint = static_cast<rocke_temporal_hint_t>(2);
     rocke_mem_opts_t no_size = {};

@@ -28,6 +28,7 @@ from .ir import (
     Type,
     Value,
     VectorType,
+    require_streaming_arch,
 )
 
 
@@ -509,6 +510,8 @@ class _Lowerer:
                 "global_load_vN: alignment must be a positive power of two"
             )
         nontemporal = _nontemporal(op)
+        if nontemporal:
+            require_streaming_arch(op.name, self.arch.gfx)
         if align < byte_count or byte_count & (byte_count - 1):
             if nontemporal:
                 raise NotImplementedError(
@@ -1862,6 +1865,8 @@ class _Lowerer:
                 "global_store_vN: alignment must be a positive power of two"
             )
         nontemporal = _nontemporal(op)
+        if nontemporal:
+            require_streaming_arch(op.name, self.arch.gfx)
         if align < byte_count or byte_count & (byte_count - 1):
             if nontemporal:
                 raise NotImplementedError(

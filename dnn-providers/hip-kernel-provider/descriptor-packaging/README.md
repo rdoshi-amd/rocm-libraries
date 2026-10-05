@@ -300,7 +300,7 @@ is that cache entry; the probe module is never read.
   (prebuilt `.co` files) and C++/runtime paths, and install staging.
 - Device behavior: no kernel is launched, no numerics are checked.
 - Integrations and architectures without a probe.
-- That the CI job runs: that is the job of `--no-tests=error` and the junit check below.
+- That the CI job runs: that is the job of the junit check below.
 
 ### How to use
 
@@ -333,7 +333,7 @@ also fails configure.
 
 | Argument | Meaning |
 |---|---|
-| `ARCH` | Required. The one architecture to pack, e.g. `gfx950`; must match `^gfx[0-9a-z]+$`. Passed to the packer as `--arches`. |
+| `ARCH` | Required. The one architecture to pack, e.g. `gfx950`; one concrete target matching `^gfx[0-9a-f]+$`. Passed to the packer as `--arches`. |
 | `ROOT` | Optional descriptor root to probe. Defaults to the production root (`HIPKERNELPROVIDER_PRODUCTION_DESCRIPTOR_SOURCE_ROOT`). A relative path is resolved against `probes/`; a trailing `/` is ignored. |
 | `NAME` | Optional probe name; must match `^[A-Za-z0-9_.+-]+$`, must not be dots only, and must not be `tools`. Defaults to `<ARCH>` for the production root and `<ROOT basename>_<ARCH>` for another `ROOT`. Pack target `hkp_packaging_probe_<NAME>`, ctest entry `hkp-probe-<NAME>`. Declaring a name twice is a configure error. |
 | `UKDS` | Optional UKD `name`s to pack instead of the default sample. Each entry is non-empty and listed once. |

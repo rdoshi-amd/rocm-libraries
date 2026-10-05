@@ -5,7 +5,6 @@ from __future__ import annotations
 import itertools
 import json
 import os
-import subprocess
 import sys
 from pathlib import Path
 
@@ -14,12 +13,8 @@ import pytest
 from probe_support import MAIN_FIXTURE, PROBE_DERIVE, run_derive
 
 
-def _run(src: Path, arch: str, out: Path, ukds=()):
-    return run_derive(src, arch, out, ukds)
-
-
 def _derive(src: Path, arch: str, out: Path, ukds=()):
-    r = _run(src, arch, out, ukds)
+    r = run_derive(src, arch, out, ukds)
     assert r.returncode == 0, r.stderr
     return json.loads((out.parent / "expect.json").read_text())
 
@@ -229,7 +224,7 @@ def test_dot_prefixed_kdp_is_copied_but_not_expected(tmp_path):
 # --- configure-time refusals (exit 2, nothing written) ----------------------
 def _refused(tmp_path, ukds, message, kdp_arch=("gfx950",)):
     _write_root(tmp_path / "src", ukds, kdp_arch=kdp_arch)
-    r = _run(tmp_path / "src", "gfx950", tmp_path / "w" / "root")
+    r = run_derive(tmp_path / "src", "gfx950", tmp_path / "w" / "root")
     assert r.returncode == 2, r.stderr
     assert r.stderr.startswith("hkp_probe_derive:")
     assert message in r.stderr
@@ -247,7 +242,7 @@ def test_standalone_ukd_reference_exits_2(tmp_path):
 def test_standalone_reference_in_real_fixture_exits_2(tmp_path):
     # tests/fixtures/main: pointwise.kdp.json ships for gfx950 and references
     # ukd-pointwise-add-f32-b128 by id.
-    r = _run(MAIN_FIXTURE, "gfx950", tmp_path / "w" / "root")
+    r = run_derive(MAIN_FIXTURE, "gfx950", tmp_path / "w" / "root")
     assert r.returncode == 2, r.stderr
     assert "pointwise.kdp.json" in r.stderr
     assert "ukd-pointwise-add-f32-b128" in r.stderr
@@ -304,7 +299,7 @@ def test_malformed_kdp_exits_2(tmp_path):
     src = tmp_path / "src"
     src.mkdir()
     (src / "bad.kdp.json").write_text("{ not json")
-    r = _run(src, "gfx950", tmp_path / "w" / "root")
+    r = run_derive(src, "gfx950", tmp_path / "w" / "root")
     assert r.returncode == 2
     assert "bad.kdp.json is unreadable" in r.stderr
     assert "Traceback" not in r.stderr
@@ -348,7 +343,7 @@ def test_ukd_list_copies_kdps_not_shipping_for_arch(tmp_path):
 
 def _ukd_refused(tmp_path, ukds, listed, message):
     _write_root(tmp_path / "src", ukds, kdp_arch=("gfx942", "gfx950"))
-    r = _run(tmp_path / "src", "gfx950", tmp_path / "w" / "root", ukds=listed)
+    r = run_derive(tmp_path / "src", "gfx950", tmp_path / "w" / "root", ukds=listed)
     assert r.returncode == 2, r.stderr
     assert r.stderr.startswith("hkp_probe_derive:")
     assert message in r.stderr
@@ -368,7 +363,7 @@ def test_ukd_list_name_only_in_kdp_for_other_arch_exits_2(tmp_path):
     src = tmp_path / "src"
     _write_root(src, [_rocke("a")], kdp_file="keep.kdp.json")
     _write_root(src, [_rocke("b")], kdp_arch=("gfx942",), kdp_file="other.kdp.json")
-    r = _run(src, "gfx950", tmp_path / "w" / "root", ukds=["a", "b"])
+    r = run_derive(src, "gfx950", tmp_path / "w" / "root", ukds=["a", "b"])
     assert r.returncode == 2, r.stderr
     assert "['b'] matched no" in r.stderr
 
@@ -392,6 +387,16 @@ def test_ukd_list_standalone_ref_in_kept_kdp_exits_2(tmp_path):
         ["a"],
         "standalone UKD references unsupported by probe derive",
     )
+
+
+def test_ukd_list_arch_outside_kdp_arch_exits_2(tmp_path):
+    ukds = [_rocke("a", arch=["gfx90a", "gfx950"])]
+    _ukd_refused(tmp_path, ukds, ["a"], "not a subset of the KDP arch")
+
+
+def test_ukd_list_kept_ukds_with_equal_names_exit_2(tmp_path):
+    ukds = [_rocke("same", "b1"), _rocke("same", "b2")]
+    _ukd_refused(tmp_path, ukds, ["same"], "share a name")
 
 
 def test_ukd_list_unregistered_kind_of_kept_ukd_exits_2(tmp_path):

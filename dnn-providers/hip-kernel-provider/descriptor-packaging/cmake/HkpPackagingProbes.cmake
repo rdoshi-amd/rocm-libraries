@@ -149,9 +149,10 @@ endfunction()
 #   kind (see hkp_probe_assert.py). Adding a pack under an already probed ARCH needs no
 #   new declaration unless the probe lists UKDS.
 #
-#   ARCH must match gfx[0-9a-z]+. NAME defaults to <ARCH> for the production root and
-#   <ROOT basename>_<ARCH> for another ROOT; it must match [A-Za-z0-9_.+-]+, must not be
-#   dots only, and must not be `tools` (hkp-probe-tools is the probe tooling test).
+#   ARCH must be one concrete target, gfx[0-9a-f]+. NAME defaults to <ARCH> for the
+#   production root and <ROOT basename>_<ARCH> for another ROOT; it must match
+#   [A-Za-z0-9_.+-]+, must not be dots only, and must not be `tools` (hkp-probe-tools
+#   is the probe tooling test).
 #   UKDS entries must be non-empty and unique. Creates pack target
 #   hkp_packaging_probe_<NAME> (stamp and output under
 #   ${CMAKE_BINARY_DIR}/hkp-probes/<NAME>/out) and ctest entry hkp-probe-<NAME>. The
@@ -169,10 +170,10 @@ function(hkp_add_packaging_probe)
     if(NOT ARG_ARCH)
         message(FATAL_ERROR "hkp probe: hkp_add_packaging_probe requires ARCH.")
     endif()
-    if(NOT ARG_ARCH MATCHES "^gfx[0-9a-z]+$")
+    if(NOT ARG_ARCH MATCHES "^gfx[0-9a-f]+$")
         message(FATAL_ERROR
-            "hkp probe: ARCH '${ARG_ARCH}' is not one architecture of the form "
-            "gfx[0-9a-z]+.")
+            "hkp probe: ARCH '${ARG_ARCH}' is not one concrete architecture of the "
+            "form gfx[0-9a-f]+.")
     endif()
     if(NOT ARG_ROOT)
         set(ARG_ROOT "${HIPKERNELPROVIDER_PRODUCTION_DESCRIPTOR_SOURCE_ROOT}")
@@ -192,7 +193,9 @@ function(hkp_add_packaging_probe)
         message(FATAL_ERROR
             "hkp probe '${ARG_NAME}': ROOT is not a directory: '${ARG_ROOT}'")
     endif()
-    if("UKDS" IN_LIST ARG_KEYWORDS_MISSING_VALUES)
+    # `UKDS ""` (e.g. an empty variable) parses as a present but empty list.
+    if("UKDS" IN_LIST ARG_KEYWORDS_MISSING_VALUES
+       OR ("UKDS" IN_LIST ARGV AND ARG_UKDS STREQUAL ""))
         message(FATAL_ERROR
             "hkp probe '${ARG_NAME}': UKDS needs at least one UKD name.")
     endif()

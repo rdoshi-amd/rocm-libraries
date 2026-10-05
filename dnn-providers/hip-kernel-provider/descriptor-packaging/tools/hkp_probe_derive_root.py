@@ -121,6 +121,14 @@ def _check_unique_names(rel, kept):
         )
 
 
+def _check_arch_subset(ukd, kdp, where):
+    if not arch_subset_ok(ukd.get("arch") or [], kdp.get("arch") or []):
+        raise DeriveError(
+            f"{where} arch {ukd.get('arch')} is not a subset of the KDP "
+            f"arch {kdp.get('arch')}"
+        )
+
+
 def _derive_kdp(kdp, rel, arch):
     """Return the kept UKDs of a KDP shipping for `arch`, in authored order."""
     entries = kdp.get("kernelDescriptors")
@@ -133,11 +141,7 @@ def _derive_kdp(kdp, rel, arch):
         where = f"{rel}: UKD '{entry.get('id', '?')}'"
         if not isinstance(entry.get("name"), str):
             raise DeriveError(f"{where} has no string 'name'")
-        if not arch_subset_ok(entry.get("arch") or [], kdp.get("arch") or []):
-            raise DeriveError(
-                f"{where} arch {entry.get('arch')} is not a subset of the KDP "
-                f"arch {kdp.get('arch')}"
-            )
+        _check_arch_subset(entry, kdp, where)
         if arch_matches(entry, arch):
             candidates.append((_group_key(entry, where), entry))
 
@@ -157,10 +161,7 @@ def _derive_kdp_listed(kdp, rel, arch, wanted):
     kept = [
         e
         for e in entries
-        if isinstance(e, dict)
-        and e.get("name") in wanted
-        and arch_matches(e, arch)
-        and arch_subset_ok(e.get("arch") or [], kdp.get("arch") or [])
+        if isinstance(e, dict) and e.get("name") in wanted and arch_matches(e, arch)
     ]
     if not kept:
         return kept
@@ -168,7 +169,10 @@ def _derive_kdp_listed(kdp, rel, arch, wanted):
         if not isinstance(entry, dict):
             raise _standalone_error(rel, entry)
     for entry in kept:
-        _check_kind(entry, f"{rel}: UKD '{entry.get('id', '?')}'")
+        where = f"{rel}: UKD '{entry.get('id', '?')}'"
+        # The packer rejects this root; a listed UKD must not be dropped silently.
+        _check_arch_subset(entry, kdp, where)
+        _check_kind(entry, where)
     _check_unique_names(rel, kept)
     return kept
 

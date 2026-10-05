@@ -684,9 +684,10 @@ invalidate old evidence and return to stages 3–5.
 **Final step: packaging probe.** Add
 `hkp_add_packaging_probe(ARCH <gfx> NAME <integration> UKDS <representative UKD names>)`
 to `dnn-providers/hip-kernel-provider/descriptor-packaging/probes/probes.cmake`, configure
-with `-DHIPKERNELPROVIDER_ENABLE_PACKAGING_PROBES=ON`, and run
-`ctest -R '^hkp-probe-' --no-tests=error`; `hkp-probe-<NAME>` must pass. See "Packaging
-probes" in the descriptor-packaging README.
+with `-DHIPKERNELPROVIDER_ENABLE_PACKAGING_PROBES=ON`, build
+(`cmake --build <build> --target hkp_packaging_probes`), and run
+`ctest --test-dir <build> -R '^hkp-probe-' --no-tests=error`; `hkp-probe-<NAME>` must
+pass. See "Packaging probes" in the descriptor-packaging README.
 
 ## 8. Handoff
 

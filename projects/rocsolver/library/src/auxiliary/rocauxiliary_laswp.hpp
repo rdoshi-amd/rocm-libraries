@@ -4,7 +4,7 @@
  *     Univ. of Tennessee, Univ. of California Berkeley,
  *     Univ. of Colorado Denver and NAG Ltd..
  *     June 2017
- * Copyright (C) 2019-2024 Advanced Micro Devices, Inc.
+ * Copyright (C) 2019-2026 Advanced Micro Devices, Inc.
  * ************************************************************************ */
 
 #pragma once

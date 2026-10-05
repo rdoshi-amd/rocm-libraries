@@ -25,8 +25,8 @@ atoms** — what differs between the layouts is which logical data each issued a
 CANONICAL — each issued atom IS one whole canonical atom; iterate to cover the wave tile:
    step 0:  atom0 M[0-15] K[0-15]
    step 1:  atom1 M[16-31]K[0-15]
-   step 2:  atom2 M[32-47]K[0-15]   
-   ... 
+   step 2:  atom2 M[32-47]K[0-15]
+   ...
 
 INTERLEAVED — each issued atom computes a small portion of ALL canonical atoms; iterate to cover the wave tile:
    step 0:  a small portion of atom0, atom1, atom2, …

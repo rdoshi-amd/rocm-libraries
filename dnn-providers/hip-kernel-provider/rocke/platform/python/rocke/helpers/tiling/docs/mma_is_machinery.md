@@ -23,7 +23,7 @@ In classical computing, hardware has evolved from doing thread-wise parallelism 
 
 ## The one thing to internalize
 
-**An MMA instruction drives fixed machinery: it parallelizes dot products in individual threads.** 
+**An MMA instruction drives fixed machinery: it parallelizes dot products in individual threads.**
 In general per mma instruction call, each thread will accumulate one partial dot product of $C_{ij} = \sum_{k} A_{ik}\,B_{kj} + \text{accum}$, for some vector size $K$, (which varies between instructions).
 What this means:
 * Mma instructions have *physical* routing in thread/register coordinates. For example in physical coordinates $[\text{thread}, \text{register}]$, the dot product machinery implements $C[0,0] = A[0,0]\,B[0,0] + A[0,1]\,B[0,1] + \dots + \text{accum}$. This is *fixed*, and is physical hardware. It is a tool we use to implement the separate higher-level logical equation.

@@ -3374,6 +3374,20 @@ namespace
         return false;
 #endif
     }
+
+    // A JIT bundle's code object can lack a helper kernel that its solution
+    // launches, so resolve all of them before submitting the first.
+    bool resolvesJitKernels(const rocblaslt_matmul_algo*                      algo,
+                            TensileLite::hip::SolutionAdapter&                adapter,
+                            const std::vector<TensileLite::KernelInvocation>& kernels)
+    {
+        if(!isJitAlgorithm(algo))
+            return true;
+        for(const auto& kernel : kernels)
+            if(adapter.initKernel(kernel.kernelName) != hipSuccess)
+                return false;
+        return true;
+    }
 }
 
 TensileLite::ProblemOverride
@@ -3871,6 +3885,8 @@ rocblaslt_status runContractionProblem(rocblaslt_handle                   handle
             skInputs.Synchronizer
                 = synchronizerForSolution(*solution, prob.streamKFlags, prob.Synchronizer);
             auto kernels = solution->solve(data->problem, skInputs, *hardware);
+            if(!resolvesJitKernels(algo, *adapter, kernels))
+                return rocblaslt_status_execution_failed;
             // Remove this after supports getting comgr buffers from hip.
             bool isPreloaded = false;
             if(rocblaslt::Debug::Instance().preload())
@@ -4214,6 +4230,8 @@ rocblaslt_status makeArgument(rocblaslt_handle             handle,
             }
 
             auto kernels = solution->solve(data->problem, data->inputs, *hardware);
+            if(!resolvesJitKernels(&algo, *adapter, kernels))
+                return rocblaslt_status_execution_failed;
             data->kernels = std::move(kernels);
             // Publish the adapter identity only after arguments are ready. A
             // failed reinitialization must never pair old kernels with a new bundle.

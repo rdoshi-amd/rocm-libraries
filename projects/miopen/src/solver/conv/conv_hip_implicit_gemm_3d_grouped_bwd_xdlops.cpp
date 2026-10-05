@@ -211,9 +211,9 @@ bool PerformanceConfigHipImplicitGemm3DGroupBwdXdlops::SetNextValue(
     {
         // For generic search, we want all available kernels, not heuristic selection
         InitValidKernels(problem);
-        assert(!valid_kernels.empty());
         if(valid_kernels.empty())
             return false;
+        assert(!valid_kernels.empty());
 
         // Seed the first enumerated config to valid_kernels[0]. Without this, the branch returned
         // with kernel_id still unset: GenericSearch's ComputedIterator skips configs whose

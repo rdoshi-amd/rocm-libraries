@@ -926,6 +926,7 @@ static void scheduleRegionWithMovableSideEffects(
             PASS_DEBUG(std::cerr << "[DAG drain] emitting filler inst before dagId="
                                  << currentNode->id << "\n");
             scheduled.push_back(filler);
+            readyQueue.onScheduled(*filler);
             ++fillerCount;
         }
 
@@ -938,6 +939,7 @@ static void scheduleRegionWithMovableSideEffects(
 
         // Add the instruction to the scheduled list.
         scheduled.push_back(currentNode->inst);
+        readyQueue.onScheduled(*currentNode->inst);
 
         // Process all successors of the current node.
         for (unsigned succId : dagGraph[currentNode->id]) {
@@ -1000,6 +1002,7 @@ static void scheduleInDAG(BasicBlock& bb, ReadyQueue& readyQueue,
                                                  wmmaIndex, fillerCount);
 
             scheduled.push_back(&inst);
+            readyQueue.onScheduled(inst);
 
             PASS_DEBUG(std::cerr << "Scheduling non-movable side-effect instruction:\n";
                        inst.dump(std::cerr); std::cerr << "\n");

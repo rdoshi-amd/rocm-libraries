@@ -49,10 +49,8 @@ namespace rocsparse
 
         static constexpr rocsparse_int NNZ_DIM_X = 64;
         static constexpr rocsparse_int NNZ_DIM_Y = 16;
-        int64_t                        blocks = (static_cast<int64_t>(m) - 1) / (NNZ_DIM_X * 4) + 1;
-        if(std::is_same<T, rocsparse_double_complex>{})
-            blocks = (static_cast<int64_t>(m) - 1) / (NNZ_DIM_X) + 1;
-        dim3 k_threads(NNZ_DIM_X, NNZ_DIM_Y);
+        const int64_t                  blocks = (static_cast<int64_t>(m) - 1) / (NNZ_DIM_X * 4) + 1;
+        dim3                           k_threads(NNZ_DIM_X, NNZ_DIM_Y);
         RETURN_IF_ROCSPARSE_ERROR(rocsparse::dispatch_grid_stride_x(
             handle, blocks, NNZ_DIM_X, [&](auto grid_stride, uint32_t grid) -> rocsparse_status {
                 RETURN_IF_HIPLAUNCHKERNELGGL_ERROR(

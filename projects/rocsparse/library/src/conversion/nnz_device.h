@@ -303,7 +303,7 @@ namespace rocsparse
         else
         {
             rocsparse::nnz_row_device<DIM_X, DIM_Y>(
-                static_cast<J>(hipBlockIdx_x), order, m, n, A, lda, nnz_per_row, sdata);
+                static_cast<int64_t>(hipBlockIdx_x), order, m, n, A, lda, nnz_per_row, sdata);
         }
     }
 }

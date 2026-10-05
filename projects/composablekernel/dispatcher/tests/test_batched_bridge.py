@@ -42,6 +42,7 @@ from batched_gemm_utils import (  # noqa: E402
     BATCHED_SUPPORTED_DTYPES,
     BATCHED_SUPPORTED_LAYOUTS,
     BATCHED_VERIFY_TOL,
+    GpuBatchedGemmRunner,
     _C_SIZEOF,
     _get_arch,
     _repeat_ok,
@@ -270,6 +271,26 @@ class TestBatchedAbiMarshalling(unittest.TestCase):
         A = np.zeros((1, 1, 1), np.float16)
         status, _ = lib.run(A, A, A, M=1, N=1, K=1, batch_count=1)
         self.assertEqual(status, -2)
+
+
+class TestBatchedRunnerFp8Encoding(unittest.TestCase):
+    """fp8/bf8 host encoding follows the arch the .so targets, not a probe."""
+
+    def test_arch_pins_ocp(self):
+        lib = mock.MagicMock(kernel_names=["gemm_fp8_rcr_compv3_batched"])
+        A = np.zeros((1, 1, 1), np.float32)
+        problem = BatchedGemmProblem(batch_count=1, M=1, N=1, K=1)
+        cases = (("gfx942", False), ("gfx950", True), ("gfx1250", True), (None, None))
+        for arch, ocp in cases:
+            with mock.patch.object(
+                batched_gemm_utils, "BatchedGemmDispatcherLib", return_value=lib
+            ), mock.patch.object(
+                batched_gemm_utils._gu, "_encode_operand", side_effect=RuntimeError
+            ) as enc:
+                runner = GpuBatchedGemmRunner(Path("/nonexistent/batched.so"), arch)
+                with self.assertRaises(RuntimeError):
+                    runner.run(A, A, problem)
+            self.assertIs(enc.call_args[0][2], ocp, arch)
 
 
 class TestBatchedDtypeLayoutGate(unittest.TestCase):

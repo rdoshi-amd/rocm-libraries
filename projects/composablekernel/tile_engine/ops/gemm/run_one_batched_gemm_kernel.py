@@ -12,8 +12,11 @@ Batched counterpart of run_one_gemm_kernel.py:
 Input JSON format:
     Single: {"so_path": "...",
              "problem": {"batch_count":.., "M":.., "N":.., "K":..},
-             "kernel_name": "..."}
+             "kernel_name": "...", "arch": "gfx942"}
     Batch:  {"items": [{...}, ...]}
+
+``arch`` (optional) is the target the .so was built for; it fixes the fp8/bf8
+host encoding instead of probing the local GPU.
 
 Optional top-level keys ``verify`` (bool) and ``verify_tol`` (float) enable an
 fp32 numpy reference check (per-batch A @ B); when set, each OK result also
@@ -38,7 +41,9 @@ from batched_gemm_utils import (  # noqa: E402
 import numpy as np  # noqa: E402
 
 
-def _run_one(idx, so_path, prob_dict, kernel_name, verify=False, verify_tol=2e-2):
+def _run_one(
+    idx, so_path, prob_dict, kernel_name, verify=False, verify_tol=2e-2, arch=None
+):
     """Run a single batched kernel and emit its result as one JSON line.
 
     When ``verify`` is set, the batched output is checked against an fp32 numpy
@@ -66,7 +71,7 @@ def _run_one(idx, so_path, prob_dict, kernel_name, verify=False, verify_tol=2e-2
         A, B = cache[key]
 
         # CRITICAL: load the library ONLY inside this subprocess.
-        runner = GpuBatchedGemmRunner(lib_path=so_path)
+        runner = GpuBatchedGemmRunner(lib_path=so_path, arch=arch)
         result = runner.run(A, B, problem)
 
         if result.success:
@@ -136,6 +141,7 @@ def main():
                 item.get("kernel_name", "unknown"),
                 verify=verify,
                 verify_tol=verify_tol,
+                arch=item.get("arch"),
             )
     else:
         _run_one(
@@ -145,6 +151,7 @@ def main():
             d.get("kernel_name", "unknown"),
             verify=verify,
             verify_tol=verify_tol,
+            arch=d.get("arch"),
         )
 
 

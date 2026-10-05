@@ -133,7 +133,7 @@ def check_batched_fp16(gfx_arch: str, batch: int, M: int, N: int, K: int) -> tup
     if not so_paths or so_paths[0] is None:
         return FAIL, "batched/fp16: kernel build failed"
 
-    runner = GpuBatchedGemmRunner(so_paths[0])
+    runner = GpuBatchedGemmRunner(so_paths[0], arch=gfx_arch)
 
     rng = np.random.default_rng(7)
     A = rng.uniform(-1.0, 1.0, (batch, M, K)).astype(np.float32)

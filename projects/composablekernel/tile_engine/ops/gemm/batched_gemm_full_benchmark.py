@@ -123,7 +123,12 @@ def _run_batch_on_device(device_id, unit, args, worker_path, base_env):
     )
 
     items = [
-        {"so_path": str(lib), "problem": prob_dict, "kernel_name": cfg.name}
+        {
+            "so_path": str(lib),
+            "problem": prob_dict,
+            "kernel_name": cfg.name,
+            "arch": cfg.gfx_arch,
+        }
         for _, cfg, lib in batch
     ]
     payload = json.dumps(

@@ -390,12 +390,15 @@ class GpuBatchedGemmRunner:
     every BATCHED_SUPPORTED_DTYPES x BATCHED_SUPPORTED_LAYOUTS signature runs here.
     """
 
-    def __init__(self, lib_path: Path):
+    def __init__(self, lib_path: Path, arch: Optional[str] = None):
         self.lib = BatchedGemmDispatcherLib(lib_path)
         if not self.lib.initialize():
             raise RuntimeError(f"Failed to initialize batched dispatcher .so: {lib_path}")
         names = self.lib.kernel_names
         self._kernel_name = names[0] if names else "unknown"
+        # fp8/bf8 encoding must match the arch the .so was compiled for; `arch`
+        # pins it, otherwise the local GPU is probed (as in GpuGemmRunner).
+        self._use_ocp = _gu._fp8_uses_ocp(arch) if arch else None
 
     @property
     def kernel_name(self) -> str:
@@ -462,8 +465,8 @@ class GpuBatchedGemmRunner:
         B_lay = B if lb == "r" else np.transpose(B, (0, 2, 1))
         C_shape = (batch, M, N) if lc == "r" else (batch, N, M)
 
-        A_h = _gu._encode_operand(A_lay, dtype)
-        B_h = _gu._encode_operand(B_lay, dtype)
+        A_h = _gu._encode_operand(A_lay, dtype, self._use_ocp)
+        B_h = _gu._encode_operand(B_lay, dtype, self._use_ocp)
         out_dtype, c_np = _gu._c_numpy_dtype(dtype)
         # F6: the host C buffer is memcpy'd byte-for-byte to/from the device
         # buffer the kernel writes as CDataType, so the numpy element size MUST

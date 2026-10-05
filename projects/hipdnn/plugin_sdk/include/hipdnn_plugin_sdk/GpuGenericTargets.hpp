@@ -34,11 +34,11 @@ inline bool isGenericShapedArchName(std::string_view name)
 /// The table row for the generic named exactly @p name, or nullptr when absent.
 inline const generated::GenericTargetRow* findGenericTarget(std::string_view name)
 {
-    for(std::size_t i = 0; i < generated::GENERIC_TARGET_ROW_COUNT; ++i)
+    for(const auto& row : generated::GENERIC_TARGET_ROWS)
     {
-        if(generated::GENERIC_TARGET_ROWS[i].name == name)
+        if(row.name == name)
         {
-            return &generated::GENERIC_TARGET_ROWS[i];
+            return &row;
         }
     }
     return nullptr;

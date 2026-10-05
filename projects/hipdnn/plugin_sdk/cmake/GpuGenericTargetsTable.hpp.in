@@ -19,9 +19,12 @@ struct GenericTargetRow
     std::size_t memberCount;
 };
 
+// Constexpr tables of string_view; arrays keep the data in static storage with no allocation.
+// NOLINTBEGIN(modernize-avoid-c-arrays)
 @HIPDNN_GENERIC_TARGET_MEMBER_ARRAYS@
 inline constexpr GenericTargetRow GENERIC_TARGET_ROWS[] = {
 @HIPDNN_GENERIC_TARGET_ROWS@};
+// NOLINTEND(modernize-avoid-c-arrays)
 
 inline constexpr std::size_t GENERIC_TARGET_ROW_COUNT = @HIPDNN_GENERIC_TARGET_ROW_COUNT@;
 

@@ -31,6 +31,8 @@ class CanonicalStyle(LayoutStyle):
             return TileDesc((free_sub * traits.n, k_sub * traits.k), layout)
         raise ValueError(f"operand role must be 'A' or 'B' -- got {role!r}")
 
-    def accumulator_desc(self, traits: MmaTraits, *, m_sub: int, n_sub: int) -> TileDesc:
+    def accumulator_desc(
+        self, traits: MmaTraits, *, m_sub: int, n_sub: int
+    ) -> TileDesc:
         layout = c_warp_encoding(traits, m_iter=m_sub, n_iter=n_sub)
         return TileDesc((m_sub * traits.m, n_sub * traits.n), layout)

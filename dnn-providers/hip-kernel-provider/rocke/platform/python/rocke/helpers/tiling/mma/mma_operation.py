@@ -32,11 +32,29 @@ class TileMma:
     composed pieces.
     """
 
-    def __init__(self, shape=None, *, a=None, b=None, c=None, target,
-                 tiling=None, style=None, catalog=None, atom_override=None) -> None:
+    def __init__(
+        self,
+        shape=None,
+        *,
+        a=None,
+        b=None,
+        c=None,
+        target,
+        tiling=None,
+        style=None,
+        catalog=None,
+        atom_override=None,
+    ) -> None:
         self._plan = TileMmaPlan(
-            shape, a=a, b=b, c=c, target=target, tiling=tiling, style=style,
-            catalog=catalog, atom_override=atom_override,
+            shape,
+            a=a,
+            b=b,
+            c=c,
+            target=target,
+            tiling=tiling,
+            style=style,
+            catalog=catalog,
+            atom_override=atom_override,
         )
         self._driver = TileMmaDriver(self._plan)
 
@@ -53,49 +71,64 @@ class TileMma:
 
     # ---- design surface, delegated to the plan --------------------------------------------------
     @property
-    def shape(self): return self._plan.shape
+    def shape(self):
+        return self._plan.shape
 
     @property
-    def atom_shape(self): return self._plan.atom_shape
+    def atom_shape(self):
+        return self._plan.atom_shape
 
     @property
-    def subtiles(self): return self._plan.subtiles
+    def subtiles(self):
+        return self._plan.subtiles
 
     @property
-    def tiling(self): return self._plan.tiling
+    def tiling(self):
+        return self._plan.tiling
 
     @property
-    def target(self): return self._plan.target
+    def target(self):
+        return self._plan.target
 
     @property
-    def op_id(self): return self._plan.op_id
+    def op_id(self):
+        return self._plan.op_id
 
     @property
-    def wave_size(self): return self._plan.wave_size
+    def wave_size(self):
+        return self._plan.wave_size
 
     @property
-    def traits(self): return self._plan.traits
+    def traits(self):
+        return self._plan.traits
 
     @property
-    def a_layout(self): return self._plan.a_layout
+    def a_layout(self):
+        return self._plan.a_layout
 
     @property
-    def b_layout(self): return self._plan.b_layout
+    def b_layout(self):
+        return self._plan.b_layout
 
     @property
-    def c_layout(self): return self._plan.c_layout
+    def c_layout(self):
+        return self._plan.c_layout
 
     @property
-    def a_desc(self): return self._plan.a_desc
+    def a_desc(self):
+        return self._plan.a_desc
 
     @property
-    def b_desc(self): return self._plan.b_desc
+    def b_desc(self):
+        return self._plan.b_desc
 
     @property
-    def c_desc(self): return self._plan.c_desc
+    def c_desc(self):
+        return self._plan.c_desc
 
     @property
-    def style(self): return self._plan.style
+    def style(self):
+        return self._plan.style
 
     def emit_op(self):
         return self._plan.emit_op()

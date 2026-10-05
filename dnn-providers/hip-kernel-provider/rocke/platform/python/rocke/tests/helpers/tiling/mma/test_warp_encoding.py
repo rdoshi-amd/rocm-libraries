@@ -66,7 +66,11 @@ def test_b_encoding_uses_n_as_major_dim() -> None:
 def test_bijection_holds_for_gfx90a_dense_atoms(op_id: str) -> None:
     # Construction runs __post_init__ bijection validation; must not raise.
     traits = _traits(op_id)
-    for encoding in (a_warp_encoding(traits), b_warp_encoding(traits), c_warp_encoding(traits)):
+    for encoding in (
+        a_warp_encoding(traits),
+        b_warp_encoding(traits),
+        c_warp_encoding(traits),
+    ):
         assert isinstance(encoding, WarpDistributionEncoding)
 
 

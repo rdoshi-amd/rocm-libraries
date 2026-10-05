@@ -82,7 +82,9 @@ def cooperative_load_desc(
     identity is NOT general -- dump the address map rather than assume it for another config.
     """
     if vw < 1 or tile_free % vw:
-        raise ValueError(f"cooperative load: tile_free={tile_free} not divisible by vw={vw}")
+        raise ValueError(
+            f"cooperative load: tile_free={tile_free} not divisible by vw={vw}"
+        )
     free_lanes = tile_free // vw
     if free_lanes > wave_size or wave_size % free_lanes:
         raise ValueError(
@@ -108,7 +110,10 @@ def cooperative_load_desc(
         thread_dist=[free_lanes, k_lanes],
         thread_order=thread_order,  # free dim fastest -> coalesced across lanes
         block_repeat=[1, k_repeat],
-        wave_dist=[1, n_waves],  # the waves split K; each wave loads the full free extent
+        wave_dist=[
+            1,
+            n_waves,
+        ],  # the waves split K; each wave loads the full free extent
         wave_size=wave_size,
     )
     if len(desc.shape) != 2:
@@ -128,23 +133,30 @@ def lds_tile_alloc(
 
     A style supplies the coop descriptor; the SEAM sizes the allocation. A style can never clip-size it.
     """
-    store_desc = coop_desc.swap_dims(0, 1)  # (free, K) -> (K, free): the LDS store order
+    store_desc = coop_desc.swap_dims(
+        0, 1
+    )  # (free, K) -> (K, free): the LDS store order
     block_lanes = wave_size * n_waves
     ext = desc_extents(store_desc, block_lanes)
     if len(ext) != 2:
-        raise ValueError(f"LDS store descriptor must be rank-2 (K, free) -- extents {ext!r}")
+        raise ValueError(
+            f"LDS store descriptor must be rank-2 (K, free) -- extents {ext!r}"
+        )
     k_ext, free_ext = ext
     shape = (k_ext, buffers * free_ext)
     strides = (buffers * free_ext, 1)
     return shape, strides
 
 
-def _fit_or_raise(what: str, tile_desc: TileDesc, n_lanes: int, alloc: tuple[int, ...]) -> None:
+def _fit_or_raise(
+    what: str, tile_desc: TileDesc, n_lanes: int, alloc: tuple[int, ...]
+) -> None:
     """Raise unless every axis of ``tile_desc`` fits the LDS ``alloc`` (seam invariant c). LDS accesses
     are UNCLIPPED by design, so an out-of-range index is not masked -- it reads another workgroup's
     memory. Sizing to the DESCRIPTOR, per axis (a product check hides compensating per-axis errors).
     This is an EXTENT-vs-alloc check (`origin` unchecked): it polices full-tile SIZING, not a
-    within-alloc buffer-index bug -- the double-buffer geometry closes that by construction."""
+    within-alloc buffer-index bug -- the double-buffer geometry closes that by construction.
+    """
     ext = desc_extents(tile_desc, n_lanes)
     if len(ext) != len(alloc) or any(e > a for e, a in zip(ext, alloc)):
         raise ValueError(
@@ -169,7 +181,9 @@ def lds_store(
     LDS mask is unrepresentable). Runs the fit guard against ``alloc`` first (invariant c). The store
     width follows the fragment's contiguous run (``ds_write_b{32,64,128}``)."""
     _fit_or_raise("cooperative LDS store", fragment.tile_desc, n_lanes, alloc)
-    window = make_window(lds_tensor_desc, origin)  # no bounds -- masking LDS is unrepresentable
+    window = make_window(
+        lds_tensor_desc, origin
+    )  # no bounds -- masking LDS is unrepresentable
     if window.bounds is not None:  # invariant b: the LDS window can never carry a clip
         raise ValueError(
             "cooperative LDS access window carries a clip -- invariant (b) violated: masking LDS is "
@@ -192,7 +206,8 @@ def lds_read(
 ) -> Fragment:
     """Full-width, UNMASKED cooperative read from LDS (seam invariant b: NO ``bounds`` parameter). Runs
     the fit guard against ``alloc`` first (invariant c). Returns the loaded fragment; the caller applies
-    any MMA-ready register reorder (that is a register transform, not a memory access)."""
+    any MMA-ready register reorder (that is a register transform, not a memory access).
+    """
     _fit_or_raise("cooperative LDS read", tile_desc, n_lanes, alloc)
     window = make_window(lds_tensor_desc, origin)  # no bounds
     if window.bounds is not None:  # invariant b: the LDS window can never carry a clip

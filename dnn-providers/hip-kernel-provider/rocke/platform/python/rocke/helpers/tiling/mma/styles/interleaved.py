@@ -84,7 +84,9 @@ class InterleavedStyle(LayoutStyle):
             free_lanes = traits.n
         else:
             raise ValueError(f"operand role must be 'A' or 'B' -- got {role!r}")
-        return self.operand_descs(traits, free_sub=free_sub, k_sub=k_sub, free_lanes=free_lanes)
+        return self.operand_descs(
+            traits, free_sub=free_sub, k_sub=k_sub, free_lanes=free_lanes
+        )
 
     def operand_desc(
         self, traits: MmaTraits, *, role: str, free_sub: int, k_sub: int
@@ -92,7 +94,9 @@ class InterleavedStyle(LayoutStyle):
         """The MMA-ready descriptor -- the second half of the LDS bridge (:meth:`lds_bridge`)."""
         return self.lds_bridge(traits, role=role, free_sub=free_sub, k_sub=k_sub)[1]
 
-    def accumulator_desc(self, traits: MmaTraits, *, m_sub: int, n_sub: int) -> TileDesc:
+    def accumulator_desc(
+        self, traits: MmaTraits, *, m_sub: int, n_sub: int
+    ) -> TileDesc:
         """The DERIVED accumulator -- what the interleaved A/B produce through the fixed MFMA coupling.
         Hand-built: ``make_tile_desc`` cannot express the M axis's lane-below-register level. With
         ``R=c_lane_rows, V=c_inner, P=c_patches, W=n``:
@@ -118,7 +122,9 @@ class InterleavedStyle(LayoutStyle):
             layout=WarpDistributionEncoding(
                 replication_lengths=(),
                 hierarchical_lengths=(tuple(m_levels), (atom.n, n_sub)),
-                lane_to_rh_major=((1, 2),),   # lane = mo (an M level) * atom.n + n_in (N level 0)
+                lane_to_rh_major=(
+                    (1, 2),
+                ),  # lane = mo (an M level) * atom.n + n_in (N level 0)
                 lane_to_rh_minor=((l_rows, 0),),
                 # significance: mi (M atom index), nj (N atom index), mna (M patch), m_in (M within)
                 register_to_rh_major=(1, 2) + patch_reg[0] + (1,),

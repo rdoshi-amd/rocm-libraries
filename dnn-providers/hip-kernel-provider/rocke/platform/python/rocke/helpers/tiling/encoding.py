@@ -24,6 +24,7 @@ from dataclasses import dataclass
 
 __all__ = ["WarpDistributionEncoding"]
 
+
 @dataclass(frozen=True)
 class WarpDistributionEncoding:
     """Raw coordinate-transform encoding; mirrors rocke's fields.
@@ -91,7 +92,9 @@ class WarpDistributionEncoding:
             zip(self.lane_to_rh_major, self.lane_to_rh_minor)
         ):
             if len(majors) != len(minors):
-                raise ValueError(f"lane P{lane_index} major/minor sub-sequence mismatch")
+                raise ValueError(
+                    f"lane P{lane_index} major/minor sub-sequence mismatch"
+                )
             for major, minor in zip(majors, minors):
                 claim("P", lane_index, major, minor)
         for reg_index, (major, minor) in enumerate(

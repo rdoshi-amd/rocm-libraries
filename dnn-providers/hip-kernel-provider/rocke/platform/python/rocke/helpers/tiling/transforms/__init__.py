@@ -36,8 +36,21 @@ from .observers import (
 from .verb import transform_fragment
 
 __all__ = [
-    "TransformPlan", "interleave_idx", "k_distribution", "classify_transform", "mma_pair_k_aligned",
-    "derive_c_distribution", "Diagnostic", "mma_accumulator_flow_consistent", "as_forward_map",
-    "mma_operand_layout_sound", "mma_operand_repair_hint", "mma_pair_compatible", "transform_fragment",
-    "describe_edge", "name_permutation", "reorder_between", "ReorderPlan",
+    "TransformPlan",
+    "interleave_idx",
+    "k_distribution",
+    "classify_transform",
+    "mma_pair_k_aligned",
+    "derive_c_distribution",
+    "Diagnostic",
+    "mma_accumulator_flow_consistent",
+    "as_forward_map",
+    "mma_operand_layout_sound",
+    "mma_operand_repair_hint",
+    "mma_pair_compatible",
+    "transform_fragment",
+    "describe_edge",
+    "name_permutation",
+    "reorder_between",
+    "ReorderPlan",
 ]

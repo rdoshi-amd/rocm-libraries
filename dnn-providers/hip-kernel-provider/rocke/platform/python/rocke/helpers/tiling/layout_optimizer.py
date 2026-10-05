@@ -46,21 +46,38 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .layouts.tile_distribution import make_tile_desc
-from .transforms import (as_forward_map, classify_transform, describe_edge, mma_pair_k_aligned,
-                         name_permutation, mma_operand_layout_sound)
+from .transforms import (
+    as_forward_map,
+    classify_transform,
+    describe_edge,
+    mma_pair_k_aligned,
+    name_permutation,
+    mma_operand_layout_sound,
+)
 
-__all__ = ["Edge", "Assessment", "evaluate_transform", "optimize_layout", "enumerate_stripings", "recommend"]
+__all__ = [
+    "Edge",
+    "Assessment",
+    "evaluate_transform",
+    "optimize_layout",
+    "enumerate_stripings",
+    "recommend",
+]
 
 _DWORD_BITS = 32
 # BOTH heavy movers scale with the NUMBER OF REGISTERS moved (the data volume) -- the tile only gets more
 # expensive as it grows. cross-lane moves each register individually (DPP/ds_bpermute), so it scales HARD; an
 # LDS reposition moves them in bulk but is fundamentally **bandwidth-bound** (store + read of every register).
 # These slopes are ranking heuristics, not measured cycles.
-_LDS_BARRIER = 1.0             # fixed sync for a reposition round-trip
-_LDS_BW_PER_REG = 0.25        # LDS round-trip traffic per register -- LDS BANDWIDTH is the binding resource
-_CROSS_LANE_BASE = 8.0        # per-op setup for a cross-lane instruction (DPP / ds_bpermute)
-_CROSS_LANE_CYC_PER_OP_REG = 0.5   # ~cost per (cross-lane op x register): a 1-op/reg permute is cheap;
-                                   # grouped / multi-op permutes do MORE ops per register -> proportionally dearer
+_LDS_BARRIER = 1.0  # fixed sync for a reposition round-trip
+_LDS_BW_PER_REG = (
+    0.25  # LDS round-trip traffic per register -- LDS BANDWIDTH is the binding resource
+)
+_CROSS_LANE_BASE = 8.0  # per-op setup for a cross-lane instruction (DPP / ds_bpermute)
+_CROSS_LANE_CYC_PER_OP_REG = (
+    0.5  # ~cost per (cross-lane op x register): a 1-op/reg permute is cheap;
+)
+# grouped / multi-op permutes do MORE ops per register -> proportionally dearer
 
 
 @dataclass(frozen=True)
@@ -82,7 +99,8 @@ class Assessment:
     ``sound`` severity, the pairwise ``k_match`` severity (``"n/a"`` when no ``k_partner`` given), the priced
     ``edge`` (cheapest way to reach the target, used for ranking), a plain ``reason``, and ``contenders`` --
     every priced way to reach the target. When a re-ownership can go either register-cross-lane OR LDS
-    reposition, BOTH are here (both ``empirical``); :func:`recommend` refuses to pick between them on cost."""
+    reposition, BOTH are here (both ``empirical``); :func:`recommend` refuses to pick between them on cost.
+    """
 
     works: bool
     sound: str
@@ -99,7 +117,7 @@ def _reorder_grade(perm: tuple[int, ...], per_dword: int) -> tuple[float, str]:
         return 1.0, "dword-aligned"
     for i in range(len(perm)):
         base = i - (i % per_dword)
-        if perm[i] - perm[base] != (i - base):          # the dword group did not move as a unit
+        if perm[i] - perm[base] != (i - base):  # the dword group did not move as a unit
             return float(per_dword), "sub-dword"
     return 1.0, "dword-aligned"
 
@@ -108,15 +126,29 @@ def _num_lanes(fwd: dict) -> int:
     return len({l for l, _ in fwd})
 
 
-def _price(plan, *, dtype_bits: int, through_lds: bool, tile_regs: int, lds_conflict_cost,
-           cross_lane_ops_per_reg: float = 1.0) -> Edge:
+def _price(
+    plan,
+    *,
+    dtype_bits: int,
+    through_lds: bool,
+    tile_regs: int,
+    lds_conflict_cost,
+    cross_lane_ops_per_reg: float = 1.0,
+) -> Edge:
     """Price the classified delta against the cost ladder. ``cross_lane_ops_per_reg`` scales the cross-lane cost
-    by how many ops the mechanism runs per register (1 for a simple permute; more for grouped / multi-op)."""
+    by how many ops the mechanism runs per register (1 for a simple permute; more for grouped / multi-op).
+    """
     if plan.tier == "reorder":
         if plan.permutation == tuple(range(len(plan.permutation))):
             return Edge("identity", 0.0, "no movement")
-        cost, grade = _reorder_grade(plan.permutation, max(1, _DWORD_BITS // dtype_bits))
-        return Edge("reorder", cost, f"{grade} register reorder = {name_permutation(plan.permutation)}")
+        cost, grade = _reorder_grade(
+            plan.permutation, max(1, _DWORD_BITS // dtype_bits)
+        )
+        return Edge(
+            "reorder",
+            cost,
+            f"{grade} register reorder = {name_permutation(plan.permutation)}",
+        )
     # cross-lane in registers is the last resort -- BUT if the data already transits LDS, the same re-ownership
     # can be a reposition (re-addressing). Its cost is a full round-trip: the throughput FLOOR + a BARRIER (paid
     # even conflict-free, scaling with the registers moved -> BANDWIDTH) PLUS the NEW access's bank conflicts,
@@ -124,27 +156,54 @@ def _price(plan, *, dtype_bits: int, through_lds: bool, tile_regs: int, lds_conf
     # through LDS can INTRODUCE conflicts the register path never had. Without measured costs this is only a
     # LOWER BOUND (barrier + bandwidth), flagged so no one reads it as free.
     if through_lds:
-        floor = _LDS_BARRIER + _LDS_BW_PER_REG * tile_regs      # bandwidth: scales with registers moved
+        floor = (
+            _LDS_BARRIER + _LDS_BW_PER_REG * tile_regs
+        )  # bandwidth: scales with registers moved
         if lds_conflict_cost is None:
-            return Edge("reposition_lds", floor,
-                        f"LDS reposition LOWER BOUND (barrier + bandwidth for {tile_regs} regs = {floor:g}) -- "
-                        "the NEW store AND read bank-conflict patterns are NOT evaluated (two patterns, two port "
-                        "rules) and LDS capacity/occupancy is not counted; route via /bank-conflict, never free",
-                        empirical=True)
-        store_bc, read_bc = (lds_conflict_cost if isinstance(lds_conflict_cost, tuple)
-                             else (float(lds_conflict_cost), 0.0))
-        return Edge("reposition_lds", floor + float(store_bc) + float(read_bc),
-                    f"LDS reposition = barrier+bandwidth ({floor:g}, {tile_regs} regs) + measured store BC "
-                    f"{float(store_bc):g} + read BC {float(read_bc):g}", empirical=True)
-    cost = _CROSS_LANE_BASE + _CROSS_LANE_CYC_PER_OP_REG * cross_lane_ops_per_reg * tile_regs
-    return Edge("cross_lane", cost,
-                f"cross-lane (DPP/ds_bpermute) {cross_lane_ops_per_reg:g} op/reg over {tile_regs} regs -- "
-                f"{plan.reason}", empirical=True)
+            return Edge(
+                "reposition_lds",
+                floor,
+                f"LDS reposition LOWER BOUND (barrier + bandwidth for {tile_regs} regs = {floor:g}) -- "
+                "the NEW store AND read bank-conflict patterns are NOT evaluated (two patterns, two port "
+                "rules) and LDS capacity/occupancy is not counted; route via /bank-conflict, never free",
+                empirical=True,
+            )
+        store_bc, read_bc = (
+            lds_conflict_cost
+            if isinstance(lds_conflict_cost, tuple)
+            else (float(lds_conflict_cost), 0.0)
+        )
+        return Edge(
+            "reposition_lds",
+            floor + float(store_bc) + float(read_bc),
+            f"LDS reposition = barrier+bandwidth ({floor:g}, {tile_regs} regs) + measured store BC "
+            f"{float(store_bc):g} + read BC {float(read_bc):g}",
+            empirical=True,
+        )
+    cost = (
+        _CROSS_LANE_BASE
+        + _CROSS_LANE_CYC_PER_OP_REG * cross_lane_ops_per_reg * tile_regs
+    )
+    return Edge(
+        "cross_lane",
+        cost,
+        f"cross-lane (DPP/ds_bpermute) {cross_lane_ops_per_reg:g} op/reg over {tile_regs} regs -- "
+        f"{plan.reason}",
+        empirical=True,
+    )
 
 
-def evaluate_transform(source, target, *, canon=None, k_partner=None, dtype_bits: int = 16,
-                       through_lds: bool = False, lds_conflict_cost=None,
-                       cross_lane_ops_per_reg: float = 1.0) -> Assessment:
+def evaluate_transform(
+    source,
+    target,
+    *,
+    canon=None,
+    k_partner=None,
+    dtype_bits: int = 16,
+    through_lds: bool = False,
+    lds_conflict_cost=None,
+    cross_lane_ops_per_reg: float = 1.0,
+) -> Assessment:
     """Is there a VALID path from ``source`` to ``target``, and what is the cheapest edge that reaches it?
 
     ``source``/``target`` are ``WarpDistributionEncoding`` or forward maps. Validity gates (all optional, all
@@ -157,14 +216,24 @@ def evaluate_transform(source, target, *, canon=None, k_partner=None, dtype_bits
     transform-cost-ONLY and does not imply a valid MMA.
     """
     src, tgt = as_forward_map(source), as_forward_map(target)
-    sound = mma_operand_layout_sound(tgt, canon).severity if canon is not None else "n/a"
-    k_match = mma_pair_k_aligned(tgt, k_partner).severity if k_partner is not None else "n/a"
+    sound = (
+        mma_operand_layout_sound(tgt, canon).severity if canon is not None else "n/a"
+    )
+    k_match = (
+        mma_pair_k_aligned(tgt, k_partner).severity if k_partner is not None else "n/a"
+    )
     works = (canon is None or sound == "ok") and (k_partner is None or k_match == "ok")
     valid_note = f"sound={sound}, K-match={k_match}"
 
     def _assess(edge: Edge, how: str, contenders=None) -> Assessment:
-        return Assessment(works, sound, k_match, edge, f"{valid_note}; {how}",
-                          tuple(contenders) if contenders else (edge,))
+        return Assessment(
+            works,
+            sound,
+            k_match,
+            edge,
+            f"{valid_note}; {how}",
+            tuple(contenders) if contenders else (edge,),
+        )
 
     # TOP OF THE LADDER: a free relabel / symmetry -- a pure axis-permutation at register identity (transpose /
     # col<->row / A<->B M<->N rename), zero movement. Detect it BEFORE pricing a delta, else classify_transform
@@ -178,30 +247,65 @@ def evaluate_transform(source, target, *, canon=None, k_partner=None, dtype_bits
     try:
         plan = classify_transform(src, tgt)
     except ValueError as exc:
-        return Assessment(False, sound, k_match, Edge("invalid", float("inf"), str(exc)),
-                          "source and target hold different elements -- no transform exists")
+        return Assessment(
+            False,
+            sound,
+            k_match,
+            Edge("invalid", float("inf"), str(exc)),
+            "source and target hold different elements -- no transform exists",
+        )
     tile_regs = len(tgt) // max(1, _num_lanes(tgt))
-    reg = _price(plan, dtype_bits=dtype_bits, through_lds=False, tile_regs=tile_regs, lds_conflict_cost=None,
-                 cross_lane_ops_per_reg=cross_lane_ops_per_reg)
-    gate = "" if (canon is not None or k_partner is not None) else " [no validity gate -- cost only]"
-    if reg.kind != "cross_lane":                          # deterministic (identity / reorder) -- decides on cost
+    reg = _price(
+        plan,
+        dtype_bits=dtype_bits,
+        through_lds=False,
+        tile_regs=tile_regs,
+        lds_conflict_cost=None,
+        cross_lane_ops_per_reg=cross_lane_ops_per_reg,
+    )
+    gate = (
+        ""
+        if (canon is not None or k_partner is not None)
+        else " [no validity gate -- cost only]"
+    )
+    if (
+        reg.kind != "cross_lane"
+    ):  # deterministic (identity / reorder) -- decides on cost
         return _assess(reg, f"reach via {reg.kind} (cost {reg.cost:g}){gate}")
     # A cross-lane re-ownership. The register cross-lane op is one path; if the data transits LDS, an LDS
     # reposition is the OTHER -- both empirical, so carry BOTH as contenders (equal shots; see recommend()).
     contenders = [reg]
     if through_lds:
-        contenders.append(_price(plan, dtype_bits=dtype_bits, through_lds=True, tile_regs=tile_regs,
-                                 lds_conflict_cost=lds_conflict_cost,
-                                 cross_lane_ops_per_reg=cross_lane_ops_per_reg))
+        contenders.append(
+            _price(
+                plan,
+                dtype_bits=dtype_bits,
+                through_lds=True,
+                tile_regs=tile_regs,
+                lds_conflict_cost=lds_conflict_cost,
+                cross_lane_ops_per_reg=cross_lane_ops_per_reg,
+            )
+        )
     best = min(contenders, key=lambda e: e.cost)
-    how = (f"heavy mover ({' vs '.join(e.kind for e in contenders)}) -- EQUAL SHOTS, settle by testing"
-           if len(contenders) > 1 else f"reach via cross_lane (cost {best.cost:g}){gate}")
+    how = (
+        f"heavy mover ({' vs '.join(e.kind for e in contenders)}) -- EQUAL SHOTS, settle by testing"
+        if len(contenders) > 1
+        else f"reach via cross_lane (cost {best.cost:g}){gate}"
+    )
     return _assess(best, how, contenders)
 
 
-def optimize_layout(source, candidates: dict, *, canon=None, k_partner=None, dtype_bits: int = 16,
-                    through_lds: bool = False, lds_conflict_cost=None,
-                    cross_lane_ops_per_reg: float = 1.0) -> list[tuple[str, Assessment]]:
+def optimize_layout(
+    source,
+    candidates: dict,
+    *,
+    canon=None,
+    k_partner=None,
+    dtype_bits: int = 16,
+    through_lds: bool = False,
+    lds_conflict_cost=None,
+    cross_lane_ops_per_reg: float = 1.0,
+) -> list[tuple[str, Assessment]]:
     """MINIMIZE: assess every candidate target distribution with :func:`evaluate_transform` and return them
     ordered cheapest-VALID first. The head is the recommended distribution -- but read it via :func:`recommend`,
     which refuses to crown a winner among the ``empirical`` heavy movers (LDS reposition vs cross-lane) on
@@ -210,15 +314,29 @@ def optimize_layout(source, candidates: dict, *, canon=None, k_partner=None, dty
     ``candidates`` maps a name -> a target layout (a striping / ownership / register order). Build the ones
     worth trying yourself, or sweep them with :func:`enumerate_stripings`.
     """
-    scored = [(name, evaluate_transform(source, tgt, canon=canon, k_partner=k_partner, dtype_bits=dtype_bits,
-                                        through_lds=through_lds, lds_conflict_cost=lds_conflict_cost,
-                                        cross_lane_ops_per_reg=cross_lane_ops_per_reg))
-              for name, tgt in candidates.items()]
+    scored = [
+        (
+            name,
+            evaluate_transform(
+                source,
+                tgt,
+                canon=canon,
+                k_partner=k_partner,
+                dtype_bits=dtype_bits,
+                through_lds=through_lds,
+                lds_conflict_cost=lds_conflict_cost,
+                cross_lane_ops_per_reg=cross_lane_ops_per_reg,
+            ),
+        )
+        for name, tgt in candidates.items()
+    ]
     scored.sort(key=lambda na: (not na[1].works, na[1].edge.cost))
     return scored
 
 
-def recommend(ranked: list[tuple[str, Assessment]]) -> tuple[str, list[tuple[str, Assessment]], tuple]:
+def recommend(
+    ranked: list[tuple[str, Assessment]],
+) -> tuple[str, list[tuple[str, Assessment]], tuple]:
     """Read the outcome of :func:`optimize_layout` HONESTLY. Returns ``(status, picks, contenders)``:
 
     - ``("none", [], ())``               -- no valid candidate.
@@ -247,7 +365,8 @@ def enumerate_stripings(shape, wave_size: int) -> dict:
     """Sweep the candidate lane STRIPINGS of a 2-D ``shape`` across ``wave_size`` lanes: every way to split the
     two axes over the lanes (``lanes0·lanes1 == wave_size``, each dividing its axis) x the lane axis-order.
     Returns ``{name -> WarpDistributionEncoding}`` -- the raw material :func:`optimize_layout` ranks. This is
-    the "try a different distribution" lever: rocKE constructs each candidate, the optimizer prices it."""
+    the "try a different distribution" lever: rocKE constructs each candidate, the optimizer prices it.
+    """
     d0, d1 = int(shape[0]), int(shape[1])
     out: dict = {}
     for lanes0 in _divisors(d0):
@@ -259,9 +378,15 @@ def enumerate_stripings(shape, wave_size: int) -> dict:
         t0, t1 = d0 // lanes0, d1 // lanes1
         for order in ([0, 1], [1, 0]):
             try:
-                desc = make_tile_desc(shape=[d0, d1], thread_tile=[t0, t1], thread_dist=[lanes0, lanes1],
-                                      thread_order=order, block_repeat=[1, 1], wave_dist=[1, 1],
-                                      wave_size=wave_size)
+                desc = make_tile_desc(
+                    shape=[d0, d1],
+                    thread_tile=[t0, t1],
+                    thread_dist=[lanes0, lanes1],
+                    thread_order=order,
+                    block_repeat=[1, 1],
+                    wave_dist=[1, 1],
+                    wave_size=wave_size,
+                )
             except (ValueError, Exception):
                 continue
             name = f"lanes({lanes0}x{lanes1}) tile({t0}x{t1}) order{order[0]}{order[1]}"

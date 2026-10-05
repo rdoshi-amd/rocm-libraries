@@ -51,6 +51,7 @@ from ..fragments import TileDesc
 
 __all__ = ["make_tile_desc"]
 
+
 def _axis_tuple(name: str, value: Sequence[int] | None, n_axes: int) -> tuple[int, ...]:
     """Normalize a per-axis quantity to a validated rank-``n_axes`` tuple (``None`` -> all 1s)."""
     if value is None:
@@ -67,7 +68,10 @@ def _axis_tuple(name: str, value: Sequence[int] | None, n_axes: int) -> tuple[in
             raise ValueError(f"{name} entries must be positive -- got {out!r}")
     return out
 
-def _parse_broadcast(name: str, value: int | Sequence[int], whole_size: int) -> tuple[int, int]:
+
+def _parse_broadcast(
+    name: str, value: int | Sequence[int], whole_size: int
+) -> tuple[int, int]:
     """Return ``(size, count)`` for a broadcast: a bare int -> whole-tile (size = ``whole_size``,
     the full lane/wave extent); else the ``[size, count]`` pair."""
     if isinstance(value, bool):
@@ -78,12 +82,17 @@ def _parse_broadcast(name: str, value: int | Sequence[int], whole_size: int) -> 
         return whole_size, value
     pair = tuple(value)
     if len(pair) != 2:
-        raise ValueError(f"{name} must be an int (count) or a [size, count] pair -- got {value!r}")
+        raise ValueError(
+            f"{name} must be an int (count) or a [size, count] pair -- got {value!r}"
+        )
     for entry in pair:
         if isinstance(entry, bool) or not isinstance(entry, int) or entry <= 0:
-            raise ValueError(f"{name} [size, count] entries must be positive ints -- got {value!r}")
+            raise ValueError(
+                f"{name} [size, count] entries must be positive ints -- got {value!r}"
+            )
     size, count = pair
     return size, count
+
 
 def _broadcast_insert_index(
     bucket: list[tuple[int, int]],
@@ -95,7 +104,8 @@ def _broadcast_insert_index(
 ) -> int:
     """Index into a partition bucket where R sits so the entries BELOW it multiply to ``size``.
     ``size == 1`` -> least-significant (append, ADJACENT copies); ``size == whole`` -> index 0
-    (most-significant, the half split). Must land on a boundary (a trailing run of ``dist_name``)."""
+    (most-significant, the half split). Must land on a boundary (a trailing run of ``dist_name``).
+    """
     if size == 1:
         return len(bucket)
     extents = [hierarchical[major - 1][minor] for major, minor in bucket]
@@ -111,11 +121,13 @@ def _broadcast_insert_index(
         f"of a trailing run of {dist_name} (extents {extents})"
     )
 
+
 def _reorder_bucket(
     bucket: list[tuple[int, int]], axes: Sequence[int], name: str, noun: str
 ) -> list[tuple[int, int]]:
     """Reorder a partition bucket into ``axes`` (axis indices, fastest-moving RIGHT-MOST). Must be
-    a permutation of the axes that actually carry that partition (``noun`` = 'threads'/'waves')."""
+    a permutation of the axes that actually carry that partition (``noun`` = 'threads'/'waves').
+    """
     order = tuple(axes)
     for axis in order:
         if isinstance(axis, bool) or not isinstance(axis, int):
@@ -127,6 +139,7 @@ def _reorder_bucket(
         )
     by_axis = {major - 1: (major, minor) for major, minor in bucket}
     return [by_axis[axis] for axis in order]
+
 
 def make_tile_desc(
     *,
@@ -162,7 +175,9 @@ def make_tile_desc(
     block_repeat = _axis_tuple("block_repeat", block_repeat, n_axes)
 
     for axis in range(n_axes):
-        product = thread_dist[axis] * wave_dist[axis] * thread_tile[axis] * block_repeat[axis]
+        product = (
+            thread_dist[axis] * wave_dist[axis] * thread_tile[axis] * block_repeat[axis]
+        )
         if product != shape[axis]:
             raise ValueError(
                 f"axis {axis}: thread_dist*wave_dist*thread_tile*block_repeat = {product} != shape "
@@ -176,7 +191,9 @@ def make_tile_desc(
     wave_product = 1
     for count in wave_dist:
         wave_product *= count
-    t_size, t_count = _parse_broadcast("thread_broadcast", thread_broadcast, lane_product)
+    t_size, t_count = _parse_broadcast(
+        "thread_broadcast", thread_broadcast, lane_product
+    )
     w_size, w_count = _parse_broadcast("wave_broadcast", wave_broadcast, wave_product)
     if lane_product * t_count != wave_size:
         raise ValueError(
@@ -210,7 +227,9 @@ def make_tile_desc(
 
     # Order overrides: reorder the lane / wave merges (fastest right-most) when the author sets them.
     if thread_order is not None:
-        lane_bucket = _reorder_bucket(lane_bucket, thread_order, "thread_order", "threads")
+        lane_bucket = _reorder_bucket(
+            lane_bucket, thread_order, "thread_order", "threads"
+        )
     if wave_order is not None:
         wave_bucket = _reorder_bucket(wave_bucket, wave_order, "wave_order", "waves")
 

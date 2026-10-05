@@ -4,7 +4,8 @@
 """The wide-GLOBAL-load fully-in-bounds gate (Principle 4). An unmasked wide global load is emitted
 ONLY when the tile is provably in bounds on the stride-1 run axis; a ragged/odd tensor (or a runtime
 clip that can't be proven aligned) falls to the scalar masked path -- never an out-of-bounds wide
-read. LDS is exempt (its allocation is the full tile by construction). Offline, no GPU."""
+read. LDS is exempt (its allocation is the full tile by construction). Offline, no GPU.
+"""
 
 from __future__ import annotations
 
@@ -60,8 +61,9 @@ def test_lds_access_is_exempt_from_the_gate() -> None:
 
 # ---- #32: origin-alignment on the wide-load gate (compile-time mid-tile origin caught; SSA trusted) ----
 
+
 def test_aligned_int_origin_stays_wide() -> None:
-    assert _vw((256, 16), origin=(128, 0)) == 8            # origin 128 is on the tile grid (128)
+    assert _vw((256, 16), origin=(128, 0)) == 8  # origin 128 is on the tile grid (128)
 
 
 def test_compile_time_mid_tile_origin_scalarizes() -> None:
@@ -78,28 +80,42 @@ def test_ssa_origin_is_trusted_grid_aligned() -> None:
 
 # ---- #30: the N-D operand gate fires only for a tensor that carries a CONTRACTION axis ----
 
+
 def test_loads_as_operand_predicate() -> None:
     from rocke.helpers.tiling.emit import _loads_as_operand
 
-    a_op = make_tensor_desc((16, 8), (8, 1), _F16, ("free", "contraction"))       # A (M,K)
-    b_op = make_tensor_desc((8, 16), (1, 8), _F16, ("contraction", "free"))       # B (K,N)
-    c_out = make_tensor_desc((16, 16), (16, 1), _F16, ("free", "free"))           # C output (M,N)
-    plain = make_tensor_desc((16, 8), (8, 1), _F16)                               # no roles
-    rank3 = make_tensor_desc((4, 16, 8), (128, 8, 1), _F16, ("batch", "free", "contraction"))
+    a_op = make_tensor_desc((16, 8), (8, 1), _F16, ("free", "contraction"))  # A (M,K)
+    b_op = make_tensor_desc((8, 16), (1, 8), _F16, ("contraction", "free"))  # B (K,N)
+    c_out = make_tensor_desc(
+        (16, 16), (16, 1), _F16, ("free", "free")
+    )  # C output (M,N)
+    plain = make_tensor_desc((16, 8), (8, 1), _F16)  # no roles
+    rank3 = make_tensor_desc(
+        (4, 16, 8), (128, 8, 1), _F16, ("batch", "free", "contraction")
+    )
 
     assert _loads_as_operand(a_op) is True
     assert _loads_as_operand(b_op) is True
-    assert _loads_as_operand(c_out) is False   # C reload: all free, not an operand -> gate skipped (was wrongly rejected)
-    assert _loads_as_operand(plain) is False   # positional, no roles
-    assert _loads_as_operand(rank3) is True    # has a contraction -> operand (assert_mma_operand then rejects rank!=2)
+    assert (
+        _loads_as_operand(c_out) is False
+    )  # C reload: all free, not an operand -> gate skipped (was wrongly rejected)
+    assert _loads_as_operand(plain) is False  # positional, no roles
+    assert (
+        _loads_as_operand(rank3) is True
+    )  # has a contraction -> operand (assert_mma_operand then rejects rank!=2)
 
 
 # ---- #31: masking LDS is structurally unrepresentable -- the LDS verbs carry NO bounds parameter ----
+
 
 def test_lds_verbs_have_no_bounds_parameter() -> None:
     import inspect
 
     from rocke.helpers.tiling.memory import lds_read, lds_store
 
-    assert "bounds" not in inspect.signature(lds_store).parameters, "lds_store must not accept bounds"
-    assert "bounds" not in inspect.signature(lds_read).parameters, "lds_read must not accept bounds"
+    assert (
+        "bounds" not in inspect.signature(lds_store).parameters
+    ), "lds_store must not accept bounds"
+    assert (
+        "bounds" not in inspect.signature(lds_read).parameters
+    ), "lds_read must not accept bounds"

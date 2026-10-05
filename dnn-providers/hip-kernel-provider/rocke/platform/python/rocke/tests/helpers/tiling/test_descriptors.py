@@ -70,9 +70,12 @@ def test_window_bounds_rank_must_match_tensor() -> None:
 
 # ---- N-D axis roles + rank-reducing slice (at_index / squeeze) ---------------------------------
 
+
 def _batched(dt=_DT("f16")):
     """A rank-3 batched operand (batch, M=free, K=contraction), strides (M*K, K, 1)."""
-    return make_tensor_desc((4, 16, 8), (128, 8, 1), dt, ("batch", "free", "contraction"))
+    return make_tensor_desc(
+        (4, 16, 8), (128, 8, 1), dt, ("batch", "free", "contraction")
+    )
 
 
 def test_axis_roles_recorded_and_located() -> None:
@@ -108,24 +111,24 @@ def test_at_index_pins_batch_and_reduces_rank() -> None:
     reduced = win.at_index(0, 3)
     assert reduced.tensor.rank == 2
     assert reduced.tensor.lengths == (16, 8)
-    assert reduced.tensor.strides == (8, 1)          # strides preserved
+    assert reduced.tensor.strides == (8, 1)  # strides preserved
     assert reduced.tensor.axis_roles == ("free", "contraction")
     assert reduced.origin == (0, 0)
-    assert reduced.pinned == ((3, 128),)             # batch offset carried: index 3 * stride 128
+    assert reduced.pinned == ((3, 128),)  # batch offset carried: index 3 * stride 128
 
 
 def test_at_index_reduces_bounds_too() -> None:
     win = make_window(_batched(), (0, 0, 0), (4, 16, 8))
     reduced = win.at_index(0, 1)
-    assert reduced.bounds == (16, 8)                 # the batch bound entry is dropped
+    assert reduced.bounds == (16, 8)  # the batch bound entry is dropped
 
 
 def test_at_index_refuses_free_or_contraction_axis() -> None:
     win = make_window(_batched(), (0, 0, 0))
     with pytest.raises(ValueError, match="may only reduce a 'batch' axis"):
-        win.at_index(1, 0)                           # free
+        win.at_index(1, 0)  # free
     with pytest.raises(ValueError, match="may only reduce a 'batch' axis"):
-        win.at_index(2, 0)                           # contraction
+        win.at_index(2, 0)  # contraction
 
 
 def test_at_index_requires_declared_roles() -> None:
@@ -147,7 +150,7 @@ def test_at_index_refuses_clipped_batch_axis() -> None:
         win.at_index(0, 1)
 
 
-def test_at_index_address_matches_full_rank(  ) -> None:
+def test_at_index_address_matches_full_rank() -> None:
     # The reduced (M, K) window must address the same element the rank-3 window would at batch=i.
     from rocke.helpers.tiling.emit import _address
     from rocke.helpers.tiling.lds_conflict import NumBuilder
@@ -162,7 +165,9 @@ def test_at_index_address_matches_full_rank(  ) -> None:
 
 
 def test_squeeze_drops_unit_batch_axis() -> None:
-    td = make_tensor_desc((1, 16, 8), (128, 8, 1), _DT("f16"), ("batch", "free", "contraction"))
+    td = make_tensor_desc(
+        (1, 16, 8), (128, 8, 1), _DT("f16"), ("batch", "free", "contraction")
+    )
     reduced = td.squeeze(0)
     assert reduced.rank == 2
     assert reduced.axis_roles == ("free", "contraction")
@@ -171,7 +176,7 @@ def test_squeeze_drops_unit_batch_axis() -> None:
 
 def test_squeeze_refuses_non_unit_axis() -> None:
     with pytest.raises(ValueError, match="needs a length-1 axis"):
-        _batched().squeeze(0)                        # batch length is 4
+        _batched().squeeze(0)  # batch length is 4
 
 
 def test_squeeze_refuses_free_axis() -> None:
@@ -181,7 +186,9 @@ def test_squeeze_refuses_free_axis() -> None:
 
 
 def test_assert_mma_operand_passes_rank2_free_contraction() -> None:
-    make_tensor_desc((16, 8), (8, 1), _DT("f16"), ("free", "contraction")).assert_mma_operand()
+    make_tensor_desc(
+        (16, 8), (8, 1), _DT("f16"), ("free", "contraction")
+    ).assert_mma_operand()
 
 
 def test_assert_mma_operand_rejects_undeclared_roles() -> None:
@@ -192,12 +199,16 @@ def test_assert_mma_operand_rejects_undeclared_roles() -> None:
 def test_assert_mma_operand_accepts_b_orientation() -> None:
     # B is presented (K, N) = (contraction, free) so that A @ B^T maps onto the atom's A @ B; the
     # gate is order-agnostic (checks the axis SET, not the order).
-    make_tensor_desc((8, 16), (1, 8), _DT("f16"), ("contraction", "free")).assert_mma_operand()
+    make_tensor_desc(
+        (8, 16), (1, 8), _DT("f16"), ("contraction", "free")
+    ).assert_mma_operand()
 
 
 def test_assert_mma_operand_rejects_missing_contraction() -> None:
     with pytest.raises(ValueError, match="one free \\+ one contraction"):
-        make_tensor_desc((16, 16), (16, 1), _DT("f16"), ("free", "free")).assert_mma_operand()
+        make_tensor_desc(
+            (16, 16), (16, 1), _DT("f16"), ("free", "free")
+        ).assert_mma_operand()
 
 
 def test_assert_mma_operand_rejects_unreduced_rank3() -> None:

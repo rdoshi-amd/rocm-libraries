@@ -34,11 +34,18 @@ __all__ = [
 # Element byte-widths, keyed by the rocke ``ir.Type`` name. Drives the load/store
 # alignment so NO dtype is baked into the verb -- the width follows the fragment's type.
 _BYTE_WIDTH = {
-    "i8": 1, "fp8e4m3": 1, "bf8e5m2": 1,
-    "i16": 2, "f16": 2, "bf16": 2,
-    "i32": 4, "f32": 4,
-    "i64": 8, "f64": 8,
+    "i8": 1,
+    "fp8e4m3": 1,
+    "bf8e5m2": 1,
+    "i16": 2,
+    "f16": 2,
+    "bf16": 2,
+    "i32": 4,
+    "f32": 4,
+    "i64": 8,
+    "f64": 8,
 }
+
 
 def _align_of(dtype: Any) -> int:
     """Natural alignment (bytes) for an ``ir.Type`` -- the element's own width."""
@@ -50,9 +57,11 @@ def _align_of(dtype: Any) -> int:
             f"expected one of {sorted(_BYTE_WIDTH)}"
         ) from exc
 
+
 def _cast_element(b: Any, value: Any, src: Any, dst: Any) -> Any:
     """Honest, fail-fast element cast: identity, or the proven f32->{f16,bf16} accumulator
-    narrowing. Any other conversion raises rather than silently doing the wrong thing."""
+    narrowing. Any other conversion raises rather than silently doing the wrong thing.
+    """
     if src.name == dst.name:
         return value
     if src.name == "f32":
@@ -61,6 +70,7 @@ def _cast_element(b: Any, value: Any, src: Any, dst: Any) -> Any:
         f"unsupported fragment cast on store -- src={src.name!r}, dst={dst.name!r}, "
         f"expected src==dst or src=='f32'"
     )
+
 
 def emit_lane_contributors(
     b: Any, encoding: WarpDistributionEncoding, thread: Any
@@ -85,7 +95,9 @@ def emit_lane_contributors(
             contributor[partition_buckets[position]] = b.const_i32(0)
         else:
             divided = thread if suffix == 1 else b.div(thread, b.const_i32(suffix))
-            contributor[partition_buckets[position]] = b.mod(divided, b.const_i32(length))
+            contributor[partition_buckets[position]] = b.mod(
+                divided, b.const_i32(length)
+            )
         suffix *= length
     return contributor
 
@@ -102,7 +114,9 @@ def emit_coordinates_for_register(
     consecutive registers' coordinates, and thus addresses, differ by a constant. Returns ONE SSA
     coordinate per X-dim (2 for an MMA fragment, N for a data tile).
     """
-    register_buckets = list(zip(encoding.register_to_rh_major, encoding.register_to_rh_minor))
+    register_buckets = list(
+        zip(encoding.register_to_rh_major, encoding.register_to_rh_minor)
+    )
     register_lengths = [encoding.bucket_length(*bucket) for bucket in register_buckets]
 
     contributor = dict(lane_contributors)  # copy -- never mutate the hoisted lane map
@@ -144,22 +158,30 @@ def emit_tensor_coordinates(
         b, encoding, emit_lane_contributors(b, encoding, thread), register_index
     )
 
+
 def fill_fragment(b: Any, fragment: Fragment, scalar: Any) -> None:
     """Set every register of `fragment` to `scalar`, element-wise (no layout, no addressing).
     M1: scalar is 0."""
     fragment.value = b.zero_vec(fragment.dtype, fragment.tile_desc.register_count)
 
+
 def _as_value(b: Any, x: Any) -> Any:
     """An int becomes a const_i32; an SSA value passes through unchanged."""
     return b.const_i32(x) if isinstance(x, int) else x
 
+
 def _positions(b: Any, window: TensorWindow, coords: tuple[Any, ...]) -> list[Any]:
     """Per-axis GLOBAL position = origin + coord (the basis of both the address and the clip)."""
-    return [b.add(_as_value(b, window.origin[axis]), coord) for axis, coord in enumerate(coords)]
+    return [
+        b.add(_as_value(b, window.origin[axis]), coord)
+        for axis, coord in enumerate(coords)
+    ]
+
 
 def _address(b: Any, window: TensorWindow, positions: list[Any]) -> Any:
     """The strided element address from precomputed positions: sum(position * stride), plus the
-    fixed offset of any batch axes already reduced away by ``TensorWindow.at_index`` (``pinned``)."""
+    fixed offset of any batch axes already reduced away by ``TensorWindow.at_index`` (``pinned``).
+    """
     address: Any = None
     for axis, position in enumerate(positions):
         stride = window.tensor.strides[axis]
@@ -171,6 +193,7 @@ def _address(b: Any, window: TensorWindow, positions: list[Any]) -> Any:
         address = term if address is None else b.add(address, term)
     return address
 
+
 def _register_coord_offsets(
     encoding: WarpDistributionEncoding, register_index: int
 ) -> tuple[int, ...]:
@@ -180,7 +203,9 @@ def _register_coord_offsets(
     fixed per-register offset (linearized by the tensor strides) is added, so consecutive registers'
     addresses differ by a constant and the store vectorizer merges them into ``dwordx4``. It is
     bit-exact with the per-register reconstruction by linearity of ``_address``."""
-    register_buckets = list(zip(encoding.register_to_rh_major, encoding.register_to_rh_minor))
+    register_buckets = list(
+        zip(encoding.register_to_rh_major, encoding.register_to_rh_minor)
+    )
     register_lengths = [encoding.bucket_length(*bucket) for bucket in register_buckets]
     remainder = register_index
     register_values = [0] * len(register_lengths)
@@ -206,14 +231,18 @@ def _origin_misaligned(origin: Any, extent: int) -> bool:
     placed there straddles a tile boundary and can overhang the tensor's far edge even when the extent
     is a tile multiple. A runtime (SSA) origin is TRUSTED grid-aligned -- every current caller positions
     tiles at ``block_id * tile``. PARTIAL GUARD: an SSA mid-tile origin (attention's sliding window) is
-    NOT caught here; full mid-tile-origin handling is DEFERRED with attention support."""
+    NOT caught here; full mid-tile-origin handling is DEFERRED with attention support.
+    """
     return isinstance(origin, int) and origin % extent != 0
+
 
 def _loads_as_operand(tensor: Any) -> bool:
     """True when `tensor` is loaded as a TYPED MMA OPERAND -- it declares axis roles AND carries a
     CONTRACTION axis. A positional tensor (no roles) or an OUTPUT tensor whose roles are all `free`
-    (a C reload, (M, N)) is NOT an operand, so the rank-2 (free, contraction) gate must not fire for it."""
+    (a C reload, (M, N)) is NOT an operand, so the rank-2 (free, contraction) gate must not fire for it.
+    """
     return tensor.axis_roles is not None and "contraction" in tensor.axis_roles
+
 
 def _clip_mask(
     b: Any, window: TensorWindow, positions: list[Any], tile_shape: tuple[int, ...]
@@ -223,24 +252,36 @@ def _clip_mask(
     ``window.bounds`` (a `None` entry keeps the length). Predicate = AND over checked axes of
     ``position < bound``. A tile-aligned compile-time bound AT a grid-aligned origin can NEVER overhang,
     so it is SKIPPED at build time -- an aligned kernel emits no compare and stays byte-identical to
-    no-clip; a compile-time MID-TILE origin is NOT skipped (it could straddle the boundary)."""
+    no-clip; a compile-time MID-TILE origin is NOT skipped (it could straddle the boundary).
+    """
     mask: Any = None
     for axis, position in enumerate(positions):
         bound = window.bounds[axis] if window.bounds is not None else None
         if bound is None:
             bound = window.tensor.lengths[axis]
-        if isinstance(bound, int) and bound % tile_shape[axis] == 0 \
-                and not _origin_misaligned(window.origin[axis], tile_shape[axis]):
+        if (
+            isinstance(bound, int)
+            and bound % tile_shape[axis] == 0
+            and not _origin_misaligned(window.origin[axis], tile_shape[axis])
+        ):
             continue
         in_axis = b.cmp_lt(position, _as_value(b, bound))
         mask = in_axis if mask is None else b.land(mask, in_axis)
     return mask
 
+
 def _zero_scalar(b: Any, dtype: Any) -> Any:
     """A scalar 0 of `dtype` -- the zero-pad value handed to ``masked_global_load``."""
     return b.vec_extract(b.zero_vec(dtype, 1), 0)
 
-_WIDE_OK = {"f16", "bf16", "f32", "i32"}   # dtypes global_load_vN / smem_load_vN vectorize
+
+_WIDE_OK = {
+    "f16",
+    "bf16",
+    "f32",
+    "i32",
+}  # dtypes global_load_vN / smem_load_vN vectorize
+
 
 def _contiguous_run(
     tile_desc: TileDesc, window: TensorWindow, dtype: Any, is_lds: bool
@@ -264,7 +305,7 @@ def _contiguous_run(
     majors, minors = layout.register_to_rh_major, layout.register_to_rh_minor
     if not majors:
         return 1
-    axis = majors[-1] - 1                      # innermost register bucket's X-dim -> tensor axis
+    axis = majors[-1] - 1  # innermost register bucket's X-dim -> tensor axis
     if axis < 0 or window.tensor.strides[axis] != 1:
         return 1
     if not is_lds:
@@ -284,25 +325,33 @@ def _contiguous_run(
                 f"the wide-load bounds check needs matching ranks (reduce an N-D tensor with at_index)"
             )
         for ax in range(len(window.tensor.lengths)):
-            clip = window.bounds[ax] if window.bounds is not None and window.bounds[ax] is not None \
+            clip = (
+                window.bounds[ax]
+                if window.bounds is not None and window.bounds[ax] is not None
                 else window.tensor.lengths[ax]
+            )
             if not (isinstance(clip, int) and clip % tile_desc.shape[ax] == 0):
                 return 1
             if _origin_misaligned(window.origin[ax], tile_desc.shape[ax]):
                 return 1
     length = layout.bucket_length(majors[-1], minors[-1])
-    max_vw = 16 // _BYTE_WIDTH[dtype.name]   # one load = dwordx4 = 16 bytes; longer runs -> N loads
+    max_vw = (
+        16 // _BYTE_WIDTH[dtype.name]
+    )  # one load = dwordx4 = 16 bytes; longer runs -> N loads
     for vw in (16, 8, 4, 2):
         if vw <= max_vw and length % vw == 0:
             return vw
     return 1
 
+
 def _is_lds(source: Any) -> bool:
     """True when `source` is an LDS buffer (an ``smem<...>`` value from ``smem_alloc``) rather
     than a global/constant ``ptr<...>``. Lets one verb serve both spaces -- the load/store op is
-    chosen from the SOURCE, so the caller just hands the buffer (global ptr OR LDS smem) it has."""
+    chosen from the SOURCE, so the caller just hands the buffer (global ptr OR LDS smem) it has.
+    """
     name = getattr(getattr(source, "type", None), "name", "")
     return isinstance(name, str) and name.startswith("smem")
+
 
 def _swizzle_lds_positions(b: Any, positions: list) -> list:
     """XOR-swizzle the innermost LDS index by the outer index, at b128-block (8-f16) granularity:
@@ -310,7 +359,8 @@ def _swizzle_lds_positions(b: Any, positions: list) -> list:
     de-aliasing LDS banks across the outer (K) dim -> conflict-free WITHOUT padding (which breaks
     alignment). A bijection of the physical ``(outer, m)``, so applying it identically to the store and
     the read leaves correctness intact regardless of the two fragments' layouts. Requires each access to
-    be naturally vw-aligned within an 8-f16 block (true for our b128 store / b64 read)."""
+    be naturally vw-aligned within an 8-f16 block (true for our b128 store / b64 read).
+    """
     if len(positions) < 2:
         return positions
     outer, m = positions[-2], positions[-1]
@@ -326,7 +376,8 @@ def _swizzle_vw(lds_swizzle: Any, dist_vw: int, align: int) -> int:
     A callable swizzle relocates whole units of its granularity, so the access must not span wider than
     that unit. The callable declares its granularity via a ``vw_elems`` attribute (default = one dword);
     the built-in bool swizzle preserves the natural run. The chosen width is checked to satisfy
-    ``1 <= vw <= dist_vw`` (the distribution's natural contiguous run) -- wider is unrepresentable."""
+    ``1 <= vw <= dist_vw`` (the distribution's natural contiguous run) -- wider is unrepresentable.
+    """
     if not callable(lds_swizzle):
         return dist_vw
     want = getattr(lds_swizzle, "vw_elems", max(1, 4 // align))
@@ -371,7 +422,7 @@ def load_fragment(
         window.tensor.assert_mma_operand()
     align = _align_of(dtype)
     lds = _is_lds(ptr)
-    vw = _contiguous_run(tile_desc, window, dtype, lds)   # >1 -> one wide load per run
+    vw = _contiguous_run(tile_desc, window, dtype, lds)  # >1 -> one wide load per run
     # A custom swizzle relocates whole units of its granularity (vw_elems), capped + range-checked to
     # [1, natural run]. The built-in bool swizzle preserves its run.
     if lds:
@@ -422,6 +473,7 @@ def load_fragment(
         value = b.vec_insert(value, loaded, register)
     return Fragment(tile_desc, dtype, value)
 
+
 def store_fragment(
     b: Any,
     ptr: Any,
@@ -447,7 +499,11 @@ def store_fragment(
     lds = _is_lds(ptr)
     # Wide LDS stores when the innermost register run is contiguous (ds_write_b{32,64,128}); the
     # global store stays scalar (the C epilogue is one-shot + may clip/cast).
-    vw = _contiguous_run(fragment.tile_desc, window, out_dtype, is_lds=True) if lds else 1
+    vw = (
+        _contiguous_run(fragment.tile_desc, window, out_dtype, is_lds=True)
+        if lds
+        else 1
+    )
     # A custom swizzle relocates whole units of its granularity (vw_elems) -> the access is capped and
     # range-checked to [1, natural run]. The built-in bool swizzle preserves its run.
     if lds:
@@ -464,36 +520,55 @@ def store_fragment(
     base_address: Any = None
     if not lds:
         base_coords = emit_coordinates_for_register(
-            b, fragment.tile_desc.layout, emit_lane_contributors(b, fragment.tile_desc.layout, thread), 0
+            b,
+            fragment.tile_desc.layout,
+            emit_lane_contributors(b, fragment.tile_desc.layout, thread),
+            0,
         )
         base_positions = _positions(b, window, base_coords)
         base_address = _address(b, window, base_positions)
     for register in range(0, fragment.tile_desc.register_count, vw):
         if lds:
-            coords = emit_tensor_coordinates(b, fragment.tile_desc.layout, thread, register)
+            coords = emit_tensor_coordinates(
+                b, fragment.tile_desc.layout, thread, register
+            )
             positions = _positions(b, window, coords)
             if lds_swizzle:
                 swz = _swizzle_lds_positions if lds_swizzle is True else lds_swizzle
                 positions = swz(b, positions)
             if vw == 1:
-                el = _cast_element(b, b.vec_extract(fragment.value, register), fragment.dtype, out_dtype)
+                el = _cast_element(
+                    b,
+                    b.vec_extract(fragment.value, register),
+                    fragment.dtype,
+                    out_dtype,
+                )
                 b.smem_store_vN(ptr, positions, el, 1)
             else:
                 vec = b.zero_vec(out_dtype, vw)
                 for i in range(vw):
                     el = _cast_element(
-                        b, b.vec_extract(fragment.value, register + i), fragment.dtype, out_dtype
+                        b,
+                        b.vec_extract(fragment.value, register + i),
+                        fragment.dtype,
+                        out_dtype,
                     )
                     vec = b.vec_insert(vec, el, i)
                 b.smem_store_vN(ptr, positions, vec, vw)
             continue
         deltas = _register_coord_offsets(fragment.tile_desc.layout, register)
         positions = [
-            base_positions[axis] if d == 0 else b.add(base_positions[axis], b.const_i32(d))
+            (
+                base_positions[axis]
+                if d == 0
+                else b.add(base_positions[axis], b.const_i32(d))
+            )
             for axis, d in enumerate(deltas)
         ]
         offset = sum(d * window.tensor.strides[axis] for axis, d in enumerate(deltas))
-        address = base_address if offset == 0 else b.add(base_address, b.const_i32(offset))
+        address = (
+            base_address if offset == 0 else b.add(base_address, b.const_i32(offset))
+        )
         element = b.vec_extract(fragment.value, register)
         value = _cast_element(b, element, fragment.dtype, out_dtype)
         mask = _clip_mask(b, window, positions, fragment.tile_desc.shape)

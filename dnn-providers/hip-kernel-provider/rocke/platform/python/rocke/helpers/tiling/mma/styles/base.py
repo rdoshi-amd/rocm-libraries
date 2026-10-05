@@ -36,16 +36,17 @@ from ...traits import MmaTraits
 @dataclass(frozen=True)
 class AtomNumbers:
     """The handful of atom quantities a layout style needs, DERIVED from the traits SSOT (never
-    hand-typed), so a style re-derives for a different atom instead of being rewritten for it."""
+    hand-typed), so a style re-derives for a different atom instead of being rewritten for it.
+    """
 
     m: int
     n: int
     k: int
-    k_per_lane: int   # ABK -- K a lane holds per atom
-    k_lanes: int      # lanes spanning K within one atom == k / k_per_lane
-    c_patches: int    # CMN -- disjoint M sub-tiles a lane owns in the accumulator
+    k_per_lane: int  # ABK -- K a lane holds per atom
+    k_lanes: int  # lanes spanning K within one atom == k / k_per_lane
+    c_patches: int  # CMN -- disjoint M sub-tiles a lane owns in the accumulator
     c_lane_rows: int  # M / CM -- lanes the accumulator spends on M
-    c_inner: int      # CM / CMN -- contiguous accumulator M rows per patch per atom
+    c_inner: int  # CM / CMN -- contiguous accumulator M rows per patch per atom
     wave_size: int
 
     @classmethod
@@ -79,7 +80,9 @@ class LayoutStyle:
         a wave sub-grid of ``free_sub`` free-atoms x ``k_sub`` K-atoms."""
         raise NotImplementedError
 
-    def accumulator_desc(self, traits: MmaTraits, *, m_sub: int, n_sub: int) -> TileDesc:
+    def accumulator_desc(
+        self, traits: MmaTraits, *, m_sub: int, n_sub: int
+    ) -> TileDesc:
         """The DERIVED native C accumulator descriptor for a ``m_sub`` x ``n_sub`` wave grid. Always
         atom-derived (never style-supplied data)."""
         raise NotImplementedError

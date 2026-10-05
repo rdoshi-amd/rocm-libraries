@@ -116,7 +116,11 @@ class TensorDesc:
             tuple(self.lengths[i] for i in order),
             tuple(self.strides[i] for i in order),
             self.dtype,
-            tuple(self.axis_roles[i] for i in order) if self.axis_roles is not None else None,
+            (
+                tuple(self.axis_roles[i] for i in order)
+                if self.axis_roles is not None
+                else None
+            ),
         )
 
     def _drop_axis(self, axis: int) -> "TensorDesc":
@@ -126,7 +130,11 @@ class TensorDesc:
             tuple(self.lengths[a] for a in keep),
             tuple(self.strides[a] for a in keep),
             self.dtype,
-            tuple(self.axis_roles[a] for a in keep) if self.axis_roles is not None else None,
+            (
+                tuple(self.axis_roles[a] for a in keep)
+                if self.axis_roles is not None
+                else None
+            ),
         )
 
     def _check_reducible(self, axis: int, verb: str) -> None:
@@ -149,7 +157,8 @@ class TensorDesc:
 
     def squeeze(self, axis: int) -> "TensorDesc":
         """Drop a length-1 BATCH `axis` (typed; fail-fast on a free/contraction axis or a
-        non-unit axis). For a longer batch axis, pin one index with :meth:`TensorWindow.at_index`."""
+        non-unit axis). For a longer batch axis, pin one index with :meth:`TensorWindow.at_index`.
+        """
         self._check_reducible(axis, "squeeze")
         if self.lengths[axis] != 1:
             raise ValueError(
@@ -220,9 +229,13 @@ class TensorWindow:
         # origin and bounds both index the tensor's axes, so both agree with its rank.
         rank = self.tensor.rank
         if len(self.origin) != rank:
-            raise ValueError(f"window origin rank {len(self.origin)} != tensor rank {rank}")
+            raise ValueError(
+                f"window origin rank {len(self.origin)} != tensor rank {rank}"
+            )
         if self.bounds is not None and len(self.bounds) != rank:
-            raise ValueError(f"window bounds rank {len(self.bounds)} != tensor rank {rank}")
+            raise ValueError(
+                f"window bounds rank {len(self.bounds)} != tensor rank {rank}"
+            )
 
     def at_index(self, axis: int, index: Any) -> "TensorWindow":
         """Pin a BATCH `axis` to one `index` and DROP it -- the rank-reducing slice toward the
@@ -233,7 +246,8 @@ class TensorWindow:
         or a runtime SSA value (e.g. a batch-loop induction variable).
 
         `index` SUPPLIES the batch coordinate for this axis -- any `origin` previously set on it is
-        superseded (a batch axis is SELECTED, not positioned). In practice the batch origin is 0."""
+        superseded (a batch axis is SELECTED, not positioned). In practice the batch origin is 0.
+        """
         self.tensor._check_reducible(axis, "at_index")
         # Silent-wrong-answer guard (fail-fast BEFORE reducing): the pinned index IS the batch
         # coordinate, so a conflicting position/clip already on this axis must not be dropped
@@ -244,8 +258,11 @@ class TensorWindow:
                 f"(origin={self.origin[axis]!r}) -- the pinned index supplies the batch coordinate, "
                 f"so leave origin[axis]=0"
             )
-        if (self.bounds is not None and self.bounds[axis] is not None
-                and self.bounds[axis] != self.tensor.lengths[axis]):
+        if (
+            self.bounds is not None
+            and self.bounds[axis] is not None
+            and self.bounds[axis] != self.tensor.lengths[axis]
+        ):
             raise ValueError(
                 f"at_index cannot reduce a CLIPPED batch axis {axis} "
                 f"(bounds={self.bounds[axis]!r} != length {self.tensor.lengths[axis]})"

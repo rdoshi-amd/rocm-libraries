@@ -21,7 +21,9 @@ from ..encoding import WarpDistributionEncoding
 from ..register_mapper import RegisterMapper
 
 
-def interleave_idx(gather: int, stride: int, count: int, length: int | None = None) -> tuple[int, ...]:
+def interleave_idx(
+    gather: int, stride: int, count: int, length: int | None = None
+) -> tuple[int, ...]:
     """Register-index permutation ``interleave_idx<gather, stride, count>`` from the reference
     layout tables. Within each ``count``-sized block the local index is transposed as an
     ``(stride, count//stride)`` grid. ``target[i]`` for ``i in range(length)`` (``length`` defaults
@@ -42,7 +44,9 @@ def interleave_idx(gather: int, stride: int, count: int, length: int | None = No
         )
     length = count if length is None else length
     if length % count != 0:
-        raise ValueError(f"interleave_idx length must be a multiple of count -- length={length}, count={count}")
+        raise ValueError(
+            f"interleave_idx length must be a multiple of count -- length={length}, count={count}"
+        )
     inner = count // stride
     perm = [0] * length
     for i in range(length):
@@ -60,7 +64,7 @@ def name_permutation(perm: tuple[int, ...]) -> str:
     n = len(perm)
     if tuple(perm) == tuple(range(n)):
         return "identity (no reorder)"
-    for stride in range(2, n):                                  # count == n (single block); gather==1
+    for stride in range(2, n):  # count == n (single block); gather==1
         if n % stride:
             continue
         if tuple(perm) == interleave_idx(1, stride, n):
@@ -69,7 +73,9 @@ def name_permutation(perm: tuple[int, ...]) -> str:
     return f"reorder perm={perm}"
 
 
-def _forward_map(enc: WarpDistributionEncoding) -> tuple[dict[tuple[int, int], tuple[int, ...]], RegisterMapper]:
+def _forward_map(
+    enc: WarpDistributionEncoding,
+) -> tuple[dict[tuple[int, int], tuple[int, ...]], RegisterMapper]:
     """{(lane, register) -> matrix coordinate} for every slot of the encoding."""
     m = RegisterMapper(enc)
     fmap = {
@@ -80,7 +86,9 @@ def _forward_map(enc: WarpDistributionEncoding) -> tuple[dict[tuple[int, int], t
     return fmap, m
 
 
-def k_distribution(enc: WarpDistributionEncoding, k_axis: int = 1) -> tuple[tuple[int, ...], ...]:
+def k_distribution(
+    enc: WarpDistributionEncoding, k_axis: int = 1
+) -> tuple[tuple[int, ...], ...]:
     """Project the encoding onto its K axis: per lane, the tuple of K coordinates by register slot.
 
     ``k_axis`` is the contraction axis index (1 for both A=(M,K) and B=(N,K)). Two operands are
@@ -88,7 +96,9 @@ def k_distribution(enc: WarpDistributionEncoding, k_axis: int = 1) -> tuple[tupl
     """
     m = RegisterMapper(enc)
     return tuple(
-        tuple(m.matrix_coordinates(lane, reg)[k_axis] for reg in range(m.num_vector_items))
+        tuple(
+            m.matrix_coordinates(lane, reg)[k_axis] for reg in range(m.num_vector_items)
+        )
         for lane in range(m.num_lanes)
     )
 
@@ -101,8 +111,11 @@ def as_forward_map(x) -> dict[tuple[int, int], tuple[int, ...]]:
     if isinstance(x, dict):
         return x
     rm = RegisterMapper(x)
-    return {(l, r): tuple(rm.matrix_coordinates(l, r))
-            for l in range(rm.num_lanes) for r in range(rm.num_vector_items)}
+    return {
+        (l, r): tuple(rm.matrix_coordinates(l, r))
+        for l in range(rm.num_lanes)
+        for r in range(rm.num_vector_items)
+    }
 
 
 @dataclass(frozen=True)
@@ -116,8 +129,10 @@ class TransformPlan:
     reason: str
 
 
-def _classify_maps(smap: dict[tuple[int, int], tuple[int, ...]],
-                   tmap: dict[tuple[int, int], tuple[int, ...]]) -> TransformPlan:
+def _classify_maps(
+    smap: dict[tuple[int, int], tuple[int, ...]],
+    tmap: dict[tuple[int, int], tuple[int, ...]],
+) -> TransformPlan:
     """Classify the delta ``smap -> tmap`` between two forward maps ``{(lane,reg)->coord}`` (the IR-free
     core; works on labels from an encoding OR from another stage).
 
@@ -127,8 +142,10 @@ def _classify_maps(smap: dict[tuple[int, int], tuple[int, ...]],
 
     Raises ``ValueError`` if the maps describe different fragment dimensions or different element sets.
     """
-    s_lanes = {l for l, _ in smap}; s_regs = {r for _, r in smap}
-    t_lanes = {l for l, _ in tmap}; t_regs = {r for _, r in tmap}
+    s_lanes = {l for l, _ in smap}
+    s_regs = {r for _, r in smap}
+    t_lanes = {l for l, _ in tmap}
+    t_regs = {r for _, r in tmap}
     if (len(s_lanes), len(s_regs)) != (len(t_lanes), len(t_regs)):
         raise ValueError(
             "cannot transform between fragments of different dimensions -- source is "
@@ -160,7 +177,8 @@ def _classify_maps(smap: dict[tuple[int, int], tuple[int, ...]],
         dst_lane, dst_reg = target_of[coord]
         if dst_lane != lane:
             return TransformPlan(
-                "cross_lane", None,
+                "cross_lane",
+                None,
                 f"element {coord} moves lane {lane}->{dst_lane}; needs cross-lane movement",
             )
         per_lane_perm.setdefault(lane, {})[reg] = dst_reg
@@ -169,7 +187,8 @@ def _classify_maps(smap: dict[tuple[int, int], tuple[int, ...]],
     for lane, perm in per_lane_perm.items():
         if perm != reference:
             return TransformPlan(
-                "cross_lane", None,
+                "cross_lane",
+                None,
                 f"register permutation on lane {lane} differs from lane 0 -- not lane-uniform, "
                 "so not a single compile-time reorder",
             )
@@ -187,16 +206,18 @@ class ReorderPlan:
     *sub-dword* reorder is a real ``v_perm_b32`` repack; ``vperm_per_lane`` is the emitted-op estimate;
     ``cost`` is the one-line render string. A returned plan ALWAYS means a real reorder (identity ->
     ``reorder_between`` returns ``None``)."""
-    tier: str                                  # "reorder (dword)" | "reorder (sub-dword, Nx)" | "cross_lane"
+
+    tier: str  # "reorder (dword)" | "reorder (sub-dword, Nx)" | "cross_lane"
     permutation: tuple[int, ...] | None
-    label: str                                 # name_permutation(perm), e.g. "interleave_idx(1, 8, 32) ..."
+    label: str  # name_permutation(perm), e.g. "interleave_idx(1, 8, 32) ..."
     vperm_per_lane: int
     cost: str
 
 
 def _dword_aligned(perm: tuple[int, ...], pack: int) -> bool:
     """True iff ``perm`` moves whole ``pack``-sized dword blocks as units (register renumber); False iff it
-    splits a dword (a sub-dword repack -- a real ``v_perm_b32``). ``pack`` = elements per 32-bit register."""
+    splits a dword (a sub-dword repack -- a real ``v_perm_b32``). ``pack`` = elements per 32-bit register.
+    """
     if pack <= 1:
         return True
     for b in range(0, len(perm), pack):
@@ -205,8 +226,10 @@ def _dword_aligned(perm: tuple[int, ...], pack: int) -> bool:
     return True
 
 
-def _axis_permutation(smap: dict[tuple[int, int], tuple[int, ...]],
-                      tmap: dict[tuple[int, int], tuple[int, ...]]) -> tuple[int, ...] | None:
+def _axis_permutation(
+    smap: dict[tuple[int, int], tuple[int, ...]],
+    tmap: dict[tuple[int, int], tuple[int, ...]],
+) -> tuple[int, ...] | None:
     """The fixed axis permutation ``pi`` with ``tmap[k] == tuple(smap[k][pi[i]] for i)`` for EVERY shared
     key, or ``None``. Identity ``pi`` = a pure rename (numeric coords unchanged); a non-identity ``pi`` = a
     transpose / axis swap. Both maps must share keys and coord rank."""
@@ -238,7 +261,7 @@ def _atom_k_signature(
                 f"{role}-atoms -- not a clean atom tiling"
             )
         width = len(kl) // atoms
-        chunks = [kl[i * width:(i + 1) * width] for i in range(atoms)]
+        chunks = [kl[i * width : (i + 1) * width] for i in range(atoms)]
         if any(c != chunks[0] for c in chunks):
             return (), (
                 f"{role} fragment lane {lane} K-slots {kl} are not a uniform repeat across "
@@ -248,15 +271,22 @@ def _atom_k_signature(
     return tuple(sig), ""
 
 
-def _kdist_from_fwd(fwd: dict[tuple[int, int], tuple[int, ...]], k_axis: int = 1) -> tuple[tuple[int, ...], ...]:
+def _kdist_from_fwd(
+    fwd: dict[tuple[int, int], tuple[int, ...]], k_axis: int = 1
+) -> tuple[tuple[int, ...], ...]:
     """Per-lane K sequence (by ascending register) from a forward map -- the ``k_distribution`` of a map."""
     lanes = sorted({l for l, _ in fwd})
-    return tuple(tuple(fwd[(l, r)][k_axis] for r in sorted(rr for (ll, rr) in fwd if ll == l)) for l in lanes)
+    return tuple(
+        tuple(fwd[(l, r)][k_axis] for r in sorted(rr for (ll, rr) in fwd if ll == l))
+        for l in lanes
+    )
 
 
 def _free_relabel(
-    canon: WarpDistributionEncoding, supplied_fwd: dict[tuple[int, int], tuple[int, ...]],
-    free_axis: int = 0, k_axis: int = 1,
+    canon: WarpDistributionEncoding,
+    supplied_fwd: dict[tuple[int, int], tuple[int, ...]],
+    free_axis: int = 0,
+    k_axis: int = 1,
 ) -> dict[int, int]:
     """Map each canonical free index -> the SUPPLIED layout's free label at that index's canonical K=0 slot.
 
@@ -264,7 +294,9 @@ def _free_relabel(
     label sitting on that register is what actually FLOWS through the machine (docs/mma_is_machinery.md).
     Canonical input -> identity; a relabeled input -> the relabel.
     """
-    cinv = RegisterMapper(canon).inverse_map()          # (free, k) -> LaneRegister  (the canonical machine)
+    cinv = RegisterMapper(
+        canon
+    ).inverse_map()  # (free, k) -> LaneRegister  (the canonical machine)
     rel: dict[int, int] = {}
     for coord, lr in cinv.items():
         if coord[k_axis] == 0:
@@ -275,7 +307,8 @@ def _free_relabel(
 @dataclass(frozen=True)
 class Diagnostic:
     """A pure OBSERVATION about a layout/pair -- ``severity`` in ``{"ok", "warning", "error"}`` + a
-    ``message``. Diagnostics never mutate a distribution; they only report what is true of the labels."""
+    ``message``. Diagnostics never mutate a distribution; they only report what is true of the labels.
+    """
 
     severity: str
     message: str

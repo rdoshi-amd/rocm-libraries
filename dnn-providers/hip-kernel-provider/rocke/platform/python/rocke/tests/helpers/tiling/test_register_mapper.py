@@ -44,7 +44,9 @@ def test_c_mapper_covers_every_element_once() -> None:
 
 
 def test_a_mapper_counts() -> None:
-    mapper = RegisterMapper(a_warp_encoding(load_mma_traits().get("mfma_f32_16x16x16f16")))
+    mapper = RegisterMapper(
+        a_warp_encoding(load_mma_traits().get("mfma_f32_16x16x16f16"))
+    )
     assert mapper.num_lanes == 64
     assert mapper.num_vector_items == 4  # a_per_lane
 
@@ -108,6 +110,6 @@ def test_c_forward_map_reproduces_lane_to_output(factory_name: str, op_id: str) 
         for register in range(mapper.num_vector_items):
             ours = mapper.matrix_coordinates(lane, register)
             expected = tuple(atom.lane_to_output(builder, lane, register))
-            assert ours == expected, (
-                f"{op_id}: lane={lane} reg={register} ours={ours} oracle={expected}"
-            )
+            assert (
+                ours == expected
+            ), f"{op_id}: lane={lane} reg={register} ours={ours} oracle={expected}"

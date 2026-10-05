@@ -51,28 +51,34 @@ class Instruction:
 
 @dataclass(frozen=True)
 class CoalescingReport:
-    direction: str            # "load" | "store"
-    dims: tuple               # axis NAMES, per coord component -- carried so a render never guesses which is which
-    strides: tuple            # element stride per axis (parallel to dims) -- the source of the addresses
+    direction: str  # "load" | "store"
+    dims: tuple  # axis NAMES, per coord component -- carried so a render never guesses which is which
+    strides: tuple  # element stride per axis (parallel to dims) -- the source of the addresses
     dtype_bits: int
-    line_bytes: int           # ARCH cache-line size -- explicit, never assumed (differs per arch)
-    per_instruction: tuple    # of Instruction, in issue order
-    worst_lines: int          # max cache lines any single instruction touches
+    line_bytes: (
+        int  # ARCH cache-line size -- explicit, never assumed (differs per arch)
+    )
+    per_instruction: tuple  # of Instruction, in issue order
+    worst_lines: int  # max cache lines any single instruction touches
     best_lines: int
-    fully_coalesced: bool     # every instruction fused
-    footprint_ratio: float    # worst instruction's lines / its minimum -- the cache WORKING-SET / eviction cost
+    fully_coalesced: bool  # every instruction fused
+    footprint_ratio: float  # worst instruction's lines / its minimum -- the cache WORKING-SET / eviction cost
 
     @property
     def stride1_axis(self) -> str:
         """The contiguous axis (stride == 1, else the smallest stride) -- BY NAME, from the given dims."""
-        i = self.strides.index(1) if 1 in self.strides else min(range(len(self.strides)),
-                                                                 key=lambda k: self.strides[k])
+        i = (
+            self.strides.index(1)
+            if 1 in self.strides
+            else min(range(len(self.strides)), key=lambda k: self.strides[k])
+        )
         return self.dims[i]
 
     @property
     def ideal_vw_elems(self) -> int:
         """The per-lane vector width (elements) this LAYOUT+strides SUPPORT (b128-ideal). What codegen SHOULD be
-        able to emit; the achieved width is a separate, ASM-observed fact -- see :meth:`reconcile`."""
+        able to emit; the achieved width is a separate, ASM-observed fact -- see :meth:`reconcile`.
+        """
         return self.per_instruction[0].vw_elems if self.per_instruction else 0
 
     def reconcile(self, achieved_vw_elems):
@@ -80,24 +86,34 @@ class CoalescingReport:
         (from ``llvm-objdump``). Returns ``(ok, note)``. A gap is NEVER silently reconciled away -- it is
         FLAGGED as a suspected bug, because an achieved < ideal width is exactly the signal that surfaced the
         C-store b64/b128 defect (the bug may live in the viz/model OR in the asm generation; either way the
-        human must look). ``ok`` is False whenever achieved != ideal (over- OR under-shoot both suspicious)."""
+        human must look). ``ok`` is False whenever achieved != ideal (over- OR under-shoot both suspicious).
+        """
         ideal = self.ideal_vw_elems
         if achieved_vw_elems == ideal:
-            return True, f"achieved VW={achieved_vw_elems} == b128-ideal VW={ideal} (consistent)"
+            return (
+                True,
+                f"achieved VW={achieved_vw_elems} == b128-ideal VW={ideal} (consistent)",
+            )
         rel = "under" if achieved_vw_elems < ideal else "OVER"
-        return False, (f"DISCREPANCY: achieved VW={achieved_vw_elems} {rel}shoots b128-ideal VW={ideal} "
-                       f"-- SUSPECTED BUG (viz/model OR asm generation); do not dismiss, investigate")
+        return False, (
+            f"DISCREPANCY: achieved VW={achieved_vw_elems} {rel}shoots b128-ideal VW={ideal} "
+            f"-- SUSPECTED BUG (viz/model OR asm generation); do not dismiss, investigate"
+        )
 
     def summary(self) -> str:
         axes = ", ".join(f"{d} stride {s}" for d, s in zip(self.dims, self.strides))
-        return (f"{self.direction} [{axes}]: contiguous axis = {self.stride1_axis}; "
-                f"{len(self.per_instruction)} instr, VW={self.ideal_vw_elems} elems (b128-ideal), "
-                f"lines/instr {self.best_lines}..{self.worst_lines} ({self.line_bytes}B lines), "
-                f"footprint {self.footprint_ratio:g}x, "
-                f"{'FULLY COALESCED' if self.fully_coalesced else 'SCATTERED'}")
+        return (
+            f"{self.direction} [{axes}]: contiguous axis = {self.stride1_axis}; "
+            f"{len(self.per_instruction)} instr, VW={self.ideal_vw_elems} elems (b128-ideal), "
+            f"lines/instr {self.best_lines}..{self.worst_lines} ({self.line_bytes}B lines), "
+            f"footprint {self.footprint_ratio:g}x, "
+            f"{'FULLY COALESCED' if self.fully_coalesced else 'SCATTERED'}"
+        )
 
 
-def analyze_coalescing(distribution, dims, strides, dtype_bits, *, direction="store", line_bytes):
+def analyze_coalescing(
+    distribution, dims, strides, dtype_bits, *, direction="store", line_bytes
+):
     """GENERIC coalescing report for a ``distribution`` accessing a tensor.
 
     ``distribution`` is a ``WarpDistributionEncoding`` OR a forward map ``{(lane,reg)->coord}``. ``dims`` are the
@@ -111,12 +127,18 @@ def analyze_coalescing(distribution, dims, strides, dtype_bits, *, direction="st
     """
     dims, strides = tuple(dims), tuple(int(s) for s in strides)
     if len(dims) != len(strides):
-        raise ValueError(f"dims {dims} and strides {strides} must be parallel (one stride per named axis)")
-    fwd = as_forward_map(distribution)                       # {(lane,reg) -> coord}
+        raise ValueError(
+            f"dims {dims} and strides {strides} must be parallel (one stride per named axis)"
+        )
+    fwd = as_forward_map(distribution)  # {(lane,reg) -> coord}
     addr = addr_fn_from_strides(strides)
     ebytes = max(1, dtype_bits // 8)
-    order = "addr" if direction == "store" else "reg"        # store = memory order; load = register/fill order
-    ts, _maxt = vector_transactions(fwd, lambda r, c: addr(r, c), dtype_bits, order_by=order, max_bits=128)
+    order = (
+        "addr" if direction == "store" else "reg"
+    )  # store = memory order; load = register/fill order
+    ts, _maxt = vector_transactions(
+        fwd, lambda r, c: addr(r, c), dtype_bits, order_by=order, max_bits=128
+    )
 
     by_inst: dict = {}
     for (lane, reg), t in ts.items():
@@ -124,20 +146,47 @@ def analyze_coalescing(distribution, dims, strides, dtype_bits, *, direction="st
     insts = []
     for t in sorted(by_inst):
         lanes = by_inst[t]
-        baddrs = sorted({addr(*c) * ebytes for coords in lanes.values() for c in coords})
+        baddrs = sorted(
+            {addr(*c) * ebytes for coords in lanes.values() for c in coords}
+        )
         lines = sorted({b // line_bytes for b in baddrs})
         vw = max(len(c) for c in lanes.values())
-        min_lines = -(-len(baddrs) * ebytes // line_bytes)   # ceil: fewest lines these bytes could occupy
-        lane_vectors = tuple(sorted(
-            (lane, min(addr(*c) for c in coords) * ebytes, len(coords))
-            for lane, coords in lanes.items()))
-        insts.append(Instruction(t, len(lanes), vw, tuple(baddrs), tuple(lines), min_lines,
-                                 len(lines) <= min_lines, lane_vectors))
+        min_lines = -(
+            -len(baddrs) * ebytes // line_bytes
+        )  # ceil: fewest lines these bytes could occupy
+        lane_vectors = tuple(
+            sorted(
+                (lane, min(addr(*c) for c in coords) * ebytes, len(coords))
+                for lane, coords in lanes.items()
+            )
+        )
+        insts.append(
+            Instruction(
+                t,
+                len(lanes),
+                vw,
+                tuple(baddrs),
+                tuple(lines),
+                min_lines,
+                len(lines) <= min_lines,
+                lane_vectors,
+            )
+        )
     worst = max((len(i.lines) for i in insts), default=0)
     best = min((len(i.lines) for i in insts), default=0)
     footprint = max((i.footprint for i in insts), default=1.0)
-    return CoalescingReport(direction, dims, strides, dtype_bits, line_bytes, tuple(insts), worst, best,
-                            all(i.fused for i in insts), footprint)
+    return CoalescingReport(
+        direction,
+        dims,
+        strides,
+        dtype_bits,
+        line_bytes,
+        tuple(insts),
+        worst,
+        best,
+        all(i.fused for i in insts),
+        footprint,
+    )
 
 
 def assert_asm_backed(report, achieved_vw_elems):
@@ -145,7 +194,8 @@ def assert_asm_backed(report, achieved_vw_elems):
     emitted (from ``llvm-objdump``); RAISES if it disagrees with the b128-ideal width the layout supports. This
     is intentionally fatal -- an ideal-vs-achieved gap is never a warning to skim past: it is a bug in EITHER
     the viz/model OR the asm generation (that gap is exactly how the C-store b64/b128 defect was found), and a
-    test standing on this report must FAIL until a human resolves it. Returns the (ok, note) on success."""
+    test standing on this report must FAIL until a human resolves it. Returns the (ok, note) on success.
+    """
     ok, note = report.reconcile(achieved_vw_elems)
     if not ok:
         raise AssertionError(f"ASM does not back the coalescing model -- {note}")

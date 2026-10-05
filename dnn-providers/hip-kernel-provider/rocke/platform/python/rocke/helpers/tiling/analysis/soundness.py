@@ -31,8 +31,14 @@ def verify_mma_soundness(pipeline: Any) -> int:
     for op in pipeline.ops:
         if op.kind != "mma":
             continue
-        d = mma_pair_compatible(op.a_enc, op.b_enc, a_canon=op.a_canon, b_canon=op.b_canon,
-                                a_free_atoms=op.a_free_atoms, b_free_atoms=op.b_free_atoms)
+        d = mma_pair_compatible(
+            op.a_enc,
+            op.b_enc,
+            a_canon=op.a_canon,
+            b_canon=op.b_canon,
+            a_free_atoms=op.a_free_atoms,
+            b_free_atoms=op.b_free_atoms,
+        )
         if d.severity == "error":
             raise MmaSoundnessError(f"MMA op seq {op.seq}: {d.message}")
         verified += 1

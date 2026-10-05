@@ -22,9 +22,11 @@ from .register_mapper import RegisterMapper
 
 __all__ = ["TileDesc", "Fragment", "make_fragment", "fragment_length"]
 
+
 def fragment_length(encoding: WarpDistributionEncoding) -> int:
     """Per-lane register count for an encoding (= num_vector_items)."""
     return RegisterMapper(encoding).num_vector_items
+
 
 @dataclass(frozen=True)
 class TileDesc:
@@ -74,7 +76,9 @@ class TileDesc:
             layout=WarpDistributionEncoding(
                 replication_lengths=e.replication_lengths,
                 hierarchical_lengths=tuple(hl),
-                lane_to_rh_major=tuple(tuple(remap(m) for m in row) for row in e.lane_to_rh_major),
+                lane_to_rh_major=tuple(
+                    tuple(remap(m) for m in row) for row in e.lane_to_rh_major
+                ),
                 lane_to_rh_minor=e.lane_to_rh_minor,
                 register_to_rh_major=tuple(remap(m) for m in e.register_to_rh_major),
                 register_to_rh_minor=e.register_to_rh_minor,
@@ -108,6 +112,7 @@ class TileDesc:
             ),
         )
 
+
 @dataclass
 class Fragment:
     """Per-lane register data for a tile: the `tile_desc` that lays it out, its element
@@ -117,6 +122,7 @@ class Fragment:
     tile_desc: TileDesc
     dtype: Any
     value: Any = None
+
 
 def make_fragment(tile_desc: TileDesc, dtype: Any, value: Any = None) -> Fragment:
     """Free factory: a `Fragment` for `tile_desc` at element `dtype` (registers set by

@@ -28,12 +28,14 @@ from .encoding import WarpDistributionEncoding
 
 __all__ = ["RegisterMapper", "LaneRegister"]
 
+
 @dataclass(frozen=True)
 class LaneRegister:
     """A (lane, per-lane register slot) location within a wave's fragment."""
 
     lane: int
     register: int
+
 
 class RegisterMapper:
     """Pure-int register/lane <-> matrix-coordinate mapper for one warp encoding."""

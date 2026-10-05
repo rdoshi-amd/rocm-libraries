@@ -46,6 +46,7 @@ def test_lds_bridge_rejects_bad_role() -> None:
 
 # ---- #33: per-operand soundness runs at TileMmaPlan CONSTRUCTION (same timing as the C-oracle) ----
 
+
 def test_shipped_styles_build_a_plan_without_raising() -> None:
     # Both profiles pass the construction-time operand-soundness check by construction -- for a
     # single-atom wave AND a subtiled one. The (32,32,32) wave over a (16,16,16) atom makes
@@ -54,13 +55,19 @@ def test_shipped_styles_build_a_plan_without_raising() -> None:
     from rocke.helpers.tiling.mma.plan import TileMmaPlan, Tiling
 
     configs = (
-        ((16, 16, 16), None),                              # single atom (m_sub=n_sub=k_sub=1)
-        ((32, 32, 32), Tiling(atom_shape=(16, 16, 16))),   # 2x2x2 subtiled wave tile
+        ((16, 16, 16), None),  # single atom (m_sub=n_sub=k_sub=1)
+        ((32, 32, 32), Tiling(atom_shape=(16, 16, 16))),  # 2x2x2 subtiled wave tile
     )
     for style in (CanonicalStyle(), InterleavedStyle()):
         for shape, tiling in configs:
             TileMmaPlan(
-                shape, a="f16", b="f16", c="f32", target="gfx90a", style=style, tiling=tiling
+                shape,
+                a="f16",
+                b="f16",
+                c="f32",
+                target="gfx90a",
+                style=style,
+                tiling=tiling,
             )
 
 
@@ -72,7 +79,9 @@ def test_unsound_operand_rejected_at_plan_construction(monkeypatch) -> None:
     from rocke.helpers.tiling.transforms._core import Diagnostic
 
     monkeypatch.setattr(
-        transforms, "mma_operand_layout_sound", lambda *a, **k: Diagnostic("error", "forced-unsound (test)")
+        transforms,
+        "mma_operand_layout_sound",
+        lambda *a, **k: Diagnostic("error", "forced-unsound (test)"),
     )
     with pytest.raises(ValueError, match="not sound"):
         TileMmaPlan((16, 16, 16), a="f16", b="f16", c="f32", target="gfx90a")

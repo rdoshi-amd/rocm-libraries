@@ -24,12 +24,14 @@ from ..traits import MmaTraits
 
 __all__ = ["a_warp_encoding", "b_warp_encoding", "c_warp_encoding", "canonical_layouts"]
 
+
 def _require_divisible(numerator: int, denominator: int, what: str, op_id: str) -> int:
     if denominator == 0 or numerator % denominator != 0:
         raise ValueError(
             f"{what} not divisible -- op_id={op_id!r}, {numerator} % {denominator} != 0"
         )
     return numerator // denominator
+
 
 def c_warp_encoding(
     traits: MmaTraits, m_iter: int = 1, n_iter: int = 1
@@ -94,6 +96,7 @@ def c_warp_encoding(
         register_to_rh_minor=tuple(reg_minor),
     )
 
+
 def _ab_strided_k_encoding(
     *,
     major_dim_size: int,
@@ -119,7 +122,9 @@ def _ab_strided_k_encoding(
       lane merges {K1, R, major_dim}; registers = {num_access, k_per_lane/num_access}.
     """
     k_outer = _require_divisible(k_dim, k_per_lane, "K / k_ab_per_lane", op_id)
-    k_inner = _require_divisible(k_per_lane, num_access, "k_ab_per_lane / num_access", op_id)
+    k_inner = _require_divisible(
+        k_per_lane, num_access, "k_ab_per_lane / num_access", op_id
+    )
     if major_iter <= 0 or k_iter <= 0:
         raise ValueError(
             f"major_iter/k_iter must be positive -- op_id={op_id!r}, "
@@ -171,6 +176,7 @@ def _ab_strided_k_encoding(
         register_to_rh_minor=tuple(reg_minor),
     )
 
+
 def a_warp_encoding(
     traits: MmaTraits, m_iter: int = 1, k_iter: int = 1
 ) -> WarpDistributionEncoding:
@@ -187,6 +193,7 @@ def a_warp_encoding(
         major_iter=m_iter,
         k_iter=k_iter,
     )
+
 
 def b_warp_encoding(
     traits: MmaTraits, n_iter: int = 1, k_iter: int = 1
@@ -205,9 +212,12 @@ def b_warp_encoding(
         k_iter=k_iter,
     )
 
+
 def canonical_layouts(
     traits: MmaTraits, subtiles: tuple[int, int, int]
-) -> tuple[WarpDistributionEncoding, WarpDistributionEncoding, WarpDistributionEncoding]:
+) -> tuple[
+    WarpDistributionEncoding, WarpDistributionEncoding, WarpDistributionEncoding
+]:
     """The canonical-machine yardstick ``(a_canon, b_canon, c_canon)`` for a wave tile.
 
     Sibling-facing internal factory (in ``__all__`` alongside the three ``*_warp_encoding`` fundamentals it

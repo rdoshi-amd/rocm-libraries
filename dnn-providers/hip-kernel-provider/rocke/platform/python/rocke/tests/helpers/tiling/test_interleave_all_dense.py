@@ -18,6 +18,7 @@ population counts are asserted so a catalogue change (a new atom, a changed trai
 Interleavability depends only on (shape, wave, element size), so bf8/fp8, bf16/f16 and f32/xf32 are
 equivalent — but every distinct dense row is still exercised.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -25,7 +26,11 @@ import pytest
 from rocke.helpers.tiling.traits import load_mma_traits
 from rocke.helpers.tiling.layouts import make_tile_desc
 from rocke.helpers.tiling.mma.styles import AtomNumbers, InterleavedStyle
-from rocke.helpers.tiling.transforms import as_forward_map, classify_transform, mma_pair_k_aligned
+from rocke.helpers.tiling.transforms import (
+    as_forward_map,
+    classify_transform,
+    mma_pair_k_aligned,
+)
 
 # The interleaved operand/accumulator descriptors are the promoted `InterleavedStyle`; the atom quantities
 # come from the library `AtomNumbers.from_traits`. The one piece not yet promoted is the C store-order
@@ -37,12 +42,13 @@ _STYLE = InterleavedStyle()
 def _c_store_desc(atom, wave_m, wave_n, m_sub, n_sub):
     """The C-shuffle TARGET (row-major store order): register order `(mna, m_local, n_local)` with the
     n_sub-wide N run contiguous. The lane's `P` disjoint M runs are a `block_repeat` on M above the lane
-    level, so `make_tile_desc` expresses it directly; at `P == 1` it is the single-rectangle desc."""
+    level, so `make_tile_desc` expresses it directly; at `P == 1` it is the single-rectangle desc.
+    """
     return make_tile_desc(
         shape=[wave_m, wave_n],
         thread_tile=[atom.c_inner * m_sub, n_sub],
         thread_dist=[atom.c_lane_rows, atom.n],
-        thread_order=[0, 1],               # N fastest -> lane = mo*atom.n + n_in, matching native C
+        thread_order=[0, 1],  # N fastest -> lane = mo*atom.n + n_in, matching native C
         block_repeat=[atom.c_patches, 1],  # the lane's P disjoint M sub-tiles
         wave_size=atom.wave_size,
     )
@@ -54,10 +60,12 @@ def _operand_gate(t) -> bool:
     must DIVIDE the wave; the quotient is the broadcast/replication factor (1 for CDNA/gfx12; 2 for
     gfx11 WMMA, which holds the whole K per lane and DUPLICATES the operand across the two 16-lane
     halves -- identical data, no cross-lane). Fails when EITHER operand OVER-subscribes the wave -- the
-    non-square f4 row does so on A (32*2 = 64 > 32) while B is fine (16*2 = 32), so the row is out."""
+    non-square f4 row does so on A (32*2 = 64 > 32) while B is fine (16*2 = 32), so the row is out.
+    """
     k_lanes = t.k // t.k_ab_per_lane
     return all(
-        free_lanes * k_lanes <= t.wave_size and t.wave_size % (free_lanes * k_lanes) == 0
+        free_lanes * k_lanes <= t.wave_size
+        and t.wave_size % (free_lanes * k_lanes) == 0
         for free_lanes in (t.m, t.n)  # A's free = M, B's free = N
     )
 
@@ -72,8 +80,11 @@ def _operand_reorder_ok(t, a, free_atoms: int, k_sub: int) -> tuple[bool, str]:
     a replicated (gfx11) operand duplicates each element across copies, so full-wave ``classify_transform``
     false-positives to ``cross_lane`` (it pairs the duplicate with a different copy). Prove it directly:
     (a) every lane keeps its exact element set (the DEFINITION of a within-lane reorder), AND (b) within ONE
-    replication copy the transform classifies as ``reorder``. Non-replicated atoms use the plain full-wave check."""
-    rd, mma = _STYLE.operand_descs(t, free_sub=free_atoms, k_sub=k_sub, free_lanes=a.m)  # A operand (free = M)
+    replication copy the transform classifies as ``reorder``. Non-replicated atoms use the plain full-wave check.
+    """
+    rd, mma = _STYLE.operand_descs(
+        t, free_sub=free_atoms, k_sub=k_sub, free_lanes=a.m
+    )  # A operand (free = M)
     broadcast = a.wave_size // (a.m * a.k_lanes)
     if broadcast == 1:
         plan = classify_transform(rd.layout, mma.layout)
@@ -128,7 +139,9 @@ def test_dense_mma_interleavable(t):
     # Operand K-contiguous <-> free-dim-contiguous transpose, single atom and multi-atom (DPT/k_sub>1).
     for free_atoms, k_sub in [(1, 1), (2, 2)]:
         ok, tier = _operand_reorder_ok(t, a, free_atoms, k_sub)
-        assert ok, f"{t.op_id}: operand K<->free is {tier} at (free_atoms={free_atoms}, k_sub={k_sub})"
+        assert (
+            ok
+        ), f"{t.op_id}: operand K<->free is {tier} at (free_atoms={free_atoms}, k_sub={k_sub})"
 
     # MMA soundness (positional per-atom K-match) for the base single-atom operands. Per-operand free
     # lanes: A's free axis is M (free_lanes=a.m), B's is N (free_lanes=a.n) -- equal for a square atom.
@@ -142,9 +155,9 @@ def test_dense_mma_interleavable(t):
         cn = _STYLE.accumulator_desc(t, m_sub=m_sub, n_sub=n_sub)
         cs = _c_store_desc(a, a.m * m_sub, a.n * n_sub, m_sub, n_sub)
         plan = classify_transform(cn.layout, cs.layout)
-        assert plan.tier == "reorder", (
-            f"{t.op_id}: C-shuffle is {plan.tier} at (m_sub={m_sub}, n_sub={n_sub}) -- {plan.reason}"
-        )
+        assert (
+            plan.tier == "reorder"
+        ), f"{t.op_id}: C-shuffle is {plan.tier} at (m_sub={m_sub}, n_sub={n_sub}) -- {plan.reason}"
 
 
 def test_proof_population():
@@ -156,12 +169,15 @@ def test_proof_population():
             driven += 1
         else:
             cannot += 1
-    assert (len(_DENSE), driven, cannot) == (73, 72, 1), (
-        f"population shifted: total={len(_DENSE)} driven={driven} cannot={cannot}"
-    )
+    assert (len(_DENSE), driven, cannot) == (
+        73,
+        72,
+        1,
+    ), f"population shifted: total={len(_DENSE)} driven={driven} cannot={cannot}"
     # Every cannot-interleave row is one we documented (and vice-versa).
     measured_cannot = {
-        t.op_id for t in _DENSE
+        t.op_id
+        for t in _DENSE
         if not (_operand_gate(t) and _accum_gate(t) and t.m == t.n)
     }
     assert measured_cannot == _CANNOT_INTERLEAVE, measured_cannot ^ _CANNOT_INTERLEAVE

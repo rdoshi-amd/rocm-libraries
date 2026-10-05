@@ -71,23 +71,45 @@ from .layout_visualizer import describe, render_forward_map, render_inverse_map
 
 __all__ = [
     # colour model
-    "accent_tint", "ACCENTS", "NACC",
+    "accent_tint",
+    "ACCENTS",
+    "NACC",
     # components
-    "RegisterFileComponent", "RegGroup",
-    "LogicalTileComponent", "LogicalGroup",
-    "LdsBankView", "CellGroup", "MmaTee",
+    "RegisterFileComponent",
+    "RegGroup",
+    "LogicalTileComponent",
+    "LogicalGroup",
+    "LdsBankView",
+    "CellGroup",
+    "MmaTee",
     # pipeline spine + render entry
-    "FlowStage", "Pipeline", "WaveStrip", "transform_note", "render_views", "render_coalescing",
+    "FlowStage",
+    "Pipeline",
+    "WaveStrip",
+    "transform_note",
+    "render_views",
+    "render_coalescing",
     "LabelMutationError",
     # Level-0 block diagram (selection-flow entry point)
     "block_diagram",
     # primitive flow recipes
-    "flow_mem_to_register", "flow_lds_to_register", "flow_wave_mma", "flow_kloop_operand",
+    "flow_mem_to_register",
+    "flow_lds_to_register",
+    "flow_wave_mma",
+    "flow_kloop_operand",
     # phase recipes
-    "flow_load_phase", "flow_mma_phase", "flow_epilogue_phase",
-    "flow_lds_store_placement", "flow_lds_load_placement",
+    "flow_load_phase",
+    "flow_mma_phase",
+    "flow_epilogue_phase",
+    "flow_lds_store_placement",
+    "flow_lds_load_placement",
     # descriptor -> viz adapters
-    "field_inputs", "lds_inputs", "coop_forward_map", "classify_epilogue",
+    "field_inputs",
+    "lds_inputs",
+    "coop_forward_map",
+    "classify_epilogue",
     # text reflection
-    "describe", "render_forward_map", "render_inverse_map",
+    "describe",
+    "render_forward_map",
+    "render_inverse_map",
 ]

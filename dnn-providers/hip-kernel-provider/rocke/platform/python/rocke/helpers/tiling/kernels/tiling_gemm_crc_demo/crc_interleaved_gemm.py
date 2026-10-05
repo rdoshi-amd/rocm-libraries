@@ -100,12 +100,18 @@ def _macro_coop_descs_crc(tile_free: int, tile_k: int, n_waves: int):
     k_lanes = tile_k // kpt
     desc = make_tile_desc(
         shape=[tile_free, tile_k],
-        thread_tile=[dpt, kpt],          # free dim = dpt CONTIGUOUS per lane (stride-1); K = kpt
+        thread_tile=[
+            dpt,
+            kpt,
+        ],  # free dim = dpt CONTIGUOUS per lane (stride-1); K = kpt
         thread_dist=[m_lanes, k_lanes],
-        thread_order=[1, 0],             # K the major lane, free the minor (matches wave read wiring)
+        thread_order=[
+            1,
+            0,
+        ],  # K the major lane, free the minor (matches wave read wiring)
         thread_broadcast=1,
         block_repeat=[1, 1],
-        wave_dist=[n_waves, 1],          # the block's waves split the free dim
+        wave_dist=[n_waves, 1],  # the block's waves split the free dim
         wave_order=None,
         wave_broadcast=1,
         wave_size=64,
@@ -116,7 +122,8 @@ def _macro_coop_descs_crc(tile_free: int, tile_k: int, n_waves: int):
 def _c_store_desc(m_sub: int, n_sub: int):
     """M-contiguous C store distribution (make_tile_desc): each lane owns a contiguous 4*m_sub x n_sub
     (M x N) block with M inner (stride-1) -> the col-major C store is coalesced/wide in M. The native
-    interleaved accumulator -> this store desc is a pure register ``reorder`` (same lane ownership)."""
+    interleaved accumulator -> this store desc is a pure register ``reorder`` (same lane ownership).
+    """
     return make_tile_desc(
         shape=[m_sub * _ATOM, n_sub * _ATOM],
         thread_tile=[4 * m_sub, n_sub],  # M inner (contiguous), N outer per lane
@@ -159,12 +166,18 @@ def build_crc_gemm(
 
     n_waves = waves_m * waves_n
     if tile_m % waves_m or tile_n % waves_n:
-        raise ValueError(f"macro tile must divide by waves -- {tile_m}x{tile_n} / {waves_m}x{waves_n}")
+        raise ValueError(
+            f"macro tile must divide by waves -- {tile_m}x{tile_n} / {waves_m}x{waves_n}"
+        )
     warp_m, warp_n = tile_m // waves_m, tile_n // waves_n
     if warp_m % _ATOM or warp_n % _ATOM or tile_k % _ATOM:
-        raise ValueError(f"warp tile must be multiples of {_ATOM} -- {warp_m}x{warp_n}x{tile_k}")
+        raise ValueError(
+            f"warp tile must be multiples of {_ATOM} -- {warp_m}x{warp_n}x{tile_k}"
+        )
     if tile_m % n_waves or tile_n % n_waves:
-        raise ValueError(f"macro tile must divide by n_waves={n_waves} for the cooperative load")
+        raise ValueError(
+            f"macro tile must divide by n_waves={n_waves} for the cooperative load"
+        )
     if K_LEN % tile_k:
         raise ValueError(f"K_LEN ({K_LEN}) must be a multiple of tile_k ({tile_k})")
     if (K_LEN // tile_k) < 2 and not single_buffer:
@@ -178,12 +191,20 @@ def build_crc_gemm(
     # multiplies B(fed as A) x A(fed as B) and emits C' = C^T = (N, M).
     if ab_swap:
         mma = TileMma(
-            (warp_n, warp_m, tile_k), a="f16", b="f16", c="f32", target=arch,
+            (warp_n, warp_m, tile_k),
+            a="f16",
+            b="f16",
+            c="f32",
+            target=arch,
             tiling=Tiling(atom_shape=(_ATOM, _ATOM, _ATOM)),
         )
     else:
         mma = TileMma(
-            (warp_m, warp_n, tile_k), a="f16", b="f16", c="f32", target=arch,
+            (warp_m, warp_n, tile_k),
+            a="f16",
+            b="f16",
+            c="f32",
+            target=arch,
             tiling=Tiling(atom_shape=(_ATOM, _ATOM, _ATOM)),
         )
 
@@ -209,9 +230,9 @@ def build_crc_gemm(
     n_macro = b.mul(b.block_id_x(), b.const_i32(tile_n))
 
     # CRC memory descriptors -- the free dim is stride-1 everywhere.
-    lda = lda if lda is not None else M_LEN   # A (M,K): M contiguous -> strides (1, lda)
-    ldb = ldb if ldb is not None else N_LEN   # B (N,K): N contiguous -> strides (1, ldb)
-    ldc = ldc if ldc is not None else M_LEN   # C (M,N): M contiguous -> strides (1, ldc)
+    lda = lda if lda is not None else M_LEN  # A (M,K): M contiguous -> strides (1, lda)
+    ldb = ldb if ldb is not None else N_LEN  # B (N,K): N contiguous -> strides (1, ldb)
+    ldc = ldc if ldc is not None else M_LEN  # C (M,N): M contiguous -> strides (1, ldc)
     a_td = make_tensor_desc((M_LEN, K_LEN), (1, lda), F16)
     b_td = make_tensor_desc((N_LEN, K_LEN), (1, ldb), F16)
     c_td = make_tensor_desc((M_LEN, N_LEN), (1, ldc), F32)
@@ -252,21 +273,45 @@ def build_crc_gemm(
         # IDENTITY round-trip: relabel (free,K) -> (K,free) with NO register movement, then store wide.
         fa = make_fragment(a_coop_t, F16, frags[0].value)
         fb = make_fragment(b_coop_t, F16, frags[1].value)
-        store_fragment(b, lds_a, make_window(lds_a_td, (zero, row_a)), fa, tid, lds_swizzle=lds_swizzle)
-        store_fragment(b, lds_b, make_window(lds_b_td, (zero, row_b)), fb, tid, lds_swizzle=lds_swizzle)
+        store_fragment(
+            b,
+            lds_a,
+            make_window(lds_a_td, (zero, row_a)),
+            fa,
+            tid,
+            lds_swizzle=lds_swizzle,
+        )
+        store_fragment(
+            b,
+            lds_b,
+            make_window(lds_b_td, (zero, row_b)),
+            fb,
+            tid,
+            lds_swizzle=lds_swizzle,
+        )
 
     def _read_buf(row_a, row_b):
         # Read the wave's warp tile from LDS in the interleaved MMA-operand layout (K-contig via the
         # transposed relabel). ab_swap reads the N-band into slotA and the M-band into slotB.
         fa = load_fragment(
-            b, lds_a, make_window(lds_a_td, (zero, b.add(row_a, b.mul(wm, warp_m_c)))),
-            a_rd_t, tid, lds_swizzle=lds_swizzle,
+            b,
+            lds_a,
+            make_window(lds_a_td, (zero, b.add(row_a, b.mul(wm, warp_m_c)))),
+            a_rd_t,
+            tid,
+            lds_swizzle=lds_swizzle,
         )
         fb = load_fragment(
-            b, lds_b, make_window(lds_b_td, (zero, b.add(row_b, b.mul(wn, warp_n_c)))),
-            b_rd_t, tid, lds_swizzle=lds_swizzle,
+            b,
+            lds_b,
+            make_window(lds_b_td, (zero, b.add(row_b, b.mul(wn, warp_n_c)))),
+            b_rd_t,
+            tid,
+            lds_swizzle=lds_swizzle,
         )
-        return make_fragment(slotA_wave, F16, fa.value), make_fragment(slotB_wave, F16, fb.value)
+        return make_fragment(slotA_wave, F16, fa.value), make_fragment(
+            slotB_wave, F16, fb.value
+        )
 
     def _prefetch_load(kb):
         # Global load uses the coop desc in its native (free, K) X-order matching a_td=(M,K)/b_td=(N,K).
@@ -311,7 +356,11 @@ def build_crc_gemm(
         _store_buf(_prefetch_load(zero), zero, zero)
         b.sync_lds_only()
         outer = b.scf_for_iter(
-            b.const_i32(0), b.const_i32(K_LEN), tk_c, [("acc", accumulator.value)], iv_name="k",
+            b.const_i32(0),
+            b.const_i32(K_LEN),
+            tk_c,
+            [("acc", accumulator.value)],
+            iv_name="k",
         )
         with outer as (kiv, (acc_val,)):
             a_frag, b_frag = _read_buf(zero, zero)
@@ -327,7 +376,11 @@ def build_crc_gemm(
         _store_buf(_prefetch_load(zero), zero, zero)  # prologue: tile 0 -> buffer 0
         b.sync_lds_only()
         outer = b.scf_for_iter(
-            b.const_i32(0), b.const_i32(K_LEN - tile_k), tk_c, [("acc", accumulator.value)], iv_name="k",
+            b.const_i32(0),
+            b.const_i32(K_LEN - tile_k),
+            tk_c,
+            [("acc", accumulator.value)],
+            iv_name="k",
         )
         with outer as (kiv, (acc_val,)):
             ki = b.div(kiv, tk_c)
@@ -335,7 +388,9 @@ def build_crc_gemm(
             oth = b.sub(b.const_i32(1), cur)
             cur_ra, cur_rb = b.mul(cur, tile_m_c), b.mul(cur, tile_n_c)
             oth_ra, oth_rb = b.mul(oth, tile_m_c), b.mul(oth, tile_n_c)
-            pf = _prefetch_load(b.add(kiv, tk_c))  # prefetch tile ki+1 (always in range)
+            pf = _prefetch_load(
+                b.add(kiv, tk_c)
+            )  # prefetch tile ki+1 (always in range)
             a_frag, b_frag = _read_buf(cur_ra, cur_rb)  # read tile ki
             acc = _mma_prio(a_frag, b_frag, acc_val)
             _store_buf(pf, oth_ra, oth_rb)  # store tile ki+1 -> OTHER buffer
@@ -344,7 +399,9 @@ def build_crc_gemm(
             b.scf_yield(acc.value)
         acc_val = outer.results[0]
         last_cur = (n_tiles - 1) % 2  # process the last prefetched tile (N-1)
-        last_ra, last_rb = b.const_i32(last_cur * tile_m), b.const_i32(last_cur * tile_n)
+        last_ra, last_rb = b.const_i32(last_cur * tile_m), b.const_i32(
+            last_cur * tile_n
+        )
         a_frag, b_frag = _read_buf(last_ra, last_rb)
         accumulator = _mma_prio(a_frag, b_frag, acc_val)
 
@@ -356,15 +413,17 @@ def build_crc_gemm(
         # permuted C view: each register's crossed coord (nc, mc) lands at addr = mc*1 + nc*ldc -- the
         # SAME col-major C address as the base path. In the crossed layout M is lane-major, so this
         # M-contiguous store wave-coalesces WITHOUT any epilogue reorder (the ab_swap payoff).
-        c_view = c_td.permute([1, 0])                       # (N, M): addr(n, m) = m*1 + n*ldc
+        c_view = c_td.permute([1, 0])  # (N, M): addr(n, m) = m*1 + n*ldc
         c_win = make_window(
             c_view,
             (b.add(n_macro, b.mul(wn, warp_n_c)), b.add(m_macro, b.mul(wm, warp_m_c))),
         )
     else:
-        c_store = _c_store_desc(m_sub, n_sub)               # over (warp_m, warp_n); axis0 = M (inner)
+        c_store = _c_store_desc(
+            m_sub, n_sub
+        )  # over (warp_m, warp_n); axis0 = M (inner)
         accumulator = transform_fragment(b, accumulator, c_store)
-        c_view = c_td                                       # (M, N): addr(m, n) = m*1 + n*ldc
+        c_view = c_td  # (M, N): addr(m, n) = m*1 + n*ldc
         c_win = make_window(
             c_view,
             (b.add(m_macro, b.mul(wm, warp_m_c)), b.add(n_macro, b.mul(wn, warp_n_c))),
@@ -382,8 +441,12 @@ def _compile_launcher(kernel, arch: str):
     artifact = compile_kernel(kernel, arch=arch)
     signature = (
         SignatureBuilder()
-        .ptr("A", "f16").ptr("B", "f16").ptr("C", "f32")
-        .scalar("M", "i32").scalar("N", "i32").scalar("K", "i32")
+        .ptr("A", "f16")
+        .ptr("B", "f16")
+        .ptr("C", "f32")
+        .scalar("M", "i32")
+        .scalar("N", "i32")
+        .scalar("K", "i32")
         .build()
     )
     return KernelLauncher(
@@ -394,7 +457,8 @@ def _compile_launcher(kernel, arch: str):
 def _crc_host_arrays(M_LEN, N_LEN, K_LEN, *, zeros=False):
     """Host arrays in CRC byte order. A col-major (M,K) has the SAME bytes as a C-contiguous (K,M);
     likewise B->(K,N), C->(N,M). We upload those C-contiguous transposes (as_u8_buffer needs
-    C-contiguity) and reinterpret on readback. Returns (A_logical, B_logical, A_dev, B_dev, C_dev)."""
+    C-contiguity) and reinterpret on readback. Returns (A_logical, B_logical, A_dev, B_dev, C_dev).
+    """
     if zeros:
         a = np.zeros((M_LEN, K_LEN), dtype=np.float16)
         bm = np.zeros((N_LEN, K_LEN), dtype=np.float16)
@@ -402,9 +466,11 @@ def _crc_host_arrays(M_LEN, N_LEN, K_LEN, *, zeros=False):
         rng = np.random.default_rng(0)
         a = rng.integers(-3, 4, size=(M_LEN, K_LEN)).astype(np.float16)
         bm = rng.integers(-3, 4, size=(N_LEN, K_LEN)).astype(np.float16)
-    a_dev = np.ascontiguousarray(a.T)          # (K,M) c-contig == A (M,K) col-major bytes
-    b_dev = np.ascontiguousarray(bm.T)         # (K,N) c-contig == B (N,K) col-major bytes
-    c_dev = np.zeros((N_LEN, M_LEN), dtype=np.float32)  # (N,M) c-contig == C (M,N) col-major bytes
+    a_dev = np.ascontiguousarray(a.T)  # (K,M) c-contig == A (M,K) col-major bytes
+    b_dev = np.ascontiguousarray(bm.T)  # (K,N) c-contig == B (N,K) col-major bytes
+    c_dev = np.zeros(
+        (N_LEN, M_LEN), dtype=np.float32
+    )  # (N,M) c-contig == C (M,N) col-major bytes
     return a, bm, a_dev, b_dev, c_dev
 
 
@@ -432,12 +498,24 @@ def run_and_verify_crc(
 
     dev_arch = get_device_arch(0)
     if dev_arch != arch:
-        raise RuntimeError(f"device arch {dev_arch!r} != requested {arch!r}; run on a {arch} GPU")
+        raise RuntimeError(
+            f"device arch {dev_arch!r} != requested {arch!r}; run on a {arch} GPU"
+        )
 
     kernel, mma = build_crc_gemm(
-        M_LEN, N_LEN, K_LEN, arch=arch, tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
-        waves_m=waves_m, waves_n=waves_n, ab_swap=ab_swap, single_buffer=single_buffer,
-        mac_prio=mac_prio, lds_swizzle=lds_swizzle,
+        M_LEN,
+        N_LEN,
+        K_LEN,
+        arch=arch,
+        tile_m=tile_m,
+        tile_n=tile_n,
+        tile_k=tile_k,
+        waves_m=waves_m,
+        waves_n=waves_n,
+        ab_swap=ab_swap,
+        single_buffer=single_buffer,
+        mac_prio=mac_prio,
+        lds_swizzle=lds_swizzle,
     )
     launcher = _compile_launcher(kernel, arch)
     block = (mma.wave_size * waves_m * waves_n, 1, 1)
@@ -457,8 +535,8 @@ def run_and_verify_crc(
     synchronize_and_release()
     rt.memcpy_d2h(as_u8_buffer(c_dev_h), c_dev.ptr(), c_dev_h.nbytes)
 
-    reference = a.astype(np.float32) @ bm.astype(np.float32).T   # logical (M, N)
-    result = c_dev_h.T.astype(np.float32)                        # (N,M) c-contig -> (M,N) col-major
+    reference = a.astype(np.float32) @ bm.astype(np.float32).T  # logical (M, N)
+    result = c_dev_h.T.astype(np.float32)  # (N,M) c-contig -> (M,N) col-major
     max_abs_diff = float(np.abs(result - reference).max())
     return {
         "shape": (M_LEN, N_LEN, K_LEN),
@@ -493,13 +571,27 @@ def benchmark_crc(
     from rocke.runtime.hip_module import Runtime
     from rocke.runtime.host_buffers import as_u8_buffer
     from rocke.runtime.launcher import (
-        DeviceMem, StreamConfig, launch_kernel, make_kernel, wait_stream_and_release,
+        DeviceMem,
+        StreamConfig,
+        launch_kernel,
+        make_kernel,
+        wait_stream_and_release,
     )
 
     kernel, mma = build_crc_gemm(
-        M_LEN, N_LEN, K_LEN, arch=arch, tile_m=tile_m, tile_n=tile_n, tile_k=tile_k,
-        waves_m=waves_m, waves_n=waves_n, ab_swap=ab_swap, single_buffer=single_buffer,
-        mac_prio=mac_prio, lds_swizzle=lds_swizzle,
+        M_LEN,
+        N_LEN,
+        K_LEN,
+        arch=arch,
+        tile_m=tile_m,
+        tile_n=tile_n,
+        tile_k=tile_k,
+        waves_m=waves_m,
+        waves_n=waves_n,
+        ab_swap=ab_swap,
+        single_buffer=single_buffer,
+        mac_prio=mac_prio,
+        lds_swizzle=lds_swizzle,
     )
     launcher = _compile_launcher(kernel, arch)
 
@@ -514,10 +606,16 @@ def benchmark_crc(
     closure = make_kernel(
         launcher,
         {"A": a_dev, "B": b_dev, "C": c_dev, "M": M_LEN, "N": N_LEN, "K": K_LEN},
-        grid, (mma.wave_size * waves_m * waves_n, 1, 1),
+        grid,
+        (mma.wave_size * waves_m * waves_n, 1, 1),
     )
     ms = launch_kernel(
-        StreamConfig(time_kernel=True, cold_niters=cold_niters, nrepeat=nrepeat, is_gpu_timer=True),
+        StreamConfig(
+            time_kernel=True,
+            cold_niters=cold_niters,
+            nrepeat=nrepeat,
+            is_gpu_timer=True,
+        ),
         closure,
     )
     wait_stream_and_release()

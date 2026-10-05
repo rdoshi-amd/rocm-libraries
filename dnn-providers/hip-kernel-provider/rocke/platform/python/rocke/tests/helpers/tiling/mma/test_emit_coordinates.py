@@ -47,7 +47,9 @@ class _IntEvalBuilder:
         return int(a) + int(c)
 
 
-@pytest.mark.parametrize("encoding_fn", [a_warp_encoding, b_warp_encoding, c_warp_encoding])
+@pytest.mark.parametrize(
+    "encoding_fn", [a_warp_encoding, b_warp_encoding, c_warp_encoding]
+)
 def test_emit_coordinates_match_register_mapper(encoding_fn) -> None:
     encoding = encoding_fn(load_mma_traits().get("mfma_f32_16x16x16f16"))
     mapper = RegisterMapper(encoding)
@@ -55,4 +57,7 @@ def test_emit_coordinates_match_register_mapper(encoding_fn) -> None:
     for lane in range(mapper.num_lanes):
         for register in range(mapper.num_vector_items):
             emitted = emit_tensor_coordinates(builder, encoding, lane, register)
-            assert emitted == mapper.matrix_coordinates(lane, register), (lane, register)
+            assert emitted == mapper.matrix_coordinates(lane, register), (
+                lane,
+                register,
+            )

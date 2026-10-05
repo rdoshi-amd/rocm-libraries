@@ -76,9 +76,14 @@ class Tiling:
                 f"unknown subtile order -- order={self.order!r}, "
                 f"expected one of {list(_SUBTILE_ORDERS)}"
             )
-        if (not isinstance(self.mac_prio, int) or isinstance(self.mac_prio, bool)
-                or not 0 <= self.mac_prio <= 3):
-            raise ValueError(f"mac_prio must be an int in 0..3 -- mac_prio={self.mac_prio!r}")
+        if (
+            not isinstance(self.mac_prio, int)
+            or isinstance(self.mac_prio, bool)
+            or not 0 <= self.mac_prio <= 3
+        ):
+            raise ValueError(
+                f"mac_prio must be an int in 0..3 -- mac_prio={self.mac_prio!r}"
+            )
 
 
 class TileMmaPlan:
@@ -122,12 +127,18 @@ class TileMmaPlan:
             shape = tuple(shape) if shape is not None else atom_shape
         else:
             if shape is None:
-                raise ValueError("shape (M, N, K) is required unless atom_override is given")
+                raise ValueError(
+                    "shape (M, N, K) is required unless atom_override is given"
+                )
             if a is None or b is None or c is None:
-                raise ValueError("a/b/c dtypes are required unless atom_override is given")
+                raise ValueError(
+                    "a/b/c dtypes are required unless atom_override is given"
+                )
             shape = tuple(shape)
             if a != b:
-                raise ValueError(f"MFMA requires matching A/B dtypes -- a={a!r}, b={b!r}")
+                raise ValueError(
+                    f"MFMA requires matching A/B dtypes -- a={a!r}, b={b!r}"
+                )
             # Resolve the atom + its traits from the knob: explicit intrinsic NAME, atom SHAPE,
             # or (None) the wave shape itself. Both paths end with a resolved traits row.
             atom_knob = tiling.atom_shape
@@ -138,7 +149,13 @@ class TileMmaPlan:
                 atom_shape = atom_knob if atom_knob is not None else shape
                 m, n, k = atom_shape
                 self._traits = catalog.select(
-                    target=target, input_dtype=a, output_dtype=c, m=m, n=n, k=k, family="dense"
+                    target=target,
+                    input_dtype=a,
+                    output_dtype=c,
+                    m=m,
+                    n=n,
+                    k=k,
+                    family="dense",
                 )
 
         if len(shape) != 3:
@@ -320,7 +337,8 @@ class TileMmaPlan:
         sound MMA operand (one fixed M/N per output-row, well-formed K) against the atom-canonical
         machine. Catches a per-operand-unsound custom style at plan build, matching the C-oracle's
         timing; the driver keeps its own unconditional check. The reference is the shared
-        ``canonical_layouts`` helper -- NEVER the style's own descriptor (a check against itself proves nothing)."""
+        ``canonical_layouts`` helper -- NEVER the style's own descriptor (a check against itself proves nothing).
+        """
         from ..transforms import mma_operand_layout_sound
 
         a_canon, b_canon, _ = canonical_layouts(self._traits, self.subtiles)
@@ -336,7 +354,8 @@ class TileMmaPlan:
 
     def _assert_accumulator_matches_oracle(self) -> None:
         """Independent-path C-oracle: the style's native accumulator labels vs the machine's fall-out
-        from the style's operands (:func:`derive_c_distribution`). See the `__init__` note."""
+        from the style's operands (:func:`derive_c_distribution`). See the `__init__` note.
+        """
         from ..transforms import derive_c_distribution
         from ..transforms._core import as_forward_map
 
@@ -392,8 +411,16 @@ class TileMmaPlan:
         from rocke.core import ir
 
         try:
-            return getattr(ir, {"f16": "F16", "bf16": "BF16", "f32": "F32",
-                                 "f8": "FP8E4M3", "bf8": "BF8E5M2"}[token])
+            return getattr(
+                ir,
+                {
+                    "f16": "F16",
+                    "bf16": "BF16",
+                    "f32": "F32",
+                    "f8": "FP8E4M3",
+                    "bf8": "BF8E5M2",
+                }[token],
+            )
         except KeyError as exc:
             raise NotImplementedError(
                 f"no ir.Type for dtype token -- token={token!r}"

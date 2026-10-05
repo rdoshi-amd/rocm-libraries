@@ -39,7 +39,14 @@ def test_gfx90a_16x16x16_f16_matches_sot() -> None:
     # Field values come from the traits table (the gfx90a 16x16x16 f16 MFMA row).
     assert traits.op_id == "mfma_f32_16x16x16f16"
     assert traits.wave_size == 64
-    assert (traits.m, traits.n, traits.k, traits.b, traits.r, traits.s) == (16, 16, 16, 1, 1, 1)
+    assert (traits.m, traits.n, traits.k, traits.b, traits.r, traits.s) == (
+        16,
+        16,
+        16,
+        1,
+        1,
+        1,
+    )
     assert traits.k_ab_per_lane == 4  # ABK
     assert traits.a_k_num_access == 1  # AKN
     assert traits.c_m_per_lane == 4  # CM

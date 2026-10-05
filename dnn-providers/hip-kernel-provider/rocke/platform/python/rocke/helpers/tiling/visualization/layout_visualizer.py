@@ -19,6 +19,7 @@ from ..register_mapper import RegisterMapper
 
 __all__ = ["describe", "render_forward_map", "render_inverse_map"]
 
+
 def describe(encoding: WarpDistributionEncoding) -> dict[str, object]:
     """Structured, machine-readable reflection of an encoding (for humans and agents)."""
     mapper = RegisterMapper(encoding)
@@ -31,6 +32,7 @@ def describe(encoding: WarpDistributionEncoding) -> dict[str, object]:
         "hierarchical_lengths": encoding.hierarchical_lengths,
         "replication_lengths": encoding.replication_lengths,
     }
+
 
 def render_forward_map(
     encoding: WarpDistributionEncoding,
@@ -59,6 +61,7 @@ def render_forward_map(
             cells.append(",".join(str(value) for value in coordinate))
         lines.append(f"{lane:>9} | " + " | ".join(cells))
     return "\n".join(lines)
+
 
 def render_inverse_map(
     encoding: WarpDistributionEncoding,

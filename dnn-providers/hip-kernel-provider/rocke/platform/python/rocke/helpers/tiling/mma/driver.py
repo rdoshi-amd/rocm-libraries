@@ -24,7 +24,13 @@ from .warp_encoding import canonical_layouts
 
 
 def _assert_atom_contiguous(
-    tile_desc: TileDesc, *, atom_k: int, free_sub: int, k_sub: int, role: str, op_id: str,
+    tile_desc: TileDesc,
+    *,
+    atom_k: int,
+    free_sub: int,
+    k_sub: int,
+    role: str,
+    op_id: str,
 ) -> None:
     """The SOA slice contract: the driver slices each atom as the CONTIGUOUS register block
     ``[i*atom_len : +atom_len]`` and issues one ``b.mma`` per block, so every register in a block must
@@ -94,24 +100,46 @@ def _validate_mma_issue(a_fragment, b_fragment, accumulator, plan: TileMmaPlan) 
     for role, lay, canon in (("A", a_lay, a_canon), ("B", b_lay, b_canon)):
         d = mma_operand_layout_sound(lay, canon, role=role)
         if d.severity != "ok":
-            raise ValueError(f"MMA {role} operand not sound for {plan.op_id!r} -- {d.message}")
+            raise ValueError(
+                f"MMA {role} operand not sound for {plan.op_id!r} -- {d.message}"
+            )
 
     d = mma_pair_k_aligned(a_lay, b_lay, a_free_atoms=m_sub, b_free_atoms=n_sub)
     if d.severity != "ok":
-        raise ValueError(f"MMA operands not K-aligned for {plan.op_id!r} -- {d.message}")
+        raise ValueError(
+            f"MMA operands not K-aligned for {plan.op_id!r} -- {d.message}"
+        )
 
     d = mma_accumulator_flow_consistent(
-        accumulator.tile_desc.layout, a_lay, b_lay,
-        a_canon=a_canon, b_canon=b_canon, c_canon=c_canon,
+        accumulator.tile_desc.layout,
+        a_lay,
+        b_lay,
+        a_canon=a_canon,
+        b_canon=b_canon,
+        c_canon=c_canon,
     )
     if d.severity != "ok":
-        raise ValueError(f"MMA accumulator (C) not consistent for {plan.op_id!r} -- {d.message}")
+        raise ValueError(
+            f"MMA accumulator (C) not consistent for {plan.op_id!r} -- {d.message}"
+        )
 
     atom_k = plan.atom_shape[2]
-    _assert_atom_contiguous(a_fragment.tile_desc, atom_k=atom_k, free_sub=m_sub, k_sub=k_sub,
-                            role="A", op_id=plan.op_id)
-    _assert_atom_contiguous(b_fragment.tile_desc, atom_k=atom_k, free_sub=n_sub, k_sub=k_sub,
-                            role="B", op_id=plan.op_id)
+    _assert_atom_contiguous(
+        a_fragment.tile_desc,
+        atom_k=atom_k,
+        free_sub=m_sub,
+        k_sub=k_sub,
+        role="A",
+        op_id=plan.op_id,
+    )
+    _assert_atom_contiguous(
+        b_fragment.tile_desc,
+        atom_k=atom_k,
+        free_sub=n_sub,
+        k_sub=k_sub,
+        role="B",
+        op_id=plan.op_id,
+    )
 
 
 class TileMmaDriver:
@@ -137,7 +165,8 @@ class TileMmaDriver:
     @staticmethod
     def _write_subvector(b, vec, sub, start: int, length: int):
         """Write ``sub`` back into ``vec`` at ``[start:start+length]``, returning the new SSA
-        vector (accumulators are loop-carried SSA values, so this rebuilds the tile C)."""
+        vector (accumulators are loop-carried SSA values, so this rebuilds the tile C).
+        """
         out = vec
         for i in range(length):
             out = b.vec_insert(out, b.vec_extract(sub, i), start + i)
@@ -165,11 +194,17 @@ class TileMmaDriver:
         ``b.mma`` per atom and accumulating each C subtile. The fragments are
         subtile-contiguous (from the wave layouts), so every atom is a register slice.
         Checks operand dtypes, then runs the single validation (:func:`_validate_mma_issue` -- operand
-        soundness, pairwise K-match, accumulator consistency, atom contiguity) before issuing."""
+        soundness, pairwise K-match, accumulator consistency, atom contiguity) before issuing.
+        """
         plan = self._plan
-        for name, fragment in (("A", a_fragment), ("B", b_fragment), ("C", accumulator)):
-            want = plan._ir_type({"A": plan._a_dtype, "B": plan._b_dtype,
-                                  "C": plan._c_dtype}[name])
+        for name, fragment in (
+            ("A", a_fragment),
+            ("B", b_fragment),
+            ("C", accumulator),
+        ):
+            want = plan._ir_type(
+                {"A": plan._a_dtype, "B": plan._b_dtype, "C": plan._c_dtype}[name]
+            )
             if fragment.dtype.name != want.name:
                 raise ValueError(
                     f"MMA operand dtype mismatch -- operand={name}, "
@@ -191,15 +226,22 @@ class TileMmaDriver:
             acc_value = accumulator.value
             if k_sub == 1:
                 return Fragment(
-                    accumulator.tile_desc, accumulator.dtype,
+                    accumulator.tile_desc,
+                    accumulator.dtype,
                     b.mma(op, a_fragment.value, b_fragment.value, acc_value),
                 )
             a_atom = fragment_length(a_fragment.tile_desc.layout) // k_sub
             b_atom = fragment_length(b_fragment.tile_desc.layout) // k_sub
-            mac_prio = plan.tiling.mac_prio          # raise AFTER the first atom (see grid-branch note below)
+            mac_prio = (
+                plan.tiling.mac_prio
+            )  # raise AFTER the first atom (see grid-branch note below)
             for ki in range(k_sub):
-                a_sub = self._read_subvector(b, a_fragment.value, ki * a_atom, a_atom, a_fragment.dtype)
-                b_sub = self._read_subvector(b, b_fragment.value, ki * b_atom, b_atom, b_fragment.dtype)
+                a_sub = self._read_subvector(
+                    b, a_fragment.value, ki * a_atom, a_atom, a_fragment.dtype
+                )
+                b_sub = self._read_subvector(
+                    b, b_fragment.value, ki * b_atom, b_atom, b_fragment.dtype
+                )
                 acc_value = b.mma(op, a_sub, b_sub, acc_value)
                 if mac_prio and ki == 0:
                     b.s_setprio(mac_prio)
@@ -218,7 +260,9 @@ class TileMmaDriver:
         b_atom = fragment_length(b_fragment.tile_desc.layout) // (n_sub * k_sub)
         c_atom = fragment_length(accumulator.tile_desc.layout) // (m_sub * n_sub)
         accs = [
-            self._read_subvector(b, accumulator.value, idx * c_atom, c_atom, accumulator.dtype)
+            self._read_subvector(
+                b, accumulator.value, idx * c_atom, c_atom, accumulator.dtype
+            )
             for idx in range(m_sub * n_sub)
         ]
         # `mac_prio` raises wave issue priority for the matrix-dense body (MFMA or WMMA -- the driver is
@@ -231,10 +275,18 @@ class TileMmaDriver:
         for i, (mi, nj, ki) in enumerate(self._subtile_triples()):
             idx = mi * n_sub + nj
             a_sub = self._read_subvector(
-                b, a_fragment.value, (mi * k_sub + ki) * a_atom, a_atom, a_fragment.dtype
+                b,
+                a_fragment.value,
+                (mi * k_sub + ki) * a_atom,
+                a_atom,
+                a_fragment.dtype,
             )
             b_sub = self._read_subvector(
-                b, b_fragment.value, (nj * k_sub + ki) * b_atom, b_atom, b_fragment.dtype
+                b,
+                b_fragment.value,
+                (nj * k_sub + ki) * b_atom,
+                b_atom,
+                b_fragment.dtype,
             )
             accs[idx] = b.mma(op, a_sub, b_sub, accs[idx])
             if mac_prio and i == 0:

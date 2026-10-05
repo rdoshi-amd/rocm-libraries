@@ -22,7 +22,7 @@ _BINARY = {
     "arith.add": lambda a, b: a + b,
     "arith.sub": lambda a, b: a - b,
     "arith.mul": lambda a, b: a * b,
-    "arith.div": lambda a, b: a // b,   # emit uses integer division
+    "arith.div": lambda a, b: a // b,  # emit uses integer division
     "arith.mod": lambda a, b: a % b,
 }
 
@@ -55,22 +55,30 @@ def resolve_value(value: Any, bindings: dict) -> int:
         return int(op.attrs["value"])
     if name == "scf.for":
         if "k" not in bindings:
-            raise OriginResolutionError("scf.for induction variable hit but no 'k' binding supplied")
+            raise OriginResolutionError(
+                "scf.for induction variable hit but no 'k' binding supplied"
+            )
         return int(bindings["k"])
     if name == "gpu.thread_id":
         if "tid" not in bindings:
-            raise OriginResolutionError("gpu.thread_id hit but no 'tid' binding supplied")
+            raise OriginResolutionError(
+                "gpu.thread_id hit but no 'tid' binding supplied"
+            )
         return int(bindings["tid"])
     if name == "gpu.block_id":
         axis = op.attrs.get("axis")
         block = bindings.get("block_id", {})
         if axis not in block:
-            raise OriginResolutionError(f"gpu.block_id[{axis}] hit but no 'block_id' binding supplied")
+            raise OriginResolutionError(
+                f"gpu.block_id[{axis}] hit but no 'block_id' binding supplied"
+            )
         return int(block[axis])
     fn = _BINARY.get(name)
     if fn is None:
         raise OriginResolutionError(f"unhandled op in origin DAG: {name!r}")
-    return fn(resolve_value(op.operands[0], bindings), resolve_value(op.operands[1], bindings))
+    return fn(
+        resolve_value(op.operands[0], bindings), resolve_value(op.operands[1], bindings)
+    )
 
 
 def resolve_origin(origin: tuple, bindings: dict) -> tuple[int, ...]:
@@ -81,7 +89,8 @@ def resolve_origin(origin: tuple, bindings: dict) -> tuple[int, ...]:
 def _lane_span(encoding: Any) -> int:
     """Total threads an encoding spans = product over ALL lane-partition levels (wave outer + lane
     inner). `RegisterMapper.num_lanes` reads only the first level, so for a cooperative NDimP=2
-    encoding it undercounts -- this is the count `emit_tensor_coordinates` actually decomposes."""
+    encoding it undercounts -- this is the count `emit_tensor_coordinates` actually decomposes.
+    """
     span = 1
     for majors, minors in zip(encoding.lane_to_rh_major, encoding.lane_to_rh_minor):
         for major, minor in zip(majors, minors):
@@ -98,7 +107,8 @@ def _arch_wave(pipeline: Any) -> tuple[str, int]:
             "pipeline has no arch/wave_size: no TileMma was recorded and none was declared. A kernel with "
             "no matrix instruction (reduction, scan, elementwise, LDS-combining epilogue) must pass the "
             "target it already resolved: record_build(build_fn, ..., declared_arch='gfxNNN', "
-            "declared_wave_size=N).")
+            "declared_wave_size=N)."
+        )
     return pipeline.arch, pipeline.wave_size
 
 

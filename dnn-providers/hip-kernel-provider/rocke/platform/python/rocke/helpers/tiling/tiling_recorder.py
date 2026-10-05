@@ -52,8 +52,12 @@ class PipelineTransaction:
     register_count: int
     vw: int  # per-access fan-out width (registers per hardware op)
     swizzle: Any
-    produces: int | None = None       # id() of the SSA Value this node yields (the loaded/filled fragment)
-    consumes: tuple[int, ...] = ()     # id()s of the SSA Values this node reads (the stored fragment)
+    produces: int | None = (
+        None  # id() of the SSA Value this node yields (the loaded/filled fragment)
+    )
+    consumes: tuple[
+        int, ...
+    ] = ()  # id()s of the SSA Values this node reads (the stored fragment)
 
     @property
     def encoding(self) -> Any:
@@ -75,19 +79,29 @@ class PipelineOp:
     seq: int
     src_enc: Any = None
     tgt_enc: Any = None
-    a_enc: Any = None       # CONSUMED operand encodings (the TileMma fragments, not a load view)
+    a_enc: Any = (
+        None  # CONSUMED operand encodings (the TileMma fragments, not a load view)
+    )
     b_enc: Any = None
     c_enc: Any = None
-    a_canon: Any = None     # the atom's canonical refs (the fixed machine) -- for the soundness gate
+    a_canon: Any = (
+        None  # the atom's canonical refs (the fixed machine) -- for the soundness gate
+    )
     b_canon: Any = None
     c_canon: Any = None
     atom_shape: tuple[int, ...] | None = None
     atom_count: int = 0  # number of `tile.mma` the TileMma call explodes into
-    a_free_atoms: int = 1  # free-dim atom counts (m_sub / n_sub) -- for the per-atom K-match soundness gate
+    a_free_atoms: int = (
+        1  # free-dim atom counts (m_sub / n_sub) -- for the per-atom K-match soundness gate
+    )
     b_free_atoms: int = 1
     note: str = ""
-    produces: int | None = None       # id() of the SSA Value this op yields (transform / mma output)
-    consumes: tuple[int, ...] = ()     # id()s of the SSA Values this op reads (operands / transform src)
+    produces: int | None = (
+        None  # id() of the SSA Value this op yields (transform / mma output)
+    )
+    consumes: tuple[
+        int, ...
+    ] = ()  # id()s of the SSA Values this op reads (operands / transform src)
 
 
 @dataclass
@@ -96,10 +110,12 @@ class RecordedPipeline:
 
     nodes: list[Any] = field(default_factory=list)
     spaces: dict[int, str] = field(default_factory=dict)  # space_id -> space_name
-    arch: str | None = None       # gfx target -- the DRIVER's SoT for nbanks/wave_size
+    arch: str | None = None  # gfx target -- the DRIVER's SoT for nbanks/wave_size
     wave_size: int | None = None  # lanes per wave -- NOT assumed 64
-    arch_declared: bool = False   # True when the CALLER supplied arch/wave_size to record_build (a kernel
-                                  # with no TileMma has no other source); a recorded TileMma must then AGREE
+    arch_declared: bool = (
+        False  # True when the CALLER supplied arch/wave_size to record_build (a kernel
+    )
+    # with no TileMma has no other source); a recorded TileMma must then AGREE
 
     @property
     def transactions(self) -> list[PipelineTransaction]:
@@ -119,8 +135,10 @@ class RecordedPipeline:
 
     def block_diagram(self, out_path: str, *, title: str = "") -> str:
         """Render the Level-0 pipeline block diagram (labelled boxes + flow) to ``out_path``. Thin
-        wrapper over :func:`visualization.block_diagram.block_diagram` -- matplotlib stays lazy."""
+        wrapper over :func:`visualization.block_diagram.block_diagram` -- matplotlib stays lazy.
+        """
         from .visualization.block_diagram import block_diagram
+
         return block_diagram(self, out_path, title=title)
 
 
@@ -149,8 +167,17 @@ class _Recorder:
         self._seq += 1
         return s
 
-    def add_memory(self, kind: str, ptr: Any, window: Any, tile_desc: Any, swizzle: Any,
-                   *, produces: int | None = None, consumes: tuple[int, ...] = ()) -> None:
+    def add_memory(
+        self,
+        kind: str,
+        ptr: Any,
+        window: Any,
+        tile_desc: Any,
+        swizzle: Any,
+        *,
+        produces: int | None = None,
+        consumes: tuple[int, ...] = (),
+    ) -> None:
         from .emit import _is_lds
 
         space = "lds" if _is_lds(ptr) else "global"
@@ -162,67 +189,123 @@ class _Recorder:
         else:
             vw = _access_vw(tile_desc, tensor.strides, tensor.dtype.name, swizzle)
         node = PipelineTransaction(
-            kind=kind, seq=self._next(), space=space, space_id=id(ptr),
-            space_name=getattr(ptr, "name", "?"), tile_desc=tile_desc,
-            dtype_name=tensor.dtype.name, strides=tuple(tensor.strides),
-            lengths=tuple(tensor.lengths), origin=tuple(window.origin),
-            register_count=tile_desc.register_count, vw=vw, swizzle=swizzle,
-            produces=produces, consumes=tuple(consumes),
+            kind=kind,
+            seq=self._next(),
+            space=space,
+            space_id=id(ptr),
+            space_name=getattr(ptr, "name", "?"),
+            tile_desc=tile_desc,
+            dtype_name=tensor.dtype.name,
+            strides=tuple(tensor.strides),
+            lengths=tuple(tensor.lengths),
+            origin=tuple(window.origin),
+            register_count=tile_desc.register_count,
+            vw=vw,
+            swizzle=swizzle,
+            produces=produces,
+            consumes=tuple(consumes),
         )
         self.pipeline.nodes.append(node)
         self.pipeline.spaces[node.space_id] = node.space_name
 
     def add_fill(self, fragment: Any) -> None:
         td = fragment.tile_desc
-        self.pipeline.nodes.append(PipelineTransaction(
-            kind="fill", seq=self._next(), space="reg", space_id=id(fragment),
-            space_name="reg", tile_desc=td, dtype_name=getattr(fragment.dtype, "name", "?"),
-            strides=None, lengths=None, origin=None,
-            register_count=td.register_count, vw=1, swizzle=False,
-            produces=id(fragment.value), consumes=(),
-        ))
+        self.pipeline.nodes.append(
+            PipelineTransaction(
+                kind="fill",
+                seq=self._next(),
+                space="reg",
+                space_id=id(fragment),
+                space_name="reg",
+                tile_desc=td,
+                dtype_name=getattr(fragment.dtype, "name", "?"),
+                strides=None,
+                lengths=None,
+                origin=None,
+                register_count=td.register_count,
+                vw=1,
+                swizzle=False,
+                produces=id(fragment.value),
+                consumes=(),
+            )
+        )
 
-    def add_transform(self, fragment: Any, target_desc: Any, *, produces: int | None = None,
-                      consumes: tuple[int, ...] = ()) -> None:
+    def add_transform(
+        self,
+        fragment: Any,
+        target_desc: Any,
+        *,
+        produces: int | None = None,
+        consumes: tuple[int, ...] = (),
+    ) -> None:
         from .transforms import classify_transform
 
         src = fragment.tile_desc.layout
         tgt = target_desc.layout
         kind = classify_transform(src, tgt)
-        self.pipeline.nodes.append(PipelineOp(
-            kind=kind if kind in ("reorder", "cross_lane") else "reorder",
-            seq=self._next(), src_enc=src, tgt_enc=tgt, note=str(kind),
-            produces=produces, consumes=tuple(consumes),
-        ))
+        self.pipeline.nodes.append(
+            PipelineOp(
+                kind=kind if kind in ("reorder", "cross_lane") else "reorder",
+                seq=self._next(),
+                src_enc=src,
+                tgt_enc=tgt,
+                note=str(kind),
+                produces=produces,
+                consumes=tuple(consumes),
+            )
+        )
 
-    def add_mma(self, mma: Any, a_fragment: Any, b_fragment: Any, accumulator: Any, *,
-                produces: int | None = None, consumes: tuple[int, ...] = ()) -> None:
-        m_sub, n_sub, k_sub = mma.subtiles           # public surface (front-door TileMma or a raw plan)
+    def add_mma(
+        self,
+        mma: Any,
+        a_fragment: Any,
+        b_fragment: Any,
+        accumulator: Any,
+        *,
+        produces: int | None = None,
+        consumes: tuple[int, ...] = (),
+    ) -> None:
+        m_sub, n_sub, k_sub = (
+            mma.subtiles
+        )  # public surface (front-door TileMma or a raw plan)
         atom_count = m_sub * n_sub * k_sub
         # a_enc/b_enc = the CONSUMED operand encodings (the fragments the kernel feeds in -- for CRC these
         # are its OWN interleaved distributions, NOT TileMma's broken interleaved output). a_canon/b_canon/
         # c_canon = the CANONICAL machine refs from the `canonical_layouts` helper (atom-canonical by
         # construction, style-immutable -- the trusted tee path; NOT the public `*_layout` accessor).
         from .mma.warp_encoding import canonical_layouts
+
         a_canon, b_canon, c_canon = canonical_layouts(mma.traits, mma.subtiles)
-        self.pipeline.nodes.append(PipelineOp(
-            kind="mma", seq=self._next(),
-            a_enc=a_fragment.tile_desc.layout, b_enc=b_fragment.tile_desc.layout,
-            c_enc=accumulator.tile_desc.layout,
-            a_canon=a_canon, b_canon=b_canon, c_canon=c_canon,
-            atom_shape=tuple(mma.atom_shape), atom_count=atom_count,
-            a_free_atoms=m_sub, b_free_atoms=n_sub, note="TileMma",
-            produces=produces, consumes=tuple(consumes),
-        ))
-        if self.pipeline.arch is None:                         # the recording's SoT for arch/wave-size
+        self.pipeline.nodes.append(
+            PipelineOp(
+                kind="mma",
+                seq=self._next(),
+                a_enc=a_fragment.tile_desc.layout,
+                b_enc=b_fragment.tile_desc.layout,
+                c_enc=accumulator.tile_desc.layout,
+                a_canon=a_canon,
+                b_canon=b_canon,
+                c_canon=c_canon,
+                atom_shape=tuple(mma.atom_shape),
+                atom_count=atom_count,
+                a_free_atoms=m_sub,
+                b_free_atoms=n_sub,
+                note="TileMma",
+                produces=produces,
+                consumes=tuple(consumes),
+            )
+        )
+        if self.pipeline.arch is None:  # the recording's SoT for arch/wave-size
             self.pipeline.arch = mma.target
             self.pipeline.wave_size = mma.wave_size
         elif self.pipeline.arch_declared and (
-                (self.pipeline.arch, self.pipeline.wave_size) != (mma.target, mma.wave_size)):
-            raise ValueError(                                  # fail LOUD: a silent mismatch would make every
+            (self.pipeline.arch, self.pipeline.wave_size) != (mma.target, mma.wave_size)
+        ):
+            raise ValueError(  # fail LOUD: a silent mismatch would make every
                 f"recorded MMA targets {mma.target}/wave{mma.wave_size}, but record_build was told "
                 f"{self.pipeline.arch}/wave{self.pipeline.wave_size}. Every bank, width and residency number "
-                "downstream is derived from this -- fix the caller, do not let them disagree.")
+                "downstream is derived from this -- fix the caller, do not let them disagree."
+            )
 
 
 def _access_vw(tile_desc: Any, strides: Any, dtype_name: str, swizzle: Any) -> int:
@@ -261,32 +344,54 @@ def record_pipeline(build_fn: Callable) -> Iterator[RecordedPipeline]:
 
     def _wrap_load(orig):
         def w(b, ptr, window, tile_desc, thread, **kw):
-            res = orig(b, ptr, window, tile_desc, thread, **kw)   # delegate first: capture the produced value
-            rec.add_memory("load", ptr, window, tile_desc, kw.get("lds_swizzle", False),
-                           produces=id(res.value))
+            res = orig(
+                b, ptr, window, tile_desc, thread, **kw
+            )  # delegate first: capture the produced value
+            rec.add_memory(
+                "load",
+                ptr,
+                window,
+                tile_desc,
+                kw.get("lds_swizzle", False),
+                produces=id(res.value),
+            )
             return res
+
         return w
 
     def _wrap_store(orig):
         def w(b, ptr, window, fragment, thread, **kw):
-            rec.add_memory("store", ptr, window, fragment.tile_desc, kw.get("lds_swizzle", False),
-                           consumes=(id(fragment.value),))
+            rec.add_memory(
+                "store",
+                ptr,
+                window,
+                fragment.tile_desc,
+                kw.get("lds_swizzle", False),
+                consumes=(id(fragment.value),),
+            )
             return orig(b, ptr, window, fragment, thread, **kw)
+
         return w
 
     def _wrap_fill(orig):
         def w(b, fragment, scalar):
-            res = orig(b, fragment, scalar)                       # fragment.value is bound by now
+            res = orig(b, fragment, scalar)  # fragment.value is bound by now
             rec.add_fill(fragment)
             return res
+
         return w
 
     def _wrap_transform(orig):
         def w(b, fragment, target_desc, **kw):
             res = orig(b, fragment, target_desc, **kw)
-            rec.add_transform(fragment, target_desc, produces=id(res.value),
-                              consumes=(id(fragment.value),))
+            rec.add_transform(
+                fragment,
+                target_desc,
+                produces=id(res.value),
+                consumes=(id(fragment.value),),
+            )
             return res
+
         return w
 
     wrappers = {
@@ -308,8 +413,18 @@ def record_pipeline(build_fn: Callable) -> Iterator[RecordedPipeline]:
 
     def _wrap_mma_call(self, b, a_fragment, b_fragment, accumulator):
         out = mma_orig(self, b, a_fragment, b_fragment, accumulator)
-        rec.add_mma(self, a_fragment, b_fragment, accumulator, produces=id(out.value),
-                    consumes=(id(a_fragment.value), id(b_fragment.value), id(accumulator.value)))
+        rec.add_mma(
+            self,
+            a_fragment,
+            b_fragment,
+            accumulator,
+            produces=id(out.value),
+            consumes=(
+                id(a_fragment.value),
+                id(b_fragment.value),
+                id(accumulator.value),
+            ),
+        )
         return out
 
     TileMma.__call__ = _wrap_mma_call
@@ -321,9 +436,13 @@ def record_pipeline(build_fn: Callable) -> Iterator[RecordedPipeline]:
         TileMma.__call__ = mma_orig
 
 
-def record_build(build_fn: Callable, *args: Any,
-                 declared_arch: str | None = None, declared_wave_size: int | None = None,
-                 **kwargs: Any) -> tuple[Any, RecordedPipeline]:
+def record_build(
+    build_fn: Callable,
+    *args: Any,
+    declared_arch: str | None = None,
+    declared_wave_size: int | None = None,
+    **kwargs: Any,
+) -> tuple[Any, RecordedPipeline]:
     """Run ``build_fn(*args, **kwargs)`` with the verbs decorated; return ``(result, pipeline)``.
 
     ``declared_arch`` / ``declared_wave_size`` carry the target RESOLVED BY THE CALLER into the recording.
@@ -339,7 +458,8 @@ def record_build(build_fn: Callable, *args: Any,
     if (declared_arch is None) != (declared_wave_size is None):
         raise ValueError(
             "record_build: pass declared_arch and declared_wave_size TOGETHER (or neither) -- a "
-            "half-declared target silently leaves the other to be scavenged from a recorded TileMma.")
+            "half-declared target silently leaves the other to be scavenged from a recorded TileMma."
+        )
     with record_pipeline(build_fn) as pipeline:
         if declared_arch is not None:
             pipeline.arch = declared_arch
@@ -353,11 +473,17 @@ def record_build(build_fn: Callable, *args: Any,
 # The `b`-witness completeness gate
 # --------------------------------------------------------------------------------------------------
 
-_MEM_OP_NAMES = frozenset({
-    "memref.global_load_vN", "memref.global_load", "memref.masked_global_load",
-    "memref.global_store_typed", "memref.global_store_vN",
-    "tile.smem_load_vN", "tile.smem_store_vN",
-})
+_MEM_OP_NAMES = frozenset(
+    {
+        "memref.global_load_vN",
+        "memref.global_load",
+        "memref.masked_global_load",
+        "memref.global_store_typed",
+        "memref.global_store_vN",
+        "tile.smem_load_vN",
+        "tile.smem_store_vN",
+    }
+)
 _MMA_OP_NAMES = frozenset({"tile.mma"})
 
 
@@ -396,7 +522,9 @@ class WitnessReport:
         return self.mem_ok and self.mma_ok
 
 
-def witness(pipeline: RecordedPipeline, kernel: Any, *, raise_on_gap: bool = True) -> WitnessReport:
+def witness(
+    pipeline: RecordedPipeline, kernel: Any, *, raise_on_gap: bool = True
+) -> WitnessReport:
     """Reconcile emitted memory/mma ops against the recorded nodes' fan-out.
 
     Raises :class:`CoverageError` (when ``raise_on_gap``) if either category is unaccounted -- the
@@ -404,7 +532,9 @@ def witness(pipeline: RecordedPipeline, kernel: Any, *, raise_on_gap: bool = Tru
     rather than a silently short pipeline.
     """
     hist = op_histogram(kernel)
-    mem_expected = sum(t.op_fanout for t in pipeline.transactions if t.kind in ("load", "store"))
+    mem_expected = sum(
+        t.op_fanout for t in pipeline.transactions if t.kind in ("load", "store")
+    )
     mem_counted = sum(hist.get(n, 0) for n in _MEM_OP_NAMES)
     mma_expected = sum(o.atom_count for o in pipeline.ops if o.kind == "mma")
     mma_counted = sum(hist.get(n, 0) for n in _MMA_OP_NAMES)
@@ -429,8 +559,14 @@ def _elem_addresses(t: PipelineTransaction, n_lanes: int) -> dict[tuple[int, int
     from .lds_conflict import addr_map
 
     origin = tuple(int(o) for o in t.origin)  # Milestone 0: constant LDS origins
-    accesses, vw = addr_map(t.tile_desc, tuple(t.strides), origin=origin, n_lanes=n_lanes,
-                            dtype_name=t.dtype_name, lds_swizzle=t.swizzle)
+    accesses, vw = addr_map(
+        t.tile_desc,
+        tuple(t.strides),
+        origin=origin,
+        n_lanes=n_lanes,
+        dtype_name=t.dtype_name,
+        lds_swizzle=t.swizzle,
+    )
     out: dict[tuple[int, int], int] = {}
     for a in accesses:
         for i in range(a["vw"]):
@@ -438,7 +574,9 @@ def _elem_addresses(t: PipelineTransaction, n_lanes: int) -> dict[tuple[int, int
     return out
 
 
-def _labels(t: PipelineTransaction, n_lanes: int) -> dict[tuple[int, int], tuple[int, ...]]:
+def _labels(
+    t: PipelineTransaction, n_lanes: int
+) -> dict[tuple[int, int], tuple[int, ...]]:
     """(lane, register) -> the logical tile coordinate the encoding places there."""
     from .register_mapper import RegisterMapper
 
@@ -450,7 +588,9 @@ def _labels(t: PipelineTransaction, n_lanes: int) -> dict[tuple[int, int], tuple
     }
 
 
-def verify_roundtrip(pipeline: RecordedPipeline, *, n_lanes: int | None = None) -> list[int]:
+def verify_roundtrip(
+    pipeline: RecordedPipeline, *, n_lanes: int | None = None
+) -> list[int]:
     """For each LDS space with a store then a read, assert the read recovers, at each address, the
     logical label the store placed there. Returns the space_ids verified. Raises AssertionError with
     the first offending ``(lane, reg)`` on failure.
@@ -466,12 +606,21 @@ def verify_roundtrip(pipeline: RecordedPipeline, *, n_lanes: int | None = None) 
     if not n_lanes:
         raise ValueError(
             "verify_roundtrip needs the wave size: this pipeline recorded no TileMma, so "
-            "`pipeline.wave_size` is unset. Pass n_lanes= explicitly for the target you are checking.")
+            "`pipeline.wave_size` is unset. Pass n_lanes= explicitly for the target you are checking."
+        )
 
     verified: list[int] = []
     for space_id in pipeline.lds_spaces():
-        stores = [t for t in pipeline.transactions if t.space_id == space_id and t.kind == "store"]
-        reads = [t for t in pipeline.transactions if t.space_id == space_id and t.kind == "load"]
+        stores = [
+            t
+            for t in pipeline.transactions
+            if t.space_id == space_id and t.kind == "store"
+        ]
+        reads = [
+            t
+            for t in pipeline.transactions
+            if t.space_id == space_id and t.kind == "load"
+        ]
         if not stores or not reads:
             continue
         store, read = stores[0], reads[0]

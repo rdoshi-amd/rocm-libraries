@@ -31,6 +31,7 @@ DEFAULT_TRAITS_PATH = Path(__file__).resolve().parent / "data" / "mma_traits.jso
 _VALID_FAMILIES = frozenset({"dense", "sparse", "scaled"})
 _VALID_WAVE_SIZES = frozenset({32, 64})
 
+
 def _require_clean_int(field_name: str, raw_value: str, op_id: str) -> int:
     """Parse a non-negative integer SOT cell, failing fast on markers/garbage.
 
@@ -49,6 +50,7 @@ def _require_clean_int(field_name: str, raw_value: str, op_id: str) -> int:
         f"malformed SOT value -- op_id={op_id!r}, {field_name}={raw_value!r}, "
         f"expected a non-negative integer"
     )
+
 
 @dataclass(frozen=True)
 class MmaTraits:
@@ -151,6 +153,7 @@ class MmaTraits:
             supported_targets=tuple(record["supported_targets"]),  # type: ignore[arg-type]
         )
 
+
 @dataclass(frozen=True)
 class MmaTraitsCatalog:
     """The loaded MMA traits table with lookup and selection.
@@ -216,6 +219,7 @@ class MmaTraitsCatalog:
             f"ambiguous MMA selection for {query} -- "
             f"matched {[t.op_id for t in matches]}"
         )
+
 
 def load_mma_traits(path: Path = DEFAULT_TRAITS_PATH) -> MmaTraitsCatalog:
     """Load and validate ``mma_traits.json`` into a :class:`MmaTraitsCatalog`.

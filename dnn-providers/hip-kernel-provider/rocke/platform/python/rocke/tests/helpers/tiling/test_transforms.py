@@ -32,22 +32,28 @@ def _traits(op_id: str = "mfma_f32_16x16x16f16"):
     return load_mma_traits().get(op_id)
 
 
-def _swap_register_axes(enc: WarpDistributionEncoding, i: int, j: int) -> WarpDistributionEncoding:
+def _swap_register_axes(
+    enc: WarpDistributionEncoding, i: int, j: int
+) -> WarpDistributionEncoding:
     """A register-slot reorder: swap two register (Y) axis entries. Same buckets, so still a valid
     bijection -- only the per-lane register slot order changes (an interleave)."""
     rmaj = list(enc.register_to_rh_major)
     rmin = list(enc.register_to_rh_minor)
     rmaj[i], rmaj[j] = rmaj[j], rmaj[i]
     rmin[i], rmin[j] = rmin[j], rmin[i]
-    return dataclasses.replace(enc, register_to_rh_major=tuple(rmaj), register_to_rh_minor=tuple(rmin))
+    return dataclasses.replace(
+        enc, register_to_rh_major=tuple(rmaj), register_to_rh_minor=tuple(rmin)
+    )
 
 
 def test_interleave_idx_matches_reference_tables() -> None:
-    assert interleave_idx(1, 2, 8) == (0, 2, 4, 6, 1, 3, 5, 7)          # CDNA16 <1,2,8>
-    assert interleave_idx(1, 4, 16) == tuple((i % 4) * 4 + i // 4 for i in range(16))  # <1,4,16>
-    assert interleave_idx(1, 16, 32, 32)[:4] == (0, 16, 1, 17)         # RDNA3 <1,16,32>
-    assert interleave_idx(1, 1, 8) == tuple(range(8))                  # NOP: stride == 1
-    assert interleave_idx(1, 8, 8) == tuple(range(8))                  # NOP: stride == count
+    assert interleave_idx(1, 2, 8) == (0, 2, 4, 6, 1, 3, 5, 7)  # CDNA16 <1,2,8>
+    assert interleave_idx(1, 4, 16) == tuple(
+        (i % 4) * 4 + i // 4 for i in range(16)
+    )  # <1,4,16>
+    assert interleave_idx(1, 16, 32, 32)[:4] == (0, 16, 1, 17)  # RDNA3 <1,16,32>
+    assert interleave_idx(1, 1, 8) == tuple(range(8))  # NOP: stride == 1
+    assert interleave_idx(1, 8, 8) == tuple(range(8))  # NOP: stride == count
 
 
 def test_interleave_idx_gather_gt_1_deferred() -> None:
@@ -90,7 +96,7 @@ def test_classify_reorder_is_involution() -> None:
 
 
 def test_classify_different_elements_rejected() -> None:
-    a = a_warp_encoding(_traits())          # (M, K)
+    a = a_warp_encoding(_traits())  # (M, K)
     a_bigger = a_warp_encoding(_traits(), k_iter=2)  # different fragment dims
     with pytest.raises(ValueError, match="different dimensions"):
         classify_transform(a, a_bigger)
@@ -114,21 +120,29 @@ def test_describe_edge_reposition_is_free_and_label_invariant() -> None:
     # register -> LDS: label INVARIANT, the datum's PHYSICAL storage placement changes -- never a LABEL
     # transpose (the memref axis order is positional). tgt_dims must NOT manufacture a "(M,K)->(K,M)" why.
     a = a_warp_encoding(_traits())
-    kind, why = describe_edge(a, None, src_dims=("M", "K"), tgt_dims=("K", "M"), to_space="lds")
+    kind, why = describe_edge(
+        a, None, src_dims=("M", "K"), tgt_dims=("K", "M"), to_space="lds"
+    )
     assert kind == "reposition"
     assert "invariant" in why and "lds" in why
-    assert "transpose" not in why and "->" not in why      # storage != label; no label-dims transpose
+    assert (
+        "transpose" not in why and "->" not in why
+    )  # storage != label; no label-dims transpose
 
 
 def test_describe_edge_explicit_relabel_changes_label() -> None:
     # Relabel = the ONE sanctioned label change: a FINISHED tile reused as a downstream input (axis
     # permutation + rename). NOT AB-swap (that is machine-input routing, labels invariant). EXPLICIT.
     m = {(0, 0): (0, 0), (0, 1): (1, 0), (1, 0): (0, 1), (1, 1): (1, 1)}
-    kind, why = describe_edge(m, m, src_dims=("M", "K"), tgt_dims=("N", "K"), relabel=True)
+    kind, why = describe_edge(
+        m, m, src_dims=("M", "K"), tgt_dims=("N", "K"), relabel=True
+    )
     assert kind == "relabel" and "CHANGES" in why
     # a transpose relabel (axes swapped) is also a relabel, and names the swap
     mt = {k: (c[1], c[0]) for k, c in m.items()}
-    kind2, why2 = describe_edge(m, mt, src_dims=("M", "K"), tgt_dims=("K", "M"), relabel=True)
+    kind2, why2 = describe_edge(
+        m, mt, src_dims=("M", "K"), tgt_dims=("K", "M"), relabel=True
+    )
     assert kind2 == "relabel" and "swapped" in why2
 
 
@@ -152,11 +166,13 @@ def test_mma_pair_k_aligned_rejects_k_misaligned() -> None:
     tr = _traits()
     a = a_warp_encoding(tr, k_iter=2)
     b = b_warp_encoding(tr, k_iter=2)
-    a_k_scrambled = _swap_register_axes(a, 0, 2)  # reorders which K sits in which register slot
+    a_k_scrambled = _swap_register_axes(
+        a, 0, 2
+    )  # reorders which K sits in which register slot
     if k_distribution(a_k_scrambled) == k_distribution(a):
         pytest.skip("swap did not perturb the K projection for this atom")
     d = mma_pair_k_aligned(a_k_scrambled, b)
-    assert d.severity in ("warning", "error")   # the driver rejects either
+    assert d.severity in ("warning", "error")  # the driver rejects either
     # a register-axis swap keeps the K SET per lane but changes its order -> reorder-fixable warning
     # (names transform_fragment); if it also changed the set it would be a hard "different K sets" error.
     assert "transform_fragment" in d.message or "different K sets" in d.message
@@ -171,12 +187,16 @@ def test_mma_pair_k_aligned_accepts_rectangular_per_atom() -> None:
     # A rectangular wave tile (64x32x32 -> m_sub=4, n_sub=2) tiles more M-atoms in A than N-atoms in
     # B, so the WHOLE-fragment K-lists differ in length (A repeats atom-K 4x, B 2x). The per-atom gate
     # must accept it (every issued 16x16x16 atom pairs the same K); the whole-fragment default rejects.
-    from rocke.helpers.tiling.kernels.tiling_gemm_interleaved_demo import _wave_descs_interleaved
+    from rocke.helpers.tiling.kernels.tiling_gemm_interleaved_demo import (
+        _wave_descs_interleaved,
+    )
 
     a, b, _ = _wave_descs_interleaved(4, 2, 2)
     d_atom = mma_pair_k_aligned(a.layout, b.layout, a_free_atoms=4, b_free_atoms=2)
     assert d_atom.severity == "ok", d_atom.message
-    d_whole = mma_pair_k_aligned(a.layout, b.layout)  # default 1,1 -> whole-fragment, rejects rectangular
+    d_whole = mma_pair_k_aligned(
+        a.layout, b.layout
+    )  # default 1,1 -> whole-fragment, rejects rectangular
     assert d_whole.severity != "ok"
 
 
@@ -184,7 +204,9 @@ def test_mma_pair_k_aligned_per_atom_still_rejects_k_mismatch() -> None:
     # The per-atom relaxation must NOT mask a genuine K divergence. Pairing A's 4-atom reduction against a
     # B told it has 1 atom (its whole 2-atom K-list as one signature) yields unequal atom signatures --
     # the gate rejects, proving the relaxation only forgives the free-dim repeat, never the K.
-    from rocke.helpers.tiling.kernels.tiling_gemm_interleaved_demo import _wave_descs_interleaved
+    from rocke.helpers.tiling.kernels.tiling_gemm_interleaved_demo import (
+        _wave_descs_interleaved,
+    )
 
     a, b, _ = _wave_descs_interleaved(4, 2, 2)
     d = mma_pair_k_aligned(a.layout, b.layout, a_free_atoms=4, b_free_atoms=1)
@@ -199,10 +221,24 @@ def test_interleaved_style_operand_desc_is_distinct() -> None:
     # the style's C is machine-consistent).
     from rocke.helpers.tiling.mma import TileMma, Tiling
     from rocke.helpers.tiling.mma.styles import InterleavedStyle
-    canon = TileMma((32, 32, 32), a="f16", b="f16", c="f32", target="gfx90a",
-                    tiling=Tiling(atom_shape=(16, 16, 16)))
-    inter = TileMma((32, 32, 32), a="f16", b="f16", c="f32", target="gfx90a",
-                    tiling=Tiling(atom_shape=(16, 16, 16)), style=InterleavedStyle())
+
+    canon = TileMma(
+        (32, 32, 32),
+        a="f16",
+        b="f16",
+        c="f32",
+        target="gfx90a",
+        tiling=Tiling(atom_shape=(16, 16, 16)),
+    )
+    inter = TileMma(
+        (32, 32, 32),
+        a="f16",
+        b="f16",
+        c="f32",
+        target="gfx90a",
+        tiling=Tiling(atom_shape=(16, 16, 16)),
+        style=InterleavedStyle(),
+    )
     # canonical and interleaved styles produce DIFFERENT operand layouts over the same machine. canon is a
     # canonical-style object, so its own accessor IS the canonical reference (no helper needed here).
     assert inter.a_desc.layout != canon.a_desc.layout
@@ -211,6 +247,7 @@ def test_interleaved_style_operand_desc_is_distinct() -> None:
 
 # --- reorder_between: derive the in-register reorder that bridges coalesced -> requested order ---
 # All SYNTHETIC (no CRC): the interleave params are OUTPUTS of the classifier, proving genericity.
+
 
 def _perm_maps(perm, nlanes=2):
     """A source frame + its within-lane register reorder by ``perm`` (same per-lane data, reordered)."""
@@ -221,15 +258,19 @@ def _perm_maps(perm, nlanes=2):
 
 def test_reorder_between_identity_is_none() -> None:
     src, _ = _perm_maps((0, 1, 2, 3))
-    assert reorder_between(src, src, pack=2) is None          # no reorder -> no panel
+    assert reorder_between(src, src, pack=2) is None  # no reorder -> no panel
 
 
 def test_reorder_between_dword_vs_subdword_from_pack() -> None:
     # SAME permutation, different dtype pack: pack=1 (f32) is a dword renumber; pack=2 (f16) splits a
     # dword -> a real v_perm repack. The tier is DERIVED from pack, not hardcoded per kernel.
-    src, tgt = _perm_maps(interleave_idx(1, 2, 4))            # (0,2,1,3)
+    src, tgt = _perm_maps(interleave_idx(1, 2, 4))  # (0,2,1,3)
     dword = reorder_between(src, tgt, pack=1)
-    assert dword is not None and dword.tier == "reorder (dword)" and dword.vperm_per_lane == 0
+    assert (
+        dword is not None
+        and dword.tier == "reorder (dword)"
+        and dword.vperm_per_lane == 0
+    )
     assert "interleave_idx(1, 2, 4)" in dword.label
     sub = reorder_between(src, tgt, pack=2)
     assert sub.tier == "reorder (sub-dword, 2x)" and sub.vperm_per_lane > 0
@@ -270,11 +311,12 @@ def test_observer_result_types_surfaced_at_package_root() -> None:
 
 # ---- #47: a REPLICATED / duplicated-coordinate layout is REPORTED, not silently first-slot-classified ----
 
+
 def test_classify_rejects_a_replicated_layout() -> None:
     # An element held at MULTIPLE (lane,reg) slots (e.g. gfx11 WMMA duplicates the operand across lane
     # halves) cannot be paired source<->target by coordinate. The classifier must report it, not let the
     # first slot silently win (the old `setdefault` mis-classified the reorder). Classify within one copy.
-    replicated = {(0, 0): (7,), (1, 0): (7,)}   # element (7,) held by BOTH lanes
+    replicated = {(0, 0): (7,), (1, 0): (7,)}  # element (7,) held by BOTH lanes
     with pytest.raises(ValueError, match="REPLICATED"):
         classify_transform(replicated, replicated)
 
@@ -282,7 +324,7 @@ def test_classify_rejects_a_replicated_layout() -> None:
 def test_classify_rejects_same_set_different_multiplicity() -> None:
     # Same element SET, different MULTIPLICITY -- the old `set()` check passed this; the multiset check
     # rejects it as different elements (a same-size gather/broadcast preserves count but not the set).
-    src = {(0, 0): (0,), (1, 0): (0,), (2, 0): (1,)}   # multiset {(0,): 2, (1,): 1}
-    tgt = {(0, 0): (0,), (1, 0): (1,), (2, 0): (1,)}   # multiset {(0,): 1, (1,): 2}
+    src = {(0, 0): (0,), (1, 0): (0,), (2, 0): (1,)}  # multiset {(0,): 2, (1,): 1}
+    tgt = {(0, 0): (0,), (1, 0): (1,), (2, 0): (1,)}  # multiset {(0,): 1, (1,): 2}
     with pytest.raises(ValueError, match="different elements"):
         classify_transform(src, tgt)

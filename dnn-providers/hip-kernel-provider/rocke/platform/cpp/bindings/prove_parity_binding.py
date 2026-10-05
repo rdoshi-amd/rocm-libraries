@@ -1456,6 +1456,7 @@ def _selector_parity_row(problem_dict, arch):
             use_sinks=bool(problem_dict.get("use_sinks", False)),
             use_alibi=bool(problem_dict.get("use_alibi", False)),
             use_qq_bias=bool(problem_dict.get("use_qq_bias", False)),
+            use_additive_bias=bool(problem_dict.get("use_additive_bias", False)),
             use_fp8=bool(problem_dict.get("use_fp8", False)),
             num_kv_blocks=problem_dict.get("num_kv_blocks", 0),
         )
@@ -1484,6 +1485,7 @@ def _selector_parity_row(problem_dict, arch):
                 "has_softcap",
                 "use_alibi",
                 "use_qq_bias",
+                "use_additive_bias",
                 "num_seqs",
                 "num_warps",
                 "waves_per_eu",

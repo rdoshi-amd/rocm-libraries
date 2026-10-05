@@ -66,6 +66,7 @@ class UnifiedAttention2DTiledSpec:
     has_softcap: bool
     use_alibi: bool = False
     use_qq_bias: bool = False
+    use_additive_bias: bool = False
     num_seqs: int = 0
     num_warps: int = 1
     waves_per_eu: Optional[int] = None
@@ -84,6 +85,7 @@ class UnifiedAttention2DTiledSpec:
             num_queries_per_kv=self.num_queries_per_kv,
             use_alibi=self.use_alibi,
             use_qq_bias=self.use_qq_bias,
+            use_additive_bias=self.use_additive_bias,
             use_fp8=self.kv_storage_dtype == "fp8e4m3",
             q_dtype=None,
             num_warps=self.num_warps,
@@ -156,7 +158,8 @@ def supports_tiled_2d(
     num_queries_per_kv: int,
     use_alibi: bool,
     use_qq_bias: bool,
-    use_fp8: bool,
+    use_additive_bias: bool = False,
+    use_fp8: bool = False,
     q_dtype,
     num_warps: int = 1,
     block_m_per_warp: int = 16,
@@ -204,6 +207,8 @@ def supports_tiled_2d(
         return False, "gfx1250 tiled 2D does not support ALiBi yet"
     if use_qq_bias:
         return False, "gfx1250 tiled 2D does not support QQ bias yet"
+    if use_additive_bias:
+        return False, "gfx1250 tiled 2D does not support additive bias yet"
     if q_dtype is not None and q_dtype != "bf16":
         return False, f"gfx1250 tiled 2D: unsupported q_dtype {q_dtype!r}"
     if not use_fp8 or kv_storage_dtype != "fp8e4m3":

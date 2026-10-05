@@ -898,6 +898,18 @@ _CONFIGS = {
         block_m_per_warp=32,
         tile_size=64,
     ),
+    # --- idx56: additive bias feature flag ---
+    56: dict(
+        head_size=64,
+        block_size=32,
+        num_query_heads=32,
+        num_kv_heads=32,
+        dtype="bf16",
+        use_sinks=False,
+        sliding_window=0,
+        has_softcap=False,
+        use_additive_bias=True,
+    ),
 }
 
 

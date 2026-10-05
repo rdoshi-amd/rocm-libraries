@@ -107,6 +107,7 @@ class UnifiedAttention3DTiledSpec:
     num_segments: int
     use_alibi: bool = False
     use_qq_bias: bool = False
+    use_additive_bias: bool = False
     num_seqs: int = 0
     waves_per_eu: Optional[int] = None
     kv_storage_dtype: Optional[str] = None
@@ -184,6 +185,7 @@ class UnifiedAttention3DTiledSpec:
             "softcap" if self.has_softcap else "",
             "alibi" if self.use_alibi else "",
             "qqb" if self.use_qq_bias else "",
+            "addb" if self.use_additive_bias else "",
             "hoist" if self.use_invariant_hoist else "",
             "wkv" if self.use_wide_kv_load else "",
         )

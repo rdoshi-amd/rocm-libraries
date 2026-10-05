@@ -1079,6 +1079,36 @@ class TestAttentionHelpers(unittest.TestCase):
         # ALiBi kernel name suffix.
         self.assertIn("_alibi", ll)
 
+    def test_unified_attention_2d_tiled_additive_bias(self):
+        """Additive-bias variant emits the correct ABI params and kernel name token."""
+        from kernels import (
+            UnifiedAttention2DTiledSpec,
+            build_unified_attention_2d_tiled,
+        )
+
+        spec = UnifiedAttention2DTiledSpec(
+            head_size=64,
+            block_size=32,
+            num_query_heads=32,
+            num_kv_heads=32,
+            dtype="bf16",
+            use_sinks=False,
+            sliding_window=0,
+            has_softcap=False,
+            use_additive_bias=True,
+        )
+        k = build_unified_attention_2d_tiled(spec)
+        ll = lower_kernel_to_llvm(k)
+        # Additive-bias ABI: f32 pointer + 3 stride scalars.
+        self.assertIn("f32* %additive_bias_ptr", ll)
+        self.assertIn("i32 %additive_bias_batch_stride", ll)
+        self.assertIn("i32 %additive_bias_head_stride", ll)
+        self.assertIn("i32 %additive_bias_sq_stride", ll)
+        # OOB-safe masked load: select guards the GEP index.
+        self.assertIn("select i1", ll)
+        # Kernel name carries the "addb" token.
+        self.assertIn("addb", k.name)
+
     def test_unified_attention_3d_tiled_kernel_compiles(self):
         from kernels import (
             UnifiedAttention3DTiledSpec,
@@ -1875,13 +1905,14 @@ class TestAttentionHelpers(unittest.TestCase):
             num_queries_per_kv=8,
             use_alibi=False,
             use_qq_bias=False,
+            use_additive_bias=False,
             use_fp8=False,
             q_dtype=None,
         )
         ok_fp16, _ = supports_tiled_2d(**base)
         self.assertTrue(ok_fp16)
         # head_size in {64, 128, 256}, block_size in {16, 32, 64}, dtype=bf16,
-        # alibi, qq_bias all supported.
+        # alibi, qq_bias, additive_bias all supported.
         for accept in [
             dict(head_size=256),
             dict(head_size=64),
@@ -1890,6 +1921,7 @@ class TestAttentionHelpers(unittest.TestCase):
             dict(dtype="bf16"),
             dict(use_alibi=True),
             dict(use_qq_bias=True),
+            dict(use_additive_bias=True),
         ]:
             kwargs = dict(base)
             kwargs.update(accept)

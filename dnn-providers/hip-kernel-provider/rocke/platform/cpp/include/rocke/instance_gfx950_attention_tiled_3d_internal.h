@@ -136,6 +136,7 @@ typedef struct rocke_gfx950_attn_tiled_3d_config
     bool USE_SINKS; /* spec.use_sinks                                       */
     bool USE_ALIBI; /* spec.use_alibi                                       */
     bool USE_QQ_BIAS; /* spec.use_qq_bias                                     */
+    bool USE_ADDITIVE_BIAS; /* spec.use_additive_bias                         */
     bool KV_FP8; /* kv_storage_dtype == "fp8e4m3"                        */
     bool I64_KV_ADDR; /* spec.use_i64_kv_addr (64-bit paged-KV, caches > 2 GiB) */
     int KV_BYTES; /* 1 if KV_FP8 else 2                                   */
@@ -241,6 +242,10 @@ typedef struct rocke_gfx950_attention_tiled_3d_build_ctx
     rocke_value_t* num_seqs_p; /* I32 num_seqs                                */
     rocke_value_t* bt_stride_p; /* I32 block_table_stride                      */
     rocke_value_t* qq_bias_stride0_p; /* I32 qq_bias_stride_0                        */
+    rocke_value_t* additive_bias_ptr; /* F32* readonly                               */
+    rocke_value_t* additive_bias_batch_stride_p; /* I32 additive_bias_batch_stride   */
+    rocke_value_t* additive_bias_head_stride_p; /* I32 additive_bias_head_stride     */
+    rocke_value_t* additive_bias_sq_stride_p; /* I32 additive_bias_sq_stride         */
 
     /* ---------- grid ids + thread (lines 360-363) ---------- */
     rocke_value_t* q_block_global_idx; /* block_id_x()                              */

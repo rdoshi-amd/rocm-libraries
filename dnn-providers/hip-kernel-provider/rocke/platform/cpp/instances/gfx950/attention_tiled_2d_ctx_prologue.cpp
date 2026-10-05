@@ -156,6 +156,7 @@ bool rocke_gfx950_attn2d_build_ctx_init(rocke_gfx950_attn2d_build_ctx_t* ctx,
     ctx->USE_SINKS = spec->use_sinks;
     ctx->USE_ALIBI = spec->use_alibi;
     ctx->USE_QQ_BIAS = spec->use_qq_bias;
+    ctx->USE_ADDITIVE_BIAS = spec->use_additive_bias;
 
     ctx->TRANSPOSED_SCALAR_STATE = spec->use_transposed_scalar_state;
     ctx->TRANSPOSED_INVARIANT_HOIST = spec->use_transposed_invariant_hoist;
@@ -292,6 +293,19 @@ bool rocke_gfx950_attn2d_build_ctx_init(rocke_gfx950_attn2d_build_ctx_t* ctx,
         ctx->num_seqs_p = rocke_b_param(b, "num_seqs", rocke_i32(), NULL);
         ctx->bt_stride_p = rocke_b_param(b, "block_table_stride", rocke_i32(), NULL);
         ctx->qq_bias_stride0_p = rocke_b_param(b, "qq_bias_stride_0", rocke_i32(), NULL);
+
+        memset(&o, 0, sizeof(o));
+        o.readonly = true;
+        o.readonly_set = true;
+        o.align = 4;
+        o.align_set = true;
+        ctx->additive_bias_ptr = rocke_b_param(b, "additive_bias_ptr", ptr_f32, &o);
+        ctx->additive_bias_batch_stride_p
+            = rocke_b_param(b, "additive_bias_batch_stride", rocke_i32(), NULL);
+        ctx->additive_bias_head_stride_p
+            = rocke_b_param(b, "additive_bias_head_stride", rocke_i32(), NULL);
+        ctx->additive_bias_sq_stride_p
+            = rocke_b_param(b, "additive_bias_sq_stride", rocke_i32(), NULL);
     }
 
     /* ---- grid ids + wave decomposition (lines 891-904) ---- *

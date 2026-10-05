@@ -192,6 +192,7 @@ rocke_unified_attention_3d_tiled_spec_t rocke_unified_attention_3d_tiled_spec_de
     /* required fields stay zero/NULL (caller must set). Defaulted fields: */
     s.use_alibi = false;
     s.use_qq_bias = false;
+    s.use_additive_bias = false;
     s.num_seqs = 0;
     s.has_waves_per_eu = false;
     s.waves_per_eu = 0;
@@ -376,6 +377,10 @@ int rocke_gfx950_unified_attention_3d_tiled_spec_kernel_name(
     if(s->use_qq_bias)
     {
         parts[np++] = "qqb";
+    }
+    if(s->use_additive_bias)
+    {
+        parts[np++] = "addb";
     }
 
     st = rocke_kernel_name_join("", parts, np, NULL, NULL, 0, buf, cap, &out_len);
@@ -616,6 +621,7 @@ bool rocke_gfx950_attn_tiled_3d_config_from_spec(
     out->USE_SINKS = spec->use_sinks;
     out->USE_ALIBI = spec->use_alibi;
     out->USE_QQ_BIAS = spec->use_qq_bias;
+    out->USE_ADDITIVE_BIAS = spec->use_additive_bias;
     out->KV_FP8 = (spec->kv_storage_dtype != NULL
                    && rocke_attn3d950_streq(spec->kv_storage_dtype, "fp8e4m3"));
     out->I64_KV_ADDR = spec->use_i64_kv_addr;

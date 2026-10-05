@@ -584,6 +584,7 @@ static bool rocke_g950_build_ctx_init_local(rocke_gfx950_attn2d_build_ctx_t* ctx
     ctx->USE_SINKS = spec->use_sinks;
     ctx->USE_ALIBI = spec->use_alibi;
     ctx->USE_QQ_BIAS = spec->use_qq_bias;
+    ctx->USE_ADDITIVE_BIAS = spec->use_additive_bias;
 
     /* transposed-softmax + experimental predicate aliases (Py768-777). */
     ctx->TRANSPOSED_SCALAR_STATE = spec->use_transposed_scalar_state;
@@ -745,6 +746,19 @@ static bool rocke_g950_build_ctx_init_local(rocke_gfx950_attn2d_build_ctx_t* ctx
         ctx->num_seqs_p = rocke_b_param(b, "num_seqs", rocke_i32(), NULL);
         ctx->bt_stride_p = rocke_b_param(b, "block_table_stride", rocke_i32(), NULL);
         ctx->qq_bias_stride0_p = rocke_b_param(b, "qq_bias_stride_0", rocke_i32(), NULL);
+
+        memset(&o, 0, sizeof(o));
+        o.readonly = true;
+        o.readonly_set = true;
+        o.align = 4;
+        o.align_set = true;
+        ctx->additive_bias_ptr = rocke_b_param(b, "additive_bias_ptr", ptr_f32, &o);
+        ctx->additive_bias_batch_stride_p
+            = rocke_b_param(b, "additive_bias_batch_stride", rocke_i32(), NULL);
+        ctx->additive_bias_head_stride_p
+            = rocke_b_param(b, "additive_bias_head_stride", rocke_i32(), NULL);
+        ctx->additive_bias_sq_stride_p
+            = rocke_b_param(b, "additive_bias_sq_stride", rocke_i32(), NULL);
     }
 
     /* ---- grid ids + wave decomposition (Py891-904) ---- */
@@ -1093,6 +1107,7 @@ static rocke_status_t rocke_g950_attn2d_kernel_name(const rocke_attention_tiled_
             s->has_softcap ? "softcap" : "",
             s->use_alibi ? "alibi" : "",
             s->use_qq_bias ? "qqb" : "",
+            s->use_additive_bias ? "addb" : "",
             w_buf,
             mw_buf,
             s->use_mfma_32x32 ? "mfma32" : "",

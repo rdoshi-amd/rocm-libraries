@@ -329,6 +329,22 @@ void rocke_gfx950_attention_tiled_3d_declare_params(
     ctx->num_seqs_p = rocke_b_param(B, "num_seqs", rocke_i32(), NULL);
     ctx->bt_stride_p = rocke_b_param(B, "block_table_stride", rocke_i32(), NULL);
     ctx->qq_bias_stride0_p = rocke_b_param(B, "qq_bias_stride_0", rocke_i32(), NULL);
+
+    /* additive_bias_ptr: F32* readonly align4 */
+    memset(&o, 0, sizeof(o));
+    o.readonly = true;
+    o.readonly_set = true;
+    o.align = 4;
+    o.align_set = true;
+    ctx->additive_bias_ptr
+        = rocke_b_param(B, "additive_bias_ptr", rocke_ptr_type(B, rocke_f32(), "global"), &o);
+
+    ctx->additive_bias_batch_stride_p
+        = rocke_b_param(B, "additive_bias_batch_stride", rocke_i32(), NULL);
+    ctx->additive_bias_head_stride_p
+        = rocke_b_param(B, "additive_bias_head_stride", rocke_i32(), NULL);
+    ctx->additive_bias_sq_stride_p
+        = rocke_b_param(B, "additive_bias_sq_stride", rocke_i32(), NULL);
 }
 
 /* ============================================================ *

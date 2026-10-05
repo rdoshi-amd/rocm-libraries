@@ -98,6 +98,7 @@ rocke_unified_attention_problem_t rocke_unified_attention_problem_default(void)
     p.use_sinks = false;
     p.use_alibi = false;
     p.use_qq_bias = false;
+    p.use_additive_bias = false;
     p.use_fp8 = false;
     p.num_cus = 120;
     p.waves_per_eu = 0;
@@ -174,6 +175,12 @@ bool rocke_unified_attention_supports_scalar(const rocke_unified_attention_probl
     {
         if(out_reason != NULL)
             *out_reason = "QQ bias is not enabled in CK DSL attention yet";
+        return false;
+    }
+    if(p->use_additive_bias)
+    {
+        if(out_reason != NULL)
+            *out_reason = "additive bias is not enabled in CK DSL attention yet";
         return false;
     }
     if(out_reason != NULL)
@@ -324,6 +331,7 @@ rocke_status_t
     rocke_signature_builder_ptr(&sb, "seq_lens_ptr", "i32", NULL);
     rocke_signature_builder_ptr(&sb, "alibi_slopes_ptr", "f32", NULL);
     rocke_signature_builder_ptr(&sb, "qq_bias_ptr", "f32", NULL);
+    rocke_signature_builder_ptr(&sb, "additive_bias_ptr", "f32", NULL);
     rocke_signature_builder_ptr(&sb, "query_start_len_ptr", "i32", NULL);
     rocke_signature_builder_scalar(&sb, "scale", "f32");
     rocke_signature_builder_scalar(&sb, "k_scale", "f32");

@@ -415,6 +415,21 @@ void rocke_gfx950_attention_tiled_3d_emit_softmax_loop(
                         b, ctx->qq_bias_ptr, qq_idx, qq_ok, rocke_b_const_f32(b, 0.0), f32, 4);
                     s_scaled = rocke_b_fadd(b, s_scaled, rocke_b_fmul(b, qq_v, ctx->rcp_ln2));
                 }
+                if(cfg->USE_ADDITIVE_BIAS)
+                {
+                    rocke_value_t* ab_qp_safe
+                        = rocke_b_select(b, row_ok, qp_r, rocke_b_const_i32(b, 0));
+                    rocke_value_t* ab_base = rocke_b_add(b,
+                        rocke_b_mul(b, ctx->additive_bias_batch_stride_p, ctx->seq_idx),
+                        rocke_b_mul(b, ctx->additive_bias_head_stride_p, ctx->kv_head_idx));
+                    rocke_value_t* ab_row = rocke_b_add(b, ab_base,
+                        rocke_b_mul(b, ctx->additive_bias_sq_stride_p, ab_qp_safe));
+                    rocke_value_t* ab_idx = rocke_b_add(b, ab_row, col_abs);
+                    rocke_value_t* ab_v = rocke_b_masked_global_load(
+                        b, ctx->additive_bias_ptr, ab_idx, row_ok,
+                        rocke_b_const_f32(b, 0.0), f32, 4);
+                    s_scaled = rocke_b_fadd(b, s_scaled, rocke_b_fmul(b, ab_v, ctx->rcp_ln2));
+                }
                 masked[n * 4 + reg] = rocke_b_select(b, m_ok, s_scaled, ctx->neg_inf);
             }
         }

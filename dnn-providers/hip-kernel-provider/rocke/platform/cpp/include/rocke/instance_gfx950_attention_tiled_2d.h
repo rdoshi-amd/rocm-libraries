@@ -149,6 +149,7 @@ typedef struct rocke_gfx950_attention_tiled_2d_supports_args
     int num_queries_per_kv;
     bool use_alibi;
     bool use_qq_bias;
+    bool use_additive_bias;
     bool use_fp8;
     const char* q_dtype; /* NULL == Python None                        */
     int num_warps; /* default 1                                  */

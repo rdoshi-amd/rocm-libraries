@@ -106,6 +106,7 @@ def _spec_gfx942_fp16_flash(problem: UnifiedAttentionProblem):
         has_softcap=problem.softcap > 0,
         use_alibi=problem.use_alibi,
         use_qq_bias=problem.use_qq_bias,
+        use_additive_bias=problem.use_additive_bias,
         num_seqs=problem.num_seqs,
         num_warps=num_warps,
         waves_per_eu=_select_2d_waves_per_eu(problem),
@@ -172,6 +173,7 @@ def _spec_gfx942_bf16_flash(problem: UnifiedAttentionProblem):
         has_softcap=problem.softcap > 0,
         use_alibi=problem.use_alibi,
         use_qq_bias=problem.use_qq_bias,
+        use_additive_bias=problem.use_additive_bias,
         num_seqs=problem.num_seqs,
         num_warps=nw,
         waves_per_eu=_select_2d_waves_per_eu(problem),
@@ -214,7 +216,7 @@ def _base_2d_generic_fields(problem: UnifiedAttentionProblem) -> dict:
     subflags = _enable_transposed_subflags(problem)
     scalar_state = combo or subflags
     skip_legacy_qreg = combo or subflags
-    _bias_active = problem.softcap > 0 or problem.use_alibi or problem.use_qq_bias
+    _bias_active = problem.softcap > 0 or problem.use_alibi or problem.use_qq_bias or problem.use_additive_bias
     mask_opts = (combo_no_sw and not _bias_active) or subflags
     return dict(
         head_size=problem.head_size,
@@ -227,6 +229,7 @@ def _base_2d_generic_fields(problem: UnifiedAttentionProblem) -> dict:
         has_softcap=problem.softcap > 0,
         use_alibi=problem.use_alibi,
         use_qq_bias=problem.use_qq_bias,
+        use_additive_bias=problem.use_additive_bias,
         num_seqs=problem.num_seqs,
         num_warps=_select_2d_num_warps(problem),
         waves_per_eu=_select_2d_waves_per_eu(problem),
@@ -337,6 +340,7 @@ def _tiled_spec_from_problem(
             has_softcap=problem.softcap > 0,
             use_alibi=problem.use_alibi,
             use_qq_bias=problem.use_qq_bias,
+            use_additive_bias=problem.use_additive_bias,
             num_seqs=problem.num_seqs,
             num_warps=1,
             waves_per_eu=_select_2d_waves_per_eu(problem),
@@ -390,6 +394,7 @@ def _spec_generic_3d(problem: UnifiedAttentionProblem):
         num_segments=_num_segments(problem),
         use_alibi=problem.use_alibi,
         use_qq_bias=problem.use_qq_bias,
+        use_additive_bias=problem.use_additive_bias,
         num_seqs=problem.num_seqs,
         waves_per_eu=_select_3d_waves_per_eu(problem),
         kv_storage_dtype=_kv_storage_dtype(problem),
@@ -419,6 +424,7 @@ def _tiled_3d_spec_from_problem(
             num_segments=r.num_segments,
             use_alibi=problem.use_alibi,
             use_qq_bias=problem.use_qq_bias,
+            use_additive_bias=problem.use_additive_bias,
             num_seqs=problem.num_seqs,
             waves_per_eu=r.waves_per_eu,
             kv_storage_dtype=r.kv_storage_dtype,

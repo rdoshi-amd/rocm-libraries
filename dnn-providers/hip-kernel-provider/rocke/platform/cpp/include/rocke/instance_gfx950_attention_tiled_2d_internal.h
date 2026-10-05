@@ -120,7 +120,7 @@ typedef struct rocke_gfx950_attn2d_build_ctx
     int BLOCK_M, BLOCK_Q, NQK, NUM_KV, NUM_QH;
     int VALID_ROWS; /* BLOCK_Q * NQK -- rows that map to complete GQA groups */
     int SLIDING_WINDOW;
-    bool USE_SOFTCAP, USE_SINKS, USE_ALIBI, USE_QQ_BIAS;
+    bool USE_SOFTCAP, USE_SINKS, USE_ALIBI, USE_QQ_BIAS, USE_ADDITIVE_BIAS;
     /* transposed-softmax + experimental predicate aliases (spec.*) */
     bool TRANSPOSED_SCALAR_STATE, TRANSPOSED_INVARIANT_HOIST;
     bool TRANSPOSED_MASK_ONCE, TRANSPOSED_HALF_LOCAL_PV;
@@ -166,6 +166,7 @@ typedef struct rocke_gfx950_attn2d_build_ctx
     rocke_value_t* seq_lens;
     rocke_value_t* alibi_slopes_ptr;
     rocke_value_t* qq_bias_ptr;
+    rocke_value_t* additive_bias_ptr;
     rocke_value_t* cu_q;
     rocke_value_t* scale_p;
     rocke_value_t* k_scale_p;
@@ -175,6 +176,9 @@ typedef struct rocke_gfx950_attn2d_build_ctx
     rocke_value_t* num_seqs_p;
     rocke_value_t* bt_stride_p;
     rocke_value_t* qq_bias_stride0_p;
+    rocke_value_t* additive_bias_batch_stride_p;
+    rocke_value_t* additive_bias_head_stride_p;
+    rocke_value_t* additive_bias_sq_stride_p;
 
     /* ---- grid ids + wave decomposition ---- */
     rocke_value_t* q_block_global_idx;

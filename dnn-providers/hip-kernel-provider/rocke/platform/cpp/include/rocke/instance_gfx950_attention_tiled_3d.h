@@ -171,6 +171,7 @@ typedef struct rocke_unified_attention_3d_tiled_spec
     /* ---- defaulted ---- */
     bool use_alibi; /* False */
     bool use_qq_bias; /* False */
+    bool use_additive_bias; /* False */
     int num_seqs; /* 0 */
 
     bool has_waves_per_eu; /* Optional[int] None */

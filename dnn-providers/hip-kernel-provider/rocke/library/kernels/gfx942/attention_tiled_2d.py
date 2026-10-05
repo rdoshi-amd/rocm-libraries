@@ -173,6 +173,7 @@ class UnifiedAttention2DTiledSpec:
     has_softcap: bool
     use_alibi: bool = False
     use_qq_bias: bool = False
+    use_additive_bias: bool = False
     num_seqs: int = 0
     # Number of wave64 warps per CTA. `BLOCK_M = num_warps * 16` rows are
     # processed per CTA, with each warp owning its own 16-row slice. The
@@ -993,6 +994,7 @@ class UnifiedAttention2DTiledSpec:
             "softcap" if self.has_softcap else "",
             "alibi" if self.use_alibi else "",
             "qqb" if self.use_qq_bias else "",
+            "addb" if self.use_additive_bias else "",
             f"w{self.num_warps}" if self.num_warps != 1 else "",
             f"wpe{self.waves_per_eu}" if self.waves_per_eu is not None else "",
             f"mw{self.block_m_per_warp}" if self.block_m_per_warp != 16 else "",

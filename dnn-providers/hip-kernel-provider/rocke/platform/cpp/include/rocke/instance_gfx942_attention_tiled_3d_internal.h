@@ -58,6 +58,7 @@
 #ifndef ROCKE_INSTANCE_GFX942_ATTENTION_TILED_3D_INTERNAL_H
 #define ROCKE_INSTANCE_GFX942_ATTENTION_TILED_3D_INTERNAL_H
 
+#include "rocke/instance_attention_strided_kv_internal.h"
 #include <stdbool.h>
 #include <stddef.h>
 
@@ -180,6 +181,9 @@ bool rocke_gfx942_attn_tiled_3d_reduce_config_from_spec(
  * ===================================================================== */
 typedef struct rocke_gfx942_attention_tiled_3d_build_ctx
 {
+    bool strided_kv;
+    rocke_strided_kv_params_t k_strides;
+    rocke_strided_kv_params_t v_strides;
     /* ---------- inputs / configuration ---------- */
     rocke_ir_builder_t* b; /* the IRBuilder (Python `b`)           */
     rocke_gfx942_attn_tiled_3d_kind_t kind; /* segment or reduce                    */

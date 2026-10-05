@@ -146,6 +146,7 @@ class AttentionRequest(OperatorRequest):
     # ``dense_tile`` names a DENSE_TILE_GEOMETRIES key (``default`` / ``bm128``).
     dense_tile: str = "auto"  # "auto" | "default" | "bm128"
     dense_wide_lds_dma: str = "auto"  # "auto" | "on" | "off"
+    kv_layout: str = "paged"  # "paged" | "strided" (non-paged decode)
 
     def normalized(self) -> dict:
         d = asdict(self)
@@ -168,6 +169,8 @@ class AttentionRequest(OperatorRequest):
 
     def features(self) -> frozenset[str]:
         active = set()
+        if self.kv_layout == "strided":
+            active.add("strided_kv")
         try:
             mask_type = _parse_attention_mask_type(self.mask_type)
         except ValueError:
@@ -222,6 +225,8 @@ def _request_errors(req: OperatorRequest) -> list[str]:
     if not isinstance(req, AttentionRequest):
         return [f"expected AttentionRequest, got {type(req).__name__}"]
     errors: list[str] = []
+    if req.kv_layout not in ("paged", "strided"):
+        errors.append("kv_layout must be paged or strided")
     if req.op != "attention":
         errors.append(f"unsupported op {req.op!r}")
     for field in ("batch", "nhead_q", "nhead_k", "seqlen_q", "seqlen_k", "hdim_q"):

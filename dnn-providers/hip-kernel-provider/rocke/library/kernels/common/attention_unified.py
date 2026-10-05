@@ -3207,12 +3207,14 @@ def _tiled_3d_cache_key(problem: UnifiedAttentionProblem) -> Tuple:
     return base
 
 
-def _3d_signature(dtype: str, *, kv_dtype: Optional[str] = None):
+def _3d_signature(
+    dtype: str, *, kv_dtype: Optional[str] = None, strided_kv: bool = False
+):
     from rocke.helpers.spec import SignatureBuilder
 
     io_dtype = "f16" if dtype == "fp16" else "bf16"
     kv_io = kv_dtype if kv_dtype else io_dtype
-    return (
+    sb = (
         SignatureBuilder()
         .ptr("segm_output_ptr", "f32")
         .ptr("segm_max_ptr", "f32")
@@ -3233,8 +3235,15 @@ def _3d_signature(dtype: str, *, kv_dtype: Optional[str] = None):
         .scalar("num_seqs", "i32")
         .scalar("block_table_stride", "i32")
         .scalar("qq_bias_stride_0", "i32")
-        .build()
     )
+
+    if strided_kv:
+        for prefix in ("k", "v"):
+            sb.scalar(f"{prefix}_stride_batch_bytes", "i64")
+            sb.scalar(f"{prefix}_stride_head_bytes", "i64")
+            sb.scalar(f"{prefix}_stride_token_bytes", "i32")
+            sb.scalar(f"{prefix}_span_bytes", "i32")
+    return sb.build()
 
 
 def _reduce_signature(dtype: str):
@@ -3364,6 +3373,7 @@ def _run_3d_tiled(
     v_scale: float = 1.0,
     use_graph: bool = True,
     tuning_spec=None,
+    kv_cache_layout=None,
 ):
     """Launch the tiled 3D segment + reduce kernels.
 
@@ -3384,10 +3394,13 @@ def _run_3d_tiled(
     else:
         num_segments = _num_segments(problem)
         cache_key = _tiled_3d_cache_key(problem)
+    if kv_cache_layout is not None:
+        cache_key = cache_key + ("strided_kv",)
     capturing = _torch_stream_capturing()
     if use_graph and _enable_3d_graph_replay(problem) and not capturing:
         graph_key = (
             cache_key,
+            kv_cache_layout,
             int(problem.total_q),
             int(stream),
             id(q),
@@ -3435,6 +3448,7 @@ def _run_3d_tiled(
                 v_scale=v_scale,
                 use_graph=False,
                 tuning_spec=tuning_spec,
+                kv_cache_layout=kv_cache_layout,
             )
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph):
@@ -3457,11 +3471,14 @@ def _run_3d_tiled(
                         alibi_slopes=alibi_slopes,
                         qq_bias=qq_bias,
                         qq_bias_stride_0=qq_bias_stride_0,
-                        stream=stream,
+                        # torch.cuda.graph captures on its own current stream;
+                        # launching on the caller's raw stream records no nodes.
+                        stream=int(torch.cuda.current_stream().cuda_stream),
                         k_scale=k_scale,
                         v_scale=v_scale,
                         use_graph=False,
                         tuning_spec=tuning_spec,
+                        kv_cache_layout=kv_cache_layout,
                     )
             _3D_GRAPHS[graph_key] = graph
             _3D_GRAPH_REFS[graph_key] = (
@@ -3476,7 +3493,11 @@ def _run_3d_tiled(
                 alibi_slopes,
                 qq_bias,
             )
-        graph.replay()
+        # Replay must be ordered with work on the caller's stream as well.
+        import torch
+
+        with torch.cuda.stream(torch.cuda.ExternalStream(int(stream), device=q.device)):
+            graph.replay()
         if _resolved_fence(True):
             wait_stream_and_release(int(stream))
         return LaunchSummary(launches=2)
@@ -3490,7 +3511,11 @@ def _run_3d_tiled(
     # only remaining per-call cost is packing args and issuing two
     # ``hipModuleLaunchKernel`` calls on the caller's stream.
     prepared = _get_3d_pipeline(
-        problem, cache_key, num_segments, tuning_spec=tuning_spec
+        problem,
+        cache_key,
+        num_segments,
+        tuning_spec=tuning_spec,
+        strided_kv=kv_cache_layout is not None,
     )
     segm_output, segm_max, segm_expsum = prepared.workspace(
         problem, num_segments, q.device
@@ -3504,6 +3529,7 @@ def _run_3d_tiled(
 
     bound_key = (
         cache_key,
+        kv_cache_layout,
         int(problem.total_q),
         str(q.device),
         id(q),
@@ -3546,6 +3572,8 @@ def _run_3d_tiled(
             "block_table_stride": int(bt_stride),
             "qq_bias_stride_0": int(qq_bias_stride_0),
         }
+        if kv_cache_layout is not None:
+            seg_vals.update(kv_cache_layout.arguments())
         red_vals = {
             "output_ptr": out,
             "segm_output_ptr": segm_output,
@@ -3975,6 +4003,7 @@ def _get_3d_pipeline(
     num_segments: int,
     *,
     tuning_spec=None,
+    strided_kv: bool = False,
 ) -> _Attention3DPrepared:
     prepared_key = cache_key + ("total_q", int(problem.total_q))
     if prepared_key in _3D_PIPELINES:
@@ -3991,9 +4020,15 @@ def _get_3d_pipeline(
                 build_unified_attention_reduce_tiled,
                 _,
             ) = _tiled_3d_impl(arch)
-            seg_kernel = build_unified_attention_3d_tiled(
-                _tiled_3d_spec_from_problem(problem), arch=arch
-            )
+            segment_spec = _tiled_3d_spec_from_problem(problem)
+            if strided_kv:
+                segment_spec = replace(
+                    segment_spec,
+                    kv_layout="strided",
+                    use_wide_kv_load=False,
+                    use_i64_kv_addr=False,
+                )
+            seg_kernel = build_unified_attention_3d_tiled(segment_spec, arch=arch)
             red_kernel = build_unified_attention_reduce_tiled(
                 UnifiedAttentionReduceTiledSpec(
                     head_size=problem.head_size,
@@ -4019,6 +4054,7 @@ def _get_3d_pipeline(
         kernel_name=seg_kname,
         signature=_3d_signature(
             problem.dtype,
+            strided_kv=strided_kv,
             kv_dtype=(
                 tuning_spec.kernel_spec.kv_storage_dtype
                 if tuning_spec is not None
@@ -4378,8 +4414,16 @@ def run_unified_attention_torch(
     v_scale: float = 1.0,
     out_scale: float = 1.0,
     tuning_spec=None,
+    kv_layout: str = "paged",
 ):
     """Launch a CK DSL attention kernel on torch tensors.
+
+    ``kv_layout="strided"`` adapts non-paged K/V tensors with logical shape
+    [B,Hkv,capacity,D] to the existing split-KV pipeline on gfx942/gfx950.
+    K/V may have independent BSHD/BHSD or padded outer strides; D must be
+    contiguous and rows vector-aligned. Pass block_table=None, Q/O [B,Hq,D],
+    int32 KV lengths [B] in [0,capacity], and query offsets [0,1,...,B].
+    The adapter neither copies KV nor allocates a page table.
 
     Backend selection:
       - `"tiled"`: force the optimized MFMA path; raises if unsupported.
@@ -4413,6 +4457,102 @@ def run_unified_attention_torch(
                 f"backend {backend!r}"
             )
         backend = implied
+
+    if kv_layout not in ("paged", "strided"):
+        raise ValueError("kv_layout must be 'paged' or 'strided'")
+    if kv_layout == "strided":
+        from .attention_kv_cache import StridedKvCacheLayout
+
+        if _resolve_attention_arch() not in ("gfx942", "gfx950"):
+            raise ValueError("strided KV decode targets gfx942/gfx950")
+        if backend not in ("auto", "3d"):
+            raise ValueError("strided KV decode requires the 3D tiled backend")
+        if block_table is not None:
+            raise ValueError("strided KV decode does not take a block table")
+        if problem.max_seqlen_q != 1 or problem.total_q != problem.num_seqs:
+            raise ValueError("strided KV decode requires one query per sequence")
+        if (
+            problem.use_fp8
+            or problem.use_sinks
+            or problem.use_alibi
+            or problem.use_qq_bias
+            or sinks is not None
+            or alibi_slopes is not None
+            or qq_bias is not None
+        ):
+            raise ValueError("strided KV decode does not support fp8, sinks or bias")
+        if (
+            tuning_spec is not None
+            and getattr(tuning_spec.kernel_spec, "kv_layout", "paged") != "strided"
+        ):
+            raise ValueError("strided KV input requires a strided tuning spec")
+        layout = StridedKvCacheLayout.from_tensors(k, v)
+        batch, heads, capacity, dim = layout.key.shape
+        if (batch, heads, dim) != (
+            problem.num_seqs,
+            problem.num_kv_heads,
+            problem.head_size,
+        ):
+            raise ValueError("KV tensor shape does not match the attention problem")
+        if problem.max_seqlen_k > capacity:
+            raise ValueError("maximum valid KV length exceeds allocation capacity")
+        expected_q = (batch, problem.num_query_heads, dim)
+        expected_dtype = (
+            "torch.float16" if problem.dtype == "fp16" else "torch.bfloat16"
+        )
+        if tuple(q.shape) != expected_q or tuple(out.shape) != expected_q:
+            raise ValueError("strided decode Q/O must have shape [B,Hq,D]")
+        if not q.is_contiguous() or not out.is_contiguous():
+            raise ValueError("strided decode Q/O must be contiguous")
+        if not q.is_cuda:
+            raise ValueError("strided decode requires device tensors")
+        if any(int(t.data_ptr()) % 16 for t in (q, out)):
+            raise ValueError("strided decode Q/O must be 16-byte aligned")
+        if any(str(t.dtype) != expected_dtype for t in (q, k, v, out)):
+            raise ValueError("strided decode Q/K/V/O dtype must match the problem")
+        if any(t.device != q.device for t in (k, v, out, seqused_k, cu_seqlens_q)):
+            raise ValueError("strided decode inputs must be on the same device")
+        if (
+            str(seqused_k.dtype) != "torch.int32"
+            or tuple(seqused_k.shape) != (batch,)
+            or not seqused_k.is_contiguous()
+        ):
+            raise ValueError("KV lengths must be a contiguous int32 [B] tensor")
+        if (
+            str(cu_seqlens_q.dtype) != "torch.int32"
+            or tuple(cu_seqlens_q.shape) != (batch + 1,)
+            or not cu_seqlens_q.is_contiguous()
+        ):
+            raise ValueError("query offsets must be a contiguous int32 [B+1] tensor")
+        # Caller-owned device metadata: lengths are in [0, capacity], and
+        # query offsets are [0, 1, ..., B]. No host read/synchronization here.
+        ok, why = _explicit_path_supported(problem, tuning_spec, "3d")
+        if not ok:
+            raise ValueError(why)
+        return _run_3d_tiled(
+            problem=problem,
+            q=q,
+            k=k,
+            v=v,
+            out=out,
+            cu_seqlens_q=cu_seqlens_q,
+            seqused_k=seqused_k,
+            softmax_scale=softmax_scale,
+            block_table=None,
+            softcap=softcap,
+            sinks=None,
+            bt_stride=0,
+            warmup=warmup,
+            attempts=attempts,
+            stream=int(stream),
+            tuning_spec=tuning_spec,
+            kv_cache_layout=layout,
+        )
+    if (
+        tuning_spec is not None
+        and getattr(tuning_spec.kernel_spec, "kv_layout", "paged") != "paged"
+    ):
+        raise ValueError("strided tuning spec requires kv_layout='strided'")
 
     bt_stride = (
         int(block_table.stride(0))

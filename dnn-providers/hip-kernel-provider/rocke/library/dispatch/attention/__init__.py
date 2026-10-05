@@ -33,7 +33,15 @@ from rocke.dispatch.core import (
     stable_json_hash,
 )
 
-from . import generic, gfx942, gfx942_tuning, gfx950, gfx950_tuning, gfx1250
+from . import (
+    generic,
+    gfx942,
+    gfx942_tuning,
+    gfx950,
+    gfx950_tuning,
+    gfx1250,
+    strided_decode,
+)
 from .common import (
     ATTENTION_ABI_VERSION,
     ATTENTION_DIM_VOCABULARY,
@@ -63,6 +71,8 @@ ATTENTION_EXECUTION_REGISTRY = CandidateRegistry(
     require_build=True,
     require_torch_binding=True,
 )
+strided_decode.register(ATTENTION_ROUTE_REGISTRY)
+strided_decode.register(ATTENTION_EXECUTION_REGISTRY)
 generic.register(ATTENTION_ROUTE_REGISTRY)
 gfx942.register_route(ATTENTION_ROUTE_REGISTRY)
 gfx950.register_route(ATTENTION_ROUTE_REGISTRY)

@@ -1201,6 +1201,22 @@
           "kernel_name": "irhash_moe_sort_scatter_scatter_T64_K2_E16_b128",
           "sha256": "42b46dbb2203f1d2b1a25918ee0a355be2bd4e049ed4091f265975c6905d5e12",
           "status": "ok"
+        },
+        "nontemporal/gfx942/copy_bf16x8": {
+          "arch": "gfx942",
+          "bytes": 1028,
+          "family": "nontemporal",
+          "kernel_name": "irhash_nontemporal_copy_gfx942",
+          "sha256": "407897722560c530e84051b3109c845c7c6c7d61d072adfd54de670de3dbc62e",
+          "status": "ok"
+        },
+        "nontemporal/gfx950/copy_bf16x8": {
+          "arch": "gfx950",
+          "bytes": 1028,
+          "family": "nontemporal",
+          "kernel_name": "irhash_nontemporal_copy_gfx950",
+          "sha256": "a5decd14eda561f53e16f1a59a6ded1af6c2c61296c79ddd307ef718d8d1131e",
+          "status": "ok"
         }
       },
       "expected_failures": {
@@ -1228,8 +1244,8 @@
           "gfx1201": 7,
           "gfx1250": 4,
           "gfx90a": 5,
-          "gfx942": 32,
-          "gfx950": 91
+          "gfx942": 33,
+          "gfx950": 92
         },
         "expected_failures": 4,
         "families": {
@@ -1248,9 +1264,10 @@
           "gemm": 13,
           "grouped_gemm": 1,
           "kda_chunkwise": 13,
-          "moe": 9
+          "moe": 9,
+          "nontemporal": 2
         },
-        "ok_cases": 150
+        "ok_cases": 152
       }
     },
     "llvm22": {
@@ -2454,6 +2471,22 @@
           "kernel_name": "irhash_moe_sort_scatter_scatter_T64_K2_E16_b128",
           "sha256": "5a5f80209d788afa4a66e8cafe495e4d711115c79fabe6713b2ad3279489f0d1",
           "status": "ok"
+        },
+        "nontemporal/gfx942/copy_bf16x8": {
+          "arch": "gfx942",
+          "bytes": 1035,
+          "family": "nontemporal",
+          "kernel_name": "irhash_nontemporal_copy_gfx942",
+          "sha256": "882627f650e27816c6e8dc6c6d20488f7a7b328cd537cf4b65464a6b78f2b0ad",
+          "status": "ok"
+        },
+        "nontemporal/gfx950/copy_bf16x8": {
+          "arch": "gfx950",
+          "bytes": 1035,
+          "family": "nontemporal",
+          "kernel_name": "irhash_nontemporal_copy_gfx950",
+          "sha256": "6f72ea631a752d64195a2e64a3dbc39b1c6764ad3fa190b8ea49e2346379dca2",
+          "status": "ok"
         }
       },
       "expected_failures": {
@@ -2481,8 +2514,8 @@
           "gfx1201": 7,
           "gfx1250": 4,
           "gfx90a": 5,
-          "gfx942": 32,
-          "gfx950": 91
+          "gfx942": 33,
+          "gfx950": 92
         },
         "expected_failures": 4,
         "families": {
@@ -2501,9 +2534,10 @@
           "gemm": 13,
           "grouped_gemm": 1,
           "kda_chunkwise": 13,
-          "moe": 9
+          "moe": 9,
+          "nontemporal": 2
         },
-        "ok_cases": 150
+        "ok_cases": 152
       }
     },
     "llvm23": {
@@ -3739,6 +3773,22 @@
           "kernel_name": "irhash_moe_sort_scatter_scatter_T64_K2_E16_b128",
           "sha256": "d7cbeb824b95cbe046b4a5b9cc7f40c5be517afe5106082b9f30dcebdae19619",
           "status": "ok"
+        },
+        "nontemporal/gfx942/copy_bf16x8": {
+          "arch": "gfx942",
+          "bytes": 1039,
+          "family": "nontemporal",
+          "kernel_name": "irhash_nontemporal_copy_gfx942",
+          "sha256": "2e057f5918df3fda700579bab47022689d870beefbf520915969207a4adad0bf",
+          "status": "ok"
+        },
+        "nontemporal/gfx950/copy_bf16x8": {
+          "arch": "gfx950",
+          "bytes": 1039,
+          "family": "nontemporal",
+          "kernel_name": "irhash_nontemporal_copy_gfx950",
+          "sha256": "c0e5952d7eb6522e7b7367c4385634c5ee7803b4980851f707859083b5b746b1",
+          "status": "ok"
         }
       },
       "expected_failures": {},
@@ -3749,8 +3799,8 @@
           "gfx1201": 7,
           "gfx1250": 8,
           "gfx90a": 5,
-          "gfx942": 32,
-          "gfx950": 91
+          "gfx942": 33,
+          "gfx950": 92
         },
         "expected_failures": 0,
         "families": {
@@ -3769,9 +3819,10 @@
           "gemm": 17,
           "grouped_gemm": 1,
           "kda_chunkwise": 13,
-          "moe": 9
+          "moe": 9,
+          "nontemporal": 2
         },
-        "ok_cases": 154
+        "ok_cases": 156
       }
     }
   },

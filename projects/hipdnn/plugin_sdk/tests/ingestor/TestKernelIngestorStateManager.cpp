@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -33,6 +34,7 @@ namespace
 
 using namespace hipdnn_plugin_sdk::ingestor;
 using namespace hipdnn_plugin_sdk::ingestor::testing;
+using hipdnn_flatbuffers_sdk::flatbuffer_utilities::testing::ContentCarryingTestGraph;
 
 inline bool rejectSecondCriterion(const MatchContext& /*context*/, const BoundTokens& /*bound*/)
 {
@@ -46,6 +48,43 @@ inline bool rejectEveryKernel(const MatchContext& /*context*/,
 {
     ++counters().kernelCalls;
     return false;
+}
+
+constexpr const char* IN_UID_TOKEN = "test.in_uid";
+constexpr const char* OUT_UID_TOKEN = "test.out_uid";
+
+/// Binds raw tensor uids the way shipped graph matches do, so a test can tell whose
+/// numbering a catalog's bound state carries.
+inline std::optional<BoundTokens> bindTensorUids(const MatchContext& context)
+{
+    ++counters().graphMatchCalls;
+    const auto* tensors = context.graph.getGraph().tensors();
+    BoundTokens bound;
+    bound[IN_UID_TOKEN] = tensors->Get(0)->uid();
+    bound[OUT_UID_TOKEN] = tensors->Get(1)->uid();
+    return bound;
+}
+
+/// Declines override-shape graphs the way hip-kernel-provider plan builders do, reading a
+/// graph-level field `GraphContentKey` ignores.
+inline std::optional<BoundTokens> declineOverrideShapes(const MatchContext& context)
+{
+    ++counters().graphMatchCalls;
+    if(context.graph.getGraph().is_override_shape_enabled())
+    {
+        return std::nullopt;
+    }
+    return BoundTokens{};
+}
+
+ContentCarryingTestGraph::Spec specWithUids(int64_t inUid, int64_t outUid)
+{
+    ContentCarryingTestGraph::Spec spec;
+    spec.tensors = {ContentCarryingTestGraph::TensorSpec{inUid},
+                    ContentCarryingTestGraph::TensorSpec{outUid}};
+    spec.nodes[0].in0TensorUid = inUid;
+    spec.nodes[0].out0TensorUid = outUid;
+    return spec;
 }
 
 TEST(TestKernelIngestorStateManager, KernelLevelMatcherPrunesTheCatalog)
@@ -518,11 +557,12 @@ TEST(TestKernelIngestorStateManager, NoDeviceYieldsAnEmptyCatalogEvenWhenMatcher
         manager->unsortedCatalog(MatchContext{graph, NO_DEVICE, properties}).entries.empty());
 }
 
-TEST(TestKernelIngestorStateManager, RematchesEveryCallWhenTheGraphHasNoIdentity)
+TEST(TestKernelIngestorStateManager, RematchesEveryCallWhenTheGraphSuppliesNoBytes)
 {
     const ScopedSymbols symbols("test.graph", acceptGraph, "test.kernel", countingFloatKernels);
     const auto manager = makeStateManager();
-    const TestGraph graph;
+    // A valid graph id does not make a graph cacheable; only its content does.
+    const BytelessTestGraph graph(makeGraphId(0x5C));
     const auto properties = testDeviceProperties();
     const MatchContext context{graph, 0, properties};
 
@@ -534,37 +574,86 @@ TEST(TestKernelIngestorStateManager, RematchesEveryCallWhenTheGraphHasNoIdentity
     EXPECT_EQ(counters().graphMatchCalls, 2);
 }
 
-TEST(TestKernelIngestorStateManager, ServesACachedRankingWithoutRematching)
+TEST(TestKernelIngestorStateManager, ServesFreshlyBuiltIdenticalGraphsFromOneCatalogEntry)
 {
     const ScopedSymbols symbols("test.graph", acceptGraph, "test.kernel", countingFloatKernels);
     const auto manager = makeStateManager();
-    const TestGraph graph(makeGraphId(0x5D));
     const auto properties = testDeviceProperties();
-    const MatchContext context{graph, 0, properties};
 
-    ASSERT_TRUE(manager->sortedCatalog(context).isSorted);
-
-    static_cast<void>(manager->unsortedCatalog(context));
-
-    EXPECT_TRUE(manager->sortedCatalog(context).isSorted);
-    EXPECT_EQ(counters().graphMatchCalls, 1);
-}
-
-TEST(TestKernelIngestorStateManager, DistinctGraphsCarryingANilUuidDoNotShareACatalogEntry)
-{
-    const ScopedSymbols symbols("test.graph", acceptGraph, "test.kernel", countingFloatKernels);
-    const auto manager = makeStateManager();
-    const TestGraph first(makeNilGraphId());
-    const TestGraph second(makeNilGraphId());
-    const auto properties = testDeviceProperties();
+    // A rebuild of the same problem: same content and uids, a fresh graph id.
+    auto firstSpec = specWithUids(1, 2);
+    firstSpec.graphId = makeGraphId(0x31);
+    auto secondSpec = specWithUids(1, 2);
+    secondSpec.graphId = makeGraphId(0x32);
+    const ContentCarryingTestGraph first{firstSpec};
+    const ContentCarryingTestGraph second{secondSpec};
 
     const auto firstDefinitions = manager->unsortedDefinitions(MatchContext{first, 0, properties});
     const auto secondDefinitions
         = manager->unsortedDefinitions(MatchContext{second, 0, properties});
 
-    EXPECT_EQ(counters().graphMatchCalls, 2);
+    EXPECT_EQ(counters().graphMatchCalls, 1);
     EXPECT_EQ(firstDefinitions.size(), 2U);
     EXPECT_EQ(secondDefinitions.size(), 2U);
+}
+
+TEST(TestKernelIngestorStateManager, MatchesGraphsWithDifferentContentSeparately)
+{
+    const ScopedSymbols symbols("test.graph", acceptGraph, "test.kernel", countingFloatKernels);
+    const auto manager = makeStateManager();
+    const auto properties = testDeviceProperties();
+
+    auto widerSpec = specWithUids(1, 2);
+    widerSpec.tensors[0].dims = {4, 16};
+    const ContentCarryingTestGraph narrow{specWithUids(1, 2)};
+    const ContentCarryingTestGraph wider{widerSpec};
+
+    manager->unsortedDefinitions(MatchContext{narrow, 0, properties});
+    manager->unsortedDefinitions(MatchContext{wider, 0, properties});
+
+    EXPECT_EQ(counters().graphMatchCalls, 2);
+}
+
+TEST(TestKernelIngestorStateManager, ARenumberedGraphGetsItsOwnUidsBound)
+{
+    const ScopedSymbols symbols("test.graph", bindTensorUids, "test.kernel", countingFloatKernels);
+    const auto manager = makeStateManager();
+    const auto properties = testDeviceProperties();
+
+    // Equal under GraphContentKey, which folds tensor references as ordinals.
+    const ContentCarryingTestGraph low{specWithUids(1, 2)};
+    const ContentCarryingTestGraph high{specWithUids(1000, 2000)};
+
+    static_cast<void>(manager->unsortedCatalog(MatchContext{low, 0, properties}));
+    const auto bound = manager->unsortedCatalog(MatchContext{high, 0, properties}).bound;
+
+    EXPECT_EQ(counters().graphMatchCalls, 2);
+    EXPECT_EQ(tryGetBoundInt(bound, IN_UID_TOKEN), 1000);
+    EXPECT_EQ(tryGetBoundInt(bound, OUT_UID_TOKEN), 2000);
+}
+
+TEST(TestKernelIngestorStateManager, AnOverrideShapeGraphGetsItsOwnCatalogVerdict)
+{
+    const ScopedSymbols symbols(
+        "test.graph", declineOverrideShapes, "test.kernel", countingFloatKernels);
+    const auto manager = makeStateManager();
+    const auto properties = testDeviceProperties();
+
+    // Equal under GraphContentKey, which ignores is_override_shape_enabled. Matching the
+    // accepted graph first means a shared entry would serve its catalog to the other.
+    auto enabledSpec = specWithUids(1, 2);
+    enabledSpec.isOverrideShapeEnabled = true;
+    const ContentCarryingTestGraph disabled{specWithUids(1, 2)};
+    const ContentCarryingTestGraph enabled{enabledSpec};
+
+    const auto disabledDefinitions
+        = manager->unsortedDefinitions(MatchContext{disabled, 0, properties});
+    const auto enabledDefinitions
+        = manager->unsortedDefinitions(MatchContext{enabled, 0, properties});
+
+    EXPECT_EQ(counters().graphMatchCalls, 2);
+    EXPECT_EQ(disabledDefinitions.size(), 2U);
+    EXPECT_TRUE(enabledDefinitions.empty());
 }
 
 TEST(TestKernelIngestorStateManager, CarriesWhatTheGraphMatchBoundThroughToDispatch)
@@ -605,8 +694,10 @@ TEST(TestKernelIngestorStateManager, RematchesAfterCacheEviction)
     const ScopedSymbols symbols("test.graph", acceptGraph, "test.kernel", countingFloatKernels);
     const auto manager = makeStateManager(SCORE_SYMBOL, 1);
     const auto properties = testDeviceProperties();
-    const TestGraph first(makeGraphId(5));
-    const TestGraph second(makeGraphId(6));
+    auto secondSpec = specWithUids(1, 2);
+    secondSpec.tensors[0].dims = {4, 16};
+    const ContentCarryingTestGraph first{specWithUids(1, 2)};
+    const ContentCarryingTestGraph second{secondSpec};
 
     manager->unsortedDefinitions(MatchContext{first, 0, properties});
     manager->unsortedDefinitions(MatchContext{second, 0, properties});

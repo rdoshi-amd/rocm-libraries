@@ -1065,7 +1065,13 @@ TEST_F(TestIngestorGenericPlanBuilderBenchmarking,
     EXPECT_EQ(context.plan().kernel().getIntMetadata(BLOCK_SIZE), 64);
 }
 
-TEST(TestIngestorGenericPlanBuilder, ASecondColdMissWithBenchmarkingOffDoesNotReadGraphBytes)
+/// The catalog cache keys on graph content, so every catalog lookup reads the graph's
+/// bytes. With benchmarking off and the winner shard already latched by the first build,
+/// the winner-cache path must build no GraphContentKey of its own: the second build reads
+/// bytes exactly as often as one catalog lookup does (sortedCatalog's cache hit is one
+/// catalogFor call and stores nothing back).
+TEST(TestIngestorGenericPlanBuilder,
+     ASecondColdMissWithBenchmarkingOffReadsGraphBytesOnlyForTheCatalogKey)
 {
     const ScopedSymbols symbols("test.graph", acceptGraph, "test.kernel", countingFloatKernels);
     const ScopedConstantScore constantScore;
@@ -1089,12 +1095,20 @@ TEST(TestIngestorGenericPlanBuilder, ASecondColdMissWithBenchmarkingOffDoesNotRe
     context.setExecutionSettings(settings);
     builder.buildPlan(0, graph, engineConfig, context);
 
+    // What one catalog lookup costs in bytes reads, measured on the same warm entry the
+    // second build hits; a cache hit changes no state the build depends on.
+    const auto properties = testDeviceProperties();
+    bytesCalls->store(0);
+    static_cast<void>(manager->unsortedCatalog(MatchContext{graph, 0, properties}));
+    const unsigned catalogLookupReads = bytesCalls->load();
+
     bytesCalls->store(0);
     builder.buildPlan(0, graph, engineConfig, context);
 
     EXPECT_EQ(context.plan().kernel().getIntMetadata(BLOCK_SIZE), 64);
-    EXPECT_EQ(bytesCalls->load(), 0U)
-        << "a second cold miss with benchmarking off must not read graph bytes";
+    EXPECT_EQ(bytesCalls->load(), catalogLookupReads)
+        << "with benchmarking off, a second build must read graph bytes only for its one "
+           "catalog lookup; the winner-cache path must not key the graph";
 }
 
 /// prepare() fails for one kernel and succeeds for the rest: the shape of a code object

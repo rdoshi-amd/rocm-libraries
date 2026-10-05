@@ -1,0 +1,1484 @@
+# Copyright (c) Advanced Micro Devices, Inc., or its affiliates.
+# SPDX-License-Identifier: MIT
+
+"""Host-only tests of the general backward plan, predicate and declaration.
+
+* every reason code is reachable, with accept rows for every declared axis;
+* every backward table case maps to a request that yields a decision (and a
+  plan when accepted) without exceptions; every decline carries a code;
+* workspace formula: hand table, alignment, THD with and without the bound,
+  plan layout equal to the formula;
+* the declaration agrees with the predicate on a sampled grid;
+* no device query and no device-module import;
+* functional feature groups agree with the case-level feature table;
+* routing: exactly one family per accepted request, dense only when eligible.
+"""
+
+from __future__ import annotations
+
+import ast
+import builtins
+import collections
+import dataclasses
+import itertools
+import json
+import math
+import random
+from pathlib import Path
+
+import pytest
+from tests.sdpa.bwd_cases import backward_cases, select_bwd
+from tests.sdpa.bwd_kernel_cases import (
+    SUPPLEMENTARY_CASES,
+    request_from_case,
+    stage_of,
+)
+
+from kernels.common import attention_bwd_plan as plan_mod
+from kernels.common.attention_bwd import AttnBwdSpec, attn_bwd_params
+from kernels.common.attention_bwd_plan import (
+    ATTN_BWD_DECLARATION_VERSION,
+    DECLARED_ARCHS,
+    DEFERRAL_REGISTER,
+    FEATURE_GROUPS,
+    REASON_CODES,
+    ROUTES,
+    AttnBwdPolicy,
+    AttnBwdRequest,
+    attn_bwd_declaration,
+    attn_bwd_feature_groups,
+    attn_bwd_perf_class,
+    attn_bwd_plan,
+    attn_bwd_route,
+    attn_bwd_stage_vec,
+    attn_bwd_support,
+    attn_bwd_workspace_bytes,
+    attn_bwd_workspace_layout,
+    dense_bwd_eligibility,
+    shipped_policy,
+)
+from kernels.common.attention_bwd_plan import (
+    MIRROR_PAIRING_BUILT,
+    SHIPPED_DECLARED_GROUPS,
+)
+
+_KERNEL_DIR = Path(__file__).resolve().parents[1] / "kernels" / "common"
+DECLARED = ("gfx942", "gfx950", "gfx1151")
+
+# Every functional group declared and unverified performance waived: the
+# functional matrix as it will stand once the correctness gates pass.
+FULL = AttnBwdPolicy(declared_groups=frozenset(FEATURE_GROUPS), waive_unverified=True)
+
+
+def _req(**kw):
+    base = dict(b=2, h_q=8, h_k=8, h_v=8, s_q=128, s_kv=128, d_qk=128, d_v=128)
+    base.update(kw)
+    return AttnBwdRequest(**base)
+
+
+def _bhsd(b, h, s, d):
+    return (h * s * d, s * d, d, 1)
+
+
+# ---------------------------------------------------------------------------
+# every reason code reachable, plus accept rows
+# ---------------------------------------------------------------------------
+
+_WAIVED_UNDECLARED = AttnBwdPolicy(
+    declared_groups=frozenset(FEATURE_GROUPS) - {"narrow_access"},
+    waive_unverified=True,
+)
+
+_TRIGGERS = {
+    "ARCH_UNSUPPORTED": (_req(), "gfx90a", FULL),
+    # no shipped target lacks a hardware run; a policy may still list one
+    "ARCH_NOT_VALIDATED": (
+        _req(),
+        "gfx1201",
+        dataclasses.replace(FULL, not_validated_archs=frozenset({"gfx1201"})),
+    ),
+    "DROPOUT": (_req(dropout=0.1), "gfx942", FULL),
+    "BIAS_IN_BACKWARD": (_req(has_bias=True), "gfx942", FULL),
+    "DBIAS": (_req(want_dbias=True), "gfx942", FULL),
+    "ALIBI": (_req(alibi=True), "gfx942", FULL),
+    "PAGED": (_req(paged=True), "gfx942", FULL),
+    "FP8": (_req(fp8=True), "gfx942", FULL),
+    "DETERMINISTIC": (_req(deterministic=True), "gfx942", FULL),
+    "UNSUPPORTED_FEATURE": (_req(other_features=("sink_token",)), "gfx942", FULL),
+    "SCALE_DEVICE_TENSOR": (_req(scale_is_device_tensor=True), "gfx942", FULL),
+    "DTYPE": (_req(k_dtype="bf16"), "gfx942", FULL),
+    "OUT_DTYPE": (_req(dq_dtype="fp32"), "gfx942", FULL),
+    "LSE_FORMAT": (_req(lse_dtype="fp16"), "gfx942", FULL),
+    "DQK_NE_DV": (_req(d_v=64), "gfx942", FULL),
+    "HEAD_DIM_256_BWD": (_req(d_qk=256, d_v=256), "gfx942", FULL),
+    "HEAD_DIM": (_req(d_qk=96, d_v=96), "gfx942", FULL),
+    "GQA_RATIO": (_req(h_k=3, h_v=3), "gfx942", FULL),
+    "BAND_BOUND": (_req(causal=True, causal_bottom_right=True), "gfx942", FULL),
+    "STRIDE_D": (
+        _req(strides={"q": (128 * 128 * 8 * 2, 128 * 128 * 2, 128 * 2, 2)}),
+        "gfx942",
+        FULL,
+    ),
+    "STRIDE_NEGATIVE": (
+        _req(strides={"k": (-128 * 128 * 8, 128 * 128, 128, 1)}),
+        "gfx942",
+        FULL,
+    ),
+    "OUTPUT_OVERLAP": (_req(strides={"dq": (0, 128 * 128, 128, 1)}), "gfx942", FULL),
+    "STRIDE_ALIGN": (_req(tensor_alignment=1), "gfx942", FULL),
+    "INDEX_RANGE": (
+        _req(b=4096, s_q=2**19, s_kv=2**19, d_qk=64, d_v=64, h_q=1, h_k=1, h_v=1),
+        "gfx942",
+        FULL,
+    ),
+    "GRID_LIMIT": (_req(b=70000, s_q=16, s_kv=16, h_q=1, h_k=1, h_v=1), "gfx942", FULL),
+    "SEQ_LEN_FORMAT": (_req(has_seq_len_q=True, has_seq_len_kv=True), "gfx942", FULL),
+    "RAGGED_FORMAT": (_req(layout="thd", ragged_offset_dtype="int16"), "gfx942", FULL),
+    "EMPTY": (_req(b=0), "gfx942", FULL),
+    "INSTANCE_UNAVAILABLE": (
+        _req(),
+        "gfx942",
+        dataclasses.replace(
+            FULL,
+            instance_unavailable=frozenset(
+                {AttnBwdSpec(head_size=128, mask_class="none").kernel_name("main")}
+            ),
+        ),
+    ),
+    "PERF_BELOW_BASELINE": (
+        _req(),
+        "gfx942",
+        dataclasses.replace(
+            FULL,
+            perf_status={attn_bwd_perf_class(_req(), "gfx942"): "below_baseline"},
+        ),
+    ),
+    "PERF_UNVERIFIED": (
+        _req(),
+        "gfx942",
+        AttnBwdPolicy(declared_groups=frozenset(FEATURE_GROUPS)),
+    ),
+    "NOT_YET_DECLARED": (
+        # stage_vec = 1 under a policy that has not declared narrow_access
+        _req(tensor_alignment=8),
+        "gfx942",
+        _WAIVED_UNDECLARED,
+    ),
+}
+
+
+def test_reason_code_order_is_the_documented_one():
+    assert REASON_CODES[:2] == ("ARCH_UNSUPPORTED", "ARCH_NOT_VALIDATED")
+    assert REASON_CODES[-4:] == (
+        "INSTANCE_UNAVAILABLE",
+        "PERF_BELOW_BASELINE",
+        "PERF_UNVERIFIED",
+        "NOT_YET_DECLARED",
+    )
+    assert REASON_CODES.index("STRIDE_ALIGN") < REASON_CODES.index("INDEX_RANGE")
+    assert REASON_CODES.index("RAGGED_FORMAT") < REASON_CODES.index("EMPTY")
+    assert len(set(REASON_CODES)) == len(REASON_CODES) == 32
+
+
+@pytest.mark.parametrize("code", REASON_CODES)
+def test_every_reason_code_reachable(code):
+    req, arch, policy = _TRIGGERS[code]
+    v = attn_bwd_support(req, arch, policy=policy)
+    assert (v.ok, v.code) == (False, code), v
+    assert v.detail
+    with pytest.raises(ValueError, match=code):
+        attn_bwd_plan(req, arch, policy=policy)
+
+
+def _accept_rows():
+    thd = dict(
+        layout="thd",
+        strides={
+            n: (0, 128, 8 * 128, 1)
+            for n in ("q", "k", "v", "o", "do", "dq", "dk", "dv")
+        },
+    )
+    rows = {
+        "thd_without_max_total": _req(**thd),
+        "thd_with_max_total": _req(**thd, max_total_q=200, max_total_kv=200),
+        "thd_int64_offsets": _req(**thd, ragged_offset_dtype="int64"),
+        "thd_multiplier": _req(**thd, ragged_offset_multiplier=1024),
+        "s_q_1": _req(s_q=1, s_kv=777, h_k=2, h_v=2),
+        "s_q_1_mha": _req(s_q=1, s_kv=33),
+        "hk_ne_hv": _req(h_k=4, h_v=2),
+        "mqa": _req(h_k=1, h_v=1),
+        "d32": _req(d_qk=32, d_v=32),
+        "d64_bf16": _req(d_qk=64, d_v=64, dtype="bf16"),
+        "causal_tl_bool": _req(causal=True),
+        "causal_br_bool": _req(causal_bottom_right=True, s_q=33, s_kv=100),
+        "window_br": _req(left_bound=15, right_bound=0, bottom_right=True),
+        "padded": _req(padding=True, has_seq_len_q=True, has_seq_len_kv=True),
+        "explicit_scale": _req(scale=0.3),
+        "bshd": _req(
+            strides={
+                n: (128 * 8 * 128, 128, 8 * 128, 1) for n in ("q", "o", "do", "dq")
+            }
+        ),
+        # index-range rows served by the i64 per-head workspace rebase
+        "i64_rebase_h16": _req(b=1, h_q=16, h_k=16, h_v=16, s_q=2**21, s_kv=2**21),
+        "i64_rebase_b64": _req(b=64, s_q=2**19, s_kv=2**19, h_q=1, h_k=1, h_v=1),
+        "zero_b_stride_input": _req(
+            strides={"k": (0, 128 * 128, 128, 1), "v": (0, 128 * 128, 128, 1)}
+        ),
+    }
+    return rows
+
+
+@pytest.mark.parametrize("arch", DECLARED)
+@pytest.mark.parametrize("name", sorted(_accept_rows()))
+def test_accept_rows(name, arch):
+    req = _accept_rows()[name]
+    v = attn_bwd_support(req, arch, policy=FULL)
+    assert v.ok, (name, v)
+    plan = attn_bwd_plan(req, arch, policy=FULL)
+    assert plan.workspace_bytes == attn_bwd_workspace_bytes(
+        req, g_split=plan.runtime["g_split"], dq_mode=plan.specs["main"].dq_mode
+    )
+
+
+_THD_ROLES = ("q", "k", "v", "o", "do", "dq", "dk", "dv")
+# Stride rows: every B/H/S stride and every element-aligned base is
+# served; strides that are not multiples of 8 elements or a base below 16 B
+# select the narrow instances (stage_vec = 1).
+_NARROW_ROWS = {
+    "odd_s_stride": dict(strides={"q": (128 * 128 * 8, 128 * 128, 129, 1)}),
+    "h_stride_not_8": dict(strides={"k": (128 * 128 * 8, 128 * 128 + 4, 128, 1)}),
+    "odd_b_stride": dict(strides={"dv": (128 * 128 * 8 + 1, 128 * 128, 128, 1)}),
+    "bshd_odd_h_and_s": dict(
+        strides={
+            n: (128 * (8 * 133 + 3), 133, 8 * 133 + 3, 1)
+            for n in ("q", "o", "do", "dq")
+        }
+    ),
+    "thd_odd_token_stride": dict(
+        layout="thd",
+        strides={n: (0, 128, 8 * 128 + 3, 1) for n in _THD_ROLES},
+    ),
+    "base_2": dict(tensor_alignment=2),
+    "base_4": dict(tensor_alignment=4),
+    "base_8": dict(tensor_alignment=8),
+    "base_2_gqa_band": dict(
+        tensor_alignment=2, h_k=2, h_v=2, causal_bottom_right=True, s_q=33
+    ),
+    "base_4_hk_ne_hv": dict(tensor_alignment=4, h_k=4, h_v=2),
+    "base_8_padded": dict(
+        tensor_alignment=8, padding=True, has_seq_len_q=True, has_seq_len_kv=True
+    ),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_NARROW_ROWS))
+def test_narrow_access_rows_accept_with_stage_vec_1(name):
+    req = _req(**_NARROW_ROWS[name])
+    assert attn_bwd_stage_vec(req) == 1
+    assert "narrow_access" in attn_bwd_feature_groups(req)
+    for arch in DECLARED:
+        assert attn_bwd_support(req, arch, policy=FULL).ok
+        plan = attn_bwd_plan(req, arch, policy=FULL)
+        main = plan.specs["main"]
+        assert main.stage_vec == 1
+        assert {plan.specs[s].stage_vec for s in ("prep", "convert")} == {1}
+        assert all("_sv1" in step.kernel for step in plan.launches)
+    # the shipped policy declares narrow access: never a stride decline
+    assert attn_bwd_support(req, "gfx1151").ok
+    assert attn_bwd_support(req, "gfx942").code == "PERF_UNVERIFIED"
+    assert attn_bwd_support(req, "gfx950").code == "PERF_UNVERIFIED"
+
+
+def test_wide_access_needs_every_used_stride_a_multiple_of_8():
+    # strides of extents of 1 are never used: an odd batch stride with b = 1
+    # and an odd head stride with one head keep stage_vec = 8
+    assert attn_bwd_stage_vec(_req()) == 8
+    assert attn_bwd_stage_vec(_req(tensor_alignment=16)) == 8
+    one = _req(b=1, strides={"q": (3, 128 * 128, 128, 1)})
+    assert attn_bwd_stage_vec(one) == 8
+    mqa = _req(h_k=1, h_v=1, strides={"k": (128 * 128, 7, 128, 1)})
+    assert attn_bwd_stage_vec(mqa) == 8
+    # only a base that is not element aligned is declined
+    assert attn_bwd_support(_req(tensor_alignment=1), "gfx942", policy=FULL).code == (
+        "STRIDE_ALIGN"
+    )
+    for align in (2, 4, 8, 16):
+        assert attn_bwd_support(_req(tensor_alignment=align), "gfx942", policy=FULL).ok
+
+
+def test_index_range_decline_rows():
+    for req in (
+        _req(b=4096, s_q=2**19, s_kv=2**19, d_qk=64, d_v=64, h_q=1, h_k=1, h_v=1),
+        _req(b=1, s_q=2**24, s_kv=16, h_q=1, h_k=1, h_v=1),
+    ):
+        assert attn_bwd_support(req, "gfx942", policy=FULL).code == "INDEX_RANGE"
+
+
+def test_grid_limit_rows():
+    many_heads = _req(h_q=70000, h_k=70000, h_v=70000, s_q=16, s_kv=16, b=1)
+    assert attn_bwd_support(many_heads, "gfx942", policy=FULL).code == "GRID_LIMIT"
+    prep_y = _req(h_q=40000, h_k=20000, h_v=10000, s_q=16, s_kv=16, b=1)
+    assert attn_bwd_support(prep_y, "gfx942", policy=FULL).code == "GRID_LIMIT"
+
+
+def test_seq_len_and_ragged_format_rows():
+    bad = [
+        (_req(padding=True, has_seq_len_q=True), "SEQ_LEN_FORMAT"),
+        (
+            _req(
+                padding=True,
+                has_seq_len_q=True,
+                has_seq_len_kv=True,
+                seq_len_dtype="int64",
+            ),
+            "SEQ_LEN_FORMAT",
+        ),
+        (_req(layout="thd", ragged_same_table=False), "RAGGED_FORMAT"),
+        (_req(layout="thd", ragged_offset_multiplier=0), "RAGGED_FORMAT"),
+        (_req(layout="thd", ragged_offset_dims=(5,)), "RAGGED_FORMAT"),
+    ]
+    for req, code in bad:
+        assert attn_bwd_support(req, "gfx950", policy=FULL).code == code
+
+
+def test_format_decline_rows_per_rule():
+    """One decline row per predicate rule that no other row reaches first."""
+    thd = dict(layout="thd")
+    rows = [
+        # h_k divides h_q but h_v does not
+        (_req(h_k=2, h_v=3), "GQA_RATIO"),
+        (
+            _req(
+                padding=True,
+                has_seq_len_q=True,
+                has_seq_len_kv=True,
+                seq_len_dims=(2, 1, 1, 2),
+            ),
+            "SEQ_LEN_FORMAT",
+        ),
+        (_req(lse_strides=(-1, 1, 1, 1)), "LSE_FORMAT"),
+        (_req(lse_dims=(2, 8, 128, 1), lse_strides=(1024, 128, 1)), "LSE_FORMAT"),
+        (_req(**thd, lse_dims=(256, 8, 2)), "LSE_FORMAT"),
+        (_req(**thd, max_total_q=-5), "RAGGED_FORMAT"),
+        (_req(**thd, max_total_kv=-1), "RAGGED_FORMAT"),
+        # a zero token bound for a non-empty problem leaves no workspace row
+        (_req(**thd, h_k=8, h_v=4, max_total_q=0), "RAGGED_FORMAT"),
+        (_req(**thd, h_k=8, h_v=4, max_total_kv=0), "RAGGED_FORMAT"),
+        (_req(**thd, max_total_kv=0), "RAGGED_FORMAT"),
+    ]
+    for req, code in rows:
+        v = attn_bwd_support(req, "gfx942", policy=FULL)
+        assert v.code == code, (req, v)
+    # the same accepted requests without the broken field
+    assert attn_bwd_support(_req(h_k=2, h_v=2), "gfx942", policy=FULL).ok
+    assert attn_bwd_support(
+        _req(**thd, max_total_q=1, max_total_kv=1), "gfx942", policy=FULL
+    ).ok
+
+
+def test_thd_lse_head_count_and_rank_rows():
+    thd = dict(layout="thd")
+    # [T_q, H, 1] whose H is not h_q (8)
+    assert (
+        attn_bwd_support(_req(**thd, lse_dims=(256, 4, 1)), "gfx942", policy=FULL).code
+        == "LSE_FORMAT"
+    )
+    # dims and strides of different rank
+    bad_rank = _req(**thd, lse_dims=(256, 8, 1), lse_strides=(8, 1, 1, 1))
+    assert attn_bwd_support(bad_rank, "gfx942", policy=FULL).code == "LSE_FORMAT"
+    for ok in (
+        _req(**thd, lse_dims=(256, 8, 1)),
+        _req(**thd, lse_dims=(256, 8, 1), lse_strides=(8, 1, 1)),
+    ):
+        assert attn_bwd_support(ok, "gfx942", policy=FULL).ok
+
+
+@pytest.mark.parametrize(
+    "stride, ok",
+    [(-1, False), (2**31, False), (2**31 - 1, True), (0, True), (1, True)],
+)
+def test_seq_len_stride_range(stride, ok):
+    req = _req(
+        padding=True, has_seq_len_q=True, has_seq_len_kv=True, seq_len_stride=stride
+    )
+    v = attn_bwd_support(req, "gfx942", policy=FULL)
+    assert v.ok if ok else v.code == "SEQ_LEN_FORMAT", v
+
+
+_D, _S, _H = 128, 128, 8
+
+
+@pytest.mark.parametrize(
+    "name, strides, overlap",
+    [
+        # S stride one short of D: rows overlap by one element
+        ("dq", (_H * _S * _D, _S * _D, _D - 1, 1), True),
+        ("dq", (_H * _S * _D, _S * _D, _D, 1), False),
+        # H stride one short of the S * D extent already covered
+        ("dq", (_H * _S * _D, _S * _D - 1, _D, 1), True),
+        ("dq", (_H * _S * _D, _S * _D, _D, 1), False),
+        # B stride one short of H * S * D
+        ("dk", (_H * _S * _D - 1, _S * _D, _D, 1), True),
+        # interleaved packed [B, S, 2, H, D] views: dK and dV do not self-overlap
+        ("dk", (_S * 2 * _H * _D, _D, 2 * _H * _D, 1), False),
+        ("dv", (_S * 2 * _H * _D, _D, 2 * _H * _D, 1), False),
+        # same packed view with an S stride one short of 2 * H * D still fits
+        # (the H extent covers only H * D), one short of H * D does not
+        ("dv", (_S * 2 * _H * _D, _D, _H * _D - 1, 1), True),
+        ("dv", (_S * _H * _D, _D, _H * _D, 1), False),
+    ],
+)
+def test_output_overlap_at_the_boundary(name, strides, overlap):
+    req = _req(strides={name: strides})
+    v = attn_bwd_support(req, "gfx942", policy=FULL)
+    if overlap:
+        assert v.code == "OUTPUT_OVERLAP", v
+    else:
+        assert v.ok, v
+
+
+def test_thd_output_overlap_at_the_boundary():
+    thd = dict(layout="thd", max_total_q=256, max_total_kv=256)
+    # (ignored, H, token, D): token stride one short of H * D overlaps
+    bad = _req(**thd, strides={"dq": (0, _D, _H * _D - 1, 1)})
+    assert attn_bwd_support(bad, "gfx942", policy=FULL).code == "OUTPUT_OVERLAP"
+    good = _req(**thd, strides={"dq": (0, _D, _H * _D, 1)})
+    assert attn_bwd_support(good, "gfx942", policy=FULL).ok
+
+
+def test_interleaved_disjoint_outputs_are_admitted():
+    """Rows of different heads interleaved between the rows of one head (head
+    stride 96, token stride 64, D = 32: rows at 0, 64, 128 and 96, 160, 224)
+    share no element; the sorted test alone would flag them."""
+    strides = {r: (512, 32, 128, 1) for r in ("q", "k", "v", "o", "do", "dk", "dv")}
+    strides["dq"] = (512, 96, 64, 1)
+    req = _req(
+        b=1, h_q=2, h_k=2, h_v=2, s_q=3, s_kv=3, d_qk=32, d_v=32, strides=strides
+    )
+    assert plan_mod._overlaps_sorted((1, 2, 3, 32), strides["dq"])
+    assert attn_bwd_support(req, "gfx942", policy=FULL).ok
+    # one more token row lands on the next head's first row: overlap
+    over = dict(strides, dq=(512, 96, 48, 1))
+    req = _req(b=1, h_q=2, h_k=2, h_v=2, s_q=3, s_kv=3, d_qk=32, d_v=32, strides=over)
+    assert attn_bwd_support(req, "gfx942", policy=FULL).code == "OUTPUT_OVERLAP"
+    # THD: tokens of the two heads interleaved, (ignored, H, token, D)
+    thd = dict(layout="thd", b=1, h_q=2, h_k=2, h_v=2, s_q=3, s_kv=3, d_qk=32, d_v=32)
+    thd_strides = {r: (0, 32, 64, 1) for r in ("q", "k", "v", "o", "do", "dk", "dv")}
+    good = _req(**thd, strides={**thd_strides, "dq": (0, 96, 64, 1)})
+    assert attn_bwd_support(good, "gfx942", policy=FULL).ok
+
+
+def _brute_overlap(dims, strides):
+    seen = set()
+    for idx in itertools.product(*(range(n) for n in dims)):
+        off = sum(i * s for i, s in zip(idx, strides))
+        if off in seen:
+            return True
+        seen.add(off)
+    return False
+
+
+def test_overlap_test_is_exact_on_random_small_layouts():
+    """The overlap test agrees with an enumeration of every element offset
+    on random unit-D layouts (the backward's output class)."""
+    rng = random.Random(11)
+    checked = interleaved = 0
+    for _ in range(4000):
+        dims = [
+            rng.randint(1, 4),
+            rng.randint(1, 4),
+            rng.randint(1, 5),
+            rng.randint(1, 9),
+        ]
+        strides = [rng.randint(0, 60), rng.randint(0, 60), rng.randint(0, 60), 1]
+        want = _brute_overlap(dims, strides)
+        assert plan_mod._overlaps(dims, strides) == want, (dims, strides)
+        checked += 1
+        interleaved += plan_mod._overlaps_sorted(dims, strides) and not want
+    # the sample really exercises layouts the sorted test cannot prove
+    assert checked == 4000 and interleaved > 50, interleaved
+
+
+def test_empty_extents_decline_empty_not_overlap():
+    for kw in (
+        dict(h_q=0),
+        dict(h_k=0),
+        dict(h_v=0),
+        dict(s_q=0),
+        dict(s_kv=0),
+        dict(b=0),
+        dict(layout="thd", h_q=0),
+        dict(layout="thd", h_k=0),
+        dict(layout="thd", s_q=0),
+        dict(layout="thd", b=0, max_total_q=0, max_total_kv=0),
+        # an empty output never overlaps, whatever its (degenerate) strides
+        dict(h_q=0, strides={"dq": (0, 0, 128, 1)}),
+        dict(s_kv=0, strides={"dk": (0, 0, 0, 1), "dv": (0, 0, 0, 1)}),
+    ):
+        v = attn_bwd_support(_req(**kw), "gfx942", policy=FULL)
+        assert v.code == "EMPTY", (kw, v)
+
+
+def test_kv_workspace_rows_index_range_only_in_atomic_mode():
+    # B * S_kv = 2^31 rows of dK / dV workspace; every per-tensor index is in range
+    big = dict(b=2**15, s_q=1, s_kv=2**16, d_qk=32, d_v=32, h_q=2, h_k=2)
+    v = attn_bwd_support(_req(**big, h_v=1), "gfx942", policy=FULL)
+    assert v.code == "INDEX_RANGE" and "rows_kv" in v.detail, v
+    assert attn_bwd_support(_req(**big, h_v=2), "gfx942", policy=FULL).ok
+
+
+def test_index_and_grid_limits_at_the_exact_boundary():
+    one = dict(b=1, h_q=1, h_k=1, h_v=1, s_q=1, s_kv=16, d_qk=128, d_v=128)
+
+    def with_q_stride(ss):
+        return _req(**one, strides={"q": (ss, ss, ss, 1)})
+
+    assert attn_bwd_support(with_q_stride(2**31 - 1 - 128), "gfx942", policy=FULL).ok
+    v = attn_bwd_support(with_q_stride(2**31 - 128), "gfx942", policy=FULL)
+    assert v.code == "INDEX_RANGE" and "q:" in v.detail, v
+    grid = dict(h_q=1, h_k=1, h_v=1, s_q=16, s_kv=16, d_qk=32, d_v=32)
+    assert attn_bwd_support(_req(b=65535, **grid), "gfx942", policy=FULL).ok
+    v = attn_bwd_support(_req(b=65536, **grid), "gfx942", policy=FULL)
+    assert v.code == "GRID_LIMIT" and "B=65536" in v.detail, v
+
+
+def test_thd_lse_strides_in_both_forms_reach_prep():
+    thd = dict(
+        layout="thd",
+        strides={
+            n: (0, 128, 8 * 128, 1)
+            for n in ("q", "k", "v", "o", "do", "dq", "dk", "dv")
+        },
+    )
+
+    def prep_lse(req):
+        assert attn_bwd_support(req, "gfx942", policy=FULL).ok
+        s = attn_bwd_plan(req, "gfx942", policy=FULL).launches[0].scalars
+        return s["l_b"], s["l_h"], s["l_t"]
+
+    # [T_q, H_q, 1] with (t, h, 1) strides
+    assert prep_lse(_req(**thd, lse_dims=(256, 8, 1), lse_strides=(8, 1, 1))) == (
+        0,
+        1,
+        8,
+    )
+    assert prep_lse(_req(**thd, lse_dims=(256, 8, 1), lse_strides=(1, 256, 1))) == (
+        0,
+        256,
+        1,
+    )
+    # [B, H_q, S_q, 1] with (b, h, t, 1) strides; the B stride is unused
+    assert prep_lse(
+        _req(**thd, lse_dims=(2, 8, 128, 1), lse_strides=(1024, 1, 8, 1))
+    ) == (0, 1, 8)
+    assert prep_lse(
+        _req(**thd, lse_dims=(2, 8, 128, 1), lse_strides=(1024, 128, 1, 1))
+    ) == (0, 128, 1)
+    # packed default: token-major [T_q, H_q]
+    assert prep_lse(_req(**thd)) == (0, 1, 8)
+    # dense keeps (b, h, t)
+    assert prep_lse(_req(lse_strides=(1024, 128, 1, 1))) == (1024, 128, 1)
+
+
+# ---------------------------------------------------------------------------
+# LSE stride forms: every rank either honoured exactly or declined
+# ---------------------------------------------------------------------------
+
+# Distinct per-position values: a stride read from the wrong position, or a
+# default used in place of a given tuple, changes the kernargs.
+_LSE_ST = (4099, 257, 3, 9, 11, 13)
+_THD8 = {n: (0, 128, 8 * 128, 1) for n in ("q", "k", "v", "o", "do", "dq", "dk", "dv")}
+# (layout, dims form) -> (dims, {accepted stride rank: (l_b, l_h, l_t)}); the
+# _req() shape is b=2, h_q=8, s_q=128. Hand-written, not derived from the
+# implementation.
+_LSE_FORMS = {
+    ("dense", "default_dims"): ((), {0: (1024, 128, 1), 4: (4099, 257, 3)}),
+    ("dense", "bhs1"): ((2, 8, 128, 1), {0: (1024, 128, 1), 4: (4099, 257, 3)}),
+    ("thd", "default_dims"): ((), {0: (0, 1, 8), 3: (0, 257, 4099)}),
+    ("thd", "th1"): ((256, 8, 1), {0: (0, 1, 8), 3: (0, 257, 4099)}),
+    ("thd", "bhs1"): ((2, 8, 128, 1), {4: (0, 257, 3)}),
+}
+
+
+def _lse_req(layout, dims, strides):
+    kw = dict(layout="thd", strides=_THD8) if layout == "thd" else {}
+    return _req(lse_dims=dims, lse_strides=strides, **kw)
+
+
+@pytest.mark.parametrize("rank", range(7))
+@pytest.mark.parametrize("form", sorted(_LSE_FORMS), ids="-".join)
+def test_lse_stride_tuple_of_every_rank(form, rank):
+    """A stride tuple of every length 0..6 under every dims form: the accepted
+    ranks reach the prep kernargs exactly (``()`` gives the packed strides of
+    the dims); every other rank is declined ``LSE_FORMAT`` naming the rank,
+    never replaced by the packed default."""
+    dims, accepted = _LSE_FORMS[form]
+    req = _lse_req(form[0], dims, _LSE_ST[:rank])
+    v = attn_bwd_support(req, "gfx942", policy=FULL)
+    if rank in accepted:
+        assert v.ok, v
+        s = attn_bwd_plan(req, "gfx942", policy=FULL).launches[0].scalars
+        assert (s["l_b"], s["l_h"], s["l_t"]) == accepted[rank]
+    else:
+        assert v.code == "LSE_FORMAT", v
+        assert str(_LSE_ST[:rank]) in v.detail, v
+        with pytest.raises(ValueError, match="LSE_FORMAT"):
+            plan_mod._lse_kernarg_strides(req)
+        with pytest.raises(ValueError):
+            attn_bwd_plan(req, "gfx942", policy=FULL)
+
+
+@pytest.mark.parametrize(
+    "layout, dims, strides, phrase",
+    [
+        # rank of the canonical dims: the short forms that used to be dropped
+        ("dense", (), (4099,), "rank 1"),
+        ("dense", (), (4099, 257), "rank 2"),
+        ("dense", (), (4099, 257, 3), "rank 3"),
+        ("dense", (2, 8, 128, 1), (4099, 257), "rank 2"),
+        ("thd", (), (4099,), "rank 1"),
+        ("thd", (), (4099, 257), "rank 2"),
+        ("thd", (), (4099, 257, 3, 9), "rank 4"),
+        ("thd", (256, 8, 1), (8, 1), "rank 2"),
+        ("thd", (2, 8, 128, 1), (4099, 257, 3), "rank-4"),
+        # the batched THD shape has no packed default
+        ("thd", (2, 8, 128, 1), (), "batched shape"),
+        # entries
+        ("dense", (), (4099, -1, 3, 1), "negative"),
+        ("thd", (), (-8, 1, 1), "negative"),
+        ("dense", (), (4099.0, 257, 3, 1), "non-integer"),
+        ("dense", (), (4099, True, 3, 1), "non-integer"),
+        ("thd", (256.0, 8, 1), (8, 1, 1), "non-integer"),
+        ("thd", (-1, 8, 1), (8, 1, 1), "negative token count"),
+        # dims
+        ("dense", (2, 8, 128), (), "dense LSE dims"),
+        ("dense", (2, 4, 128, 1), (), "dense LSE dims"),
+        ("dense", (2, 8, 64, 1), (), "dense LSE dims"),
+        ("dense", (2, 8, 128, 2), (), "dense LSE dims"),
+        ("thd", (256, 4, 1), (), "THD LSE dims"),
+        ("thd", (256, 8, 2), (), "THD LSE dims"),
+        ("thd", (256, 8), (), "THD LSE dims"),
+        ("thd", (3, 8, 128, 1), (4099, 257, 3, 1), "THD LSE dims"),
+    ],
+)
+def test_lse_malformed_forms_are_declined_with_a_reason(layout, dims, strides, phrase):
+    v = attn_bwd_support(_lse_req(layout, dims, strides), "gfx942", policy=FULL)
+    assert v.code == "LSE_FORMAT" and phrase in v.detail, v
+
+
+def test_lse_dtype_decline_names_the_dtype():
+    v = attn_bwd_support(_req(lse_dtype="fp16"), "gfx942", policy=FULL)
+    assert v.code == "LSE_FORMAT" and "fp16" in v.detail, v
+
+
+def test_lse_accepted_forms_honour_numpy_ints_and_unit_dim_strides():
+    """numpy integer entries are integers; the stride of the trailing extent-1
+    dim never moves an address, so any non-negative value is accepted."""
+    np = pytest.importorskip("numpy")
+    st = tuple(np.int64(x) for x in (4099, 257, 3, 0))
+    for unit in (0, 1, 2**40):
+        req = _req(lse_strides=st[:3] + (unit,))
+        assert attn_bwd_support(req, "gfx942", policy=FULL).ok
+        s = attn_bwd_plan(req, "gfx942", policy=FULL).launches[0].scalars
+        assert (s["l_b"], s["l_h"], s["l_t"]) == (4099, 257, 3)
+
+
+def test_band_bound_rows():
+    for kw in (
+        dict(left_bound=-2),
+        dict(right_bound=2**30),
+        dict(causal=True, left_bound=3),
+    ):
+        assert attn_bwd_support(_req(**kw), "gfx942", policy=FULL).code == "BAND_BOUND"
+
+
+def test_request_device_hints_default_to_none():
+    req = _req()
+    assert req.num_cus is None and req.num_xcds is None
+    assert req.max_total_q is None and req.block_table_injective is None
+    # the reserved paged-table assertion never changes the general verdict
+    assert attn_bwd_support(
+        dataclasses.replace(req, block_table_injective=False), "gfx942", policy=FULL
+    ).ok
+
+
+# ---------------------------------------------------------------------------
+# case table coverage
+# ---------------------------------------------------------------------------
+
+_CASES = backward_cases()
+
+
+def test_case_table_size():
+    assert len(_CASES) == 343
+
+
+@pytest.mark.parametrize("arch", ("gfx942", "gfx950", "gfx1151", "gfx1201", "gfx90a"))
+def test_every_case_yields_a_decision(arch):
+    shipped = shipped_policy()
+    for case in _CASES:
+        req = request_from_case(case)
+        for policy in (shipped, FULL, _WAIVED_UNDECLARED):
+            v = attn_bwd_support(req, arch, policy=policy)
+            assert v.ok or (v.code in REASON_CODES and v.detail), (case.id, v)
+            if v.ok:
+                attn_bwd_plan(req, arch, policy=policy)
+
+
+@pytest.mark.parametrize("arch", DECLARED)
+def test_case_table_cells_accepted(arch):
+    for case in select_bwd("exhaustive"):
+        req = request_from_case(case)
+        v = attn_bwd_support(req, arch, policy=FULL)
+        assert v.ok, (case.id, v)
+        plan = attn_bwd_plan(req, arch, policy=FULL)
+        main = plan.specs["main"]
+        assert main.seq_mode == ("thd" if case.layout == "thd" else "batched")
+        assert main.dkv_mode == ("atomic" if case.h_k != case.h_v else "direct")
+        assert len(plan.launches) == (5 if main.dkv_mode == "atomic" else 3)
+
+
+def test_case_table_gfx1201_is_declared_like_gfx1151():
+    """gfx1201 is declared on its hardware run: no request is declined
+    ``ARCH_NOT_VALIDATED``, and every case gets the gfx1151 verdict (the same
+    RDNA functional matrix and performance status)."""
+    assert "gfx1201" in DECLARED_ARCHS
+    assert not shipped_policy().not_validated_archs
+    for case in select_bwd("exhaustive"):
+        req = request_from_case(case)
+        v1201 = attn_bwd_support(req, "gfx1201", policy=FULL)
+        assert v1201.code != "ARCH_NOT_VALIDATED"
+        assert v1201.code == attn_bwd_support(req, "gfx1151", policy=FULL).code
+        shipped = attn_bwd_support(req, "gfx1201")
+        assert shipped.code == attn_bwd_support(req, "gfx1151").code
+
+
+def test_shipped_policy_declares_the_gated_groups():
+    # The base path, the masks-and-stats group, the grouped-heads group (GQA /
+    # MQA with h_k == h_v), the split-kv-heads group (h_k != h_v, atomic
+    # dK / dV), the padding group (per-batch SEQ_LEN counts) and the ragged
+    # group (THD offsets) and the narrow-access group (stage_vec = 1: any
+    # B/H/S stride, any element-aligned base) have passed their correctness
+    # gates. Nothing is measured, so CDNA declines on performance; RDNA (never
+    # declined on performance) serves exactly the cells of the declared groups.
+    gated = frozenset(
+        {"base", "masks_and_stats", "grouped_heads", "split_kv_heads", "padding"}
+        | {"ragged", "narrow_access"}
+    )
+    assert gated == frozenset(FEATURE_GROUPS)
+    assert SHIPPED_DECLARED_GROUPS == gated
+    for case in _CASES:
+        req = request_from_case(case)
+        assert attn_bwd_support(req, "gfx942").code == "PERF_UNVERIFIED"
+        v = attn_bwd_support(req, "gfx1151")
+        if attn_bwd_feature_groups(req) <= gated:
+            assert v.ok, (case.id, v)
+        else:
+            assert v.code == "NOT_YET_DECLARED", (case.id, v)
+
+
+# ---------------------------------------------------------------------------
+# workspace
+# ---------------------------------------------------------------------------
+
+
+def test_workspace_hand_table():
+    req = _req()
+    assert attn_bwd_workspace_bytes(req) == 1_048_576 + 8_192 + 8_192 == 1_064_960
+    assert attn_bwd_workspace_bytes(req, g_split=2) == 1_064_960 + 2_097_152
+    assert attn_bwd_workspace_bytes(req, dq_mode="split") == 16_384
+
+
+def test_workspace_layout_packing_and_alignment():
+    req = _req(b=3, s_q=33, s_kv=17, h_q=6, h_k=3, h_v=2, d_qk=64, d_v=64)
+    lay = attn_bwd_workspace_layout(req)
+    assert list(lay) == ["WS_DQ", "WS_LSE2", "WS_DSUM", "WS_DK", "WS_DV"]
+    off = 0
+    for name, (o, n) in lay.items():
+        assert o == off and o % 256 == 0
+        off += -(-n // 256) * 256
+    assert attn_bwd_workspace_bytes(req) == off
+    rows_q, rows_kv = 3 * 33, 3 * 17
+    assert lay["WS_DQ"][1] == 4 * rows_q * 6 * 64
+    assert lay["WS_LSE2"][1] == lay["WS_DSUM"][1] == 4 * rows_q * 6
+    assert lay["WS_DK"][1] == 4 * rows_kv * 3 * 64
+    assert lay["WS_DV"][1] == 4 * rows_kv * 2 * 64
+    wl = attn_bwd_workspace_layout(req, worklist=True, block_n=128)
+    assert wl["WORKLIST"][1] == 8 * (3 + 1)
+
+
+def test_workspace_thd_with_and_without_the_bound():
+    thd = _req(
+        layout="thd",
+        b=4,
+        s_q=100,
+        s_kv=50,
+        h_k=4,
+        h_v=2,
+        strides={n: (0, 128, 8 * 128, 1) for n in ("q", "o", "do", "dq")},
+    )
+    no_bound = attn_bwd_workspace_layout(thd)
+    assert no_bound["WS_LSE2"][1] == 4 * (4 * 100) * 8
+    assert no_bound["WS_DK"][1] == 4 * (4 * 50) * 4 * 128
+    bound = attn_bwd_workspace_layout(
+        dataclasses.replace(thd, max_total_q=123, max_total_kv=77)
+    )
+    assert bound["WS_LSE2"][1] == 4 * 123 * 8
+    assert bound["WS_DQ"][1] == 4 * 123 * 8 * 128
+    assert bound["WS_DK"][1] == 4 * 77 * 4 * 128
+    # one bound alone is not used: rows stay per-sequence slots (B * S_max)
+    for one in (dict(max_total_q=123), dict(max_total_kv=77)):
+        assert attn_bwd_workspace_layout(dataclasses.replace(thd, **one)) == no_bound
+    # padded rows use the tensor dims, exactly like fixed lengths
+    padded = _req(padding=True, has_seq_len_q=True, has_seq_len_kv=True)
+    assert attn_bwd_workspace_bytes(padded) == attn_bwd_workspace_bytes(_req())
+
+
+def test_plan_layout_equals_the_formula():
+    for req in (
+        _req(),
+        _req(h_k=4, h_v=2),
+        _req(layout="thd", max_total_q=300),
+        _req(layout="thd", max_total_q=300, max_total_kv=200),
+        _req(layout="thd", h_k=4, h_v=2),
+    ):
+        plan = attn_bwd_plan(req, "gfx950", policy=FULL)
+        assert dict(plan.workspace_layout) == attn_bwd_workspace_layout(req)
+        assert plan.workspace_bytes == attn_bwd_workspace_bytes(req)
+        main = next(s for s in plan.launches if s.stage == "main")
+        by_token = req.max_total_q is not None and req.max_total_kv is not None
+        rows_q = req.max_total_q if by_token else req.b * req.s_q
+        assert main.scalars["ws_rows_q"] == rows_q
+
+
+def test_thd_rows_by_sequence_slot_without_both_bounds():
+    """``ws_seg`` is 1 in every launch of a THD plan that lacks either
+    caller bound (rows ``b * S_max + i``, ``B * S_max`` rows), 0 with both
+    (rows by storage token) and 0 for batched plans (the flag is not read)."""
+    thd = dict(layout="thd", b=3, s_q=40, s_kv=24, h_k=4, h_v=2)
+    cases = (
+        (_req(**thd), 1, (3 * 40, 3 * 24)),
+        (_req(**thd, max_total_q=500), 1, (3 * 40, 3 * 24)),
+        (_req(**thd, max_total_kv=500), 1, (3 * 40, 3 * 24)),
+        (_req(**thd, max_total_q=500, max_total_kv=90), 0, (500, 90)),
+        (_req(h_k=4, h_v=2), 0, None),
+    )
+    for req, seg, rows in cases:
+        plan = attn_bwd_plan(req, "gfx942", policy=FULL)
+        for step in plan.launches:
+            assert step.scalars["ws_seg"] == seg, (req, step.stage)
+        main = plan.launches[1].scalars
+        if rows is not None:
+            assert (main["ws_rows_q"], main["ws_rows_kv"]) == rows
+
+
+# ---------------------------------------------------------------------------
+# plan details
+# ---------------------------------------------------------------------------
+
+
+def test_plan_kernargs_match_the_abi():
+    for req in (
+        _req(),
+        _req(h_k=4, h_v=2, layout="thd"),
+        _req(padding=True, has_seq_len_q=True, has_seq_len_kv=True),
+    ):
+        plan = attn_bwd_plan(req, "gfx942", policy=FULL)
+        for step in plan.launches:
+            names = [n for n, _ in attn_bwd_params(step.stage)]
+            assert sorted(list(step.pointers) + list(step.scalars)) == sorted(names)
+            assert all(isinstance(v, (int, float)) for v in step.scalars.values())
+
+
+def test_plan_launch_sequence_and_grids():
+    req = _req(s_kv=300, h_k=2, h_v=2)
+    plan = attn_bwd_plan(req, "gfx942", policy=FULL)
+    assert [s.stage for s in plan.launches] == ["prep", "main", "convert"]
+    main = plan.launches[1]
+    spec = plan.specs["main"]
+    assert main.grid == (math.ceil(300 / spec.block_n), 2, 2)
+    assert main.block == spec.waves * 64
+    assert main.scalars["G"] == 4 and main.pointers["dK"] == "dk"
+    atomic = attn_bwd_plan(_req(h_k=4, h_v=2), "gfx942", policy=FULL)
+    assert [s.stage for s in atomic.launches] == [
+        "prep",
+        "main",
+        "convert",
+        "convert",
+        "convert",
+    ]
+    m = atomic.launches[1]
+    assert m.grid[1] == 8 // math.gcd(2, 4)
+    assert m.pointers["dK"] is None and m.pointers["WS_DK"] == "WS_DK"
+    assert atomic.launches[0].grid[1] == 8 + 4 + 2
+
+
+def test_scale_placements():
+    scale = 0.25
+
+    def hook(name):
+        return lambda req, arch, route, cls: {"scale_placement": name}
+
+    for name, want in (
+        ("fold_ds", (scale, 1.0, 1.0, 1.0)),
+        ("convert", (1.0, scale, 1.0, scale)),
+        ("dq_before_atomic", (1.0, scale, scale, 1.0)),
+    ):
+        policy = dataclasses.replace(FULL, tuning=hook(name))
+        plan = attn_bwd_plan(_req(scale=scale), "gfx950", policy=policy)
+        main, conv = plan.launches[1].scalars, plan.launches[2].scalars
+        assert (main["ds_mult"], main["dk_mult"], main["dq_mult"], conv["mult"]) == want
+        assert main["scale_log2"] == pytest.approx(scale * math.log2(math.e))
+
+
+def test_g_split_from_the_tuning_hook_adds_kv_workspace():
+    policy = dataclasses.replace(FULL, tuning=lambda *a: {"g_split": 2})
+    req = _req(h_k=2, h_v=2)
+    plan = attn_bwd_plan(req, "gfx942", policy=policy)
+    assert plan.specs["main"].dkv_mode == "atomic"
+    assert "WS_DK" in plan.workspace_layout
+    assert plan.launches[1].grid[1] == 2 * 2
+    bad = dataclasses.replace(FULL, tuning=lambda *a: {"g_split": 3})
+    with pytest.raises(ValueError, match="g_split"):
+        attn_bwd_plan(req, "gfx942", policy=bad)
+
+
+def test_tuning_hook_rejects_unknown_knobs_and_applies_spec_knobs():
+    with pytest.raises(ValueError, match="unknown knobs"):
+        attn_bwd_plan(
+            _req(),
+            "gfx942",
+            policy=dataclasses.replace(FULL, tuning=lambda *a: {"bogus": 1}),
+        )
+    policy = dataclasses.replace(
+        FULL,
+        tuning=lambda *a: {
+            "edge_tiles": True,
+            "block_n": 64,
+            "waves": 4,
+            "warp_grid_g4": (1, 4),
+        },
+    )
+    spec = attn_bwd_plan(_req(), "gfx942", policy=policy).specs["main"]
+    assert spec.edge_tiles is True and spec.block_n == 64
+
+
+def test_mirror_pairing_and_xcd_remap_need_device_hints():
+    mirror = dataclasses.replace(FULL, tuning=lambda *a: {"lb_order": "mirror"})
+    with pytest.raises(ValueError, match="mask"):
+        attn_bwd_plan(_req(), "gfx942", policy=mirror)
+    with pytest.raises(ValueError, match="num_cus"):
+        attn_bwd_plan(_req(causal=True), "gfx942", policy=mirror)
+    filled = _req(causal=True, s_q=4096, s_kv=4096, num_cus=8)
+    if not MIRROR_PAIRING_BUILT:
+        # the main kernel runs one kv tile per CTA: the plan refuses pairing
+        with pytest.raises(ValueError, match="not built"):
+            attn_bwd_plan(filled, "gfx942", policy=mirror)
+    else:  # pragma: no cover - the two-tile CTA is not built
+        plan = attn_bwd_plan(filled, "gfx942", policy=mirror)
+        assert plan.runtime["pair"] == 1 and plan.launches[1].scalars["pair"] == 1
+        assert plan.launches[1].grid[0] == math.ceil(
+            math.ceil(4096 / plan.specs["main"].block_n) / 2
+        )
+    reverse = dataclasses.replace(FULL, tuning=lambda *a: {"lb_order": "reverse"})
+    plan = attn_bwd_plan(_req(causal=True), "gfx942", policy=reverse)
+    assert plan.launches[1].scalars["lb_order"] == 1
+    assert plan.launches[1].scalars["pair"] == 0
+    xcd = dataclasses.replace(FULL, tuning=lambda *a: {"xcd_chunk": 64})
+    with pytest.raises(ValueError, match="num_xcds"):
+        attn_bwd_plan(_req(), "gfx942", policy=xcd)
+    plan = attn_bwd_plan(_req(num_xcds=8), "gfx942", policy=xcd)
+    assert (plan.runtime["xcd_n"], plan.runtime["xcd_chunk"]) == (8, 64)
+    plain = attn_bwd_plan(_req(num_xcds=8), "gfx942", policy=FULL)
+    assert plain.runtime["xcd_n"] == 0
+    assert attn_bwd_plan(_req(), "gfx942", policy=FULL).fill_bucket == "unknown"
+    assert attn_bwd_plan(_req(num_cus=4), "gfx942", policy=FULL).fill_bucket == "over"
+
+
+def test_head_packing_for_short_query_spans():
+    plan = attn_bwd_plan(_req(s_q=1, s_kv=500, h_k=2, h_v=2), "gfx942", policy=FULL)
+    spec = plan.specs["main"]
+    assert spec.head_pack is True
+    assert plan.launches[1].scalars["pack_heads"] == 4
+    assert (
+        plan.specs["main"].kernel_name()
+        != attn_bwd_plan(_req(), "gfx942", policy=FULL).specs["main"].kernel_name()
+    )
+    assert (
+        attn_bwd_plan(_req(), "gfx942", policy=FULL).launches[1].scalars["pack_heads"]
+        == 0
+    )
+
+
+def test_thd_offsets_and_band_kernargs():
+    req = _req(
+        layout="thd",
+        ragged_offset_dtype="int64",
+        ragged_offset_multiplier=3,
+        causal_bottom_right=True,
+        strides={
+            n: (0, 128, 8 * 128, 1)
+            for n in ("q", "k", "v", "o", "do", "dq", "dk", "dv")
+        },
+    )
+    m = attn_bwd_plan(req, "gfx942", policy=FULL).launches[1]
+    s = m.scalars
+    assert (s["off64"], s["q_mult"], s["q_div"], s["kv_div"]) == (
+        1,
+        3,
+        8 * 128,
+        8 * 128,
+    )
+    assert (s["left"], s["right"], s["bottom_right"]) == (-1, 0, 1)
+    assert s["q_b"] == 0 and m.pointers["OFF_Q"] == "offsets_q"
+
+
+# ---------------------------------------------------------------------------
+# declaration agrees with the predicate
+# ---------------------------------------------------------------------------
+
+
+def test_declaration_shape_and_serialisable():
+    for arch in ("gfx942", "gfx950", "gfx1151", "gfx1201", "gfx90a"):
+        d = attn_bwd_declaration(arch, policy=FULL)
+        json.dumps(d)
+        assert d["version"] == ATTN_BWD_DECLARATION_VERSION == 3
+        assert d["abi"] == "rocke.attn_bwd.v3"
+        assert d["reason_codes"] == list(REASON_CODES)
+        assert d["lse"]["base"] == "e" and d["lse"]["dtype"] == "fp32"
+        assert "dq" in d["determinism"] and "dk_dv" in d["determinism"]
+    assert attn_bwd_declaration("gfx1201")["status"] == "declared"
+    not_validated = dataclasses.replace(
+        FULL, not_validated_archs=frozenset({"gfx1201"})
+    )
+    assert attn_bwd_declaration("gfx1201", policy=not_validated)["status"] == (
+        "not_validated"
+    )
+    assert attn_bwd_declaration("gfx90a")["status"] == "unsupported"
+    d = attn_bwd_declaration("gfx942")
+    assert d["perf_policy"]["unverified"] == "declined"
+    assert {e["perf"] for e in d["perf"]} == {"unverified"}
+    assert {e["perf"] for e in attn_bwd_declaration("gfx1151")["perf"]} == {"degraded"}
+    assert {e["perf"] for e in attn_bwd_declaration("gfx1201")["perf"]} == {"degraded"}
+
+
+def test_d256_decline_cites_the_requirements_scope_and_the_register():
+    """d = 256 backward is declined with a reason that cites the
+    requirements' out-of-scope list, and the declaration publishes the
+    deferral-register row with its consequence for hipDNN."""
+    v = attn_bwd_support(_req(d_qk=256, d_v=256), "gfx942", policy=FULL)
+    assert v.code == "HEAD_DIM_256_BWD"
+    assert "out of scope within Tier S" in v.detail
+    assert "Explicitly out of scope" in v.detail
+    for arch in ("gfx942", "gfx950", "gfx1151", "gfx1201"):
+        d = attn_bwd_declaration(arch)
+        assert d["axes"]["head_dim_declined"]["256"]["code"] == "HEAD_DIM_256_BWD"
+        rows = {r["reason_code"]: r for r in d["deferral_register"]}
+        row = rows["HEAD_DIM_256_BWD"]
+        assert "not trainable" in row["consequence"]
+        assert "CK / AOTriton" in row["consequence"]
+        assert row["rationale"] == v.detail
+        # every register row names a code the predicate really emits
+        assert set(rows) <= set(REASON_CODES)
+        assert all(r["consequence"] for r in d["deferral_register"])
+        assert any("gfx1201" in n for n in d["notes"])
+    assert [r["reason_code"] for r in DEFERRAL_REGISTER].count("HEAD_DIM_256_BWD") == 1
+
+
+def _sample_requests(n, seed=7):
+    rng = random.Random(seed)
+    for _ in range(n):
+        d = rng.choice((32, 64, 128))
+        h_k = rng.choice((1, 2, 4, 8))
+        h_v = rng.choice((h_k, h_k, 2))
+        if 8 % h_v:
+            h_v = h_k
+        s_q = rng.choice((1, 17, 64, 128))
+        s_kv = rng.choice((s_q, 33, 200))
+        mask = rng.choice(("none", "tl", "br", "win"))
+        kw = dict(
+            b=rng.choice((1, 3)),
+            h_q=8,
+            h_k=h_k,
+            h_v=h_v,
+            s_q=s_q,
+            s_kv=s_kv,
+            d_qk=d,
+            d_v=d,
+            dtype=rng.choice(("fp16", "bf16")),
+        )
+        if mask == "tl":
+            kw.update(right_bound=0)
+        elif mask == "br":
+            kw.update(right_bound=0, bottom_right=True)
+        elif mask == "win":
+            kw.update(left_bound=7, right_bound=0)
+        lm = rng.choice(("fixed", "padded", "thd"))
+        if lm == "padded":
+            kw.update(padding=True, has_seq_len_q=True, has_seq_len_kv=True)
+        elif lm == "thd":
+            kw.update(layout="thd")
+        if rng.random() < 0.2:
+            kw.update(tensor_alignment=4)
+        yield AttnBwdRequest(**kw)
+
+
+def test_declaration_agrees_with_predicate():
+    reqs = list(_sample_requests(300))
+    rng = random.Random(11)
+    statuses = {}
+    for r in reqs:
+        cls = attn_bwd_perf_class(r, "gfx942")
+        statuses[cls] = rng.choice(("verified", "below_baseline", "unverified"))
+    for waive in (False, True):
+        policy = AttnBwdPolicy(
+            declared_groups=frozenset(FEATURE_GROUPS),
+            waive_unverified=waive,
+            perf_status=statuses,
+        )
+        decl = attn_bwd_declaration("gfx942", policy=policy)
+        table = {
+            tuple(
+                e[k]
+                for k in (
+                    "arch",
+                    "route",
+                    "d",
+                    "dtype",
+                    "mask",
+                    "heads",
+                    "length_relation",
+                    "length_mode",
+                    "stage_vec",
+                )
+            ): e["perf"]
+            for e in decl["perf"]
+        }
+        for r in reqs:
+            cls = attn_bwd_perf_class(r, "gfx942")
+            assert cls in table
+            status = table[cls]
+            v = attn_bwd_support(r, "gfx942", policy=policy)
+            if status == "below_baseline":
+                assert v.code == "PERF_BELOW_BASELINE"
+            elif status == "unverified" and not waive:
+                assert v.code == "PERF_UNVERIFIED"
+            else:
+                assert v.ok, (r, v)
+
+
+def test_declared_feature_groups_track_the_policy():
+    partial = AttnBwdPolicy(
+        declared_groups=frozenset({"base", "masks_and_stats"}), waive_unverified=True
+    )
+    decl = attn_bwd_declaration("gfx950", policy=partial)
+    assert decl["declared_feature_groups"] == ["base", "masks_and_stats"]
+    assert attn_bwd_support(_req(causal=True), "gfx950", policy=partial).ok
+    v = attn_bwd_support(_req(h_k=2, h_v=2), "gfx950", policy=partial)
+    assert v.code == "NOT_YET_DECLARED" and "grouped_heads" in v.detail
+
+
+# ---------------------------------------------------------------------------
+# no device query
+# ---------------------------------------------------------------------------
+
+_DEVICE_MODULES = (
+    "torch",
+    "hip",
+    "ctypes",
+    "rocke.runtime",
+    "rocke.core.comgr",
+    "subprocess",
+)
+
+
+def test_plan_modules_import_no_device_module():
+    for fname in ("attention_bwd.py", "attention_bwd_plan.py"):
+        tree = ast.parse((_KERNEL_DIR / fname).read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            names = []
+            if isinstance(node, ast.Import):
+                names = [a.name for a in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                names = [node.module]
+            for n in names:
+                assert not any(
+                    n == m or n.startswith(m + ".") for m in _DEVICE_MODULES
+                ), (fname, n)
+                assert n.split(".")[0] not in ("dispatch", "builders", "benchmarks"), (
+                    fname,
+                    n,
+                )
+
+
+def test_no_device_query(monkeypatch):
+    real_import = builtins.__import__
+
+    def guarded(name, *args, **kwargs):
+        if any(name == m or name.startswith(m + ".") for m in _DEVICE_MODULES):
+            raise AssertionError(f"device module {name} imported during planning")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", guarded)
+    for case in select_bwd("smoke"):
+        req = request_from_case(case)
+        for arch in ("gfx942", "gfx950", "gfx1151", "gfx1201"):
+            attn_bwd_support(req, arch)
+            if attn_bwd_support(req, arch, policy=FULL).ok:
+                attn_bwd_plan(req, arch, policy=FULL)
+        attn_bwd_declaration("gfx942")
+
+
+# ---------------------------------------------------------------------------
+# feature groups agree with the case-level feature table
+# ---------------------------------------------------------------------------
+
+
+_case_feature_rank = stage_of
+
+
+def test_feature_group_counts_per_tier():
+    counts = collections.Counter()
+    for c in _CASES:
+        rank = _case_feature_rank(c)
+        for tier in ("smoke", "full", "exhaustive"):
+            if tier in c.tags:
+                counts[(rank, tier)] += 1
+    expected = {
+        1: (2, 16, 27),
+        2: (16, 83, 121),
+        3: (5, 26, 57),
+        4: (0, 0, 2),
+        5: (5, 32, 67),
+        6: (3, 29, 69),
+    }
+    for rank, (smoke, full, exh) in expected.items():
+        assert (
+            counts[(rank, "smoke")],
+            counts[(rank, "full")],
+            counts[(rank, "exhaustive")],
+        ) == (smoke, full, exh)
+
+
+def test_stage_gate_selection_covers_every_base_layout_and_supplement():
+    smoke1 = {c.layout for c in select_bwd("smoke") if stage_of(c) == 1}
+    smoke1 |= {c.layout for c in SUPPLEMENTARY_CASES if stage_of(c) == 1}
+    assert {"bhsd", "bshd", "strided_bhsd", "strided_bshd"} <= smoke1
+    for c in SUPPLEMENTARY_CASES:
+        groups = attn_bwd_feature_groups(request_from_case(c))
+        assert stage_of(c) == 1 + max(FEATURE_GROUPS.index(g) for g in groups), c.id
+        assert attn_bwd_support(request_from_case(c), "gfx942", policy=FULL).ok
+
+
+def test_request_groups_match_case_features():
+    for c in _CASES:
+        groups = attn_bwd_feature_groups(request_from_case(c))
+        assert "base" in groups and groups <= set(FEATURE_GROUPS)
+        rank = 1 + max(FEATURE_GROUPS.index(g) for g in groups)
+        want = _case_feature_rank(c)
+        # packed QKV and an explicit scale equal to the default are not visible
+        # in a request; everything else agrees exactly
+        if c.layout == "packed_qkv" or (
+            c.scale is not None and c.scale == 1 / math.sqrt(c.d)
+        ):
+            assert rank <= want, c.id
+        else:
+            assert rank == want, c.id
+
+
+# ---------------------------------------------------------------------------
+# routing
+# ---------------------------------------------------------------------------
+
+
+def test_routing_exactly_one_family_and_dense_only_when_eligible():
+    eligible_keys = set()
+    for c in _CASES:
+        req = request_from_case(c)
+        for arch in ("gfx942", "gfx950"):
+            ok, _ = dense_bwd_eligibility(req, arch)
+            if ok:
+                eligible_keys.add((arch, plan_mod._dense_key(req)))
+    assert eligible_keys
+    policy = dataclasses.replace(FULL, dense_pack=frozenset(eligible_keys))
+    routes = collections.Counter()
+    for c in _CASES:
+        req = request_from_case(c)
+        for arch in DECLARED:
+            if not attn_bwd_support(req, arch, policy=policy).ok:
+                continue
+            route, tag = attn_bwd_route(req, arch, policy=policy)
+            assert route in ROUTES
+            routes[route] += 1
+            ok, _ = dense_bwd_eligibility(req, arch)
+            if route == "dense":
+                assert ok and tag == "dense_eligible"
+            plan = attn_bwd_plan(req, arch, policy=policy)
+            assert plan.route == route
+    assert routes["dense"] and routes["general"]
+    # an ineligible request sharing a packed dense key still takes the general route
+    fixed = _req(b=1, s_q=128, s_kv=128)
+    padded = dataclasses.replace(
+        fixed, padding=True, has_seq_len_q=True, has_seq_len_kv=True
+    )
+    pack = frozenset({("gfx942", plan_mod._dense_key(fixed))})
+    policy = dataclasses.replace(FULL, dense_pack=pack)
+    assert attn_bwd_route(fixed, "gfx942", policy=policy)[0] == "dense"
+    assert attn_bwd_route(padded, "gfx942", policy=policy) == (
+        "general",
+        "dense_ineligible_lengths",
+    )
+    assert attn_bwd_route(fixed, "gfx1151", policy=policy)[0] == "general"
+    assert (
+        attn_bwd_route(fixed, "gfx950", policy=policy)[1]
+        == "dense_ineligible_no_tuned_config"
+    )
+
+
+def test_mixed_dense_layouts_never_take_the_dense_route():
+    h, s, d = 8, 128, 128
+    bhsd = (h * s * d, s * d, d, 1)
+    bshd = (s * h * d, d, h * d, 1)
+    all_bhsd = _req(
+        strides={n: bhsd for n in ("q", "k", "v", "o", "do", "dq", "dk", "dv")}
+    )
+    all_bshd = _req(
+        strides={n: bshd for n in ("q", "k", "v", "o", "do", "dq", "dk", "dv")}
+    )
+    mixed = _req(
+        strides={
+            **{n: bhsd for n in ("q", "o", "do", "dq")},
+            **{n: bshd for n in ("k", "v", "dk", "dv")},
+        }
+    )
+    mixed_rev = _req(
+        strides={
+            **{n: bshd for n in ("q", "o", "do", "dq")},
+            **{n: bhsd for n in ("k", "v", "dk", "dv")},
+        }
+    )
+    pack = frozenset(
+        {
+            ("gfx942", plan_mod._dense_key(all_bhsd)),
+            ("gfx942", plan_mod._dense_key(all_bshd)),
+        }
+    )
+    policy = dataclasses.replace(FULL, dense_pack=pack)
+    assert attn_bwd_route(all_bhsd, "gfx942", policy=policy) == (
+        "dense",
+        "dense_eligible",
+    )
+    assert attn_bwd_route(all_bshd, "gfx942", policy=policy) == (
+        "dense",
+        "dense_eligible",
+    )
+    for req in (mixed, mixed_rev):
+        assert dense_bwd_eligibility(req, "gfx942") == (
+            False,
+            "dense_ineligible_layout",
+        )
+        assert attn_bwd_route(req, "gfx942", policy=policy) == (
+            "general",
+            "dense_ineligible_layout",
+        )
+        assert attn_bwd_support(req, "gfx942", policy=policy).ok
+        assert attn_bwd_plan(req, "gfx942", policy=policy).route == "general"
+        assert attn_bwd_perf_class(req, "gfx942", "general")[:2] == (
+            "gfx942",
+            "general",
+        )
+
+
+# ---------------------------------------------------------------------------
+# request normal form
+# ---------------------------------------------------------------------------
+
+_NAMES = ("q", "k", "v", "o", "do", "dq", "dk", "dv")
+
+
+def test_request_normalized_is_plain_json_and_order_independent():
+    from rocke.dispatch.core import stable_json_hash
+
+    strides = {n: (128 * 128 * 8, 128 * 128, 128, 1) for n in _NAMES}
+    a = _req(strides=strides, other_features=["x"], lse_dims=[2, 8, 128, 1], scale=1)
+    shuffled = list(strides.items())
+    random.Random(7).shuffle(shuffled)
+    b = _req(
+        strides={k: list(v) for k, v in shuffled},
+        other_features=("x",),
+        lse_dims=(2, 8, 128, 1),
+        scale=1.0,
+    )
+    na = a.normalized()
+    assert json.loads(json.dumps(na, sort_keys=True)) == na
+    assert list(na["strides"]) == sorted(_NAMES)
+    assert na["strides"]["q"] == [128 * 128 * 8, 128 * 128, 128, 1]
+    assert na["other_features"] == ["x"] and isinstance(na["scale"], float)
+    assert set(na) == {f.name for f in dataclasses.fields(AttnBwdRequest)}
+    assert a == b and hash(a) == hash(b)
+    assert stable_json_hash(na) == stable_json_hash(b.normalized())
+    assert _req().normalized()["strides"] is None
+    assert stable_json_hash(_req(b=3).normalized()) != stable_json_hash(
+        _req().normalized()
+    )
+    # asdict / copy work, and the stride map is read-only
+    assert dataclasses.asdict(a)["strides"] == dict(a.strides)
+    import copy
+    import pickle
+
+    assert copy.deepcopy(a) == a and pickle.loads(pickle.dumps(a)) == a
+    with pytest.raises(TypeError):
+        a.strides["q"] = (0, 0, 0, 1)
+
+
+def test_request_hash_is_stable_across_processes():
+    import os
+    import subprocess
+    import sys
+
+    from rocke.dispatch.core import stable_json_hash
+
+    code = (
+        "from kernels.common.attention_bwd_plan import AttnBwdRequest\n"
+        "from rocke.dispatch.core import stable_json_hash\n"
+        "r = AttnBwdRequest(b=2, h_q=8, h_k=8, h_v=8, s_q=128, s_kv=128, d_qk=128, d_v=128,\n"
+        "    strides={'v': (1, 2, 3, 1), 'q': (4, 5, 6, 1)}, scale=0.25)\n"
+        "print(stable_json_hash(r.normalized()))\n"
+    )
+    env = dict(os.environ, PYTHONHASHSEED="12345")
+    out = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=True,
+    )
+    local = _req(strides={"q": (4, 5, 6, 1), "v": (1, 2, 3, 1)}, scale=0.25)
+    assert out.stdout.strip() == stable_json_hash(local.normalized())
+
+
+def test_perf_class_keys():
+    cls = attn_bwd_perf_class(_req(causal=True, h_k=2, h_v=2, s_q=1, s_kv=40), "gfx950")
+    assert cls == (
+        "gfx950",
+        "general",
+        128,
+        "fp16",
+        "causal_tl",
+        "gqa",
+        "s_q_1",
+        "fixed",
+        8,
+    )
+    cls = attn_bwd_perf_class(
+        _req(
+            left_bound=3, right_bound=0, h_k=4, h_v=2, layout="thd", tensor_alignment=4
+        ),
+        "gfx942",
+    )
+    assert cls[4:] == ("window", "hk_ne_hv", "square", "thd", 1)
+    # device-fill hints never enter the class
+    assert attn_bwd_perf_class(
+        _req(num_cus=304, num_xcds=8), "gfx942"
+    ) == attn_bwd_perf_class(_req(), "gfx942")

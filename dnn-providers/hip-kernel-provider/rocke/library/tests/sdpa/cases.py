@@ -1425,3 +1425,24 @@ def table_summary():
     for t in TIERS:
         out[t] = sum(t in c.tags for c in cases)
     return out
+
+
+# ---------------------------------------------------------------------------
+# backward table (kept separate; see bwd_cases.py)
+# ---------------------------------------------------------------------------
+
+
+def backward_cases():
+    """The backward case table (``bwd_`` ids); never part of :func:`all_cases`."""
+    from .bwd_cases import backward_cases as _backward_cases
+
+    return _backward_cases()
+
+
+def select_bwd(tag="full", *, arch=None, reqs=None, max_cost=None, include_decode=True):
+    """Backward cases carrying ``tag``; see :func:`bwd_cases.select_bwd`."""
+    from .bwd_cases import select_bwd as _select_bwd
+
+    return _select_bwd(
+        tag, arch=arch, reqs=reqs, max_cost=max_cost, include_decode=include_decode
+    )

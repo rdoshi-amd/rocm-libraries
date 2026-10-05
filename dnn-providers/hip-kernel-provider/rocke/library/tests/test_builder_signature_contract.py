@@ -74,6 +74,9 @@ REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
         "num_kv_heads",
         "num_query_heads",
     ),
+    # Layout-general attention backward: only the head size is problem shape.
+    "kernels.common.attention_bwd.AttnBwdSpec": ("head_size",),
+    "kernels.common.attention_bwd_aux.AttnBwdAuxSpec": ("head_size",),
     "kernels.common.attention_unified.UnifiedAttention2DSpec": ("problem",),
     "kernels.common.attention_unified.UnifiedAttention3DSpec": ("problem",),
     "kernels.common.attention_unified.UnifiedAttentionProblem": (

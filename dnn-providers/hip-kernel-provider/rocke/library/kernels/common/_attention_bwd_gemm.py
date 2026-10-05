@@ -1,0 +1,417 @@
+# Copyright (c) Advanced Micro Devices, Inc., or its affiliates.
+# SPDX-License-Identifier: MIT
+
+"""Multi-wave block GEMM for the attention backward tile step.
+
+One :class:`BlockGemm` describes ``C[M x N] += A[M x K] * B[K x N]`` computed by
+the ``W`` waves of a CTA laid out as a warp grid ``(rows, cols)``:
+
+* wave ``w`` owns the C sub-block at rows ``(w // cols) * M / rows`` and columns
+  ``(w % cols) * N / cols``;
+* inside a wave the sub-block is a static ``frags_m x frags_n`` array of 16x16
+  atom tiles, and K advances in ``k_steps`` atom-K steps.
+
+Supported warp grids are ``(1, W)``, ``(W, 1)``, ``(2, W / 2)`` and ``(1, 1)``.
+The atom is the per-arch 16x16 atom chosen by :mod:`._attention_bwd_caps`:
+``16x16x16`` everywhere, native ``16x16x32`` on gfx950 (a gfx942 K = 32 step is
+two 16x16x16 instructions, i.e. ``atom_k = 16`` with twice the ``k_steps``),
+wave32 WMMA on RDNA.
+
+Operands are either already in registers (a ``[frag][k_step]`` list of lists,
+e.g. a C-to-A relabel from :mod:`._attention_bwd_frag`) or an
+:class:`LdsOperand` read fragment by fragment inside the K loop. Every
+fragment index is a Python int (static fragment indexing): no dynamic register
+indexing, so no scratch.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from dataclasses import dataclass
+from functools import cached_property
+
+from rocke.core.arch.target import MmaOp
+from rocke.core.ir import IRBuilder, Value
+
+from ._attention_bwd_caps import bwd_arch_caps, check_waves, select_bwd_atom
+from ._attention_bwd_frag import (
+    FragCoords,
+    RelabelPlan,
+    emit_c_to_a,
+    kperm_b_coords,
+    load_frag_lds,
+    load_frag_lds_tr16,
+    operand_coords,
+    plan_c_to_a,
+)
+
+__all__ = [
+    "BlockGemm",
+    "LdsOperand",
+    "check_relabel_grids",
+    "kperm_b_operand_coords",
+    "lane_and_wave",
+    "relabel_acc_to_a",
+]
+
+Frags = Sequence[Sequence[Value]]
+
+
+@dataclass(frozen=True)
+class LdsOperand:
+    """An operand tile in LDS, read one fragment per K step inside the loop.
+
+    ``storage`` is ``"k_inner"`` (``smem[mn][k]``) or ``"k_outer"``
+    (``smem[k][mn]``). ``mn0``/``k0`` are the block origin inside the LDS tile
+    (the wave origin is added by the GEMM). ``coords`` overrides the catalog
+    operand coordinates (e.g. a K-permuted B map). ``reader`` selects the LDS
+    read: ``"plain"`` (vector or element reads, any storage) or ``"tr16"``
+    (``ds_read_tr16_b64`` of a ``"k_outer"`` tile, gfx950 only).
+    """
+
+    smem: Value
+    storage: str = "k_inner"
+    mn0: int = 0
+    k0: int = 0
+    coords: FragCoords | None = None
+    align: int = 8
+    reader: str = "plain"
+
+    def __post_init__(self) -> None:
+        if self.reader not in ("plain", "tr16"):
+            raise ValueError(f"reader must be 'plain' or 'tr16', got {self.reader!r}")
+        if self.reader == "tr16" and self.storage != "k_outer":
+            raise ValueError("the tr16 reader reads K-outer tiles only")
+
+
+@dataclass(frozen=True)
+class BlockGemm:
+    """Validated geometry of one multi-wave block GEMM (hashable, no IR)."""
+
+    arch: str
+    dtype: str
+    m: int
+    n: int
+    k: int
+    grid: tuple[int, int]
+    atom_k: int = 16
+
+    def __post_init__(self) -> None:
+        rows, cols = self.grid
+        waves = rows * cols
+        check_waves(self.arch, waves)
+        if self.grid not in ((1, waves), (waves, 1), (2, waves // 2)):
+            raise ValueError(
+                f"warp grid {self.grid} is not one of (1, W), (W, 1), (2, W/2)"
+            )
+        op = select_bwd_atom(self.arch, self.dtype, self.atom_k)
+        if self.m % (op.m * rows) or self.n % (op.n * cols):
+            raise ValueError(
+                f"block {self.m}x{self.n} does not split into {op.m}x{op.n} atoms "
+                f"over the warp grid {self.grid}"
+            )
+        if self.k <= 0 or self.k % self.atom_k:
+            raise ValueError(
+                f"K={self.k} is not a multiple of the atom K {self.atom_k}"
+            )
+
+    # --- derived geometry ------------------------------------------------
+    @cached_property
+    def op(self) -> MmaOp:
+        return select_bwd_atom(self.arch, self.dtype, self.atom_k)
+
+    @property
+    def waves(self) -> int:
+        return self.grid[0] * self.grid[1]
+
+    @property
+    def wave_size(self) -> int:
+        return bwd_arch_caps(self.arch).wave_size
+
+    @property
+    def threads(self) -> int:
+        return self.waves * self.wave_size
+
+    @property
+    def wave_m(self) -> int:
+        return self.m // self.grid[0]
+
+    @property
+    def wave_n(self) -> int:
+        return self.n // self.grid[1]
+
+    @property
+    def frags_m(self) -> int:
+        return self.wave_m // self.op.m
+
+    @property
+    def frags_n(self) -> int:
+        return self.wave_n // self.op.n
+
+    @property
+    def k_steps(self) -> int:
+        return self.k // self.atom_k
+
+    @property
+    def mma_per_wave(self) -> int:
+        """MMA instructions issued by each wave for one call of :meth:`mma`."""
+        return self.frags_m * self.frags_n * self.k_steps
+
+    def wave_rows(self, w: int) -> tuple[int, int]:
+        r = w // self.grid[1]
+        return r * self.wave_m, (r + 1) * self.wave_m
+
+    def wave_cols(self, w: int) -> tuple[int, int]:
+        c = w % self.grid[1]
+        return c * self.wave_n, (c + 1) * self.wave_n
+
+    # --- emission ----------------------------------------------------------
+    def wave_origin(self, b: IRBuilder, wave: Value) -> tuple[Value, Value]:
+        """Row and column origin of ``wave``'s C sub-block (wave-uniform i32)."""
+        rows, cols = self.grid
+        if cols == 1:
+            r, c = wave, None
+        elif rows == 1:
+            r, c = None, wave
+        else:
+            cc = b.const_i32(cols)
+            r, c = b.div(wave, cc), b.mod(wave, cc)
+        row0 = b.mul(r, b.const_i32(self.wave_m)) if r is not None else b.const_i32(0)
+        col0 = b.mul(c, b.const_i32(self.wave_n)) if c is not None else b.const_i32(0)
+        return row0, col0
+
+    def zero_acc(self, b: IRBuilder) -> list[list[Value]]:
+        return [
+            [b.zero_vec_f32(self.op.c_frag_len) for _ in range(self.frags_n)]
+            for _ in range(self.frags_m)
+        ]
+
+    def load_a(self, b, src: LdsOperand, lane: Value, row0: Value, ks: int):
+        """A fragments ``[fm]`` of K step ``ks`` for the wave at ``row0``."""
+        coords = src.coords or operand_coords(self.op, "a")
+        return [
+            self._load(
+                b, src, coords, lane, _off(b, row0, src.mn0 + fm * self.op.m), ks
+            )
+            for fm in range(self.frags_m)
+        ]
+
+    def load_b(self, b, src: LdsOperand, lane: Value, col0: Value, ks: int):
+        """B fragments ``[fn]`` of K step ``ks`` for the wave at ``col0``."""
+        coords = src.coords or operand_coords(self.op, "b")
+        return [
+            self._load(
+                b, src, coords, lane, _off(b, col0, src.mn0 + fn * self.op.n), ks
+            )
+            for fn in range(self.frags_n)
+        ]
+
+    def _load(self, b, src: LdsOperand, coords, lane, mn0, ks: int):
+        k0 = src.k0 + ks * self.atom_k
+        if src.reader == "tr16":
+            return load_frag_lds_tr16(
+                b, coords, src.smem, lane, dtype=self.dtype, arch=self.arch,
+                mn0=mn0, k0=k0,
+            )  # fmt: skip
+        return load_frag_lds(
+            b, coords, src.smem, lane, dtype=self.dtype, mn0=mn0, k0=k0,
+            storage=src.storage, align=src.align,
+        )  # fmt: skip
+
+    def load_all_a(self, b, src: LdsOperand, lane, row0) -> list[list[Value]]:
+        """Register-resident A: ``[fm][ks]``."""
+        per_k = [self.load_a(b, src, lane, row0, ks) for ks in range(self.k_steps)]
+        return [
+            [per_k[ks][fm] for ks in range(self.k_steps)] for fm in range(self.frags_m)
+        ]
+
+    def load_all_b(self, b, src: LdsOperand, lane, col0) -> list[list[Value]]:
+        """Register-resident B: ``[fn][ks]``."""
+        per_k = [self.load_b(b, src, lane, col0, ks) for ks in range(self.k_steps)]
+        return [
+            [per_k[ks][fn] for ks in range(self.k_steps)] for fn in range(self.frags_n)
+        ]
+
+    def mma(
+        self,
+        b: IRBuilder,
+        acc: Sequence[Sequence[Value]],
+        a: Frags | LdsOperand,
+        bop: Frags | LdsOperand,
+        *,
+        lane: Value | None = None,
+        origin: tuple[Value, Value] | None = None,
+    ) -> list[list[Value]]:
+        """Issue ``frags_m * frags_n * k_steps`` MMAs; returns the new accumulators.
+
+        Register operands are ``a[fm][ks]`` and ``bop[fn][ks]``. An
+        :class:`LdsOperand` is read per K step and needs ``lane`` and the wave
+        ``origin`` (from :meth:`wave_origin`).
+        """
+        acc = [list(row) for row in acc]
+        if len(acc) != self.frags_m or any(len(r) != self.frags_n for r in acc):
+            raise ValueError("accumulator shape does not match the block geometry")
+        for which, opnd, count in (("A", a, self.frags_m), ("B", bop, self.frags_n)):
+            if isinstance(opnd, LdsOperand):
+                if lane is None or origin is None:
+                    raise ValueError(f"LDS operand {which} needs lane and origin")
+            elif len(opnd) != count or any(len(f) != self.k_steps for f in opnd):
+                raise ValueError(
+                    f"register operand {which} must be [{count}][{self.k_steps}]"
+                )
+        for ks in range(self.k_steps):
+            if isinstance(a, LdsOperand):
+                a_ks = self.load_a(b, a, lane, origin[0], ks)
+            else:
+                a_ks = [a[fm][ks] for fm in range(self.frags_m)]
+            if isinstance(bop, LdsOperand):
+                b_ks = self.load_b(b, bop, lane, origin[1], ks)
+            else:
+                b_ks = [bop[fn][ks] for fn in range(self.frags_n)]
+            for fm in range(self.frags_m):
+                for fn in range(self.frags_n):
+                    acc[fm][fn] = b.mma(self.op, a_ks[fm], b_ks[fn], acc[fm][fn])
+        return acc
+
+    def mma_frag(
+        self,
+        b: IRBuilder,
+        acc: Value,
+        a: Frags | LdsOperand,
+        bop: Frags | LdsOperand,
+        fm: int,
+        fn: int,
+        *,
+        lane: Value | None = None,
+        origin: tuple[Value, Value] | None = None,
+    ) -> Value:
+        """Accumulate fragment ``[fm][fn]`` over every K step (``k_steps`` MMAs).
+
+        The same products as :meth:`mma` for that fragment, with only its own
+        A row and B column read (an :class:`LdsOperand` is read per K step).
+        """
+        if not (0 <= fm < self.frags_m and 0 <= fn < self.frags_n):
+            raise ValueError("fragment index outside the block geometry")
+        for opnd in (a, bop):
+            if isinstance(opnd, LdsOperand) and (lane is None or origin is None):
+                raise ValueError("LDS operands need lane and origin")
+        for ks in range(self.k_steps):
+            if isinstance(a, LdsOperand):
+                coords = a.coords or operand_coords(self.op, "a")
+                mn0 = _off(b, origin[0], a.mn0 + fm * self.op.m)
+                a_f = self._load(b, a, coords, lane, mn0, ks)
+            else:
+                a_f = a[fm][ks]
+            if isinstance(bop, LdsOperand):
+                coords = bop.coords or operand_coords(self.op, "b")
+                mn0 = _off(b, origin[1], bop.mn0 + fn * self.op.n)
+                b_f = self._load(b, bop, coords, lane, mn0, ks)
+            else:
+                b_f = bop[fn][ks]
+            acc = b.mma(self.op, a_f, b_f, acc)
+        return acc
+
+    def acc_coords(
+        self, b: IRBuilder, lane: Value, origin: tuple[Value, Value], fm: int, fn: int
+    ) -> list[tuple[Value, Value]]:
+        """Block coordinates ``(row, col)`` of every slot of accumulator ``[fm][fn]``."""
+        layout = self.op.c_layout()
+        out = []
+        for s in range(layout.frag_len):
+            r, c = layout.coord(b, lane, s)
+            out.append(
+                (
+                    _off(b, b.add(origin[0], r), fm * self.op.m),
+                    _off(b, b.add(origin[1], c), fn * self.op.n),
+                )
+            )
+        return out
+
+
+def _off(b: IRBuilder, base: Value, k: int) -> Value:
+    return b.add(base, b.const_i32(k)) if k else base
+
+
+def lane_and_wave(b: IRBuilder, wave_size: int) -> tuple[Value, Value, Value]:
+    """``(tid, lane, wave)`` with ``wave`` made wave-uniform by ``readfirstlane``."""
+    tid = b.thread_id_x()
+    ws = b.const_i32(wave_size)
+    lane = b.mod(tid, ws)
+    wave = b.readfirstlane(b.div(tid, ws))
+    return tid, lane, wave
+
+
+def check_relabel_grids(producer: BlockGemm, consumer: BlockGemm) -> RelabelPlan:
+    """Prove that ``producer``'s C can feed ``consumer``'s A by register relabel.
+
+    Conditions: the consumer computes ``C_p^T * X`` (``consumer.m == producer.n``
+    and ``consumer.k == producer.m``), the same arch and dtype, every wave owns
+    the same producer columns as consumer rows and the full producer row range,
+    and the catalog lane maps of the atom pair relabel (:func:`plan_c_to_a`).
+    Raises :class:`ValueError` otherwise; returns the plan.
+    """
+    if (producer.arch, producer.dtype) != (consumer.arch, consumer.dtype):
+        raise ValueError("producer and consumer differ in arch or dtype")
+    if consumer.m != producer.n or consumer.k != producer.m:
+        raise ValueError(
+            f"consumer {consumer.m}x{consumer.n}x{consumer.k} is not the transpose "
+            f"product of producer {producer.m}x{producer.n}"
+        )
+    if consumer.waves != producer.waves:
+        raise ValueError("producer and consumer use different wave counts")
+    for w in range(producer.waves):
+        if producer.wave_cols(w) != consumer.wave_rows(w):
+            raise ValueError(
+                f"wave {w}: producer columns {producer.wave_cols(w)} differ from "
+                f"consumer rows {consumer.wave_rows(w)} (grids {producer.grid} -> "
+                f"{consumer.grid})"
+            )
+        if producer.wave_rows(w) != (0, producer.m):
+            raise ValueError(
+                f"wave {w} does not own every producer row (grid {producer.grid})"
+            )
+    plan = plan_c_to_a(producer.op, consumer.op)
+    if (
+        consumer.atom_k % producer.op.m
+        or plan.c_tiles * producer.op.m != consumer.atom_k
+    ):
+        raise ValueError("consumer atom K does not stack whole producer tiles")
+    return plan
+
+
+def relabel_acc_to_a(
+    b: IRBuilder,
+    producer: BlockGemm,
+    consumer: BlockGemm,
+    acc: Sequence[Sequence[Value]],
+    lane: Value,
+) -> tuple[list[list[Value]], RelabelPlan]:
+    """Turn the producer accumulators into consumer A fragments ``[fm][ks]``.
+
+    Consumer A fragment ``(fm, ks)`` is built from producer C tiles
+    ``(ks * tiles + t, fm)``; a plan with ``needs_k_perm`` requires the
+    consumer B operand coordinates of :func:`kperm_b_operand_coords`.
+    """
+    plan = check_relabel_grids(producer, consumer)
+    t = plan.c_tiles
+    frags = [
+        [
+            emit_c_to_a(
+                b,
+                plan,
+                [acc[ks * t + i][fm] for i in range(t)],
+                dtype=consumer.dtype,
+                lane=lane,
+            )
+            for ks in range(consumer.k_steps)
+        ]
+        for fm in range(consumer.frags_m)
+    ]
+    return frags, plan
+
+
+def kperm_b_operand_coords(plan: RelabelPlan, producer: BlockGemm, consumer: BlockGemm):
+    """B coordinates matching ``plan``'s K permutation (identity plans: catalog)."""
+    if not plan.needs_k_perm:
+        return operand_coords(consumer.op, "b")
+    return kperm_b_coords(plan, producer.op, consumer.op)

@@ -1,0 +1,242 @@
+# Copyright (c) Advanced Micro Devices, Inc., or its affiliates.
+# SPDX-License-Identifier: MIT
+
+"""Per-arch capability checks for the attention backward kernels.
+
+Every backward module asks this file, never the raw catalog, whether a lever is
+legal on a target. The facts come from :class:`rocke.core.arch.ArchTarget`
+(wave size, LDS capacity, MMA atoms, register file split, ``has_ds_read_tr``,
+``has_async_lds``) plus a few facts the catalog does not carry yet and that are
+recorded here as explicit tables:
+
+* the LDS-DMA (``buffer_load ... lds``) widths in dwords per lane: one dword on
+  gfx942, one, three or four dwords on gfx950, none on RDNA;
+* the transpose-read width: only the 64-bit ``ds_read_tr16_b64`` is used by the
+  backward (gfx950 only); the 128-bit form is never legal here;
+* native no-return fp32 global atomic add (``global_atomic_add_f32`` without a
+  compare-and-swap loop) per arch.
+
+Every check raises :class:`ValueError` *before* any IR is emitted, so a caller
+that validates a geometry first never leaves a half-built kernel behind.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from functools import cache
+
+from rocke.core.arch import ArchTarget
+from rocke.core.arch.target import MmaOp
+
+__all__ = [
+    "BWD_ARCHES",
+    "BwdArchCaps",
+    "bwd_arch_caps",
+    "bwd_atoms",
+    "check_agpr_alloc",
+    "check_lds_bytes",
+    "check_lds_dma_width",
+    "check_transpose_read",
+    "check_waves",
+    "emit_lds_dma",
+    "select_bwd_atom",
+    "wide_k_atom_available",
+]
+
+# Arches the backward knows about (gfx1201 is compile-only for the families).
+BWD_ARCHES = ("gfx942", "gfx950", "gfx1151", "gfx1201")
+
+# LDS-DMA widths in dwords per lane (``raw_ptr_buffer_load_lds``). The catalog has
+# only ``has_async_lds``; the width is a per-arch fact kept here until the core
+# catalog grows a field for it.
+_LDS_DMA_DWORDS = {
+    "gfx942": (1,),
+    "gfx950": (1, 3, 4),
+    "gfx1151": (),
+    "gfx1201": (),
+}
+
+# Native no-return fp32 global atomic add (no compare-and-swap expansion).
+_NATIVE_FP32_ATOMIC_ADD = {
+    "gfx942": True,
+    "gfx950": True,
+    "gfx1151": True,
+    "gfx1201": True,
+}
+
+_WAVES = {"mfma": (1, 2, 4, 8), "wmma": (1, 2, 4)}
+
+_DTYPES = {"fp16": "fp16", "f16": "fp16", "bf16": "bf16"}
+
+
+def _norm_dtype(dtype: str) -> str:
+    try:
+        return _DTYPES[dtype]
+    except KeyError:
+        raise ValueError(f"backward operand dtype must be fp16 or bf16, got {dtype!r}")
+
+
+@dataclass(frozen=True)
+class BwdArchCaps:
+    """Resolved backward-relevant facts for one gfx target."""
+
+    arch: str
+    wave_size: int
+    matrix_path: str  # "mfma" | "wmma"
+    lds_capacity_bytes: int
+    lds_dma_dwords: tuple[int, ...]  # legal LDS-DMA widths; () = no LDS DMA
+    has_tr_read_b64: bool  # ds_read_tr16_b64 usable
+    has_tr_read_b128: bool  # always False for the backward
+    has_agprs: bool
+    arch_vgprs: int  # per-lane arch-VGPR budget
+    agprs: int  # per-lane AGPR budget (0 on RDNA)
+    native_fp32_atomic_add: bool
+    legal_waves: tuple[int, ...]
+
+    @property
+    def max_lds_dma_dwords(self) -> int:
+        return max(self.lds_dma_dwords, default=0)
+
+
+@cache
+def bwd_arch_caps(arch: str) -> BwdArchCaps:
+    """Return the backward capability record of ``arch`` (a gfx id)."""
+    if arch not in BWD_ARCHES:
+        raise ValueError(
+            f"attention backward does not target {arch!r}; known: {BWD_ARCHES}"
+        )
+    t = ArchTarget.from_gfx(arch)
+    path = "mfma" if t.has_mfma else "wmma"
+    agprs = int(t.limits.agprs)
+    dma = _LDS_DMA_DWORDS[arch] if t.memory.has_async_lds else ()
+    return BwdArchCaps(
+        arch=arch,
+        wave_size=int(t.wave_size),
+        matrix_path=path,
+        lds_capacity_bytes=int(t.lds_capacity_bytes),
+        lds_dma_dwords=dma,
+        has_tr_read_b64=bool(t.memory.has_ds_read_tr),
+        has_tr_read_b128=False,
+        has_agprs=agprs > 0,
+        arch_vgprs=int(t.limits.vgprs) - agprs,
+        agprs=agprs,
+        native_fp32_atomic_add=_NATIVE_FP32_ATOMIC_ADD[arch],
+        legal_waves=_WAVES[path],
+    )
+
+
+@cache
+def bwd_atoms(arch: str, dtype: str) -> tuple[MmaOp, ...]:
+    """The 16x16 MMA atoms the backward may use on ``arch``, by increasing K.
+
+    32x32 atoms are excluded on purpose: ``kM0 = 16`` cannot fill them and the
+    register C-to-A relabel is proven only for the 16x16 atoms.
+    """
+    caps = bwd_arch_caps(arch)
+    dt = _norm_dtype(dtype)
+    family = "mma" if caps.matrix_path == "mfma" else "wmma"
+    ops = ArchTarget.from_gfx(arch).mma.enumerate(
+        family=family, a_dtype=dt, b_dtype=dt, c_dtype="fp32", m=16, n=16
+    )
+    out = sorted(
+        (op for op in ops if op.wave_size == caps.wave_size and op.a_frag_len > 0),
+        key=lambda op: op.k,
+    )
+    if not out:
+        raise ValueError(f"no 16x16 {dt} MMA atom on {arch}")
+    return tuple(out)
+
+
+def select_bwd_atom(arch: str, dtype: str, k: int = 16) -> MmaOp:
+    """The 16x16xk atom for ``arch`` and ``dtype``; raises if the arch lacks it.
+
+    ``k = 16`` exists everywhere; ``k = 32`` is native only on gfx950. A gfx942
+    K=32 step is issued as two 16x16x16 instructions by the caller instead.
+    """
+    for op in bwd_atoms(arch, dtype):
+        if op.k == k:
+            return op
+    raise ValueError(
+        f"no native 16x16x{k} {_norm_dtype(dtype)} atom on {arch} "
+        f"(available K: {[op.k for op in bwd_atoms(arch, dtype)]})"
+    )
+
+
+def wide_k_atom_available(arch: str, dtype: str) -> bool:
+    """True when the native 16x16x32 atom exists (gfx950)."""
+    return any(op.k == 32 for op in bwd_atoms(arch, dtype))
+
+
+def check_waves(arch: str, waves: int) -> None:
+    caps = bwd_arch_caps(arch)
+    if waves not in caps.legal_waves:
+        raise ValueError(
+            f"waves={waves} is not legal on {arch}; legal: {caps.legal_waves}"
+        )
+
+
+def check_lds_bytes(arch: str, nbytes: int) -> None:
+    caps = bwd_arch_caps(arch)
+    if nbytes < 0 or nbytes > caps.lds_capacity_bytes:
+        raise ValueError(
+            f"LDS footprint {nbytes} B exceeds the {arch} capacity "
+            f"{caps.lds_capacity_bytes} B"
+        )
+
+
+def check_lds_dma_width(arch: str, dwords: int) -> None:
+    """Raise unless an LDS-DMA copy of ``dwords`` per lane is legal on ``arch``."""
+    caps = bwd_arch_caps(arch)
+    if not caps.lds_dma_dwords:
+        raise ValueError(f"{arch} has no global-to-LDS DMA path")
+    if dwords not in caps.lds_dma_dwords:
+        raise ValueError(
+            f"LDS-DMA width of {dwords} dword(s) is not legal on {arch}; "
+            f"legal widths: {caps.lds_dma_dwords}"
+        )
+
+
+def check_transpose_read(arch: str, bits: int) -> None:
+    """Raise unless an LDS transpose read of ``bits`` per lane is legal.
+
+    Only the 64-bit form (``ds_read_tr16_b64``) on gfx950 is legal. The 128-bit
+    form is refused on every arch: the backward never routes a transposed
+    operand through it.
+    """
+    caps = bwd_arch_caps(arch)
+    if bits == 128:
+        raise ValueError(
+            "ds_read_tr16_b128 is not used by the attention backward (only the "
+            "64-bit transpose read is legal)"
+        )
+    if bits != 64:
+        raise ValueError(f"unsupported transpose-read width {bits}")
+    if not caps.has_tr_read_b64:
+        raise ValueError(f"{arch} has no ds_read_tr16_b64")
+
+
+_AGPR_ALLOC = (None, (0, 0), (128, 128), (192, 192), (256, 256))
+
+
+def check_agpr_alloc(arch: str, agpr_alloc: tuple[int, int] | None) -> None:
+    """Raise unless ``agpr_alloc`` is one of the legal knob values on ``arch``."""
+    caps = bwd_arch_caps(arch)
+    if agpr_alloc is None:
+        return
+    if not caps.has_agprs:
+        raise ValueError(f"{arch} has no AGPRs; agpr_alloc must be None")
+    if agpr_alloc not in _AGPR_ALLOC:
+        raise ValueError(
+            f"agpr_alloc={agpr_alloc!r} is not a legal value; legal: {_AGPR_ALLOC}"
+        )
+    if agpr_alloc[1] > caps.agprs:
+        raise ValueError(f"agpr_alloc={agpr_alloc!r} exceeds {caps.agprs} AGPRs")
+
+
+def emit_lds_dma(b, *, arch, rsrc, lds_ptr, voffset, soffset, dwords, coherency=0):
+    """``async_buffer_load_lds`` behind the per-arch width check.
+
+    The check runs first, so an illegal request raises without emitting any op.
+    """
+    check_lds_dma_width(arch, dwords)
+    b.async_buffer_load_lds(rsrc, lds_ptr, voffset, soffset, dwords, coherency)

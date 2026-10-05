@@ -47,6 +47,10 @@ The CTest tests are:
 | `jit-api-alpha-zero` | Alpha=0 with null A and B and a nonzero K still computes beta*C and the amax output through both APIs |
 | `jit-disabled` | The JIT headers are absent from the public include tree, `hipblaslt-ext.hpp` compiles without them, and the extension API links against the disabled library |
 
+The `GemmPointerCheck` tests in `hipblaslt-test` check that `Gemm::setProblem`
+rejects a null A or B when alpha is nonzero, also with K=0, and accepts them
+when alpha is zero, in builds with and without JIT.
+
 ## Test arguments
 
 `hipblaslt-jit-end-to-end-test` takes a source bundle directory; CTest passes

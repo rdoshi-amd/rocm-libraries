@@ -902,6 +902,40 @@ def cfgs_gfx1151_wmma_fmha_fwd():
                 ("dense", 0, 256, "none", False, False, False, 32, 1, 64),
             )
         ]
+        + [
+            dict(
+                head_size=head,
+                num_query_heads=8,
+                num_kv_heads=2,
+                dtype=dtype,
+                mask_mode=mask,
+                causal_bottom_right=tails,
+                query_tail=tails,
+                kv_tail=tails,
+                v_lds_stage=tails,
+                use_sinks=sinks,
+                use_softcap="s" in extras,
+                use_alibi="a" in extras,
+                use_qq_bias="q" in extras,
+                layout=layout,
+                page_block_size=page,
+                value_tile_size=tile,
+                store_lse="l" in extras,
+                use_attn_bias=True,
+                bias_dtype=bdt,
+            )
+            for (layout, page, head, mask, tails, sinks, bdt, extras, tile, dtype) in (
+                ("dense", 0, 64, "none", False, False, "f32", "", 0, "fp16"),
+                ("dense", 0, 64, "causal", True, True, "q", "", 0, "fp16"),
+                ("dense", 0, 128, "none", False, False, "q", "l", 0, "fp16"),
+                ("ragged", 0, 64, "causal", True, True, "f32", "", 0, "fp16"),
+                ("paged", 16, 64, "causal", True, False, "q", "", 0, "fp16"),
+                ("dense", 0, 64, "causal", True, False, "f32", "saq", 0, "fp16"),
+                ("dense", 0, 256, "none", False, False, "f32", "", 64, "fp16"),
+                ("dense", 0, 128, "causal", True, True, "q", "saql", 0, "fp16"),
+                ("dense", 0, 64, "none", False, False, "q", "", 0, "bf16"),
+            )
+        ]
     )
 
 

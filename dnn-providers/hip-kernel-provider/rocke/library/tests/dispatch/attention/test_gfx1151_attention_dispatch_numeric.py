@@ -470,6 +470,82 @@ class TestMetadataSafety(unittest.TestCase):
             ):
                 _gfx1151_validate_and_collect(request, spec, {**base, "lse": lse})
 
+    def test_attn_bias_is_required_and_validated(self):
+        from dispatch.attention.bindings import _gfx1151_validate_and_collect
+
+        request = _dense_request(use_attn_bias=True)
+        spec = _dense_spec(use_attn_bias=True)
+        q = _fake_tensor((2, 32, 4, 64))
+        k = _fake_tensor((2, 32, 2, 64))
+        base = {"q": q, "k": k, "v": k, "out": q}
+        with self.assertRaisesRegex(ValueError, r"requires tensors\['attn_bias'\]"):
+            _gfx1151_validate_and_collect(request, spec, base)
+        bad = (
+            _fake_tensor((2, 4, 32, 32), dtype="float16"),
+            _fake_tensor((2, 4, 32), dtype="float32"),
+            _fake_tensor((2, 4, 32, 31), dtype="float32"),
+            _fake_tensor((3, 4, 32, 32), dtype="float32"),
+            _fake_tensor((2, 3, 32, 32), dtype="float32"),
+            _fake_tensor((2, 4, 16, 32), dtype="float32"),
+            _fake_tensor((2, 4, 32, 32), dtype="float32", strides=(4096, 1024, 32, 2)),
+        )
+        for bias in bad:
+            with (
+                self.subTest(shape=bias.shape, dtype=bias.dtype),
+                self.assertRaises(ValueError),
+            ):
+                _gfx1151_validate_and_collect(
+                    request, spec, {**base, "attn_bias": bias}
+                )
+
+    def test_attn_bias_strides_and_broadcast_values(self):
+        from dispatch.attention.bindings import _gfx1151_validate_and_collect
+
+        request = _dense_request(use_attn_bias=True)
+        spec = _dense_spec(use_attn_bias=True)
+        q = _fake_tensor((2, 32, 4, 64))
+        k = _fake_tensor((2, 32, 2, 64))
+        base = {"q": q, "k": k, "v": k, "out": q}
+        cases = (
+            ((2, 4, 32, 32), None, (4 * 32 * 32, 32 * 32, 32)),
+            ((1, 1, 32, 32), (777, 888, 32, 1), (0, 0, 32)),
+            ((2, 1, 32, 32), None, (32 * 32, 0, 32)),
+            ((2, 4, 1, 32), None, (4 * 32, 32, 0)),
+            ((2, 4, 32, 32), (0, 0, 32, 1), (0, 0, 32)),
+        )
+        for shape, strides, expected in cases:
+            bias = _fake_tensor(shape, dtype="float32", strides=strides)
+            values = _gfx1151_validate_and_collect(
+                request, spec, {**base, "attn_bias": bias}
+            )
+            with self.subTest(shape=shape, strides=strides):
+                self.assertIs(values["attn_bias_ptr"], bias)
+                self.assertEqual(
+                    (
+                        values["bias_stride_b"],
+                        values["bias_stride_h"],
+                        values["bias_stride_q"],
+                    ),
+                    expected,
+                )
+
+    def test_attn_bias_q_dtype_follows_query_dtype(self):
+        from dispatch.attention.bindings import _gfx1151_validate_and_collect
+
+        request = _dense_request(use_attn_bias=True, attn_bias_dtype="q")
+        spec = _dense_spec(use_attn_bias=True, bias_dtype="q")
+        q = _fake_tensor((2, 32, 4, 64))
+        k = _fake_tensor((2, 32, 2, 64))
+        base = {"q": q, "k": k, "v": k, "out": q}
+        good = _fake_tensor((2, 4, 32, 32), dtype="float16")
+        _gfx1151_validate_and_collect(request, spec, {**base, "attn_bias": good})
+        with self.assertRaises(ValueError):
+            _gfx1151_validate_and_collect(
+                request,
+                spec,
+                {**base, "attn_bias": _fake_tensor((2, 4, 32, 32), dtype="float32")},
+            )
+
     def test_overlapping_dense_out_batch_stride_is_rejected(self):
         q = _fake_tensor((2, 32, 4, 64))
         k = _fake_tensor((2, 32, 2, 64))
@@ -1083,9 +1159,11 @@ def test_dispatch_dense_packed_qkv_views(batch):
 # ---------------------------------------------------------------------
 
 
-def _launch_np(request, arrays, outputs, *, scale):
+def _launch_np(request, arrays, outputs, *, scale, overrides=None):
     """Upload each named host array, launch through the public binder, and
-    return the downloaded arrays named in ``outputs``."""
+    return the downloaded arrays named in ``outputs``. ``overrides`` maps a
+    name to ``(shape, element_strides)`` describing a view over the uploaded
+    contiguous buffer (expanded, permuted or padded layouts)."""
     from benchmarks.gfx1151.attention.benchmark_sdpa import _host_bytes
     from rocke.runtime.launcher import release_retained_for_stream
     from rocke.runtime.torch_interop import resolve_stream
@@ -1100,10 +1178,14 @@ def _launch_np(request, arrays, outputs, *, scale):
             arrays[name] = a
             ptrs[name] = rt.alloc(max(a.nbytes, 1))
             rt.memcpy_h2d(ptrs[name], _host_bytes(a), a.nbytes)
+            shape = tuple(a.shape)
+            strides = tuple(s // a.itemsize for s in a.strides)
+            if overrides and name in overrides:
+                shape, strides = overrides[name]
             tensors[name] = _DeviceTensor(
                 _ptr=ptrs[name],
-                _shape=tuple(a.shape),
-                _strides=tuple(s // a.itemsize for s in a.strides),
+                _shape=tuple(shape),
+                _strides=tuple(strides),
                 _dtype=str(a.dtype),
             )
         binding = dispatch_attention(request).bind_torch(
@@ -1373,3 +1455,255 @@ def test_dispatch_ragged_lse_gqa(use_sinks):
     _assert_lse_close(got, expected)
     if not use_sinks:
         assert np.isneginf(got).any()
+
+
+def _bias_reference(q, k, v, bias, scale, *, ctx, sinks=None):
+    """FP64 ``(out, lse)`` with ``bias`` (broadcastable to ``[B, Hq, Sq, Sk]``)
+    added to the scaled scores; ``ctx`` is the bottom-right causal offset or
+    ``None`` for no mask."""
+    _, sq, hq, _ = q.shape
+    sk, hkv = k.shape[1], k.shape[2]
+    q64, k64, v64 = (x.astype(np.float64) for x in (q, k, v))
+    k64 = np.repeat(k64, hq // hkv, axis=2)
+    v64 = np.repeat(v64, hq // hkv, axis=2)
+    scores = np.einsum("bqhd,bkhd->bhqk", q64 * scale, k64) + bias
+    if ctx is not None:
+        qi = np.arange(sq).reshape(sq, 1)
+        ki = np.arange(sk).reshape(1, sk)
+        scores = np.where((ki <= qi + ctx).reshape(1, 1, sq, sk), scores, -np.inf)
+    if sinks is not None:
+        sink = np.broadcast_to(
+            sinks.astype(np.float64).reshape(1, hq, 1, 1), scores.shape[:3] + (1,)
+        )
+        scores = np.concatenate([scores, sink], axis=-1)
+    row_max = scores.max(axis=-1, keepdims=True)
+    e = np.exp(scores - row_max)
+    denom = e.sum(axis=-1, keepdims=True)
+    p = (e / denom)[..., :sk]
+    out = np.einsum("bhqk,bkhd->bqhd", p, v64).astype(np.float32)
+    lse = (np.log(denom) + row_max)[..., 0].astype(np.float32)
+    return out, lse
+
+
+def _make_bias(seed, shape, bias_dtype):
+    values = np.random.default_rng(seed).standard_normal(shape) * 2.0
+    return values.astype(np.float32 if bias_dtype == "f32" else np.float16)
+
+
+def _bias_request(batch, sq, sk, hq, hkv, dim, bias_dtype, mask, **extra):
+    return _dense_direct_request(
+        batch,
+        sq,
+        sk,
+        hq,
+        hkv,
+        dim,
+        dim,
+        mask_type=mask,
+        use_attn_bias=True,
+        attn_bias_dtype=bias_dtype,
+        **extra,
+    )
+
+
+@pytest.mark.gpu
+@_NEEDS_GPU
+@pytest.mark.parametrize("bias_dtype", ["f32", "q"])
+@pytest.mark.parametrize(
+    "mask", [AttentionMaskType.NO_MASK, AttentionMaskType.BOTTOM_RIGHT_CAUSAL]
+)
+@pytest.mark.parametrize(
+    "bias_shape", ["1,1,Q,K", "B,1,Q,K", "B,H,Q,K", "B,H,1,K", "1,H,1,K"]
+)
+def test_dispatch_dense_attn_bias_shapes(bias_dtype, mask, bias_shape):
+    batch, sq, sk, hq, hkv, dim = 2, 37, 53, 4, 2, 64
+    q, k, v = _random_qkv(401, batch, sq, sk, hq, hkv, dim, dim)
+    scale = 1.0 / np.sqrt(dim)
+    dims = {"B": batch, "H": hq, "Q": sq, "K": sk, "1": 1}
+    shape = tuple(dims[d] for d in bias_shape.split(","))
+    bias = _make_bias(402, shape, bias_dtype)
+    request = _bias_request(
+        batch, sq, sk, hq, hkv, dim, bias_dtype, mask, return_lse=True
+    )
+    arrays = {
+        "q": q,
+        "k": k,
+        "v": v,
+        "attn_bias": bias,
+        "out": np.full((batch, sq, hq, dim), np.nan, dtype=q.dtype),
+        "lse": np.full((batch, hq, sq), np.nan, dtype=np.float32),
+    }
+    got = _launch_np(request, arrays, ("out", "lse"), scale=scale)
+    ctx = sk - sq if mask == AttentionMaskType.BOTTOM_RIGHT_CAUSAL else None
+    out, lse = _bias_reference(q, k, v, bias.astype(np.float64), scale, ctx=ctx)
+    np.testing.assert_allclose(got["out"], out, rtol=0, atol=2e-2)
+    _assert_lse_close(got["lse"], lse)
+
+
+@pytest.mark.gpu
+@_NEEDS_GPU
+def test_dispatch_dense_attn_bias_changes_output_and_composes_with_sinks():
+    batch, sq, sk, hq, hkv, dim = 2, 33, 47, 4, 2, 64
+    q, k, v = _random_qkv(403, batch, sq, sk, hq, hkv, dim, dim)
+    scale = 1.0 / np.sqrt(dim)
+    sinks = np.random.default_rng(404).standard_normal(hq).astype(np.float16)
+    bias = _make_bias(405, (batch, hq, sq, sk), "f32")
+    mask = AttentionMaskType.BOTTOM_RIGHT_CAUSAL
+    request = _bias_request(batch, sq, sk, hq, hkv, dim, "f32", mask, use_sinks=True)
+    arrays = {
+        "q": q,
+        "k": k,
+        "v": v,
+        "attn_bias": bias,
+        "sinks": sinks,
+        "out": np.full((batch, sq, hq, dim), np.nan, dtype=q.dtype),
+    }
+    got = _launch_np(request, arrays, ("out",), scale=scale)["out"]
+    out, _ = _bias_reference(
+        q, k, v, bias.astype(np.float64), scale, ctx=sk - sq, sinks=sinks
+    )
+    np.testing.assert_allclose(got, out, rtol=0, atol=2e-2)
+    plain, _ = _bias_reference(q, k, v, 0.0, scale, ctx=sk - sq, sinks=sinks)
+    assert np.abs(plain - out).max() > 5e-2
+
+
+@pytest.mark.gpu
+@_NEEDS_GPU
+@pytest.mark.parametrize("bias_dtype", ["f32", "q"])
+@pytest.mark.parametrize("view", ["expanded", "permuted", "row_padded"])
+def test_dispatch_dense_attn_bias_strided_views(bias_dtype, view):
+    batch, sq, sk, hq, hkv, dim, pad = 2, 32, 48, 4, 2, 64, 8
+    q, k, v = _random_qkv(406, batch, sq, sk, hq, hkv, dim, dim)
+    scale = 1.0 / np.sqrt(dim)
+    if view == "expanded":
+        storage = _make_bias(407, (sq, sk), bias_dtype)
+        shape, strides = (batch, hq, sq, sk), (0, 0, sk, 1)
+        full = np.broadcast_to(storage.astype(np.float64), shape)
+    elif view == "permuted":
+        # [B, Sq, H, Sk] storage viewed as [B, H, Sq, Sk].
+        storage = _make_bias(407, (batch, sq, hq, sk), bias_dtype)
+        shape, strides = (batch, hq, sq, sk), (sq * hq * sk, sk, hq * sk, 1)
+        full = storage.astype(np.float64).transpose(0, 2, 1, 3)
+    else:
+        storage = _make_bias(407, (batch, hq, sq, sk + pad), bias_dtype)
+        shape = (batch, hq, sq, sk)
+        strides = (hq * sq * (sk + pad), sq * (sk + pad), sk + pad, 1)
+        full = storage.astype(np.float64)[..., :sk]
+    mask = AttentionMaskType.BOTTOM_RIGHT_CAUSAL
+    request = _bias_request(batch, sq, sk, hq, hkv, dim, bias_dtype, mask)
+    arrays = {
+        "q": q,
+        "k": k,
+        "v": v,
+        "attn_bias": storage,
+        "out": np.full((batch, sq, hq, dim), np.nan, dtype=q.dtype),
+    }
+    got = _launch_np(
+        request,
+        arrays,
+        ("out",),
+        scale=scale,
+        overrides={"attn_bias": (shape, strides)},
+    )["out"]
+    out, _ = _bias_reference(q, k, v, full, scale, ctx=sk - sq)
+    np.testing.assert_allclose(got, out, rtol=0, atol=2e-2)
+
+
+@pytest.mark.gpu
+@_NEEDS_GPU
+@pytest.mark.parametrize("bias_dtype", ["f32", "q"])
+def test_dispatch_dense_attn_bias_gapped_batch_stride_is_served_per_batch(bias_dtype):
+    """A K/V batch-stride gap forces per-batch launches; a batched bias must be
+    sliced ``[b:b+1]`` with them."""
+    batch, sq, sk, hq, hkv, dim, pad = 3, 32, 48, 4, 2, 64, 5
+    q, k, v = _random_qkv(408, batch, sq, sk, hq, hkv, dim, dim)
+    k_store = np.zeros((batch, sk + pad, hkv, dim), dtype=k.dtype)
+    v_store = np.zeros_like(k_store)
+    k_store[:, :sk], v_store[:, :sk] = k, v
+    kv_view = (
+        (batch, sk, hkv, dim),
+        ((sk + pad) * hkv * dim, hkv * dim, dim, 1),
+    )
+    bias = _make_bias(409, (batch, hq, sq, sk), bias_dtype)
+    scale = 1.0 / np.sqrt(dim)
+    mask = AttentionMaskType.NO_MASK
+    request = _bias_request(batch, sq, sk, hq, hkv, dim, bias_dtype, mask)
+    arrays = {
+        "q": q,
+        "k": k_store,
+        "v": v_store,
+        "attn_bias": bias,
+        "out": np.full((batch, sq, hq, dim), np.nan, dtype=q.dtype),
+    }
+    got = _launch_np(
+        request,
+        arrays,
+        ("out",),
+        scale=scale,
+        overrides={"k": kv_view, "v": kv_view},
+    )["out"]
+    out, _ = _bias_reference(q, k, v, bias.astype(np.float64), scale, ctx=None)
+    np.testing.assert_allclose(got, out, rtol=0, atol=2e-2)
+
+
+@pytest.mark.gpu
+@_NEEDS_GPU
+@pytest.mark.parametrize("bias_dtype", ["f32", "q"])
+@pytest.mark.parametrize("causal", [False, True])
+def test_dispatch_ragged_attn_bias_uses_within_sequence_positions(bias_dtype, causal):
+    """Ragged bias is ``[B, H|1, max_q, max_k]``; each sequence reads it at its
+    own within-sequence (query, key) positions, not packed offsets."""
+    hq, hkv, dim = 4, 2, 64
+    q_lengths = (5, 17, 1, 25)
+    k_lengths = (9, 17, 5, 40)
+    batch = len(q_lengths)
+    mq, mk = max(q_lengths), max(k_lengths)
+    total_q, total_k = sum(q_lengths), sum(k_lengths)
+    rng = np.random.default_rng(410)
+    q = rng.standard_normal((total_q, hq, dim)).astype(np.float16)
+    k = rng.standard_normal((total_k, hkv, dim)).astype(np.float16)
+    v = rng.standard_normal((total_k, hkv, dim)).astype(np.float16)
+    bias = _make_bias(411, (batch, 1, mq, mk), bias_dtype)
+    cu_q = np.concatenate([[0], np.cumsum(q_lengths)]).astype(np.int32)
+    cu_k = np.concatenate([[0], np.cumsum(k_lengths)]).astype(np.int32)
+    scale = 1.0 / np.sqrt(dim)
+    mask = (
+        AttentionMaskType.BOTTOM_RIGHT_CAUSAL if causal else AttentionMaskType.NO_MASK
+    )
+    request = AttentionRequest(
+        batch=batch,
+        nhead_q=hq,
+        nhead_k=hkv,
+        seqlen_q=mq,
+        seqlen_k=mk,
+        hdim_q=dim,
+        hdim_v=dim,
+        arch="gfx1151",
+        dtype="fp16",
+        layout="ragged",
+        mask_type=mask,
+        use_attn_bias=True,
+        attn_bias_dtype=bias_dtype,
+    )
+    arrays = {
+        "q": q,
+        "k": k,
+        "v": v,
+        "attn_bias": bias,
+        "out": np.full((total_q, hq, dim), np.nan, dtype=q.dtype),
+        "cu_seqlens_q": cu_q,
+        "cu_seqlens_k": cu_k,
+    }
+    got = _launch_np(request, arrays, ("out",), scale=scale)["out"]
+    for i in range(batch):
+        qs, qe, ks, ke = cu_q[i], cu_q[i + 1], cu_k[i], cu_k[i + 1]
+        lq, lk = int(qe - qs), int(ke - ks)
+        out, _ = _bias_reference(
+            q[None, qs:qe],
+            k[None, ks:ke],
+            v[None, ks:ke],
+            bias[i : i + 1, :, :lq, :lk].astype(np.float64),
+            scale,
+            ctx=lk - lq if causal else None,
+        )
+        np.testing.assert_allclose(got[qs:qe], out[0], rtol=0, atol=2e-2)

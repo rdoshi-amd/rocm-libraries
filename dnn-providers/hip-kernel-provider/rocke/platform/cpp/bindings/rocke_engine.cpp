@@ -3278,6 +3278,7 @@ rocke_wmma_fmha_fwd_spec_t w1151fmha_build_spec(const py::dict& d, std::deque<st
     s.v_head_size = dict_int(d, "v_head_size", s.v_head_size);
     s.window_right = dict_int(d, "window_right", s.window_right);
     s.store_lse = dict_bool(d, "store_lse", s.store_lse);
+    s.use_attn_bias = dict_bool(d, "use_attn_bias", s.use_attn_bias);
     {
         std::string v;
         if(dict_str(d, "mask_mode", v))
@@ -3288,6 +3289,8 @@ rocke_wmma_fmha_fwd_spec_t w1151fmha_build_spec(const py::dict& d, std::deque<st
             s.layout = keep(v);
         if(dict_str(d, "kv_dtype", v))
             s.kv_dtype = keep(v);
+        if(dict_str(d, "bias_dtype", v))
+            s.bias_dtype = keep(v);
         if(dict_str(d, "name", v))
             s.name = keep(v);
         if(dict_str(d, "scheduler_strategy", v))

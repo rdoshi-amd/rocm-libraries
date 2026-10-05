@@ -123,6 +123,10 @@ The request describes layout (`dense`, `ragged`, or `paged`) and score features
 FP16/BF16 Q/O and head dimensions that are multiples of 16 up to 256 (Q/K and
 V/O widths may differ) are supported. `window_right >= 0` adds a right window
 for `NO_MASK`, `SLIDING_WINDOW` and `BOTTOM_RIGHT_CAUSAL` requests.
+`use_attn_bias=True` adds the `attn_bias` feature and requires an `attn_bias` tensor
+`[B|1, H|1, Sq|1, Sk]` with a unit-stride key dimension; `attn_bias_dtype` is `"f32"`
+(default) or `"q"` (the Q dtype). Broadcast, expanded, permuted, and row-padded views are
+accepted without copies; a wrong dtype, rank, extent, or key stride raises `ValueError`.
 `return_lse=True` adds the `lse` feature and requires an FP32 `lse` tensor at launch:
 `[B, Hq, Sq]` for dense, `[Hq, total_q]` for packed layouts; fully masked rows store `-inf`. Explicit layout
 or feature requirements reject candidates that do not declare them; `layout="auto"`

@@ -898,6 +898,54 @@ def _gfx1151_validate_and_collect(
         values["qq_bias_rows"] = _fits_i32(bias_shape[0], "qq_bias_rows")
         values["qq_bias_cols"] = _fits_i32(bias_shape[1], "qq_bias_cols")
         values["qq_bias_stride"] = _fits_i32(qq_bias.stride(0), "qq_bias_stride")
+    if spec.use_attn_bias:
+        attn_bias = tensors.get("attn_bias")
+        if attn_bias is None:
+            raise ValueError("spec.use_attn_bias requires tensors['attn_bias']")
+        want_kind = "float32" if spec.bias_dtype == "f32" else q_kind
+        bias_kind = (
+            "float32"
+            if "float32" in str(getattr(attn_bias, "dtype", "")).lower()
+            else _dtype_kind(attn_bias, "attn_bias")
+        )
+        if bias_kind != want_kind:
+            raise ValueError(
+                f"attn_bias dtype must be {want_kind} for bias_dtype="
+                f"{spec.bias_dtype!r}, got {bias_kind}"
+            )
+        bias_shape = _shape(attn_bias, "attn_bias")
+        if len(bias_shape) != 4:
+            raise ValueError(
+                f"attn_bias must be rank-4 [B|1, H|1, Sq|1, Sk], got {bias_shape}"
+            )
+        for axis, (extent, full, label) in enumerate(
+            (
+                (bias_shape[0], int(request.batch), "batch"),
+                (bias_shape[1], spec.num_query_heads, "head"),
+                (bias_shape[2], int(request.seqlen_q), "query"),
+            )
+        ):
+            if extent not in (1, full):
+                raise ValueError(
+                    f"attn_bias dim {axis} ({label}) must be 1 or {full}, got {extent}"
+                )
+        if bias_shape[3] != int(request.seqlen_k):
+            raise ValueError(
+                f"attn_bias key dim must equal seqlen_k={int(request.seqlen_k)}, "
+                f"got {bias_shape[3]}"
+            )
+        if bias_shape[3] > 1 and int(attn_bias.stride(3)) != 1:
+            raise ValueError("attn_bias innermost (key) dimension must be contiguous")
+        _check_max_element_offset_i32(attn_bias, "attn_bias")
+        values["attn_bias_ptr"] = attn_bias
+        for key, axis in (
+            ("bias_stride_b", 0),
+            ("bias_stride_h", 1),
+            ("bias_stride_q", 2),
+        ):
+            values[key] = (
+                0 if bias_shape[axis] == 1 else _fits_i32(attn_bias.stride(axis), key)
+            )
 
     return values
 
@@ -911,8 +959,13 @@ def bind_gfx1151_attention_torch(
     and FP16/BF16 or OCP fp8e4m3 KV storage (``spec.kv_dtype``). Tensor keys:
     ``q``/``k``/``v``/``out`` (required), plus layout metadata
     (``cu_seqlens_q``, ``cu_seqlens_k``, ``seqused_k``, ``block_table``) and
-    optional score inputs (``sinks``, ``alibi_slopes``, ``qq_bias``) as
-    declared by ``spec``. When ``spec.store_lse`` is set, ``lse`` is a required
+    optional score inputs (``sinks``, ``alibi_slopes``, ``qq_bias``,
+    ``attn_bias``) as declared by ``spec``. ``attn_bias`` is a dense additive
+    bias ``[B|1, H|1, Sq|1, Sk]`` (FP32, or the Q dtype when
+    ``spec.bias_dtype == "q"``) with a unit-stride key dim; size-1 dims
+    broadcast, and any B/H/Q strides are accepted (``expand``/``permute``
+    views included). Positions are per-sequence, so for ragged/paged layouts
+    ``Sq``/``Sk`` are the request maxima. When ``spec.store_lse`` is set, ``lse`` is a required
     FP32 output: ``[B, H, Sq]`` (dense) or ``[H, total_q]`` (packed), holding the
     natural-log softmax statistic (``-inf`` for a fully masked row). Runtime scalar kwargs: ``softmax_scale`` (default
     ``1/sqrt(D)``), ``softcap`` (required, positive, when ``spec.use_softcap``),
@@ -1000,6 +1053,8 @@ def bind_gfx1151_attention_torch(
                 batch_values[key] = tensors[name][b : b + 1]
             if spec.store_lse:
                 batch_values["lse"] = tensors["lse"][b : b + 1]
+            if spec.use_attn_bias and tensors["attn_bias"].shape[0] > 1:
+                batch_values["attn_bias_ptr"] = tensors["attn_bias"][b : b + 1]
             launcher(
                 batch_values,
                 config=LaunchConfig(

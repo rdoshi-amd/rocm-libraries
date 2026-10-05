@@ -70,6 +70,17 @@ static bool wmma_valid_kv_dtype(const rocke_wmma_fmha_fwd_spec_t* spec)
            && (spec->kv_dtype[0] == '\0' || strcmp(spec->kv_dtype, "fp8e4m3") == 0);
 }
 
+static bool wmma_valid_bias_dtype(const rocke_wmma_fmha_fwd_spec_t* spec)
+{
+    return spec->bias_dtype != NULL
+           && (strcmp(spec->bias_dtype, "f32") == 0 || strcmp(spec->bias_dtype, "q") == 0);
+}
+
+static bool wmma_bias_is_q(const rocke_wmma_fmha_fwd_spec_t* spec)
+{
+    return strcmp(spec->bias_dtype, "q") == 0;
+}
+
 /* WmmaFmhaFwdSpec.v_dim: the V/output head width (v_head_size or head_size). */
 static int wmma_v_dim(const rocke_wmma_fmha_fwd_spec_t* spec)
 {
@@ -146,6 +157,8 @@ rocke_wmma_fmha_fwd_spec_t rocke_wmma_fmha_fwd_spec_default(void)
     s.v_head_size = 0;
     s.window_right = -1;
     s.store_lse = false;
+    s.use_attn_bias = false;
+    s.bias_dtype = "f32";
     return s;
 }
 
@@ -163,7 +176,7 @@ rocke_status_t rocke_wmma_fmha_fwd_kernel_name(const rocke_wmma_fmha_fwd_spec_t*
     const char* mask;
     char h[32], hq[32], hk[32], window[32], page[32], block_n[32], waves[32], scheduler[32],
         value_tile[32], v_head[32], right_window[40];
-    const char* parts[20];
+    const char* parts[21];
     const char* dtype = wmma_dtype(spec);
 
     if(spec == NULL || out == NULL || dtype == NULL || !wmma_valid_layout(spec)
@@ -244,6 +257,8 @@ rocke_status_t rocke_wmma_fmha_fwd_kernel_name(const rocke_wmma_fmha_fwd_spec_t*
     }
     if(spec->store_lse)
         parts[num_parts++] = "lse";
+    if(spec->use_attn_bias)
+        parts[num_parts++] = wmma_bias_is_q(spec) ? "abias_q" : "abias_f32";
     const char* flag_names[] = {"qtail", "kvtail", "softcap", "sinks", "alibi", "qqbias", "cskip"};
     const int flag_on[] = {spec->query_tail || packed,
                            spec->kv_tail || packed,
@@ -304,6 +319,11 @@ bool rocke_wmma_fmha_fwd_is_valid_spec(const rocke_wmma_fmha_fwd_spec_t* spec,
     if(dtype == NULL)
     {
         wmma_set_reason(reason, reason_cap, "WMMA FMHA dtype must be fp16/f16 or bf16");
+        return false;
+    }
+    if(!wmma_valid_bias_dtype(spec))
+    {
+        wmma_set_reason(reason, reason_cap, "bias_dtype must be 'f32' or 'q'");
         return false;
     }
     if(!wmma_valid_kv_dtype(spec))
@@ -383,7 +403,7 @@ bool rocke_wmma_fmha_fwd_is_valid_spec(const rocke_wmma_fmha_fwd_spec_t* spec,
         if(strcmp(spec->layout, "dense") != 0 || spec->kv_dtype[0] != '\0' || spec->query_tail
            || spec->kv_tail || spec->v_lds_stage || spec->sliding_window
            || spec->window_right >= 0 || spec->use_softcap
-           || spec->use_sinks || spec->use_alibi || spec->use_qq_bias)
+           || spec->use_sinks || spec->use_alibi || spec->use_qq_bias || spec->use_attn_bias)
         {
             wmma_set_reason(
                 reason,
@@ -589,6 +609,23 @@ static void wmma_declare_params(rocke_ir_builder_t* b, const rocke_wmma_fmha_fwd
         if(strcmp(spec->layout, "dense") != 0)
             (void)rocke_b_param(b, "stride_lse_head", rocke_i32(), NULL);
     }
+    if(spec->use_attn_bias)
+    {
+        const bool q_bias = wmma_bias_is_q(spec);
+        memset(&opts, 0, sizeof(opts));
+        opts.noalias = true;
+        opts.noalias_set = true;
+        opts.readonly = true;
+        opts.readonly_set = true;
+        opts.align = q_bias ? 2 : 4;
+        opts.align_set = true;
+        const rocke_type_t* elem
+            = q_bias ? rocke_mfma_attn_ir_type_for_dtype(b, wmma_dtype(spec)) : rocke_f32();
+        (void)rocke_b_param(b, "attn_bias_ptr", rocke_ptr_type(b, elem, "global"), &opts);
+        (void)rocke_b_param(b, "bias_stride_b", rocke_i32(), NULL);
+        (void)rocke_b_param(b, "bias_stride_h", rocke_i32(), NULL);
+        (void)rocke_b_param(b, "bias_stride_q", rocke_i32(), NULL);
+    }
 }
 
 struct wmma_score_context
@@ -603,6 +640,14 @@ struct wmma_score_context
     rocke_value_t* qq_stride;
     rocke_value_t* zero_f;
     rocke_value_t* zero_i;
+    rocke_value_t* attn_bias;
+    const rocke_type_t* bias_elem;
+    bool bias_q;
+    rocke_value_t* bias_base;
+    rocke_value_t* bias_stride_q;
+    rocke_value_t* bias_zero;
+    rocke_value_t* seqlen_q;
+    rocke_value_t* seqlen_k;
 };
 
 static rocke_value_t* wmma_score_transform(rocke_ir_builder_t* b,
@@ -633,6 +678,28 @@ static rocke_value_t* wmma_score_transform(rocke_ir_builder_t* b,
         rocke_value_t* index = rocke_b_add(b, rocke_b_mul(b, query_pos, c->qq_stride), relative_k);
         rocke_value_t* bias
             = rocke_b_masked_global_load(b, c->qq_bias, index, keep, c->zero_f, rocke_f32(), 4);
+        score = rocke_b_fadd(b, score, rocke_b_fmul(b, bias, c->log2e));
+    }
+    if(c->attn_bias != NULL)
+    {
+        rocke_value_t* bias_q_ok = rocke_b_cmp_lt(b, query_pos, c->seqlen_q);
+        rocke_value_t* bias_k_ok = rocke_b_cmp_lt(b, key_pos, c->seqlen_k);
+        rocke_value_t* keep = rocke_b_land(b, bias_q_ok, bias_k_ok);
+        rocke_value_t* index = rocke_b_add(
+            b, rocke_b_add(b, c->bias_base, rocke_b_mul(b, query_pos, c->bias_stride_q)), key_pos);
+        rocke_value_t* bias;
+        if(!c->bias_q)
+        {
+            bias = rocke_b_masked_global_load(
+                b, c->attn_bias, index, keep, c->bias_zero, rocke_f32(), 4);
+        }
+        else
+        {
+            rocke_value_t* safe = rocke_b_select(b, keep, index, rocke_b_const_i32(b, 0));
+            rocke_value_t* loaded = rocke_b_cast_to_f32(
+                b, rocke_b_global_load(b, c->attn_bias, safe, c->bias_elem, 2));
+            bias = rocke_b_select(b, keep, loaded, c->bias_zero);
+        }
         score = rocke_b_fadd(b, score, rocke_b_fmul(b, bias, c->log2e));
     }
     return score;
@@ -814,7 +881,8 @@ static rocke_status_t
     p.sliding_window = spec->sliding_window;
     p.causal_ctx_offset
         = spec->causal_bottom_right ? rocke_b_sub(b, seqlen_k, seqlen_q) : rocke_b_const_i32(b, 0);
-    const bool score_features = spec->use_softcap || spec->use_alibi || spec->use_qq_bias;
+    const bool score_features
+        = spec->use_softcap || spec->use_alibi || spec->use_qq_bias || spec->use_attn_bias;
     const bool strict = spec->causal_bottom_right || strcmp(p.dtype, "bf16") == 0 || spec->kv_tail
                         || spec->sliding_window > 0 || spec->window_right >= 0
                         || spec->causal_tile_skip || score_features
@@ -848,6 +916,22 @@ static rocke_status_t
             features.qq_rows = rocke_b_get_param(b, "qq_bias_rows");
             features.qq_cols = rocke_b_get_param(b, "qq_bias_cols");
             features.qq_stride = rocke_b_get_param(b, "qq_bias_stride");
+        }
+        if(spec->use_attn_bias)
+        {
+            features.bias_q = wmma_bias_is_q(spec);
+            features.bias_elem
+                = features.bias_q ? rocke_mfma_attn_ir_type_for_dtype(b, p.dtype) : rocke_f32();
+            features.bias_zero = rocke_b_const_f32(b, 0.0);
+            features.attn_bias = rocke_b_get_param(b, "attn_bias_ptr");
+            features.bias_stride_q = rocke_b_get_param(b, "bias_stride_q");
+            rocke_value_t* bias_b
+                = rocke_b_mul(b, batch, rocke_b_get_param(b, "bias_stride_b"));
+            rocke_value_t* bias_h
+                = rocke_b_mul(b, head, rocke_b_get_param(b, "bias_stride_h"));
+            features.bias_base = rocke_b_add(b, bias_b, bias_h);
+            features.seqlen_q = seqlen_q;
+            features.seqlen_k = seqlen_k;
         }
     }
     if(score_features)

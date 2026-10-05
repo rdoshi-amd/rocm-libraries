@@ -38,7 +38,9 @@ from .common import (
 # ``batch * value_tiles``. Callers compiled against the v1 header must be rebuilt.
 # v3: ``rocke_wmma_fmha_fwd_spec_t`` gained store_lse, and the specialized kernel
 # ABI appends an FP32 ``lse`` pointer (plus ``stride_lse_head`` for packed layouts).
-ATTENTION_GFX1151_ABI = "rocke-attention-gfx1151/v3"
+# v4: ``rocke_wmma_fmha_fwd_spec_t`` gained use_attn_bias / bias_dtype, and the
+# specialized kernel ABI appends ``attn_bias_ptr`` plus B/H/Q element strides.
+ATTENTION_GFX1151_ABI = "rocke-attention-gfx1151/v4"
 
 # Compute units of the reference gfx1151 part. The output-column tiling gate was
 # tuned at this size, so it is the fallback when no count is given or visible.
@@ -96,6 +98,7 @@ _WMMA_FWD_CAP = Capability(
             "qq_bias",
             "window_right",
             "lse",
+            "attn_bias",
             "layout_dense",
             "layout_ragged",
             "layout_paged",
@@ -141,6 +144,7 @@ def _wmma_fwd_spec(req: OperatorRequest) -> WmmaFmhaFwdSpec:
             or req.use_sinks
             or req.use_alibi
             or req.use_qq_bias
+            or req.use_attn_bias
         )
     )
     wide = transposed and seqlen_q >= 512 and seqlen_q % 32 == 0 and seqlen_k % 64 == 0
@@ -157,6 +161,7 @@ def _wmma_fwd_spec(req: OperatorRequest) -> WmmaFmhaFwdSpec:
             or req.use_sinks
             or req.use_alibi
             or req.use_qq_bias
+            or req.use_attn_bias
         )
         and maximum_length <= (1 << 30)
         and (
@@ -187,6 +192,7 @@ def _wmma_fwd_spec(req: OperatorRequest) -> WmmaFmhaFwdSpec:
             or req.use_sinks
             or req.use_alibi
             or req.use_qq_bias
+            or req.use_attn_bias
         )
     )
     short_query = seqlen_q <= 16
@@ -231,6 +237,8 @@ def _wmma_fwd_spec(req: OperatorRequest) -> WmmaFmhaFwdSpec:
         use_alibi=bool(req.use_alibi),
         use_qq_bias=bool(req.use_qq_bias),
         store_lse=bool(req.return_lse),
+        use_attn_bias=bool(req.use_attn_bias),
+        bias_dtype=req.attn_bias_dtype.strip().lower(),
         layout=layout,
         page_block_size=int(req.kv_block_size) if layout == "paged" else 0,
         kv_dtype="fp8e4m3" if bool(req.use_fp8) else "",

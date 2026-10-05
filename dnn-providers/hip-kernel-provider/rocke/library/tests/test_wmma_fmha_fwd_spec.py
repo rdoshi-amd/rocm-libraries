@@ -94,6 +94,10 @@ class TestWmmaFmhaFwdSpec(unittest.TestCase):
             replace(base, **{flag: True})
             for flag in ("use_softcap", "use_sinks", "use_alibi", "use_qq_bias")
         ]
+        variants += [
+            replace(base, use_attn_bias=True, bias_dtype=dtype)
+            for dtype in ("f32", "q")
+        ]
         variants += [replace(base, sliding_window=width) for width in (1, 64)]
         for left, right in combinations(variants, 2):
             self.assertNotEqual(left.kernel_name(), right.kernel_name())
@@ -360,6 +364,57 @@ class TestWmmaFmhaFwdSpec(unittest.TestCase):
         # The statistic also covers a sink (extra denominator mass).
         sunk = replace(base, use_sinks=True)
         self.assertNotEqual(ir(replace(sunk, store_lse=True)), ir(with_lse))
+
+
+    def test_attn_bias_naming_params_and_default_is_unchanged(self):
+        from kernels.gfx1151.wmma_fmha_fwd import build_wmma_fmha_fwd
+        from rocke.core.lower_llvm import lower_kernel_to_llvm
+
+        def ir(spec):
+            return lower_kernel_to_llvm(
+                build_wmma_fmha_fwd(spec, "gfx1151"), arch="gfx1151"
+            )
+
+        def params(spec):
+            return [p.name for p in build_wmma_fmha_fwd(spec, "gfx1151").params]
+
+        bias = ["attn_bias_ptr", "bias_stride_b", "bias_stride_h", "bias_stride_q"]
+        base = WmmaFmhaFwdSpec(head_size=64, num_query_heads=4, mask_mode="none")
+        self.assertFalse(base.use_attn_bias)
+        self.assertNotIn("abias", base.kernel_name())
+        for dtype in ("f32", "q"):
+            with self.subTest(dtype=dtype):
+                spec = replace(base, use_attn_bias=True, bias_dtype=dtype)
+                self.assertIn(f"abias_{dtype}", spec.kernel_name())
+                self.assertEqual(params(spec), params(base) + bias)
+                self.assertNotEqual(ir(spec), ir(base))
+        self.assertNotEqual(
+            ir(replace(base, use_attn_bias=True, bias_dtype="f32")),
+            ir(replace(base, use_attn_bias=True, bias_dtype="q")),
+        )
+        self.assertEqual(ir(base), ir(replace(base, use_attn_bias=False)))
+        # The bias parameters follow the LSE parameters in the kernel ABI.
+        both = replace(base, use_attn_bias=True, store_lse=True)
+        self.assertEqual(params(both), params(base) + ["lse"] + bias)
+        packed = replace(
+            base, layout="ragged", query_tail=True, kv_tail=True, use_attn_bias=True
+        )
+        self.assertEqual(params(packed)[-4:], bias)
+
+    def test_attn_bias_rejects_unknown_dtype_and_transposed_qk(self):
+        with self.assertRaises(ValueError):
+            WmmaFmhaFwdSpec(
+                head_size=64, num_query_heads=4, use_attn_bias=True, bias_dtype="f64"
+            )
+        with self.assertRaises(ValueError):
+            WmmaFmhaFwdSpec(
+                head_size=64,
+                num_query_heads=4,
+                mask_mode="none",
+                transposed_qk=True,
+                use_attn_bias=True,
+            )
+
 
 
 if __name__ == "__main__":

@@ -68,6 +68,7 @@ class TestGfx1151AttentionSelection(unittest.TestCase):
             {"use_softcap": True},
             {"use_alibi": True},
             {"use_qq_bias": True},
+            {"use_attn_bias": True},
         ):
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 dispatch_attention(_request(arch="gfx950", **changes))
@@ -163,6 +164,37 @@ class TestGfx1151AttentionSelection(unittest.TestCase):
         for arch in ("gfx950", "gfx942"):
             with self.subTest(arch=arch), self.assertRaises(ValueError):
                 dispatch_attention(_request(arch=arch, return_lse=True))
+
+    def test_attn_bias_selects_a_bias_kernel_only_on_gfx1151(self):
+        for layout in ("dense", "ragged", "paged"):
+            for dtype in ("f32", "q"):
+                with self.subTest(layout=layout, dtype=dtype):
+                    spec = dispatch_attention(
+                        _request(layout=layout, use_attn_bias=True, attn_bias_dtype=dtype)
+                    ).spec
+                    self.assertTrue(spec.use_attn_bias)
+                    self.assertEqual(spec.bias_dtype, dtype)
+                    self.assertFalse(spec.transposed_qk)
+        self.assertFalse(dispatch_attention(_request()).spec.use_attn_bias)
+        for arch in ("gfx950", "gfx942"):
+            with self.subTest(arch=arch), self.assertRaises(ValueError):
+                dispatch_attention(_request(arch=arch, use_attn_bias=True))
+
+    def test_attn_bias_composes_with_other_score_features(self):
+        spec = dispatch_attention(
+            _request(
+                use_attn_bias=True,
+                use_softcap=True,
+                use_alibi=True,
+                use_qq_bias=True,
+                return_lse=True,
+                mask_type=AttentionMaskType.TOP_LEFT_CAUSAL,
+            )
+        ).spec
+        self.assertTrue(
+            spec.use_attn_bias and spec.use_softcap and spec.use_alibi and spec.use_qq_bias
+        )
+        self.assertTrue(spec.store_lse)
 
     def test_output_column_tiling_scales_with_the_compute_unit_count(self):
         def tile(num_cus, nhead_q):

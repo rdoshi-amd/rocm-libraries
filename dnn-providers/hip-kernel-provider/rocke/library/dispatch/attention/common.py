@@ -141,6 +141,11 @@ class AttentionRequest(OperatorRequest):
     # attention sink when enabled) as an FP32 ``lse`` tensor; a candidate must
     # declare the "lse" feature.
     return_lse: bool = False
+    # Dense additive attention bias ``[B|1, H|1, Sq|1, Sk]`` (unit-stride keys)
+    # added to the scaled scores; ``attn_bias_dtype`` is "f32" or "q" (the Q
+    # dtype). A candidate must declare the "attn_bias" feature.
+    use_attn_bias: bool = False
+    attn_bias_dtype: str = "f32"
     # --- standalone attention_dense knobs (only consumed by the opt-in
     #     ``attention_dense`` candidate; ignored by the unified 2D/3D paths).
     #     Defaults deliver the best qualified persistent prefill path for large Sq:
@@ -210,6 +215,8 @@ class AttentionRequest(OperatorRequest):
             active.add("alibi")
         if bool(self.use_qq_bias):
             active.add("qq_bias")
+        if bool(self.use_attn_bias):
+            active.add("attn_bias")
         if int(self.window_right) >= 0:
             active.add("window_right")
         if bool(self.return_lse):

@@ -189,6 +189,25 @@ All strides are in their pointer's element units; page strides are separate
 from the token/head strides. K/V head elements remain contiguous. No host
 densification or input/output padding is required.
 
+### Additive attention bias
+
+`use_attn_bias=True` adds a general bias tensor `[B|1, H|1, Sq|1, Sk]` to the
+scaled scores. `bias_dtype` is `"f32"` (default) or `"q"` (the Q dtype, FP16 or
+BF16); the key dimension must be unit-stride. Batch, head, and query strides are
+runtime I32 arguments (`bias_stride_b`, `bias_stride_h`, `bias_stride_q`) after
+the `attn_bias_ptr` argument, which follows the LSE arguments. A stride of 0
+broadcasts, and an extent-1 dimension maps to stride 0, so the common
+broadcast, expanded, permuted, and row-padded views need no copy. Entries are
+multiplied by log2(e) to match the log2-domain scores and are applied after
+QQ-bias, before masking. Loads are guarded by `query_pos < seqlen_q` and
+`key_pos < seqlen_k`; out-of-range entries contribute zero.
+
+Ragged and paged layouts take `Sq`/`Sk` as the request maxima, and each sequence
+reads the bias at its own within-sequence positions. The transposed-QK fast path
+does not support a bias and its spec rejects the combination. The kernel name
+gains an `abias_<dtype>` part. Dispatch slices the bias per batch when a dense
+request needs per-batch launches.
+
 ### Softmax statistics (LSE)
 
 `store_lse=True` writes the per-row natural-log log-sum-exp of the scaled,
@@ -269,7 +288,7 @@ tail bounds, both V-staging choices, and the score features above.
   part) instead of a fixed query-group limit.
 
 Adding spec fields changes the C struct layout; the ABI string is
-`rocke-attention-gfx1151/v3`. Rebuild native callers and zero-initialise with
+`rocke-attention-gfx1151/v4`. Rebuild native callers and zero-initialise with
 `rocke_wmma_fmha_fwd_spec_default()`.
 
 ### Public library selection and launch
@@ -278,7 +297,7 @@ Adding spec fields changes the C struct layout; the ABI string is
 `attention_gfx1151_wmma` for supported requests. Set `layout` explicitly to
 `dense`, `ragged`, or `paged`; `auto` resolves to dense on this candidate and
 preserves legacy conventions on other architectures. `use_fp8`,
-`use_softcap`, `use_sinks`, `use_alibi`, and `use_qq_bias` describe required
+`use_softcap`, `use_sinks`, `use_alibi`, `use_qq_bias`, and `use_attn_bias` describe required
 features before selection, not features inferred silently at bind time.
 
 For FP16 D64 ragged causal requests and dense query/KV-tail requests without

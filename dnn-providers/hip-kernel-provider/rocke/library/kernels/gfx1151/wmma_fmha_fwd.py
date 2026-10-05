@@ -130,6 +130,11 @@ class WmmaFmhaFwdSpec:
     # an attention sink when enabled) to an FP32 ``lse`` buffer: ``[B, H, Sq]``
     # for dense, ``[H, total_q]`` (``stride_lse_head``) for packed layouts.
     store_lse: bool = False
+    # Dense additive attention bias ``[B|1, H|1, Sq|1, Sk]`` added to the scores
+    # (after softcap/alibi/qq_bias). Key dim is unit-stride; the B/H/Q strides are
+    # runtime args (0 broadcasts). ``bias_dtype`` is "f32" or "q" (the Q dtype).
+    use_attn_bias: bool = False
+    bias_dtype: str = "f32"
 
     def __post_init__(self) -> None:
         from rocke.core.codegen_policy import normalize_scheduler_strategy
@@ -147,6 +152,8 @@ class WmmaFmhaFwdSpec:
             raise ValueError(
                 f"head_size must be a multiple of 16, got {self.head_size}"
             )
+        if self.bias_dtype not in ("f32", "q"):
+            raise ValueError(f"bias_dtype must be 'f32' or 'q', got {self.bias_dtype!r}")
         if self.v_head_size < 0 or self.v_head_size % 16 != 0:
             raise ValueError(
                 f"v_head_size must be zero or a multiple of 16, got {self.v_head_size}"
@@ -230,6 +237,7 @@ class WmmaFmhaFwdSpec:
                 or self.use_sinks
                 or self.use_alibi
                 or self.use_qq_bias
+                or self.use_attn_bias
             ):
                 raise ValueError(
                     "transposed QK requires aligned dense inputs without extra score features"
@@ -299,6 +307,7 @@ class WmmaFmhaFwdSpec:
             f"dv{self.value_tile_size}" if self.value_tile_size else "",
             f"vh{self.v_head_size}" if self.v_head_size else "",
             "lse" if self.store_lse else "",
+            f"abias_{self.bias_dtype}" if self.use_attn_bias else "",
             flags={
                 "qtail": self.query_tail or self.layout != "dense",
                 "kvtail": self.kv_tail or self.layout != "dense",
@@ -459,11 +468,33 @@ def _declare_params(b: IRBuilder, spec: WmmaFmhaFwdSpec):
         )
         if spec.layout != "dense":
             params["stride_lse_head"] = b.param("stride_lse_head", I32)
+    if spec.use_attn_bias:
+        bias_elem = F32 if spec.bias_dtype == "f32" else _q_elem(spec)
+        params["attn_bias_ptr"] = b.param(
+            "attn_bias_ptr",
+            PtrType(bias_elem, "global"),
+            noalias=True,
+            readonly=True,
+            align=4 if spec.bias_dtype == "f32" else 2,
+        )
+        params["bias_stride_b"] = b.param("bias_stride_b", I32)
+        params["bias_stride_h"] = b.param("bias_stride_h", I32)
+        params["bias_stride_q"] = b.param("bias_stride_q", I32)
     return params
 
 
-def _score_features(b, spec, params, head, context):
-    if not (spec.use_softcap or spec.use_sinks or spec.use_alibi or spec.use_qq_bias):
+def _q_elem(spec):
+    return BF16 if spec.dtype == "bf16" else F16
+
+
+def _score_features(b, spec, params, head, context, batch, seqlen_q, seqlen_k):
+    if not (
+        spec.use_softcap
+        or spec.use_sinks
+        or spec.use_alibi
+        or spec.use_qq_bias
+        or spec.use_attn_bias
+    ):
         return None, None
     log2e = b.const_f32(1.4426950408889634)
     cap = b.fmul(params["softcap"], log2e) if spec.use_softcap else None
@@ -480,6 +511,14 @@ def _score_features(b, spec, params, head, context):
         )
     zero_f = b.const_f32(0.0) if spec.use_qq_bias else None
     zero_i = b.const_i32(0) if spec.use_qq_bias else None
+    bias_base = bias_zero = bias_elem = None
+    if spec.use_attn_bias:
+        bias_elem = F32 if spec.bias_dtype == "f32" else _q_elem(spec)
+        bias_zero = b.const_f32(0.0)
+        bias_base = b.add(
+            b.mul(batch, params["bias_stride_b"]),
+            b.mul(head, params["bias_stride_h"]),
+        )
 
     def transform(builder, score, _kt, _row, query_pos, key_pos):
         if cap is not None:
@@ -505,10 +544,38 @@ def _score_features(b, spec, params, head, context):
                 params["qq_bias_ptr"], index, keep, zero_f, F32, align=4
             )
             score = builder.fadd(score, builder.fmul(bias, log2e))
+        if spec.use_attn_bias:
+            keep = builder.land(
+                builder.cmp_lt(query_pos, seqlen_q), builder.cmp_lt(key_pos, seqlen_k)
+            )
+            index = builder.add(
+                builder.add(
+                    bias_base, builder.mul(query_pos, params["bias_stride_q"])
+                ),
+                key_pos,
+            )
+            if spec.bias_dtype == "f32":
+                bias = builder.masked_global_load(
+                    params["attn_bias_ptr"], index, keep, bias_zero, F32, align=4
+                )
+            else:
+                safe = builder.select(keep, index, builder.const_i32(0))
+                loaded = builder.cast_to_f32(
+                    builder.global_load(
+                        params["attn_bias_ptr"], safe, bias_elem, align=2
+                    )
+                )
+                bias = builder.select(keep, loaded, bias_zero)
+            score = builder.fadd(score, builder.fmul(bias, log2e))
         return score
 
     return (
-        transform if spec.use_softcap or spec.use_alibi or spec.use_qq_bias else None
+        transform
+        if spec.use_softcap
+        or spec.use_alibi
+        or spec.use_qq_bias
+        or spec.use_attn_bias
+        else None
     ), sink
 
 
@@ -674,10 +741,13 @@ def build_wmma_fmha_fwd(spec: WmmaFmhaFwdSpec, arch: str = "gfx1151") -> KernelD
         or spec.use_sinks
         or spec.use_alibi
         or spec.use_qq_bias
+        or spec.use_attn_bias
         or spec.layout != "dense"
     )
     masked = b.const_f32(float("-inf")) if strict else None
-    score_transform, sink = _score_features(b, spec, p, head, context)
+    score_transform, sink = _score_features(
+        b, spec, p, head, context, batch, seqlen_q, seqlen_k
+    )
     tile_start, tile_stop = _window_tiles(
         b,
         spec.sliding_window,

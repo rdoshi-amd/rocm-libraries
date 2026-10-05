@@ -43,6 +43,7 @@ EXPECTED_FEATURES = {
         "qq_bias",
         "window_right",
         "lse",
+        "attn_bias",
         "layout_dense",
         "layout_ragged",
         "layout_paged",

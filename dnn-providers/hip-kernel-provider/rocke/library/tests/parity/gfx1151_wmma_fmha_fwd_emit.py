@@ -4,7 +4,7 @@
 #
 # tests/parity/gfx1151_wmma_fmha_fwd_emit.py -- Python reference emitter for the
 # gfx1151 (RDNA3.5 / Strix Halo) WMMA FMHA forward instance parity harness.
-# Selects one of 138 sampled configurations by argv[1] (0..137), builds it
+# Selects one of 147 sampled configurations by argv[1] (0..146), builds it
 # via build_wmma_fmha_fwd(arch='gfx1151') and prints
 # lower_kernel_to_llvm(kernel, arch='gfx1151') to stdout so it can be
 # byte-compared with the C emitter gfx1151_wmma_fmha_fwd_emit.c.
@@ -45,7 +45,56 @@ _LSE_CASES = (
 )
 
 
+_ATTN_BIAS_CASES = (
+    # layout, page, head_size, mask, tails (bottom-right + tails + V LDS), sinks, bias_dtype,
+    # extras (s=softcap a=alibi q=qq_bias l=lse), value_tile, dtype
+    ("dense", 0, 64, "none", False, False, "f32", "", 0, "fp16"),
+    ("dense", 0, 64, "causal", True, True, "q", "", 0, "fp16"),
+    ("dense", 0, 128, "none", False, False, "q", "l", 0, "fp16"),
+    ("ragged", 0, 64, "causal", True, True, "f32", "", 0, "fp16"),
+    ("paged", 16, 64, "causal", True, False, "q", "", 0, "fp16"),
+    ("dense", 0, 64, "causal", True, False, "f32", "saq", 0, "fp16"),
+    ("dense", 0, 256, "none", False, False, "f32", "", 64, "fp16"),
+    ("dense", 0, 128, "causal", True, True, "q", "saql", 0, "fp16"),
+    ("dense", 0, 64, "none", False, False, "q", "", 0, "bf16"),
+)
+
+
 def _spec(idx: int) -> WmmaFmhaFwdSpec:
+    if 138 <= idx < 138 + len(_ATTN_BIAS_CASES):
+        (
+            layout,
+            page,
+            head,
+            mask,
+            tails,
+            sinks,
+            bias_dtype,
+            extras,
+            tile,
+            dtype,
+        ) = _ATTN_BIAS_CASES[idx - 138]
+        return WmmaFmhaFwdSpec(
+            head_size=head,
+            num_query_heads=8,
+            num_kv_heads=2,
+            dtype=dtype,
+            mask_mode=mask,
+            causal_bottom_right=tails,
+            query_tail=tails,
+            kv_tail=tails,
+            v_lds_stage=tails,
+            use_sinks=sinks,
+            use_softcap="s" in extras,
+            use_alibi="a" in extras,
+            use_qq_bias="q" in extras,
+            layout=layout,
+            page_block_size=page,
+            value_tile_size=tile,
+            store_lse="l" in extras,
+            use_attn_bias=True,
+            bias_dtype=bias_dtype,
+        )
     if 131 <= idx < 131 + len(_LSE_CASES):
         layout, page, head, mask, tails, sinks, swap, block_n, waves, tile = _LSE_CASES[idx - 131]
         return WmmaFmhaFwdSpec(
@@ -296,7 +345,7 @@ def main() -> int:
     return run_emit(
         _spec,
         build_wmma_fmha_fwd,
-        usage="usage: gfx1151_wmma_fmha_fwd_emit.py <config_index 0..137>\n",
+        usage="usage: gfx1151_wmma_fmha_fwd_emit.py <config_index 0..146>\n",
         arch="gfx1151",
     )
 

@@ -72,8 +72,9 @@ extern "C" {
  * String fields are referenced as-is; keep them alive with the spec. */
 /* ABI: this struct is passed by value layout, so appending fields changes it.
  * The kv_dtype, transposed_qk, block_n, num_waves, scheduler_strategy and
- * value_tile_size, causal_tile_skip, v_head_size, window_right and store_lse fields (and the batch * value_tiles grid z axis) are the
- * "rocke-attention-gfx1151/v3" ABI. Code built against an older header must be
+ * value_tile_size, causal_tile_skip, v_head_size, window_right, store_lse and
+ * use_attn_bias/bias_dtype fields (and the batch * value_tiles grid z axis) are the
+ * "rocke-attention-gfx1151/v4" ABI. Code built against an older header must be
  * recompiled; zero-initialise the struct with rocke_wmma_fmha_fwd_spec_default
  * so new fields take their defaults. */
 typedef struct rocke_wmma_fmha_fwd_spec
@@ -106,6 +107,8 @@ typedef struct rocke_wmma_fmha_fwd_spec
     int v_head_size; /* 0 => V/O width equals head_size; else a distinct multiple of 16 */
     int window_right; /* -1 => off; >=0 keeps k <= q + ctx + window_right (mask NONE, standard path) */
     bool store_lse; /* also write the FP32 natural-log softmax LSE per query row */
+    bool use_attn_bias; /* dense additive bias [B|1, H|1, Sq|1, Sk]; unit-stride keys */
+    const char* bias_dtype; /* "f32" (default) or "q" (the Q dtype) */
 } rocke_wmma_fmha_fwd_spec_t;
 
 /* Default-constructed spec (Python dataclass defaults). The caller must still

@@ -14,7 +14,8 @@ KDPs that do not ship for `--arch` are copied unchanged; the packer prunes them.
 
 `expect.json` is written beside `--out` (`<out parent>/expect.json`): a list of
 {"kdp": <KDP path relative to the root>, "name": <UKD name>, "kind": <authored
-kernel_source.kind>}, one entry per kept UKD, for hkp_probe_assert.py.
+kernel_source.kind>}, one entry per kept UKD, for hkp_probe_assert.py. Entries of kinds
+whose packed output is a pass-through also carry the authored "kernel_source".
 
 Files are written only when their content differs and files absent from the
 source are removed, so deriving twice leaves every mtime of the derived root
@@ -68,11 +69,10 @@ def _group_key(ukd, where):
     if kind not in KINDS:
         raise DeriveError(
             f"{where} kind {kind!r} has no probe support. A kind the packer packs to "
-            "kpack needs one entry in KINDS (hkp_probe_kinds.py). A pass-through kind "
-            "(embedded_source: shipped as authored, not as kpack) or any kind the "
-            "packer does not pack to kpack cannot be probed by adding an entry: keep "
-            "such UKDs in a KDP that does not ship for the probed arch, or decide how "
-            "the probe should cover them"
+            "kpack or ships as authored (pass-through) needs one entry in KINDS "
+            "(hkp_probe_kinds.py). A kind the packer does not support yet needs "
+            "packer work first; until then keep such UKDs in a KDP that does not "
+            "ship for the probed arch"
         )
     return (kind,) + tuple(
         json.dumps(source.get(f), sort_keys=True) for f in KINDS[kind].group_by
@@ -143,10 +143,12 @@ def _plan(src, arch):
             continue
         kdp["kernelDescriptors"] = kept
         files[rel] = (json.dumps(kdp, indent=2) + "\n").encode("utf-8")
-        expect.extend(
-            {"kdp": rel, "name": u["name"], "kind": u["kernel_source"]["kind"]}
-            for u in kept
-        )
+        for u in kept:
+            entry = {"kdp": rel, "name": u["name"], "kind": u["kernel_source"]["kind"]}
+            if KINDS[entry["kind"]].output == "passthrough":
+                # The packer ships the block as authored; the assertion compares it.
+                entry["kernel_source"] = u["kernel_source"]
+            expect.append(entry)
     return files, expect
 
 

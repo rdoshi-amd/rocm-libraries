@@ -133,6 +133,27 @@ def test_hsaco_ukd_for_other_arch_is_ignored(tmp_path):
     assert [e["name"] for e in expect] == ["b_950"]
 
 
+def test_passthrough_kind_expect_carries_authored_kernel_source(tmp_path):
+    emb = {
+        "id": "id-e",
+        "name": "e",
+        "kernel_source": {
+            "kind": "embedded_source",
+            "source_file": "k/a.cpp",
+            "entry_point": "Entry",
+        },
+    }
+    other = dict(emb, id="id-e2", name="e2")
+    _write_root(tmp_path / "src", [other, emb, _rocke("r")])
+    expect = _derive(tmp_path / "src", "gfx950", tmp_path / "w" / "root")
+    by_name = {e["name"]: e for e in expect}
+    # One passthrough UKD per KDP (nothing compiles); it records its authored block.
+    assert set(by_name) == {"e", "r"}
+    assert by_name["e"]["kernel_source"] == emb["kernel_source"]
+    # kpack-output entries keep the three-field schema.
+    assert set(by_name["r"]) == {"kdp", "name", "kind"}
+
+
 def test_pick_is_independent_of_authored_order(tmp_path):
     ukds = [_rocke(n) for n in ("m", "c", "x", "a2", "a1")]
     for i, order in enumerate(itertools.permutations(ukds, 3)):
@@ -228,7 +249,7 @@ def test_standalone_reference_in_other_arch_kdp_is_ignored(tmp_path):
     assert _derive(tmp_path / "src", "gfx950", tmp_path / "w" / "root") == []
 
 
-@pytest.mark.parametrize("kind", ["embedded_source", "kpack", "mystery"])
+@pytest.mark.parametrize("kind", ["kpack", "mystery"])
 def test_kind_without_probe_support_exits_2(tmp_path, kind):
     _refused(
         tmp_path,
@@ -238,7 +259,7 @@ def test_kind_without_probe_support_exits_2(tmp_path, kind):
 
 
 def test_unsupported_kind_for_other_arch_is_ignored(tmp_path):
-    ukds = [_rocke("a"), dict(_other("embedded_source", "m"), arch=["gfx942"])]
+    ukds = [_rocke("a"), dict(_other("kpack", "m"), arch=["gfx942"])]
     _write_root(tmp_path / "src", ukds, kdp_arch=("gfx942", "gfx950"))
     assert [
         e["name"] for e in _derive(tmp_path / "src", "gfx950", tmp_path / "w" / "root")
@@ -366,3 +387,11 @@ def test_kinds_registry_is_complete():
         used |= set(entry.provenance)
     # ... and no implementation is dead.
     assert used == set(checks)
+
+
+def test_every_registered_output_type_has_checks():
+    kinds = _tool_module("hkp_probe_kinds").KINDS
+    outputs = _tool_module("hkp_probe_assert")._OUTPUT_CHECKS
+    assert {k.output for k in kinds.values()} <= set(outputs)
+    # ... and no check set is dead.
+    assert set(outputs) <= {k.output for k in kinds.values()}

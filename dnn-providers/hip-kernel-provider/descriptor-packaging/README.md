@@ -353,13 +353,28 @@ normal declaration is one line per architecture: `hkp_add_packaging_probe(ARCH g
 
 A probe has no producer-kind or per-KDP argument: the producer kinds present in the root
 are discovered from its descriptors, and the assertion expects each UKD's provenance by
-its authored `kernel_source.kind`. Probes cover `hip`, `rocke` and `hsaco`, the kinds registered in `tools/hkp_probe_kinds.py`
-(per kind: the `kernel_source` fields that define a compile group, and the provenance
-checks a shipped UKD must satisfy). Any other kind in a UKD kept for the probed arch makes
-configure fail. A kind the packer packs to kpack becomes probeable with one entry there.
-Pass-through kinds (`embedded_source`, which the packer ships as authored, not as kpack) and
-kinds the packer does not pack to kpack cannot be probed by adding an entry: such a UKD must
-live in a KDP that does not ship for a probed arch, or the probe needs a design decision.
+its authored `kernel_source.kind`. Probes cover `hip`, `rocke`, `hsaco` and
+`embedded_source`, the kinds registered in `tools/hkp_probe_kinds.py`. Each entry gives the
+`kernel_source` fields that define a compile group, the provenance checks a shipped UKD must
+satisfy, and the packed **output type**: `kpack` (the packer packs the UKD into the archive
+and ships a `kind: kpack` UKD: `hip`, `rocke`, `hsaco`) or `passthrough` (the packer ships the
+UKD as authored and nothing enters the archive: `embedded_source`). A kind whose output is
+one of these types, using provenance checks that already exist, is probeable with one entry
+there plus one end-to-end test case; the kinds list in this paragraph is edited with it. A
+kind the packer does not support yet needs packer work first. Any kind not registered, in a
+UKD kept for the probed arch, makes configure fail and fails `no-rules-for-kind` in the
+assertion; such a UKD must live in a KDP that does not ship for a probed arch, or the probe
+needs a design decision.
+
+The archive rule: the archive checks (`kpack-missing`, `kpack-empty`, `kpack-toc`, `sha256`,
+`symbol`, `signature`) run only when the expected list holds at least one kpack-output UKD.
+A root of only pass-through UKDs ships descriptors and no `kpack/` directory; the archive is
+then not required and an archive that happens to exist is ignored.
+
+Non-goals: a pass-through kind probes one UKD per KDP (`group_by` is empty), not every
+`source_file` and `entry_point`; standalone-UKD references are rejected by derive; a further
+output type (for example a runtime-compiled kind) is a new decision when it lands, not an
+entry.
 
 Configuration fails, never skips, when: `ARCH` is missing; `ROOT` is not a directory;
 no KDP under the root ships for `ARCH`; a
@@ -380,6 +395,7 @@ themselves ship for `ARCH`. The group is the part of a UKD that selects its comp
 | `rocke` | `(kind, builder)` |
 | `hip` | `(kind, source, build)` |
 | `hsaco` | one per KDP (compiles nothing) |
+| `embedded_source` | one per KDP (compiles nothing; ships as authored, no archive entry) |
 
 The kept UKD is the first by sorted `name`. The probe therefore packs the real
 descriptors and compiles every distinct compile path once instead of every variant.
@@ -391,7 +407,7 @@ A production KDP whose UKDs share one builder keeps one UKD.
   ingestor run; names encode the specialization and are unique.
 - **Arch matching follows the packer** (`arch_matches`, `_arch_subset_ok`): an empty or
   absent `arch` list is a wildcard.
-- Derive also writes `expect.json` (kept KDP, UKD name and kind) beside the root; the
+- Derive also writes `expect.json` (kept KDP, UKD name and kind; pass-through kinds also carry the authored `kernel_source`) beside the root; the
   assertion expects exactly that set.
 - The derive step re-runs when any file under the root changes, and rewrites only files
   whose content differs, so a reconfigure leaves the pack stamp fresh.
@@ -406,10 +422,12 @@ A production KDP whose UKDs share one builder keeps one UKD.
 | `out-root-missing` | The probe output root does not exist: build `hkp_packaging_probes` first. |
 | `stamp-missing` | The pack stamp is absent. |
 | `arch-dir-missing` / `extra-arch-dir` | `<out>/<arch>/` is absent, or another `gfx*` directory is present. |
-| `kpack-missing` / `kpack-empty` | `<out>/<arch>/kpack/hip_kernel_provider_<arch>.kpack` is absent or empty. |
+| `kpack-missing` / `kpack-empty` | Kpack output is expected and `<out>/<arch>/kpack/hip_kernel_provider_<arch>.kpack` is absent or empty. |
 | `no-kdp` | No `*.kdp.json` under `<out>/<arch>`. |
-| `ukd-kind` | A shipped UKD's `kernel_source.kind` is not `kpack`. |
-| `arch-field` | A KDP or UKD `arch` is not exactly the probe architecture. |
+| `ukd-kind` | A shipped UKD's `kernel_source.kind` differs from what its expected kind's output type requires: `kpack` for kpack output, the authored kind for pass-through output. |
+| `arch-field` | A KDP or UKD `arch` is not exactly the probe architecture (always required for a pass-through UKD). |
+| `passthrough-source` | A pass-through UKD's `kernel_source` differs from the authored one recorded in `expect.json`. |
+| `passthrough-provenance` | A pass-through UKD's `provenance.source_label` is empty, or `provenance.source_file` differs from `kernel_source.source_file`. |
 | `kpack-toc` | The archive has no entry for a UKD's `toc_key` and architecture. |
 | `sha256` | The blob's sha256 differs from `kernel_source.sha256`. |
 | `signature` | A UKD has an empty `signature`. |
@@ -418,7 +436,7 @@ A production KDP whose UKDs share one builder keeps one UKD.
 | `no-rules-for-kind` | A UKD's expected kind has no entry in `tools/hkp_probe_kinds.py`: a new producer kind must add its entry. |
 | `provenance-wheel` | `rocke_wheel_sha256` is missing or empty: the wheel did not supply rocKE. |
 | `provenance-comgr` | The comgr recorded at pack time is not the expected library (or is empty). Catches a stale system comgr shadowing the intended one. |
-| `ukd-count` | The number of kpack-kind UKDs differs from the expected list (`expect.json`, written by derive), is zero, or a shipped UKD is not in the list. |
+| `ukd-count` | The number of shipped UKDs found in the expected list (`expect.json`, written by derive) differs from its length, is zero, or a shipped UKD is not in the list. |
 
 ### Adding a probe
 

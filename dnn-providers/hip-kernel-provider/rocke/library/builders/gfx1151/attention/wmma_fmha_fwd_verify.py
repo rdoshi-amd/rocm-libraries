@@ -42,6 +42,7 @@ from kernels.gfx1151.wmma_fmha_fwd import (
     build_wmma_fmha_fwd,
     wmma_fmha_fwd_grid,
 )
+from rocke.numeric.bf16 import bf16_to_f32, f32_to_bf16
 from rocke.runtime.hip_module import Runtime
 
 
@@ -53,7 +54,7 @@ from rocke.runtime.hip_module import Runtime
 # looser budget rather than reusing fp16's -- a shared tolerance would let a
 # structural bug hide inside bf16 quantisation noise (TESTING.md gap G5).
 #
-# Measured on gfx1151 (Strix Halo) and gfx1201, B=2 Sq=Sk=64, inputs ~N(0, 0.3).
+# Measured on gfx1151 and gfx1201, B=2 Sq=Sk=64, inputs ~N(0, 0.3).
 # Both arches produce identical figures:
 #
 #   bf16  D=64  Hq=Hk=4  causal   max_abs = 1.95e-03  (2^-9)
@@ -76,26 +77,10 @@ from rocke.runtime.hip_module import Runtime
 _DEFAULT_TOL = {"fp16": 2e-2, "bf16": 1e-2}
 
 
-def _f32_to_bf16(a):
-    """fp32 -> bf16 (raw uint16) with round-to-nearest-even on the high 16 bits.
-
-    Adds the tie-breaking bias ``0x7FFF + lsb`` to the fp32 bit pattern before
-    truncating, which is exactly RNE on the retained mantissa.
-    """
-    import numpy as np
-
-    u = np.ascontiguousarray(a, dtype=np.float32).view(np.uint32)
-    bias = np.uint32(0x7FFF) + ((u >> np.uint32(16)) & np.uint32(1))
-    return ((u + bias) >> np.uint32(16)).astype(np.uint16)
-
-
-def _bf16_to_f32(a):
-    """bf16 (raw uint16) -> fp32 by shifting the pattern back into place."""
-    import numpy as np
-
-    return (np.ascontiguousarray(a, dtype=np.uint16).astype(np.uint32) << 16).view(
-        np.float32
-    )
+# The bf16 host codec is shared with the library/tests numeric gate; see
+# rocke.numeric.bf16 for why there is exactly one implementation.
+_f32_to_bf16 = f32_to_bf16
+_bf16_to_f32 = bf16_to_f32
 
 
 def _to_storage(a_f32, dtype: str):

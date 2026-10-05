@@ -1,0 +1,43 @@
+# Copyright (c) Advanced Micro Devices, Inc., or its affiliates.
+# SPDX-License-Identifier: MIT
+
+"""Torch-free bf16 host encoding for numeric verify harnesses.
+
+numpy has no native bfloat16 and numpy is rocKE's only hard dependency, so a
+bf16 tensor is carried on the host as raw ``uint16`` and converted by hand --
+per TESTING.md, "bf16 gets a hand-rolled encoding or an explicit
+NotImplementedError, never a silent upcast".
+
+This lives in ``platform`` so the one implementation is shared by every harness
+that needs it (``library/builders`` verify drivers and the ``library/tests``
+numeric gate alike). A second copy is how a harness ends up agreeing with
+itself rather than with the device.
+"""
+
+from __future__ import annotations
+
+__all__ = ["bf16_to_f32", "f32_to_bf16"]
+
+
+def f32_to_bf16(a):
+    """fp32 -> bf16 (raw ``uint16``) with round-to-nearest-even.
+
+    Adds the tie-breaking bias ``0x7FFF + lsb`` to the fp32 bit pattern before
+    truncating to the high 16 bits, which is exactly RNE on the retained
+    mantissa. Plain truncation would bias every value toward zero and show up
+    downstream as kernel "error".
+    """
+    import numpy as np
+
+    u = np.ascontiguousarray(a, dtype=np.float32).view(np.uint32)
+    bias = np.uint32(0x7FFF) + ((u >> np.uint32(16)) & np.uint32(1))
+    return ((u + bias) >> np.uint32(16)).astype(np.uint16)
+
+
+def bf16_to_f32(a):
+    """bf16 (raw ``uint16``) -> fp32 by shifting the pattern back into place."""
+    import numpy as np
+
+    return (np.ascontiguousarray(a, dtype=np.uint16).astype(np.uint32) << 16).view(
+        np.float32
+    )

@@ -12,6 +12,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -443,7 +444,7 @@ TEST(TestConvFwdPack, HasAGraphMatchAndOneKernelMatcher)
     // A single-pack engine has nothing to discriminate between, so it carries no
     // graph-scoped criterion at all: the engine's graph_match both admits the node type
     // and fully validates the shape.
-    EXPECT_FALSE(set.engine.graphMatchNativeSymbol.empty());
+    EXPECT_FALSE(std::holds_alternative<std::monostate>(set.engine.graphMatch));
     EXPECT_EQ(std::count_if(set.matchers.begin(),
                             set.matchers.end(),
                             [](const auto& matcher) {

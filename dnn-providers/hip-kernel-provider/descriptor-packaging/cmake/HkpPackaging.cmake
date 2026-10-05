@@ -174,6 +174,10 @@ endfunction()
 #   NAME is the source label written into every descriptor's provenance. NAME, the
 #   absolute SOURCE_ROOT, OUT_ROOT and ARCHES go into a global registry read by
 #   hkp_verify_embedded_sources() and hkp_register_census_tests().
+#
+#   Every root resolves UED graph patterns against
+#   HIPKERNELPROVIDER_OP_SCHEMA_REGISTRY (set by hkp_add_packaging), and a change
+#   to that file repacks.
 # ---------------------------------------------------------------------------
 function(hkp_wire_pack_target)
     set(_one NAME SOURCE_ROOT ARCHES HIPCC ROCM_KPACK_DIR
@@ -314,10 +318,12 @@ function(hkp_wire_pack_target)
                 --kpack-python-dir "${ARG_ROCM_KPACK_DIR}"
                 --source-label "${ARG_NAME}"
                 ${_wheel_stamp_arg}
+                --op-schema-registry "${HIPKERNELPROVIDER_OP_SCHEMA_REGISTRY}"
         COMMAND "${CMAKE_COMMAND}" -E make_directory "${ARG_OUT_ROOT}"
         COMMAND "${CMAKE_COMMAND}" -E touch "${_stamp}"
         DEPENDS "${HKP_TOOL}" ${_source_inputs} ${_tool_sources}
                 "${_input_manifest}"
+                "${HIPKERNELPROVIDER_OP_SCHEMA_REGISTRY}"
                 ${_interp_dep} ${_wheel_dep}
         COMMENT "hkp: packing root '${ARG_NAME}' for ${ARG_ARCHES}"
         VERBATIM)
@@ -1331,6 +1337,27 @@ function(hkp_add_packaging)
 
     _hkp_resolve_production_root(_source_root _source_root_is_default)
 
+    # The op-schema registry is generated from the hipDNN graph schemas and
+    # committed beside them, so a full checkout always carries it. A checkout
+    # without projects/hipdnn points this at the copy hipDNN installs under
+    # <prefix>/share/hipdnn_flatbuffers_sdk/.
+    get_filename_component(_default_op_schema_registry
+        "${HKP_PKG_DIR}/../../../projects/hipdnn/flatbuffers_sdk/op_schema_registry.json"
+        ABSOLUTE)
+    set(HIPKERNELPROVIDER_OP_SCHEMA_REGISTRY "${_default_op_schema_registry}"
+        CACHE FILEPATH
+        "The op-schema registry JSON that UED graph_match.nodes patterns resolve \
+against when descriptors are packed. Defaults to the committed copy in the \
+repository's hipDNN tree.")
+    if(NOT EXISTS "${HIPKERNELPROVIDER_OP_SCHEMA_REGISTRY}")
+        message(FATAL_ERROR
+            "hkp: the op-schema registry does not exist: "
+            "${HIPKERNELPROVIDER_OP_SCHEMA_REGISTRY}. Descriptor packaging "
+            "resolves UED graph patterns against it. Set "
+            "HIPKERNELPROVIDER_OP_SCHEMA_REGISTRY to the op_schema_registry.json "
+            "that hipDNN installs under share/hipdnn_flatbuffers_sdk/.")
+    endif()
+
     _hkp_resolve_rocke_args(_rocke_args _rocke_comgr_lib)
 
     # A KDP is what arch pruning consumes, so a root holding none has nothing to ship.
@@ -1483,7 +1510,8 @@ function(hkp_register_tests rocm_kpack_dir hipcc rocke_comgr_lib)
     # conftest.py reads HIPKERNELPROVIDER_ROCM_KPACK_DIR, so that is the name
     # forwarded here regardless of which variable resolved it.
     #
-    # HKP_HIPCC names the hipcc that configure found.
+    # HKP_HIPCC names the hipcc that configure found. HKP_OP_SCHEMA_REGISTRY names
+    # the registry the pack step resolves graph patterns against.
     #
     # HKP_CMAKE_COMMAND and HKP_CMAKE_MAKE_PROGRAM name this build's own CMake
     # and build tool. The python environment tests drive real sub-configures and
@@ -1492,7 +1520,8 @@ function(hkp_register_tests rocm_kpack_dir hipcc rocke_comgr_lib)
     set(_pyenv "PYTHONPATH=${HKP_PYTHON_ROOT}"
         "HKP_HIPCC=${hipcc}"
         "HKP_CMAKE_COMMAND=${CMAKE_COMMAND}"
-        "HKP_CMAKE_MAKE_PROGRAM=${CMAKE_MAKE_PROGRAM}")
+        "HKP_CMAKE_MAKE_PROGRAM=${CMAKE_MAKE_PROGRAM}"
+        "HKP_OP_SCHEMA_REGISTRY=${HIPKERNELPROVIDER_OP_SCHEMA_REGISTRY}")
     if(rocm_kpack_dir)
         list(APPEND _pyenv "HIPKERNELPROVIDER_ROCM_KPACK_DIR=${rocm_kpack_dir}")
     endif()

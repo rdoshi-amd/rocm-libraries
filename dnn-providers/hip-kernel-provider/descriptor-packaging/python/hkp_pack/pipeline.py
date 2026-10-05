@@ -1458,6 +1458,7 @@ def run_pipeline(
     rocke_wheel_stamp=None,
     group=GROUP_NAME,
     source_label=None,
+    op_schema_registry=None,
     log=print,
 ):
     """One invocation over the full arch list: compile, prune, pack, install.
@@ -1474,6 +1475,8 @@ def run_pipeline(
     arch with no surviving KDP is skipped cleanly (no folder, no kpack) and
     logged with 'no kernels for <arch>, skipping'; every arch skipping is a
     failure, not a pack. Empty arch list installs nothing (exit 0).
+    op_schema_registry names the registry a UED's `graph_match.nodes` pattern
+    resolves against (see load_flat_input).
     """
     out_root = Path(out_root)
     results = {}
@@ -1481,7 +1484,7 @@ def run_pipeline(
         return results
 
     kpack_mod, comp = load_kpack(rocm_kpack_dir)
-    flat = load_flat_input(source_root, log=log)
+    flat = load_flat_input(source_root, log=log, op_schema_registry=op_schema_registry)
 
     if inter_root is None:
         raise HkpPackError(

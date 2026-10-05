@@ -74,7 +74,11 @@ def _parse_args(argv):
             "the first\n"
             "                 variant that fails to compile stops the pack and "
             "the queued\n"
-            "                 variants are cancelled."
+            "                 variants are cancelled.\n"
+            "  HKP_OP_SCHEMA_REGISTRY\n"
+            "                 The op-schema registry JSON when "
+            "--op-schema-registry is not\n"
+            "                 given."
         ),
     )
     p.add_argument(
@@ -141,6 +145,15 @@ def _parse_args(argv):
         "recorded in each rocKE UKD's provenance, so a shipped kernel names "
         "the wheel that produced it.",
     )
+    p.add_argument(
+        "--op-schema-registry",
+        default=None,
+        help="Path to the op-schema registry JSON a UED's graph_match.nodes "
+        "pattern resolves against. Defaults to HKP_OP_SCHEMA_REGISTRY, then "
+        "to the committed projects/hipdnn/flatbuffers_sdk/op_schema_registry.json "
+        "of the repository this tool lives in. Read only when a UED carries a "
+        "pattern.",
+    )
     return p.parse_args(argv)
 
 
@@ -157,6 +170,7 @@ def main(argv=None):
         rocke_wheel_stamp=args.rocke_wheel_stamp,
         group=args.group,
         source_label=args.source_label,
+        op_schema_registry=args.op_schema_registry,
     )
     return 0
 

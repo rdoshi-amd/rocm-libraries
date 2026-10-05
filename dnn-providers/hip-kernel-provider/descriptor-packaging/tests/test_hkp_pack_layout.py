@@ -1069,14 +1069,15 @@ def test_generic_descriptors_are_validated_against_the_loader_schema(
         ({"name": "test:engine\n"}, None, "scoped"),
         ({"tensor_roots": ["input_a"]}, None, "tensor_roots"),
         ({"graph_match": None}, None, "graph_match"),
-        ({"graph_match": {}}, None, "native"),
+        ({"graph_match": {}}, None, "exactly one of 'nodes' or 'native'"),
         ({"graph_match": {"native": ""}}, None, "native"),
         ({"graph_match": {"native": 7}}, None, "native"),
         (
             {"graph_match": {"native": "hipkernel.pointwise.graph_match", "nodes": []}},
             None,
-            "nodes",
+            "exactly one of 'nodes' or 'native'",
         ),
+        ({"graph_match": {"nodes": "pointwise"}}, None, "'nodes' must be a nonempty"),
         ({"knobs": "block_size"}, None, "knobs"),
         ({"knobs": ["block_size", "block_size"]}, None, "duplicates"),
         ({"numerical_notes": [7]}, None, "numerical_notes"),
@@ -1698,8 +1699,18 @@ def test_embedded_source_generics_are_identical_across_shards(
     authored = root / "pointwise"
     ued_path = authored / "solo.ued.json"
     ued = _read(ued_path)
+    # A declarative pattern packs like any other generic: validated, then
+    # shipped byte for byte.
     ued["graph_match"] = {
-        "native": "hipkernel.pointwise.graph_match",
+        "nodes": [
+            {
+                "kind": "op",
+                "id": "pointwise",
+                "op": "pointwise",
+                "operands": {"in_0": "$input_a", "in_1": "$input_b"},
+                "results": {"out_0": "$output"},
+            }
+        ],
         "x-producer": {"build": "coherent"},
     }
     # Use unusual spacing to catch JSON rewriting.

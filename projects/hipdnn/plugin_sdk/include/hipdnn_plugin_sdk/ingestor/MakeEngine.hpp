@@ -22,9 +22,9 @@ namespace hipdnn_plugin_sdk::ingestor
 
 /// Takes @p set by value so a caller building both an engine and its state manager
 /// builds the set once.
-/// @param graphMatchSymbol The engine's `graph_match` native symbol; empty means the
-///        engine declares none and binds no tokens.
-/// @param describedBy Names the engine in the graph_match resolution failure and in the
+/// @param graphMatch The engine's `graph_match`; std::monostate means the engine
+///        declares none and binds no tokens.
+/// @param describedBy Names the engine in a native graph_match resolution failure and in the
 ///        warning an engine shipping no heuristic gets. Defaulted from @p set, but a
 ///        caller that already moved `set.engine` out must pass it, or both name nothing.
 /// @param engineName The engine's scoped name, used to locate its on-disk
@@ -32,11 +32,10 @@ namespace hipdnn_plugin_sdk::ingestor
 ///        that already moved `set.engine` out must pass it explicitly, or the state
 ///        manager gets an empty name and disables its disk cache.
 template <typename THandle>
-std::unique_ptr<KernelIngestorStateManager<THandle>>
-    makeStateManager(DescriptorSet set,
-                     const std::string& graphMatchSymbol,
-                     std::string describedBy = {},
-                     std::string engineName = {})
+std::unique_ptr<KernelIngestorStateManager<THandle>> makeStateManager(DescriptorSet set,
+                                                                      GraphMatch graphMatch,
+                                                                      std::string describedBy = {},
+                                                                      std::string engineName = {})
 {
     if(describedBy.empty())
     {
@@ -53,7 +52,7 @@ std::unique_ptr<KernelIngestorStateManager<THandle>>
         std::move(set.dispatches),
         std::move(set.packs),
         std::move(heuristic),
-        graphMatchSymbol,
+        std::move(graphMatch),
         describedBy,
         KernelIngestorStateManager<THandle>::DEFAULT_CATALOG_CACHE_CAPACITY,
         std::move(engineName));
@@ -72,13 +71,11 @@ std::unique_ptr<IEngine<THandle, TSettings, TContext>>
     auto describedBy = describeDescriptor("engine", set.engine.name, set.engine.id);
     auto engineName = set.engine.name;
     auto engine = std::move(set.engine);
-    auto graphMatchSymbol = engine.graphMatchNativeSymbol;
+    auto graphMatch = engine.graphMatch;
     return std::make_unique<GenericEngine<THandle, TSettings, TContext>>(
         std::move(engine),
-        makeStateManager<THandle>(std::move(set),
-                                  std::move(graphMatchSymbol),
-                                  std::move(describedBy),
-                                  std::move(engineName)),
+        makeStateManager<THandle>(
+            std::move(set), std::move(graphMatch), std::move(describedBy), std::move(engineName)),
         deviceResolver);
 }
 

@@ -923,3 +923,38 @@ TEST(TestCpuFpReferenceSdpaRaggedFp32, ThrowsOnBadOutputShape)
     EXPECT_THROW((CpuFpReferenceSdpaRagged::forward<float, float, float, float, float>(q, k, v, o)),
                  std::invalid_argument);
 }
+
+// A pre-RFC [B, H, S, D] tensor (BSHD strides, ragged along axis 2) is rejected. With H == S and
+// a full batch the offsets and S_max checks pass, so only the layout check can catch it.
+TEST(TestCpuFpReferenceSdpaRaggedFp32, ThrowsOnHeadsBeforeSequenceLayout)
+{
+    const std::vector<int64_t> dims = {1, 4, 4, 16}; // [B, H, S, D]
+    const std::vector<int64_t> strides = {256, 16, 64, 1};
+    const auto cum = cumTokens({4});
+    std::vector<float> qB(256, 0.5f);
+    std::vector<float> kB(256, 0.5f);
+    std::vector<float> vB(256, 1.0f);
+    std::vector<float> oB(256, 0.0f);
+    const auto wrap = [&](std::vector<float>& buf) {
+        return ShallowRaggedTensor<float>(
+            buf.data(), dims, strides, /*seqAxis=*/2, makeRaggedOffsetAux(cum, 64));
+    };
+    auto q = wrap(qB);
+    auto k = wrap(kB);
+    auto v = wrap(vB);
+    auto o = wrap(oB);
+    EXPECT_THROW((CpuFpReferenceSdpaRagged::forward<float, float, float, float, float>(q, k, v, o)),
+                 std::invalid_argument);
+}
+
+// The layout check itself: the RFC-0014 order passes; heads before sequence, or a seq stride too
+// small for one token, fail.
+TEST(TestCpuFpReferenceSdpaRaggedFp32, TokenMajorLayoutCheck)
+{
+    using hipdnn_test_sdk::detail::isTokenMajorRaggedLayout;
+    EXPECT_TRUE(isTokenMajorRaggedLayout({2, 5, 3, 8}, {120, 24, 8, 1}));
+    EXPECT_TRUE(isTokenMajorRaggedLayout({2, 5, 3, 8}, {160, 32, 8, 1})); // padded token
+    EXPECT_FALSE(isTokenMajorRaggedLayout({2, 3, 5, 8}, {120, 8, 24, 1})); // [B, H, S, D]
+    EXPECT_FALSE(isTokenMajorRaggedLayout({2, 5, 3, 8}, {120, 16, 8, 1})); // tokens overlap
+    EXPECT_FALSE(isTokenMajorRaggedLayout({2, 5, 3}, {15, 3, 1})); // not rank 4
+}

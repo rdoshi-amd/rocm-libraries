@@ -12,6 +12,7 @@
 #include <string>
 #include <vector>
 
+#include <hipdnn_data_sdk/utilities/RaggedTensor.hpp>
 #include <hipdnn_data_sdk/utilities/Tensor.hpp>
 #include <hipdnn_test_sdk/utilities/detail/CpuFpReferenceUtilities.hpp>
 #include <hipdnn_test_sdk/utilities/detail/RaggedTokenBoundaries.hpp>
@@ -82,19 +83,29 @@ public:
                                : (static_cast<ComputeDataType>(1.0)
                                   / std::sqrt(static_cast<ComputeDataType>(headDim)));
 
-        // Tensors that share a packing must agree on every batch's length.
+        // Every ragged tensor must use the RFC-0014 layout, and tensors that share a packing must
+        // agree on every batch's length.
         const std::string who = "CpuFpReferenceSdpaRagged";
         const auto tokens = [&](const hipdnn_data_sdk::utilities::RaggedIterationInfo& info,
-                                int64_t sMax,
+                                const std::vector<int64_t>& dims,
+                                const std::vector<int64_t>& strides,
                                 const char* name) {
-            return detail::raggedTokenBoundaries(info.rowOffsets, info.seqStride, sMax, who, name);
+            if(info.seqAxis != hipdnn_data_sdk::utilities::BSHD_SEQ_AXIS)
+            {
+                throw std::invalid_argument(who + ": " + name
+                                            + " must be ragged along BSHD_SEQ_AXIS (1), got "
+                                            + std::to_string(info.seqAxis));
+            }
+            detail::requireTokenMajorRaggedLayout(dims, strides, who, name);
+            return detail::raggedTokenBoundaries(
+                info.rowOffsets, info.seqStride, dims[1], who, name);
         };
-        const auto qTokens = tokens(*qInfo, q.dims()[1], "Q");
-        const auto kTokens = tokens(*kInfo, k.dims()[1], "K");
+        const auto qTokens = tokens(*qInfo, q.dims(), q.strides(), "Q");
+        const auto kTokens = tokens(*kInfo, k.dims(), k.strides(), "K");
         detail::requireMatchingTokenBoundaries(
-            qTokens, "Q", tokens(*oInfo, o.dims()[1], "O"), "O", who);
+            qTokens, "Q", tokens(*oInfo, o.dims(), o.strides(), "O"), "O", who);
         detail::requireMatchingTokenBoundaries(
-            kTokens, "K", tokens(*vInfo, v.dims()[1], "V"), "V", who);
+            kTokens, "K", tokens(*vInfo, v.dims(), v.strides(), "V"), "V", who);
 
         if(lse != nullptr)
         {
@@ -102,7 +113,7 @@ public:
             if(const auto lseInfo = lse->raggedIterationInfo())
             {
                 detail::requireMatchingTokenBoundaries(
-                    qTokens, "Q", tokens(*lseInfo, lse->dims()[1], "LSE"), "LSE", who);
+                    qTokens, "Q", tokens(*lseInfo, lse->dims(), lse->strides(), "LSE"), "LSE", who);
             }
         }
 

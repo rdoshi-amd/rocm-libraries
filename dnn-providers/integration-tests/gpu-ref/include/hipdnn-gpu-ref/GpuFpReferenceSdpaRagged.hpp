@@ -83,12 +83,14 @@ public:
         const auto seqStrideKv = k.strides()[1];
 
         // Offsets may live only on the device (plan path), so read them back and check them here.
-        // Tensors that share a packing must agree on every batch length.
+        // Every ragged tensor must use the RFC-0014 layout, and tensors that share a packing must
+        // agree on every batch length.
         const std::string who = "GpuFpReferenceSdpaRagged";
         const auto tokenBoundaries = [&](hipdnn_data_sdk::utilities::TensorBase<int32_t>& offsets,
-                                         int64_t seqStride,
-                                         int64_t sMax,
+                                         const std::vector<int64_t>& dims,
+                                         const std::vector<int64_t>& strides,
                                          const char* name) {
+            hipdnn_test_sdk::detail::requireTokenMajorRaggedLayout(dims, strides, who, name);
             if(offsets.strides()[0] != 1)
             {
                 throw std::invalid_argument(who + ": " + name
@@ -96,25 +98,17 @@ public:
             }
             return hipdnn_test_sdk::detail::raggedTokenBoundaries(
                 readRaggedOffsets(offsets.memory().deviceData(), batch + 1),
-                seqStride,
-                sMax,
+                strides[1],
+                dims[1],
                 who,
                 name);
         };
-        const auto qTokens = tokenBoundaries(raggedOffsetQ, seqStrideQ, q.dims()[1], "Q");
-        const auto kTokens = tokenBoundaries(raggedOffsetK, seqStrideKv, k.dims()[1], "K");
+        const auto qTokens = tokenBoundaries(raggedOffsetQ, q.dims(), q.strides(), "Q");
+        const auto kTokens = tokenBoundaries(raggedOffsetK, k.dims(), k.strides(), "K");
         hipdnn_test_sdk::detail::requireMatchingTokenBoundaries(
-            qTokens,
-            "Q",
-            tokenBoundaries(raggedOffsetO, o.strides()[1], o.dims()[1], "O"),
-            "O",
-            who);
+            qTokens, "Q", tokenBoundaries(raggedOffsetO, o.dims(), o.strides(), "O"), "O", who);
         hipdnn_test_sdk::detail::requireMatchingTokenBoundaries(
-            kTokens,
-            "K",
-            tokenBoundaries(raggedOffsetV, v.strides()[1], v.dims()[1], "V"),
-            "V",
-            who);
+            kTokens, "K", tokenBoundaries(raggedOffsetV, v.dims(), v.strides(), "V"), "V", who);
         const int64_t totalQ = qTokens.back();
 
         const float scale = attnScaleValue.has_value()
@@ -152,7 +146,7 @@ public:
                 hipdnn_test_sdk::detail::requireMatchingTokenBoundaries(
                     qTokens,
                     "Q",
-                    tokenBoundaries(*raggedOffsetLse, lseStrides[1], lseDims[1], "LSE"),
+                    tokenBoundaries(*raggedOffsetLse, lseDims, lseStrides, "LSE"),
                     "LSE",
                     who);
             }

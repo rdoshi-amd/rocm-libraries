@@ -11,6 +11,41 @@
 namespace hipdnn_test_sdk::detail
 {
 
+// RFC-0014 packs a ragged tensor token by token: rank-4 [B, S, H, D] with the sequence the
+// outermost axis after batch. The seq stride (strides[1]) must therefore cover one token's whole
+// H x D block, so tokens never overlap. A [B, H, S, D] tensor with BSHD strides fails this,
+// because its axis-1 stride is D.
+inline bool isTokenMajorRaggedLayout(const std::vector<int64_t>& dims,
+                                     const std::vector<int64_t>& strides)
+{
+    if(dims.size() != 4 || strides.size() != 4)
+    {
+        return false;
+    }
+    int64_t tokenSpan = 1; // elements from a token's first to last element, inclusive
+    for(size_t i = 2; i < dims.size(); ++i)
+    {
+        if(dims[i] > 0)
+        {
+            tokenSpan += (dims[i] - 1) * strides[i];
+        }
+    }
+    return strides[1] >= tokenSpan;
+}
+
+inline void requireTokenMajorRaggedLayout(const std::vector<int64_t>& dims,
+                                          const std::vector<int64_t>& strides,
+                                          const std::string& who,
+                                          const char* name)
+{
+    if(!isTokenMajorRaggedLayout(dims, strides))
+    {
+        throw std::invalid_argument(who + ": " + name
+                                    + " must be [B, S, H, D] packed token by token (RFC-0014): "
+                                      "strides[1] must cover one token's H x D block");
+    }
+}
+
 // Converts an RFC-0014 ragged_offset table (B + 1 element offsets) to token boundaries,
 // offset[b] / seqStride. Tensors with different token widths share a packing but not element
 // offsets, so cross-tensor checks compare tokens.

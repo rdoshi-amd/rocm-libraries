@@ -901,3 +901,23 @@ TEST(TestGpuSdpaRaggedFwdFp32, ThrowsOnLseShorterThanQ)
     EXPECT_TRUE(throwsOnQTokens({0, 2, 3}, /*lseSq=*/1));
     EXPECT_FALSE(throwsOnQTokens({0, 2, 3}, /*lseSq=*/2));
 }
+
+// A pre-RFC [B, H, S, D] tensor with BSHD strides is rejected. H == S, and the offsets are in
+// units of strides[1], so the offset and S_max checks alone would accept it.
+TEST(TestGpuSdpaRaggedFwdFp32, ThrowsOnHeadsBeforeSequenceLayout)
+{
+    SKIP_IF_NO_DEVICES();
+    const std::vector<int64_t> dims = {1, 4, 4, 16}; // [B, H, S, D]
+    const std::vector<int64_t> strides = {256, 16, 64, 1};
+    Tensor<float> q(dims, strides);
+    Tensor<float> k(dims, strides);
+    Tensor<float> v(dims, strides);
+    Tensor<float> o(dims, strides);
+    q.fillWithValue(0.5f);
+    k.fillWithValue(0.5f);
+    v.fillWithValue(1.0f);
+    auto off = makeRaggedOffset(cumTokens({4}), 16);
+    EXPECT_THROW((GpuFpReferenceSdpaRagged::fpropRagged<float, float, float, float, float>(
+                     q, k, v, o, off, off, off, off)),
+                 std::invalid_argument);
+}

@@ -229,9 +229,10 @@ private:
     GpuSdpaRaggedFwdParams _params;
 };
 
-// Same unsupported-feature gates as the dense GpuSdpaFwdPlanBuilder, plus: q/k/v/o must each
-// carry a ragged_offset aux, and seq_len_q/kv must be absent (the padded variant is not
-// supported). GpuReferenceGraphExecutor::buildSignatureKey picks dense vs ragged.
+// Same unsupported-feature gates as the dense GpuSdpaFwdPlanBuilder, plus: q/k/v/o (and a packed
+// LSE) must each carry a ragged_offset aux and use the RFC-0014 [B, S, H, D] token-major layout,
+// and seq_len_q/kv must be absent (the padded variant is not supported).
+// GpuReferenceGraphExecutor::buildSignatureKey picks dense vs ragged.
 template <hipdnn_flatbuffers_sdk::data_objects::DataType QDataTypeEnum,
           hipdnn_flatbuffers_sdk::data_objects::DataType KDataTypeEnum,
           hipdnn_flatbuffers_sdk::data_objects::DataType VDataTypeEnum,
@@ -266,7 +267,8 @@ public:
         CHECK_TENSOR_TYPE(tensorMap, nodeAttributes->v_tensor_uid(), VDataTypeEnum);
         CHECK_TENSOR_TYPE(tensorMap, nodeAttributes->o_tensor_uid(), ODataTypeEnum);
 
-        // Each primary needs an INT32 ragged_offset aux. Without them this is a dense SDPA node.
+        // Each primary needs an INT32 ragged_offset aux (without them this is a dense SDPA node)
+        // and the RFC-0014 [B, S, H, D] token-major layout.
         for(const auto primaryUid : {nodeAttributes->q_tensor_uid(),
                                      nodeAttributes->k_tensor_uid(),
                                      nodeAttributes->v_tensor_uid(),
@@ -281,6 +283,10 @@ public:
             CHECK_TENSOR_TYPE(tensorMap,
                               primary->ragged_offset_tensor_uid().value(),
                               hipdnn_flatbuffers_sdk::data_objects::DataType::INT32);
+            if(!isTokenMajor(*primary))
+            {
+                return false;
+            }
         }
 
         // The padded seq-lens variant is not supported. Lengths come from ragged_offset alone.
@@ -395,6 +401,10 @@ public:
                 CHECK_TENSOR_TYPE(tensorMap,
                                   statsRaggedOffsetUid.value(),
                                   hipdnn_flatbuffers_sdk::data_objects::DataType::INT32);
+                if(!isTokenMajor(*tensorMap.at(nodeAttributes->stats_tensor_uid().value())))
+                {
+                    return false;
+                }
             }
         }
 
@@ -504,6 +514,13 @@ public:
                                    descaleQPtr,
                                    descaleKPtr,
                                    descaleVPtr));
+    }
+
+private:
+    static bool isTokenMajor(const hipdnn_flatbuffers_sdk::data_objects::TensorAttributes& attr)
+    {
+        const auto unpacked = hipdnn_test_sdk::detail::unpackTensorAttributes(attr);
+        return hipdnn_test_sdk::detail::isTokenMajorRaggedLayout(unpacked.dims, unpacked.strides);
     }
 };
 

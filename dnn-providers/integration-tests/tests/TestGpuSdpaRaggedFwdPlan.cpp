@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -248,6 +249,72 @@ TEST(TestGpuSdpaRaggedFwdPlanBuilder, IsNotApplicableForDenseNode)
 
     const Bf16Builder bf16Builder;
     EXPECT_FALSE(bf16Builder.isApplicable(graphWrap.getNode(0), graphWrap.getTensorMap()));
+}
+
+namespace
+{
+
+// Re-serializes a graph with one tensor's dims and strides replaced.
+flatbuffers::DetachedBuffer withShape(const void* graphBuffer,
+                                      int64_t uid,
+                                      const std::vector<int64_t>& dims,
+                                      const std::vector<int64_t>& strides)
+{
+    auto graphT = std::unique_ptr<GraphT>(GetGraph(graphBuffer)->UnPack());
+    for(auto& tensor : graphT->tensors)
+    {
+        if(tensor->uid == uid)
+        {
+            tensor->dims = dims;
+            tensor->strides = strides;
+        }
+    }
+    flatbuffers::FlatBufferBuilder builder;
+    builder.Finish(CreateGraph(builder, graphT.get()));
+    return builder.Release();
+}
+
+} // namespace
+
+// A primary or packed LSE in the pre-RFC [B, H, S, D] order (BSHD strides) is not ragged-legal
+// under RFC-0014, so the plan declines it instead of misreading heads as tokens.
+TEST(TestGpuSdpaRaggedFwdPlanBuilder, IsNotApplicableForHeadsBeforeSequenceLayout)
+{
+    const Bf16Builder bf16Builder;
+    // DIMS is [1, S = 8, H = 2, D = 16]; the same memory as [B, H, S, D] has strides
+    // [256, 16, 32, 1].
+    auto graphBuilder = makeRaggedGraph();
+    const auto qOld
+        = withShape(graphBuilder.GetBufferPointer(), Q_UID, {1, 2, 8, 16}, {256, 16, 32, 1});
+    auto qWrap
+        = hipdnn_flatbuffers_sdk::flatbuffer_utilities::GraphWrapper(qOld.data(), qOld.size());
+    EXPECT_FALSE(bf16Builder.isApplicable(qWrap.getNode(0), qWrap.getTensorMap()));
+
+    RaggedSdpaFwdGraphOptions options;
+    options.statsUid = STATS_UID;
+    options.statsLayout = RaggedStatsLayout::PACKED;
+    options.raggedOffsetStatsUid = RAGGED_OFFSET_STATS_UID;
+    auto statsGraph = createRaggedSdpaFwdGraph(Q_UID,
+                                               K_UID,
+                                               V_UID,
+                                               O_UID,
+                                               RAGGED_OFFSET_Q_UID,
+                                               RAGGED_OFFSET_KV_UID,
+                                               /*batch=*/1,
+                                               DIMS,
+                                               DIMS,
+                                               DIMS,
+                                               DIMS,
+                                               DataType::BFLOAT16,
+                                               options);
+    auto statsWrap = hipdnn_flatbuffers_sdk::flatbuffer_utilities::GraphWrapper(
+        statsGraph.GetBufferPointer(), statsGraph.GetSize());
+    ASSERT_TRUE(bf16Builder.isApplicable(statsWrap.getNode(0), statsWrap.getTensorMap()));
+    const auto lseOld
+        = withShape(statsGraph.GetBufferPointer(), STATS_UID, {1, 2, 8, 1}, {16, 1, 2, 1});
+    auto lseWrap
+        = hipdnn_flatbuffers_sdk::flatbuffer_utilities::GraphWrapper(lseOld.data(), lseOld.size());
+    EXPECT_FALSE(bf16Builder.isApplicable(lseWrap.getNode(0), lseWrap.getTensorMap()));
 }
 
 TEST(TestGpuSdpaRaggedFwdPlanBuilder, IsNotApplicableForDtypeMismatch)

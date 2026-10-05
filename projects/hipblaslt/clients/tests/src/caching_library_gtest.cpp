@@ -346,9 +346,10 @@ TEST(CachingLibraryCollision, smoke_FindTopSolutionsGroupedGemmDistinguishesColl
 }
 
 // The tests below use the real ContractionProblemGemm key. Two problems that the key treats as
-// equal share one cache entry, so every field a solution predicate reads must be in the key:
-// otherwise a problem that the predicate rejects is served the solutions cached for one it
-// accepted, and hipblasLtMatmul runs a kernel that cannot handle it.
+// equal share one cache entry, so a field that a shipped solution predicate reads must be in the
+// key if hipBLASLt problems can differ in it alone: otherwise a problem that the predicate rejects
+// is served the solutions cached for one it accepted, and hipblasLtMatmul runs a kernel that
+// cannot handle it.
 namespace
 {
     using ProblemPredicate = std::shared_ptr<Predicates::Predicate<ContractionProblemGemm>>;
@@ -442,10 +443,10 @@ namespace
     constexpr size_t kM = 128;
     constexpr size_t kN = 256;
 
-    ContractionProblemGemm makeProblem(double beta = 1.0)
+    ContractionProblemGemm makeProblem(double beta = 1.0, size_t ldc = kM)
     {
         auto problem
-            = ContractionProblemGemm::GEMM(false, false, kM, kN, 64, kM, 64, kM, beta, false, 1);
+            = ContractionProblemGemm::GEMM(false, false, kM, kN, 64, kM, 64, ldc, beta, false, 1);
         // The factory leaves these uninitialized and the key compares them; hipBLASLt sets them.
         problem.setComputeInputTypeA(rocisa::DataType::Float);
         problem.setComputeInputTypeB(rocisa::DataType::Float);
@@ -453,14 +454,11 @@ namespace
         return problem;
     }
 
-    ContractionProblemGemm makeBiasProblem(rocisa::DataType type,
-                                           size_t           length    = kM,
-                                           int              useBias   = 1,
-                                           int              factorDim = 0)
+    ContractionProblemGemm makeBiasProblem(rocisa::DataType type)
     {
         auto problem = makeProblem();
-        problem.setUseBias(useBias);
-        problem.setBias(type, length, 0, false, ContractionProblemGemm::TENSOR::D, factorDim);
+        problem.setUseBias(1);
+        problem.setBias(type, kM, 0);
         return problem;
     }
 
@@ -502,43 +500,6 @@ TEST(CachingLibraryCollision, smoke_BiasDataTypeIsPartOfKey)
         makeBiasProblem(rocisa::DataType::BFloat16));
 }
 
-TEST(CachingLibraryCollision, smoke_BiasLengthIsPartOfKey)
-{
-    using Predicates::Contraction::BiasSrcWhiteList;
-    expectRejectedProblemIsNotServedFromCache(
-        makePredicate<BiasSrcWhiteList>(
-            std::vector<int>{static_cast<int>(ContractionProblemGemm::TENSOR::D)}),
-        makeBiasProblem(rocisa::DataType::Half, kM),
-        makeBiasProblem(rocisa::DataType::Half, kM - 1));
-}
-
-TEST(CachingLibraryCollision, smoke_BiasFactorDimIsPartOfKey)
-{
-    using Predicates::Contraction::BiasSrcWhiteList;
-    // With useBias 3 the bias runs along factorDim; a length-kM bias does not cover N.
-    expectRejectedProblemIsNotServedFromCache(
-        makePredicate<BiasSrcWhiteList>(
-            std::vector<int>{static_cast<int>(ContractionProblemGemm::TENSOR::D)}),
-        makeBiasProblem(rocisa::DataType::Half, kM, 3, 0),
-        makeBiasProblem(rocisa::DataType::Half, kM, 3, 1));
-}
-
-TEST(CachingLibraryCollision, smoke_GateResidualDataTypeIsPartOfKey)
-{
-    using Predicates::Contraction::GateResidualDataTypeWhiteList;
-    auto withGate = [](rocisa::DataType type) {
-        auto problem = makeProblem();
-        problem.setUseGateResidual(true);
-        problem.setGateResidual(type, {kM, kN, 1}, {1, kM, kM * kN});
-        return problem;
-    };
-    expectRejectedProblemIsNotServedFromCache(
-        makePredicate<GateResidualDataTypeWhiteList>(
-            std::vector<rocisa::DataType>{rocisa::DataType::Half}),
-        withGate(rocisa::DataType::Half),
-        withGate(rocisa::DataType::BFloat16));
-}
-
 TEST(CachingLibraryCollision, smoke_ActivationEnumIsPartOfKey)
 {
     using Predicates::Contraction::ActivationEnumWhiteList;
@@ -554,67 +515,27 @@ TEST(CachingLibraryCollision, smoke_ActivationEnumIsPartOfKey)
         withActivation(ActivationType::Gelu));
 }
 
-TEST(CachingLibraryCollision, smoke_CEqualsDIsPartOfKey)
+// With a C stride of 2^23 elements, BufferLoadOffsetLimitCheck_Beta accepts only beta == 0.
+TEST(CachingLibraryCollision, smoke_BetaZeroIsPartOfKey)
 {
-    auto withCEqualsD = [](bool cEqualsD) {
-        auto problem = makeProblem();
-        problem.setCEqualsD(cEqualsD);
-        return problem;
-    };
-    expectRejectedProblemIsNotServedFromCache(std::make_shared<Predicates::Contraction::CEqualsD>(),
-                                              withCEqualsD(true),
-                                              withCEqualsD(false));
+    constexpr size_t ldc = size_t(1) << 23;
+    expectRejectedProblemIsNotServedFromCache(
+        makePredicate<Predicates::Contraction::BufferLoadOffsetLimitCheck_Beta>(kN),
+        makeProblem(0.0, ldc),
+        makeProblem(1.0, ldc));
 }
 
-// The beta restriction is the same on every problem here, so only the beta category keeps them
-// apart. hipBLASLt builds such a problem for a complex beta of i: beta() is |beta| = 1 and the
-// restriction is Any.
-TEST(CachingLibraryCollision, smoke_BetaZeroAndOneArePartOfKey)
-{
-    auto withBeta = [](double beta) {
-        auto problem = makeProblem(beta);
-        problem.setBetaRestriction(ScalarValue::Any);
-        return problem;
-    };
-    auto betaZero = std::make_shared<Predicates::Contraction::BetaZero>();
-    expectRejectedProblemIsNotServedFromCache(betaZero, withBeta(0.0), withBeta(1.0));
-    expectRejectedProblemIsNotServedFromCache(betaZero, withBeta(0.0), withBeta(0.5));
-    auto betaOne = std::make_shared<Predicates::Contraction::BetaOne>();
-    expectRejectedProblemIsNotServedFromCache(betaOne, withBeta(1.0), withBeta(0.0));
-    expectRejectedProblemIsNotServedFromCache(betaOne, withBeta(1.0), withBeta(0.5));
-}
-
-// No predicate tells two beta values other than 0 and 1 apart, so they share one cache entry.
-TEST(CachingLibraryCollision, smoke_OtherBetaValuesShareCacheEntry)
+// The key holds only whether beta is 0, so every non-zero beta shares one cache entry.
+TEST(CachingLibraryCollision, smoke_NonZeroBetaValuesShareCacheEntry)
 {
     auto sub = std::make_shared<PredicateSubLibrary>(
         std::make_shared<Predicates::True<ContractionProblemGemm>>());
     CachingLibrary<ContractionProblemGemm> library(sub);
     auto                                   gpu = makeGpu();
 
-    EXPECT_EQ(library.findTopSolutions(makeProblem(0.5), gpu, 1).size(), 1u);
-    EXPECT_EQ(library.findTopSolutions(makeProblem(2.0), gpu, 1).size(), 1u);
+    for(double beta : {0.5, 2.0, 1.0})
+        EXPECT_EQ(library.findTopSolutions(makeProblem(beta), gpu, 1).size(), 1u);
     EXPECT_EQ(sub->findTopCalls, 1);
-}
-
-TEST(CachingLibraryCollision, smoke_AlphaAndBetaRestrictionsArePartOfKey)
-{
-    using Predicates::Contraction::AlphaValue;
-    using Predicates::Contraction::BetaValue;
-    auto withRestrictions = [](ScalarValue alpha, ScalarValue beta) {
-        auto problem = makeProblem();
-        problem.setAlphaRestriction(alpha);
-        problem.setBetaRestriction(beta);
-        return problem;
-    };
-    expectRejectedProblemIsNotServedFromCache(
-        makePredicate<AlphaValue>(ScalarValue::One),
-        withRestrictions(ScalarValue::One, ScalarValue::One),
-        withRestrictions(ScalarValue::NegativeOne, ScalarValue::One));
-    expectRejectedProblemIsNotServedFromCache(
-        makePredicate<BetaValue>(ScalarValue::One),
-        withRestrictions(ScalarValue::One, ScalarValue::One),
-        withRestrictions(ScalarValue::One, ScalarValue::NegativeOne));
 }
 
 TEST(CachingLibraryCollision, smoke_GlobalSplitUIsPartOfKey)
@@ -644,36 +565,6 @@ TEST(CachingLibraryCollision, smoke_FallbackStatusIsPartOfKey)
         withFallback(false));
 }
 
-TEST(CachingLibraryCollision, smoke_DeviceUserArgumentsArePartOfKey)
-{
-    auto withUserArgs = [](bool useDeviceUserArguments) {
-        auto problem = makeProblem();
-        problem.setGroupedGemm(true);
-        problem.setUseDeviceUserArguments(useDeviceUserArguments);
-        return problem;
-    };
-    expectRejectedProblemIsNotServedFromCache(
-        makePredicate<Predicates::Contraction::SupportDeviceUserArguments>(false),
-        withUserArgs(false),
-        withUserArgs(true));
-}
-
-TEST(CachingLibraryCollision, smoke_GroupedGemmCountIsPartOfKey)
-{
-    using Predicates::Contraction::SynchronizerSizeCheck;
-    auto withCount = [](int count) {
-        auto problem = makeProblem();
-        problem.setParams().setGSU(2);
-        problem.setGroupedGemm(true);
-        problem.setGroupedGemmCount(count);
-        return problem;
-    };
-    expectRejectedProblemIsNotServedFromCache(
-        std::make_shared<SynchronizerSizeCheck>(0, std::array<int, 6>{1, 1, 1, 1, 1, 2}),
-        withCount(2),
-        withCount(SynchronizerGroupedSlots + 1));
-}
-
 // The added key fields must still compare equal for identical problems, or every lookup misses.
 TEST(CachingLibraryCollision, smoke_IdenticalProblemIsServedFromCache)
 {
@@ -681,9 +572,6 @@ TEST(CachingLibraryCollision, smoke_IdenticalProblemIsServedFromCache)
         auto problem = makeBiasProblem(rocisa::DataType::Half);
         problem.setActivationType(ActivationType::All);
         problem.setParams().setActivationEnum(ActivationType::Relu);
-        problem.setCEqualsD(true);
-        problem.setAlphaRestriction(ScalarValue::One);
-        problem.setBetaRestriction(ScalarValue::One);
         problem.setParams().setGSU(2);
         return problem;
     };

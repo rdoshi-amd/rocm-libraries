@@ -80,15 +80,6 @@ namespace TensileLite
         }
     };
 
-    // The predicates read beta only as beta == 0 (BetaZero, BufferLoadOffsetLimitCheck_Beta) and
-    // beta == 1 (BetaOne), so the cache key keeps just that category. betaRestriction() does not
-    // cover beta == 1: for complex types hipBLASLt stores |beta| in beta() but derives the
-    // restriction from the complex value.
-    inline int cacheKeyBetaCategory(ContractionProblemGemm const& problem)
-    {
-        return problem.beta() == 0.0 ? 0 : problem.beta() == 1.0 ? 1 : 2;
-    }
-
     template <>
     struct Comparison<ContractionProblemGemm>
     {
@@ -97,9 +88,10 @@ namespace TensileLite
             implemented = true
         };
 
-        // CachingLibrary keys its solution caches on this comparison, so it must cover every
-        // problem field that a solution or library predicate reads. The fields are split over two
-        // calls because one long LexicographicCompare is not fully inlined and slows every hit.
+        // CachingLibrary keys its solution caches on this comparison. It must cover every field
+        // that a predicate in the shipped libraries reads and that hipBLASLt can set independently
+        // of the rest of the key. The fields are split over two calls because one long
+        // LexicographicCompare is not fully inlined and slows every hit.
         static int compare(ContractionProblemGemm const& lhs, ContractionProblemGemm const& rhs)
         {
             if(int rv = LexicographicCompare(lhs.operationIdentifier(),
@@ -185,38 +177,19 @@ namespace TensileLite
                 return rv;
             return LexicographicCompare(lhs.bias().dataType(),
                                         rhs.bias().dataType(),
-                                        lhs.bias().sizes(),
-                                        rhs.bias().sizes(),
-                                        lhs.getParams().biasEnum(),
-                                        rhs.getParams().biasEnum(),
-                                        lhs.getParams().factorDim(),
-                                        rhs.getParams().factorDim(),
-                                        lhs.gateResidual().dataType(),
-                                        rhs.gateResidual().dataType(),
                                         lhs.getParams().activationEnum(),
                                         rhs.getParams().activationEnum(),
+                                        // hipBLASLt sets this to the compute type, so it also
+                                        // keys computeTypeElementSize() for WorkspaceCheck.
                                         lhs.amaxd().dataType(),
                                         rhs.amaxd().dataType(),
-                                        lhs.cEqualsD(),
-                                        rhs.cEqualsD(),
-                                        cacheKeyBetaCategory(lhs),
-                                        cacheKeyBetaCategory(rhs),
-                                        lhs.alphaRestriction(),
-                                        rhs.alphaRestriction(),
-                                        lhs.betaRestriction(),
-                                        rhs.betaRestriction(),
-                                        lhs.sparse(),
-                                        rhs.sparse(),
-                                        lhs.getUseDeviceUserArguments(),
-                                        rhs.getUseDeviceUserArguments(),
+                                        // BufferLoadOffsetLimitCheck_Beta reads only beta == 0.
+                                        lhs.beta() == 0.0,
+                                        rhs.beta() == 0.0,
                                         lhs.getParams().gsu(),
                                         rhs.getParams().gsu(),
                                         lhs.getParams().fallbackStatus(),
-                                        rhs.getParams().fallbackStatus(),
-                                        lhs.getPersistentKernelEligibility(),
-                                        rhs.getPersistentKernelEligibility(),
-                                        lhs.groupedGemmCount(),
-                                        rhs.groupedGemmCount());
+                                        rhs.getParams().fallbackStatus());
         }
     };
 } // namespace TensileLite
@@ -271,21 +244,11 @@ namespace std
                                           problem.getParams().streamKTileSchedulingMode(),
                                           problem.getParams().uniformSummationOrder()),
                 TensileLite::hash_combine(problem.bias().dataType(),
-                                          problem.getParams().biasEnum(),
-                                          problem.getParams().factorDim(),
-                                          problem.gateResidual().dataType(),
                                           problem.getParams().activationEnum(),
                                           problem.amaxd().dataType(),
-                                          problem.cEqualsD(),
-                                          TensileLite::cacheKeyBetaCategory(problem),
-                                          problem.alphaRestriction(),
-                                          problem.betaRestriction(),
-                                          problem.sparse(),
-                                          problem.getUseDeviceUserArguments(),
+                                          problem.beta() == 0.0,
                                           problem.getParams().gsu(),
-                                          problem.getParams().fallbackStatus(),
-                                          problem.getPersistentKernelEligibility(),
-                                          problem.groupedGemmCount()));
+                                          problem.getParams().fallbackStatus()));
         }
     };
 

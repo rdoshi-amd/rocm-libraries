@@ -8,16 +8,11 @@
 
 TYPED_TEST(TEST_SUITE_NAME, UnpaddedTailCoverage)
 {
-    constexpr int KT = TestFixture::K_Tile;
-    const std::vector<int> num_loops{1, 2, 3, 4, 5, 7, 32};
-    const std::vector<std::pair<int, int>> MNs{{512, 512}, {512, 1024}, {1024, 512}, {1024, 1024}};
-    for(const auto& [M, N] : MNs)
-    {
-        for(int nl : num_loops)
-        {
-            this->template Run<false, false, false>(M, N, nl * KT);
-        }
-    }
+    run_tail_coverage(
+        TestFixture::K_Tile,
+        {{512, 512}, {512, 1024}, {1024, 512}, {1024, 1024}},
+        0,
+        [this](int M, int N, int K) { this->template Run<false, false, false>(M, N, K); });
 }
 
 // Padded shapes: M is not a tile multiple and K ends half way into the last K tile, so
@@ -28,13 +23,7 @@ TYPED_TEST(TEST_SUITE_NAME, UnpaddedTailCoverage)
 TYPED_TEST(TEST_SUITE_NAME, PaddedTailCoverage)
 {
     constexpr int KT = TestFixture::K_Tile;
-    const std::vector<int> num_loops{1, 2, 3, 4, 5, 7, 32};
-    const std::vector<std::pair<int, int>> MNs{{300, 512}, {776, 256}};
-    for(const auto& [M, N] : MNs)
-    {
-        for(int nl : num_loops)
-        {
-            this->template Run<true, true, true>(M, N, nl * KT - KT / 2);
-        }
-    }
+    run_tail_coverage(KT, {{300, 512}, {776, 256}}, KT / 2, [this](int M, int N, int K) {
+        this->template Run<true, true, true>(M, N, K);
+    });
 }

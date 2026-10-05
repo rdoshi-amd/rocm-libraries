@@ -16,6 +16,7 @@
 #include <stdexcept>
 #include <tuple>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 enum struct GemmPipelineType
@@ -30,6 +31,27 @@ enum struct GemmPipelineType
     CompTDMV1,
     CompTDMV2
 };
+
+// Tail coverage loop shared by the async pipeline tests: calls run(M, N, K) for every {M, N}
+// in MNs and every num_loop in num_loops, with K = num_loop * k_tile - k_short. A non-zero
+// k_short makes K end inside the last K tile without changing num_loop = ceil(K / k_tile).
+template <typename RunFn>
+void run_tail_coverage(int k_tile,
+                       const std::vector<std::pair<int, int>>& MNs,
+                       int k_short,
+                       RunFn&& run,
+                       const std::vector<int>& num_loops = {1, 2, 3, 4, 5, 7, 32})
+{
+    for(const auto& [M, N] : MNs)
+    {
+        for(int nl : num_loops)
+        {
+            SCOPED_TRACE(::testing::Message() << "M=" << M << ", N=" << N << ", num_loop=" << nl
+                                              << ", K=" << nl * k_tile - k_short);
+            run(M, N, nl * k_tile - k_short);
+        }
+    }
+}
 
 template <typename Layout>
 static constexpr inline auto is_row_major(Layout layout_)

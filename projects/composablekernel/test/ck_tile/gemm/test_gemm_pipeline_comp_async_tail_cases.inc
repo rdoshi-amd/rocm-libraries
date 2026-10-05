@@ -9,15 +9,10 @@
 // Keep k_batch = 1 so the loop counts are exact on both XDL and WMMA.
 TYPED_TEST(TEST_SUITE_NAME, UnpaddedTailCoverage)
 {
-    constexpr int KT = TestFixture::K_Tile;
-    const std::vector<int> num_loops{1, 2, 3, 4, 5, 7, 32};
-    const std::vector<std::pair<int, int>> MNs{{512, 512}, {512, 1024}, {1024, 512}, {1024, 1024}};
-    for(const auto& [M, N] : MNs)
-    {
-        for(int nl : num_loops)
-        {
-            SCOPED_TRACE(::testing::Message() << "M=" << M << ", N=" << N << ", num_loop=" << nl);
-            this->template RunSingle<false, false, false, false>(M, N, nl * KT, 0, 0, 0, 1);
-        }
-    }
+    run_tail_coverage(TestFixture::K_Tile,
+                      {{512, 512}, {512, 1024}, {1024, 512}, {1024, 1024}},
+                      0,
+                      [this](int M, int N, int K) {
+                          this->template RunSingle<false, false, false, false>(M, N, K, 0, 0, 0, 1);
+                      });
 }

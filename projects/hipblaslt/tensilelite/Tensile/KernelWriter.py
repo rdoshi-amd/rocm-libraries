@@ -25,6 +25,8 @@
 from .ExecutionPolicy import isPersistent, isPersistentDataParallel, isStreamK, hasStaticAssignment, hasDynamicAssignment, hasHybridAssignment
 from rocisa import rocIsa, countInstruction, countGlobalRead, \
             countLocalRead, countLocalWrite, countWeightedLocalRead, countWeightedLocalWrite, countMFMA, getMFMAs
+from rocisa.instruction import SBitcmp1B32
+
 from rocisa.code import Module, TextBlock, StructuredModule, KernelBody, RegSet
 from rocisa.container import RegisterContainer, replaceHolder, HWRegContainer, VCC, MemTokenData, sgpr, vgpr
 from rocisa.label import LabelManager
@@ -50,6 +52,7 @@ from .KernelWriterModules import *
 from .Component import Component, LraTileProperties
 from .Components.Signature import UserArgumentsInfo
 from .Components.PersistentLoop import PersistentKernelState
+from .Components.StreamK import StreamKKernelState
 from .Components.CustomSchedule import customMainLoopSchedule
 from .Components.ClusterLoad import ClusterLoadTDM
 from .Components.Subtile.Kernel import *
@@ -62,7 +65,7 @@ from .SolutionStructs.Utilities import getMiInputType, isSubtileIterateMode
 from .AsmMemoryInstruction import MemoryInstruction
 from .Activation import ActivationModule
 from .Common import printWarning, roundUp, print2, DebugConfig, DataDirection, \
-  INDEX_CHARS, IsaVersion, log2, clusterEnabled, persistentMulticast, \
+  INDEX_CHARS, IsaVersion, log2, clusterEnabled, \
   swizzleGeometry
 from .Common.GlobalParameters import globalParameters
 from .Common.Architectures import ARCH_CAP_OVERRIDES
@@ -96,6 +99,13 @@ def _needsPreLoopLocalReadDrain(kernel, numItersPLR, preLoopLocalReadDrainEmitte
   # already emitted one; ForceUnrollSubIter does not change that dependency.
   return bool(numItersPLR and kernel["UseCustomMainLoopSchedule"]
               and not preLoopLocalReadDrainEmitted)
+
+
+def clusterBarrierSplitWaveLoop(kernel):
+  # InitCIterWmma clones every chain head and skips v_mov, so the wave-split
+  # loop has to stay off or that clone cannot cover the accumulators.
+  return bool(kernel.get("HalfPLR", 0) and kernel.get("ClusterBarrier", False)
+              and kernel.get("InitCIterWmma", 0) != 1)
 
 
 # Make const values immutable
@@ -457,6 +467,7 @@ class StateValues:
   # tokens occupy 0..numLDSBlk-1 and metadata uses memTokenLdsBufferMeta (4), so
   # the half-1 block starts past both to keep every token unambiguous.
   memTokenLdsSplitBase: int              = 8
+  memTokenEpilogue: int                  = 0
   oneBufferScheduling: bool              = False
   doPackPreSchedulingThisLoop: bool      = False
   doPackPreSchedulingNextLoop: bool      = False
@@ -567,7 +578,7 @@ class ExternClasses:
 ################################################################################
 # Kernel Writer
 ################################################################################
-class KernelWriter(PersistentKernelState, metaclass=abc.ABCMeta):
+class KernelWriter(PersistentKernelState, StreamKKernelState, metaclass=abc.ABCMeta):
   #__metaclass__=abc.ABCMeta
 
   ##############################################################################
@@ -3360,8 +3371,8 @@ class KernelWriter(PersistentKernelState, metaclass=abc.ABCMeta):
         usePrimedSkip = self.isPrefetchAcrossPersistentEnabled(kernel)
         lbl_prefetchPrimedMerge = Label(self.labels.getNameInc("SK_PrefetchPrimedMerge"), "")
         if usePrimedSkip:
-          module.add(SCmpEQU32(src0=sgpr("PersistentPrefetchState"), src1=0, comment="tail prefetch already issued first PGR group?"))
-          module.add(SCBranchSCC0(labelName=lbl_prefetchPrimedMerge.getLabelName(), comment="skip first PGR group if primed"))
+          module.add(SBitcmp1B32(src0=sgpr("PersistentPrefetchState"), src1=0, comment="tail prefetch already issued first PGR group?"))
+          module.add(SCBranchSCC1(labelName=lbl_prefetchPrimedMerge.getLabelName(), comment="skip first PGR group if primed"))
         moduleTmp = self.directToLdsM0Update(kernel, 0, tensorParameters1st)
         module.add(replaceHolder(moduleTmp, 0))
 
@@ -5531,6 +5542,8 @@ class KernelWriter(PersistentKernelState, metaclass=abc.ABCMeta):
       if not self.states.doShadowInit:
         self.removeSgprVarFromPool("SrdWS")
       module.add(self.endSummation(kernel, tensorParametersA, tensorParametersB))
+      if isPersistent(kernel):
+        module.add(Component.TileProcessingStrategy.find(self).skipPhantomTileStore(self, kernel))
       if not self.states.doShadowInit:
         self.removeSgprVarFromPool("SrdD")
         self.removeSgprVarFromPool("SrdC")
@@ -5742,16 +5755,6 @@ class KernelWriter(PersistentKernelState, metaclass=abc.ABCMeta):
       if kernel["PrefetchGlobalRead"] >= 2:
         for idxPgr in range(1, kernel["PrefetchGlobalRead"]):
           module.add(self.openPrefetchGlobalRead2orMore(kernel, idxPgr))
-          # StreamKMulticast: the cooperative-multicast loads emitted below for
-          # this prefetch stage sit inside the single-iteration guard branch,
-          # past the generic per-load cluster-barrier bracketing boundary.
-          # Bracket them with a self-contained cluster-scope handshake so every
-          # multicast load stays synchronized and signal/wait counts stay
-          # balanced. Gated on persistentMulticast (cluster + TDM broadcast):
-          # gfx1250-strict has the cluster launch but no peer ld_bcst to keep in lockstep.
-          if persistentMulticast(kernel):
-            assignment = Component.WorkAssignment.find(self)
-            module.add(assignment.persistentMulticastProloguePrefetchHandshake(self, kernel))
           # For UnrollLoopSwapGlobalReadOrder, we also need to swap ds write A/B order.
           # In scheduling, we always schedule lwa first then lwb second,
           # Putting lwb in lwa's code object can easily change the order.
@@ -6370,7 +6373,7 @@ class KernelWriter(PersistentKernelState, metaclass=abc.ABCMeta):
     module = Module("body")
     module.add(Label("ASM_Start", "Main body of the asm kernel"))
     module.add(self.defineAndResources(kernel, tensorParametersA, tensorParametersB, tPM))
-    module.add(self.disableWmmaArbStall())
+    module.add(self.disableWmmaArbStall(kernel))
 
     # gfx1250 moves SK constants to VGPRs inside defineAndResources so the
     # freed SGPR slots can be reused before defineVariableSgprs runs.
@@ -6583,6 +6586,10 @@ class KernelWriter(PersistentKernelState, metaclass=abc.ABCMeta):
           if kernel["ProblemType"]["MXBlockA"] and kernel["ProblemType"]["MXBlockB"]:
             module.add(self.resetTDMDescriptorForTail(kernel, tensorParameters1st["MX"]))
             module.add(self.resetTDMDescriptorForTail(kernel, tensorParameters2nd["MX"]))
+        # Metadata always uses the non-wave-separated descriptor (see initTDMDescriptor),
+        # regardless of NumWaves, so its tail reset is unconditional on the branch above.
+        if kernel["ProblemType"]["Sparse"] and not kernel["DirectToVgprSparseMetadata"] and kernel["enableTDMMetadata"]:
+          module.add(self.resetTDMDescriptorForTail(kernel, tPM))
 
       # LDS mem tokens: baseline buffer 0 for tail-loop codegen
       self.resetLdsTokensForTailLoop()
@@ -7007,6 +7014,8 @@ class KernelWriter(PersistentKernelState, metaclass=abc.ABCMeta):
       self.removeSgprVarFromPool(grIncName)
 
     module.add(self.endSummation(kernel, tensorParametersA, tensorParametersB))
+    if isPersistent(kernel):
+      module.add(Component.TileProcessingStrategy.find(self).skipPhantomTileStore(self, kernel))
     if not self.states.doShadowInit:
       module.add(self.globalWriteWorkGroupInit(kernel))
 
@@ -7161,13 +7170,9 @@ class KernelWriter(PersistentKernelState, metaclass=abc.ABCMeta):
                                # Cluster-barrier handshake insertion in Gfx1250Backend
                                # (kernel-scope at every OptLevel when set).
                                "ClusterBarrier": bool(kernel.get("ClusterBarrier", False)),
-                               # StreamKMulticast gates the per-iteration cooperative-broadcast
-                               # drain in InsertClusterBarrierPass Rule 3 (mainloop): with PGR>=2
-                               # an `s_wait_tensorcnt 0` is emitted after the cooperative
-                               # tensor_load group so the broadcast retires before the back edge.
-                               # Requires TDM multicast, not just a cluster: without a peer
-                               # ld_bcst that wait has nothing to retire (gfx1250-strict).
-                               "StreamKMulticast": bool(persistentMulticast(kernel)),
+                               # InsertClusterBarrierPass duplicates the Rule 3 loop only for
+                               # HalfPLR kernels that already post a cluster barrier.
+                               "ClusterBarrierSplitWaveLoop": clusterBarrierSplitWaveLoop(kernel),
                                # TDMLoadWaveSyncPass (Gfx1250Backend): insert a barrier
                                # between an urgent and a deferrable tensor_load group.
                                # Off by default.
@@ -7177,6 +7182,11 @@ class KernelWriter(PersistentKernelState, metaclass=abc.ABCMeta):
                                "PrefetchGlobalRead": int(kernel.get("PrefetchGlobalRead", 1)),
                                # PrefetchLocalRead (PLR) for Tensile scheduling. Defaults to 1.
                                "PrefetchLocalRead": int(kernel.get("PrefetchLocalRead", 1)),
+                               # How many unrolled loop bodies were emitted
+                               # (states.unrollLoopCopies). HalfPLR sets this to 3.
+                               # SchedulingKnobHeuristics logs an optimistic ds-read
+                               # throttle from it; DsReadThrottleLatency is unchanged.
+                               "UnrollLoopCopies": int(self.states.unrollLoopCopies),
                                # Abs SW prefetch: mutually exclusive with PC-rel.
                                # Abs takes priority when both are True (backend enforces via else-if).
                                "EnableSwInstructionPrefetchAbs": swpAbsEnable,
@@ -7208,6 +7218,14 @@ class KernelWriter(PersistentKernelState, metaclass=abc.ABCMeta):
           cloneList.append(rocisa.CloneSpec(name="InitCIterWmma",
                                             startLabel="label_LoopBeginL" + self.RAP_ITERN_SUFFIX))
       stinky_module_options["CloneList"] = cloneList
+      # Prefetch lead before its tensor_load, in WMMA windows. With HalfPLR the loop body holds
+      # three TDM stages: measured best ~25 when A is sub-byte and ~40 otherwise on gfx1250
+      # MAF. Without it the body holds one stage, and a lead below 8 tells stinkytofu to issue
+      # the whole prefetch group in the tensor_load's window (temporary per-shape defaults).
+      # stinkytofu drops the lead itself where a stage has under 64 WMMAs (counted in the asm).
+      stinky_module_options["PrefetchLeadWmmas"] = \
+        4 if not kernel["HalfPLR"] else \
+        25 if kernel["ProblemType"]["DataTypeA"].numBytes() < 1 else 40
       if self.states.localReadSideOrder[0] == "B":
         stinky_module_options["DsReadOrder"] = 0  # Preserve selected B-then-A emission.
 
@@ -7294,6 +7312,10 @@ class KernelWriter(PersistentKernelState, metaclass=abc.ABCMeta):
   ##############################################################################
   def _initKernel(self, kernel, tensorParametersA, tensorParametersB):
     assert kernel["KernelLanguage"] == "Assembly"
+    if isPersistentDataParallel(kernel):
+      support = kernel["InternalSupportParams"]
+      if support.get("PersistentLoopArgsVersion", 0) != 1 or support["KernArgsVersion"] != 3:
+        raise ValueError("DataParallel code generation requires PersistentLoopArgsVersion=1 and KernArgsVersion=3")
     self.language   = "ASM"
     # ISA version, such as 803
     version = tuple(kernel["ISA"])
@@ -7726,6 +7748,15 @@ class KernelWriter(PersistentKernelState, metaclass=abc.ABCMeta):
       self.states.ldsReadTokenIdxB = self.states.memTokenLdsDcp["B"][0]
       self.states.ldsTensorTokenIdxA = self.states.memTokenLdsDcp["A"][0]
       self.states.ldsTensorTokenIdxB = self.states.memTokenLdsDcp["B"][0]
+    # Epilogue scratch must not alias a TDM/PAP token: otherwise scheduling
+    # its LDS stores drains unrelated prefetched tensor loads.
+    self.states.memTokenEpilogue = self.states.memTokenLdsBuffer0
+    if kernel.get("_SeparateEpilogueLds", False):
+      usedTokens = set(range(self.states.numLDSBlk)) | {self.states.memTokenLdsBufferMeta}
+      usedTokens.update(token for row in self.states.memTokenLdsSplit for token in row)
+      if self.states.dcpTokenGate:
+        usedTokens.update(token for row in self.states.memTokenLdsDcp.values() for token in row)
+      self.states.memTokenEpilogue = max(usedTokens) + 1
     self.states.ldsReadTokenIdx = self.states.memTokenLdsBuffer0
     self.states.ldsTensorTokenIdx = self.states.memTokenLdsBuffer0
     self.states.ldsDirectToLDSTokenIdx = self.states.memTokenLdsBuffer0
@@ -9905,8 +9936,12 @@ class KernelWriter(PersistentKernelState, metaclass=abc.ABCMeta):
         self.defineSgpr("AddressFlags", numSgprAddressFlags)
         self.states.numSgprPersistent += numSgprAddressFlags
 
-    # Persistent scheduling uses the existing six-word ABI.
-    if hasDynamicAssignment(kernel):
+    # Persistent scheduling ABI.
+    if isPersistentDataParallel(kernel):
+      self.defineSgpr("ItersPerTile", 1)
+      self.defineSgpr("PersistentGrid", 1)
+      self.states.numSgprPersistent += 2
+    elif hasDynamicAssignment(kernel):
       self.defineSgpr("ItersPerTile", 1)
       self.defineSgpr("TotalItems", 1)
       self.defineSgpr("skTiles", 1)
@@ -11132,7 +11167,7 @@ class KernelWriter(PersistentKernelState, metaclass=abc.ABCMeta):
     if self.states.dcpTokenGate:
       for stages in self.states.memTokenLdsDcp.values():
         tokens.extend(stages)
-    if kernel["TDMSplit"] and not kernel["ProblemType"]["Sparse"]:
+    if kernel["TDMSplit"]:
       for row in self.states.memTokenLdsSplit:
         tokens.extend(row)
     return sorted(set(tokens))
@@ -11640,12 +11675,15 @@ class KernelWriter(PersistentKernelState, metaclass=abc.ABCMeta):
     # -- Alpha / Beta ----------------------------------------------------------
     numSgprAlpha = max(1, int(self.states.bpeCinternal / 4))
     _reg("float64" if numSgprAlpha > 1 else "uint32", "Alpha")
-    if kernel["ProblemType"]["UseBeta"]:
+    if kernel["ProblemType"]["UseBeta"] or isPersistentDataParallel(kernel):
       numSgprBeta = max(1, int(self.states.bpeCinternal / 4))
       _reg("float64" if numSgprBeta > 1 else "uint32", "Beta")
 
     # -- StreamK scalar args ---------------------------------------------------
-    if isPersistent(kernel):
+    if isPersistentDataParallel(kernel):
+      _reg("uint32", "ItersPerTile")
+      _reg("uint32", "PersistentGrid")
+    elif isStreamK(kernel):
       _reg("uint32", "ItersPerTile")
       _reg("uint32", "MagicNumberItersPerTile")
       _reg("uint32", "MagicShiftItersPerTile")
@@ -11653,6 +11691,29 @@ class KernelWriter(PersistentKernelState, metaclass=abc.ABCMeta):
       if isPersistent(kernel):
         _reg("uint32", "SKGrid")
         _reg("uint32", "SKTilesAndSplit")
+
+    if isPersistentDataParallel(kernel):
+      # DataParallel uses KernArgsVersion=3, including its permanent beta slot.
+      # Preserve argument order inside each group (strides and packed indices).
+      def dataParallelArgPrefixOrder(arg):
+        name = arg["semantic"]
+        fixed = {
+          "GemmInfo": 0, "InternalArgs": 1, "InternalArgs1": 2, "NumWorkGroups": 3,
+          "DebugBuffer": 6, "AddressA": 7, "AddressMXScaleA": 8,
+          "AddressB": 9, "AddressMXScaleB": 10, "AddressMetadata": 16,
+          "ItersPerTile": 17, "PersistentGrid": 18, "Alpha": 19, "Beta": 20,
+          "AddressD": 21, "AddressC": 22,
+        }
+        if name in fixed:
+          return fixed[name]
+        for prefix, rank in (("SizeFree", 4), ("SizeSum", 5), ("StrideA", 11),
+                             ("StrideScaleA", 12), ("StrideB", 13), ("StrideScaleB", 14),
+                             ("StrideMetadata", 15), ("StrideD", 23), ("StrideC", 24),
+                             ("MagicNumberSize", 25), ("MagicShiftSize", 25)):
+          if name.startswith(prefix):
+            return rank
+        raise ValueError("Unknown DataParallel argument: " + name)
+      self.kernelArgDefs.sort(key=dataParallelArgPrefixOrder)
 
     # -- Scale addresses -------------------------------------------------------
     if kernel["ProblemType"]["UseScaleAB"]:
@@ -11670,6 +11731,12 @@ class KernelWriter(PersistentKernelState, metaclass=abc.ABCMeta):
       if self.states.needBiasType:
         _reg("uint32", "BiasType")
         _reg("uint32", "StrideBias")
+
+    if isPersistentDataParallel(kernel) and self.states.useGateResidual:
+      _reg("address", "AddressGateResidual")
+      _reg("uint32", "GateResidualType")
+      for i in range(self.states.gate.numSgprStrides):
+        _reg("uint32", "StrideGate%d" % i)
 
     # -- FactorDim -------------------------------------------------------------
     enableFactorDim = False
@@ -11709,6 +11776,10 @@ class KernelWriter(PersistentKernelState, metaclass=abc.ABCMeta):
       _reg("address", "Synchronizer")
       _reg("uint32", "GSUSync")
 
+    if isPersistentDataParallel(kernel) and not kernel["ProblemType"]["GroupedGemm"]:
+      for tensor in ("D", "C", "A", "B"):
+        _reg("uint64", "BatchOffset" + tensor)
+
   def _getKernelSource(self, kernel: Solution):
     """
     Returns the source of the kernel, either C++ or assembly.
@@ -11733,6 +11804,8 @@ class KernelWriter(PersistentKernelState, metaclass=abc.ABCMeta):
       "workspaceSizePerElemBias": 0,
       "generated": True,
     }
+    from .CustomKernels import validateCustomPersistentArgs
+    validateCustomPersistentArgs(kernel)
 
     self.stringIdx = 0
     if not kernel["UseSubtileImpl"]:
@@ -11741,6 +11814,23 @@ class KernelWriter(PersistentKernelState, metaclass=abc.ABCMeta):
       (error, kb) = self.kernelBodySubtile(kernel, tensorParametersA, tensorParametersB)
 
     fileString += str(kb)
+
+    if isPersistentDataParallel(kernel):
+      # rocisa emits the outer ABI version. DataParallel kernels must also carry
+      # their policy and payload version when this assembly is reused as a
+      # prebuilt custom kernel without its original solution record.
+      legacyMetadata = "custom.config:\n  InternalSupportParams:\n    KernArgsVersion: 3\n"
+      dataParallelMetadata = (
+        "custom.config:\n"
+        "  TileProcessingStrategy: DataParallel\n"
+        "  WorkAssignment: StaticGrid\n"
+        "  InternalSupportParams:\n"
+        "    KernArgsVersion: 3\n"
+        "    PersistentLoopArgsVersion: 1\n"
+      )
+      if legacyMetadata not in fileString:
+        raise ValueError("DataParallel kernel is missing its KernArgsVersion=3 assembly metadata")
+      fileString = fileString.replace(legacyMetadata, dataParallelMetadata, 1)
 
     if error != 0:
       if self.debugConfig.forceGenerateKernel:

@@ -335,14 +335,18 @@ native pack whose symbols a bundle's UKDs must name before it serves. The packag
 dependencies are documented from the repository root in
 `dnn-providers/hip-kernel-provider/descriptor-packaging/README.md`.
 
-**Required: add a packaging probe for every new architecture or integration.** CI builds
-only a few architectures, so packaging for the others breaks silently unless a probe packs
-them. Declare one `hkp_add_packaging_probe(...)` in
-`dnn-providers/hip-kernel-provider/descriptor-packaging/probes/probes.cmake` (arch, `KIND
-rocke`, the production directory, KDP file and a representative UKD name), then run the
-mutation checks listed under "Packaging probes" in the descriptor-packaging README. No
-CMake guard detects a missing probe, so this step is the only enforcement; no workflow
-edit is needed.
+**Required: add a packaging probe for every new architecture.** CI builds only a few
+architectures, so packaging for the others breaks silently unless a probe packs them.
+Probes are opt-in per architecture: declare one `hkp_add_packaging_probe(ARCH <gfx>)` line
+in `dnn-providers/hip-kernel-provider/descriptor-packaging/probes/probes.cmake`, then run
+the mutation checks listed under "Packaging probes" in the descriptor-packaging README. A
+new pack under an architecture that is already probed, in the production root, is covered
+automatically and needs no new line. Probes are superbuild-only
+(`HIPKERNELPROVIDER_ENABLE_PACKAGING_PROBES`, OFF by default) and pack one instance per
+compile group; the lane's own architecture is covered in full by the normal build. They
+do not cover ASM SDPA, C++/runtime gfx950 paths, install staging, or standalone-UKD
+references (derive fails configure on those). No CMake guard detects a missing probe, so
+this step is the only enforcement; no workflow edit is needed.
 
 Build the provider, validator and required test targets through the configured
 superbuild. For packaged engines, run `hkp_packaging_product` after the full build and

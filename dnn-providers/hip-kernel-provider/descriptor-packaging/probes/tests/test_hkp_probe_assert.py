@@ -1,22 +1,34 @@
 import json
 import shutil
-import subprocess
-import sys
 
 import pytest
 
-from conftest import ARCH, PROBE_ASSERT, STAMP_NAME
+from conftest import ARCH, STAMP_NAME, run_assert
 
 KDP = f"{ARCH}/attention.kdp.json"
+KDP_IN_ARCH_DIR = "attention.kdp.json"
 
 
 class _Tree:
-    """A mutable copy of the packed output plus the assert-tool invocation."""
+    """A mutable copy of the packed rocke output plus the assert-tool invocation."""
 
-    def __init__(self, root, rocm_kpack_dir, comgr_path):
+    def __init__(self, root, expect_path, rocm_kpack_dir, comgr_path):
         self.root = root
+        self.expect_path = expect_path
         self.rocm_kpack_dir = rocm_kpack_dir
         self.comgr_path = comgr_path
+        self.ukd_name = self.kdp()["kernelDescriptors"][0]["name"]
+        self.write_expect([self.entry()])
+
+    def entry(self, name=None, kind="rocke"):
+        return {
+            "kdp": KDP_IN_ARCH_DIR,
+            "name": self.ukd_name if name is None else name,
+            "kind": kind,
+        }
+
+    def write_expect(self, entries):
+        self.expect_path.write_text(json.dumps(entries), encoding="utf-8")
 
     def kdp(self):
         return json.loads((self.root / KDP).read_text(encoding="utf-8"))
@@ -31,26 +43,13 @@ class _Tree:
         edit(kdp)
         (self.root / KDP).write_text(json.dumps(kdp, indent=2), encoding="utf-8")
 
-    def run(self, expect_ukds=1, expect_comgr=None, root=None):
-        cmd = [
-            sys.executable,
-            str(PROBE_ASSERT),
-            "--out-root",
-            str(self.root if root is None else root),
-            "--arch",
-            ARCH,
-            "--kind",
-            "rocke",
-            "--kpack-python-dir",
+    def run(self, expect_comgr=None, root=None):
+        return run_assert(
+            self.root if root is None else root,
+            self.expect_path,
             self.rocm_kpack_dir,
-            "--stamp-name",
-            STAMP_NAME,
-            "--expect-ukds",
-            str(expect_ukds),
-        ]
-        if expect_comgr is not None:
-            cmd += ["--expect-comgr", str(expect_comgr)]
-        return subprocess.run(cmd, capture_output=True, text=True)
+            expect_comgr,
+        )
 
 
 @pytest.fixture
@@ -63,7 +62,7 @@ def tree(packed_root, tmp_path, rocm_kpack_dir, comgr_lib):
             "provenance"
         ]["comgr_path"]
     )
-    return _Tree(copy, rocm_kpack_dir, comgr)
+    return _Tree(copy, tmp_path / "expect.json", rocm_kpack_dir, comgr)
 
 
 def _assert_fails(result, assertion_id):
@@ -125,12 +124,22 @@ def test_no_kdp(tree):
 
 
 def test_ukd_count_mismatch(tree):
-    _assert_fails(tree.run(expect_ukds=2), "ukd-count")
+    tree.write_expect([tree.entry(), tree.entry(name="a_second_ukd")])
+    _assert_fails(tree.run(), "ukd-count")
 
 
 def test_ukd_count_zero_is_failure(tree):
     tree.mutate_kdp(lambda kdp: kdp.update(kernelDescriptors=[]))
-    _assert_fails(tree.run(expect_ukds=0), "ukd-count")
+    tree.write_expect([])
+    _assert_fails(tree.run(), "ukd-count")
+
+
+def test_shipped_ukd_missing_from_expect(tree):
+    # Same count, different identity: the shipped UKD is not the one expected.
+    tree.write_expect([tree.entry(name="not_the_shipped_ukd")])
+    result = tree.run()
+    _assert_fails(result, "ukd-count")
+    assert tree.ukd_name in result.stderr
 
 
 def test_ukd_kind(tree):
@@ -171,6 +180,39 @@ def test_symbol(tree):
 def test_provenance_origin(tree):
     tree.mutate_ukd(lambda u: u["provenance"].update(origin_kind="hip"))
     _assert_fails(tree.run(), "provenance-origin")
+
+
+def test_expected_kind_differs_from_shipped_origin(tree):
+    # The pack records rocke; the expectation says hip.
+    tree.write_expect([tree.entry(kind="hip")])
+    _assert_fails(tree.run(), "provenance-origin")
+
+
+def test_expected_kind_without_rules(tree):
+    tree.write_expect([tree.entry(kind="mystery")])
+    result = tree.run()
+    _assert_fails(result, "no-rules-for-kind")
+    assert "mystery" in result.stderr
+
+
+def test_hip_kind_needs_no_rocke_provenance(tree):
+    # A hip UKD records neither the wheel digest nor comgr; stripping them from a
+    # UKD expected as hip must not fail.
+    def as_hip(u):
+        u["provenance"] = {"origin_kind": "hip", "hipcc_version": "test"}
+
+    tree.mutate_ukd(as_hip)
+    tree.write_expect([tree.entry(kind="hip")])
+    result = tree.run()
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("content", ["{ not json", "{}", '[{"kdp": "x"}]'])
+def test_unusable_expect_exits_2(tree, content):
+    tree.expect_path.write_text(content, encoding="utf-8")
+    result = tree.run()
+    assert result.returncode == 2, result.stderr
+    assert "Traceback" not in result.stderr
 
 
 def test_provenance_wheel_absent(tree):

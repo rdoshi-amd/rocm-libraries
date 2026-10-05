@@ -34,11 +34,16 @@ function(_hkp_probe_check_out_root name out_root)
 endfunction()
 
 # ---------------------------------------------------------------------------
-# _hkp_probe_derive_root(<name> <from_dir> <kdp> <instance> <out_dir>)
-#   Derive the probe root at configure time (FATAL with the tool's stderr when the
-#   instance is missing or ambiguous) and re-run configure when a source file changes.
+# _hkp_probe_derive_root(<name> <from_dir> <arch> <out_dir> <expect_var>)
+#   Derive the probe root at configure time (FATAL with the tool's stderr when the root
+#   cannot be derived, e.g. a KDP for <arch> references a standalone UKD) and re-run
+#   configure when a source file changes. The tool writes <out_dir>/../expect.json, the
+#   list of kept UKDs the assertion expects; <expect_var> receives its path. FATAL when
+#   that list is empty: no KDP under <from_dir> ships for <arch>, so the pack would
+#   prune everything. Deriving is idempotent, so a reconfigure leaves the derived root's
+#   mtimes alone and does not re-pack.
 # ---------------------------------------------------------------------------
-function(_hkp_probe_derive_root name from_dir kdp instance out_dir)
+function(_hkp_probe_derive_root name from_dir arch out_dir expect_var)
     file(GLOB_RECURSE _derive_inputs CONFIGURE_DEPENDS "${from_dir}/*")
     set_property(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" APPEND
                  PROPERTY CMAKE_CONFIGURE_DEPENDS ${_derive_inputs})
@@ -46,8 +51,7 @@ function(_hkp_probe_derive_root name from_dir kdp instance out_dir)
         COMMAND "${Python3_EXECUTABLE}"
                 "${HKP_PKG_DIR}/tools/hkp_probe_derive_root.py"
                 --from "${from_dir}"
-                --kdp "${kdp}"
-                --instance-name "${instance}"
+                --arch "${arch}"
                 --out "${out_dir}"
         RESULT_VARIABLE _derive_rc
         OUTPUT_VARIABLE _derive_out
@@ -57,43 +61,62 @@ function(_hkp_probe_derive_root name from_dir kdp instance out_dir)
             "hkp probe '${name}': deriving the probe root failed (exit "
             "${_derive_rc}).\n${_derive_err}")
     endif()
+
+    get_filename_component(_expect "${out_dir}/../expect.json" ABSOLUTE)
+    file(READ "${_expect}" _expect_json)
+    string(JSON _expect_count LENGTH "${_expect_json}")
+    if(_expect_count EQUAL 0)
+        message(FATAL_ERROR
+            "hkp probe '${name}': no *.kdp.json under ${from_dir} ships for ${arch}, "
+            "so the pack would prune everything.")
+    endif()
     message(STATUS
-        "hkp: probe ${name}: derived root ${out_dir} (instance '${instance}' of ${kdp})")
+        "hkp: probe ${name}: derived root ${out_dir} (${_expect_count} UKD(s) for ${arch})")
+    set(${expect_var} "${_expect}" PARENT_SCOPE)
 endfunction()
 
 # ---------------------------------------------------------------------------
-# hkp_add_packaging_probe(NAME <n> ARCH <gfxNNN> KIND rocke
-#                         DERIVE_FROM <dir> KDP <file> INSTANCE <ukd name>
-#                         [PACK_JOBS <j>])
+# hkp_add_packaging_probe(ARCH <gfxNNN> [ROOT <dir>] [NAME <n>] [PACK_JOBS <j>])
 #   Declare one probe: pack a descriptor root for ARCH and assert the output.
 #
-#   DERIVE_FROM copies <dir> at configure time into the build tree with the named KDP
-#   trimmed to the one UKD whose `name` is INSTANCE, so the probe packs the real
-#   descriptors but compiles a single kernel and the assertion expects exactly one
-#   UKD. A missing or ambiguous INSTANCE is a configure error, never a skip.
+#   ROOT defaults to the production descriptors, HIPKERNELPROVIDER_PRODUCTION_DESCRIPTOR_
+#   SOURCE_ROOT. It is copied at configure time into the build tree with every KDP that
+#   ships for ARCH trimmed to one UKD per compile group (see hkp_probe_derive_root.py),
+#   so the probe packs the real descriptors but compiles each distinct compile path
+#   once. The assertion expects exactly the kept UKDs, each with the provenance of its
+#   producer kind (see hkp_probe_assert.py). Adding a pack under an already probed ARCH
+#   needs no new declaration.
 #
-#   Creates pack target hkp_packaging_probe_<n> (stamp and output under
-#   ${CMAKE_BINARY_DIR}/hkp-probes/<n>/out) and ctest entry hkp-probe-<n>. Only
-#   callable from a probes file loaded by hkp_load_packaging_probes().
+#   NAME defaults to <ARCH> for the production root and <ROOT basename>_<ARCH> for
+#   another ROOT. Creates pack target hkp_packaging_probe_<NAME> (stamp and output under
+#   ${CMAKE_BINARY_DIR}/hkp-probes/<NAME>/out) and ctest entry hkp-probe-<NAME>. The
+#   pack target is part of `all` (hkp_wire_pack_target declares it so), as is the
+#   aggregate hkp_packaging_probes. Only callable from a probes file loaded by
+#   hkp_load_packaging_probes().
 # ---------------------------------------------------------------------------
 function(hkp_add_packaging_probe)
-    cmake_parse_arguments(PARSE_ARGV 0 ARG ""
-        "NAME;ARCH;KIND;DERIVE_FROM;KDP;INSTANCE;PACK_JOBS" "")
+    cmake_parse_arguments(PARSE_ARGV 0 ARG "" "ARCH;ROOT;NAME;PACK_JOBS" "")
 
     if(ARG_UNPARSED_ARGUMENTS)
         message(FATAL_ERROR
             "hkp probe: unknown arguments: ${ARG_UNPARSED_ARGUMENTS}")
     endif()
-    foreach(_required NAME ARCH KIND DERIVE_FROM KDP INSTANCE)
-        if(NOT ARG_${_required})
-            message(FATAL_ERROR
-                "hkp probe: hkp_add_packaging_probe requires ${_required}.")
-        endif()
-    endforeach()
-    if(NOT ARG_KIND STREQUAL "rocke")
+    if(NOT ARG_ARCH)
+        message(FATAL_ERROR "hkp probe: hkp_add_packaging_probe requires ARCH.")
+    endif()
+    if(NOT ARG_ROOT)
+        set(ARG_ROOT "${HIPKERNELPROVIDER_PRODUCTION_DESCRIPTOR_SOURCE_ROOT}")
+        set(_default_name "${ARG_ARCH}")
+    else()
+        get_filename_component(_root_base "${ARG_ROOT}" NAME)
+        set(_default_name "${_root_base}_${ARG_ARCH}")
+    endif()
+    if(NOT ARG_NAME)
+        set(ARG_NAME "${_default_name}")
+    endif()
+    if(NOT IS_DIRECTORY "${ARG_ROOT}")
         message(FATAL_ERROR
-            "hkp probe '${ARG_NAME}': unsupported KIND '${ARG_KIND}'. Supported "
-            "kinds: rocke.")
+            "hkp probe '${ARG_NAME}': ROOT is not a directory: '${ARG_ROOT}'")
     endif()
 
     get_property(_toolchain_set GLOBAL PROPERTY HKP_PROBE_TOOLCHAIN_SET)
@@ -118,19 +141,8 @@ function(hkp_add_packaging_probe)
     _hkp_probe_check_out_root("${ARG_NAME}" "${_out_root}")
 
     set(_root "${_probe_dir}/root")
-    _hkp_probe_derive_root("${ARG_NAME}" "${ARG_DERIVE_FROM}" "${ARG_KDP}"
-                           "${ARG_INSTANCE}" "${_root}")
-
-    if(NOT IS_DIRECTORY "${_root}")
-        message(FATAL_ERROR
-            "hkp probe '${ARG_NAME}': probe root is not a directory: ${_root}")
-    endif()
-    _hkp_root_covers_any_arch(_covers "${_root}" "${ARG_ARCH}")
-    if(NOT _covers)
-        message(FATAL_ERROR
-            "hkp probe '${ARG_NAME}': no *.kdp.json under ${_root} ships for "
-            "${ARG_ARCH}, so the pack would prune everything.")
-    endif()
+    _hkp_probe_derive_root("${ARG_NAME}" "${ARG_ROOT}" "${ARG_ARCH}" "${_root}"
+                           _expect_file)
 
     set(_pack_jobs 1)
     if(ARG_PACK_JOBS)
@@ -149,10 +161,9 @@ function(hkp_add_packaging_probe)
     set(_assert_args
         --out-root "${_out_root}"
         --arch "${ARG_ARCH}"
-        --kind "${ARG_KIND}"
+        --expect "${_expect_file}"
         --kpack-python-dir "${_kpack_dir}"
-        --stamp-name "${HKP_PACK_STAMP_NAME}"
-        --expect-ukds 1)
+        --stamp-name "${HKP_PACK_STAMP_NAME}")
     if(_comgr_lib)
         list(APPEND _assert_args --expect-comgr "${_comgr_lib}")
     endif()

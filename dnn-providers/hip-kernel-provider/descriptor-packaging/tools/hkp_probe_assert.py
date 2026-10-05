@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 """Assert the output of a packaging probe.
 
-A packaging probe packs one integration's descriptors for one explicit
-architecture. This tool inspects the packed output root and fails, with one
-greppable line per failure, unless every shipped descriptor is a well-formed
-kpack-backed kernel produced by the expected producer:
+A packaging probe packs one descriptor root for one explicit architecture.
+This tool inspects the packed output root and fails, with one greppable line per
+failure, unless every shipped descriptor is a well-formed kpack-backed kernel and
+the shipped set is the one `--expect` lists (hkp_probe_derive_root.py writes it):
+a JSON list of {"kdp": <KDP path relative to the arch directory>, "name": <UKD
+name>, "kind": <authored kernel_source.kind>}. Each UKD's provenance is checked
+against the rules of its expected kind (_PROVENANCE_RULES).
 
     hkp_probe_assert: FAIL <assertion-id>: <detail>
 
 Exit status is 0 only when every assertion holds, 1 when any assertion fails,
-and 2 for an unusable invocation (rocm_kpack not importable). Plain python, not
-pytest: a script has no skip path, so it cannot pass without having checked.
+and 2 for an unusable invocation (rocm_kpack not importable, --expect
+unreadable or malformed). Plain python, not pytest: a script has no skip path, so it cannot pass without having checked.
 
 Assertion ids:
     out-root-missing   --out-root is not a directory
@@ -20,16 +23,19 @@ Assertion ids:
     kpack-missing      <out>/<arch>/kpack/hip_kernel_provider_<arch>.kpack absent
     kpack-empty        that archive has size 0
     no-kdp             no *.kdp.json under <out>/<arch>/, or one is not valid JSON
-    ukd-count          kpack-kind UKD count differs from --expect-ukds (or is 0)
+    ukd-count          kpack-kind UKD count differs from the --expect list length (or
+                       is 0), or a shipped UKD is not in the list
     ukd-kind           a UKD's kernel_source.kind is not "kpack"
     arch-field         a KDP or UKD `arch` is not [<arch>]
     kpack-toc          the archive is unreadable or has no entry for a UKD's toc_key
     sha256             the archive blob's sha256 differs from kernel_source.sha256
     signature          a UKD's signature is not a non-empty list
     symbol             a UKD's symbol does not appear in its archive blob
-    provenance-origin  provenance.origin_kind is not the --kind producer
-    provenance-wheel   provenance.rocke_wheel_sha256 is absent or empty
-    provenance-comgr   provenance.comgr_path is not the expected comgr library
+    no-rules-for-kind  a UKD's expected kind has no entry in _PROVENANCE_RULES
+    provenance-origin  provenance.origin_kind is not the UKD's expected kind
+    provenance-wheel   rocke only: provenance.rocke_wheel_sha256 absent or empty
+    provenance-comgr   rocke only: provenance.comgr_path is not the expected comgr
+                       library
 """
 
 import argparse
@@ -40,6 +46,16 @@ import sys
 from pathlib import Path
 
 _PREFIX = "hkp_probe_assert"
+
+# Provenance checks required per producer kind (the authored kernel_source.kind,
+# which the packer records as provenance.origin_kind). The kinds are those the packer
+# compiles to kpack output. A new producer needs one row here AND one row in
+# hkp_probe_derive_root.py's _GROUP_FIELDS; a kind with no row fails
+# `no-rules-for-kind`. hip's `hipcc_version` is optional and unchecked.
+_PROVENANCE_RULES = {
+    "rocke": ("wheel", "comgr"),
+    "hip": (),
+}
 
 
 class _Failures:
@@ -59,12 +75,38 @@ def _parse_args(argv):
     )
     p.add_argument("--out-root", required=True, type=Path)
     p.add_argument("--arch", required=True)
-    p.add_argument("--kind", required=True, choices=["rocke"])
     p.add_argument("--kpack-python-dir", required=True)
     p.add_argument("--stamp-name", required=True)
-    p.add_argument("--expect-ukds", required=True, type=int)
+    p.add_argument("--expect", required=True, type=Path)
     p.add_argument("--expect-comgr", default=None)
     return p.parse_args(argv)
+
+
+class _UsageError(Exception):
+    pass
+
+
+def _load_expect(path):
+    """Read --expect into {(kdp, name): kind}."""
+    try:
+        entries = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise _UsageError(f"cannot read --expect {path}: {type(exc).__name__}: {exc}")
+    if not isinstance(entries, list):
+        raise _UsageError(f"--expect {path} is not a JSON list")
+    expected = {}
+    for entry in entries:
+        if not isinstance(entry, dict) or not all(
+            isinstance(entry.get(k), str) for k in ("kdp", "name", "kind")
+        ):
+            raise _UsageError(
+                f"--expect {path} entry {entry!r} lacks string kdp, name and kind"
+            )
+        key = (entry["kdp"], entry["name"])
+        if key in expected:
+            raise _UsageError(f"--expect {path} lists {key} twice")
+        expected[key] = entry["kind"]
+    return expected
 
 
 def _load_kpack(kpack_python_dir):
@@ -116,6 +158,35 @@ def _check_kpack(args, arch_dir, failures):
     return kpack_path
 
 
+def _check_provenance(args, label, ukd, kind, failures):
+    rules = _PROVENANCE_RULES.get(kind)
+    if rules is None:
+        failures.add(
+            "no-rules-for-kind", f"{label} expected kind {kind!r} has no rules"
+        )
+        return
+    prov = ukd.get("provenance") or {}
+    origin = prov.get("origin_kind")
+    if origin != kind:
+        failures.add(
+            "provenance-origin", f"{label} origin_kind is {origin!r}, not {kind!r}"
+        )
+    if "wheel" in rules:
+        wheel = prov.get("rocke_wheel_sha256")
+        if not isinstance(wheel, str) or not wheel:
+            failures.add("provenance-wheel", f"{label} rocke_wheel_sha256 is {wheel!r}")
+    if "comgr" in rules:
+        comgr = prov.get("comgr_path")
+        if args.expect_comgr is None:
+            if not isinstance(comgr, str) or not comgr:
+                failures.add("provenance-comgr", f"{label} comgr_path is {comgr!r}")
+        elif not isinstance(comgr, str) or not _same_path(comgr, args.expect_comgr):
+            failures.add(
+                "provenance-comgr",
+                f"{label} comgr_path is {comgr!r}, expected {args.expect_comgr}",
+            )
+
+
 def _check_ukd(args, kdp_name, ukd, archive, failures):
     label = f"{kdp_name}:{ukd.get('name', ukd.get('id', '?'))}"
     source = ukd.get("kernel_source") or {}
@@ -131,25 +202,13 @@ def _check_ukd(args, kdp_name, ukd, archive, failures):
     if not isinstance(signature, list) or not signature:
         failures.add("signature", f"{label} signature is {signature!r}")
 
-    prov = ukd.get("provenance") or {}
-    origin = prov.get("origin_kind")
-    if origin != args.kind:
+    expected_kind = args.expected.get((kdp_name, ukd.get("name")))
+    if expected_kind is None:
         failures.add(
-            "provenance-origin", f"{label} origin_kind is {origin!r}, not {args.kind!r}"
+            "ukd-count", f"{label} is not in the --expect list ({args.expect})"
         )
-    wheel = prov.get("rocke_wheel_sha256")
-    if not isinstance(wheel, str) or not wheel:
-        failures.add("provenance-wheel", f"{label} rocke_wheel_sha256 is {wheel!r}")
-
-    comgr = prov.get("comgr_path")
-    if args.expect_comgr is None:
-        if not isinstance(comgr, str) or not comgr:
-            failures.add("provenance-comgr", f"{label} comgr_path is {comgr!r}")
-    elif not isinstance(comgr, str) or not _same_path(comgr, args.expect_comgr):
-        failures.add(
-            "provenance-comgr",
-            f"{label} comgr_path is {comgr!r}, expected {args.expect_comgr}",
-        )
+    else:
+        _check_provenance(args, label, ukd, expected_kind, failures)
 
     if archive is None:
         return True
@@ -194,10 +253,11 @@ def _check_descriptors(args, arch_dir, archive, failures):
         for ukd in kdp.get("kernelDescriptors", []):
             if _check_ukd(args, name, ukd, archive, failures):
                 kpack_ukds += 1
-    if kpack_ukds != args.expect_ukds or kpack_ukds < 1:
+    expected = len(args.expected)
+    if kpack_ukds != expected or kpack_ukds < 1:
         failures.add(
             "ukd-count",
-            f"{kpack_ukds} kpack UKDs under {arch_dir}, expected {args.expect_ukds} "
+            f"{kpack_ukds} kpack UKDs under {arch_dir}, expected {expected} "
             "(and at least 1)",
         )
 
@@ -227,6 +287,11 @@ def run(args):
 
 def main(argv=None):
     args = _parse_args(sys.argv[1:] if argv is None else argv)
+    try:
+        args.expected = _load_expect(args.expect)
+    except _UsageError as exc:
+        print(f"{_PREFIX}: error: {exc}", file=sys.stderr)
+        return 2
     try:
         failures = run(args)
     except ImportError as exc:

@@ -78,6 +78,8 @@ Beyond the shared third-party set, the prefixes must provide HIP/HIPRTC, `hipdnn
 
 Descriptor packaging (`HIPDNN_ENABLE_KERNEL_INGESTOR=ON`) additionally requires a supplied `Python3_EXECUTABLE` with pip, `msgpack`, and `zstandard`, a kpack source tree, and local rocKE wheels. The `hkp_rocke_wheel_python_interp` target installs those wheels only into build-owned storage with no index access or dependency resolution, then uses the supplied interpreter with a subprocess-scoped private import path. It does not install rocKE into the parent Python environment. See [Kernel packing](../../projects/hipdnn/docs/Building.md#kernel-packing-rocm_kpack) for wheel supply modes and prerequisites.
 
+Packaging probes check that the production descriptors pack for an architecture the build does not target. They are opt-in per architecture (one `hkp_add_packaging_probe(ARCH <gfx>)` line in `descriptor-packaging/probes/probes.cmake`; a new pack under an already probed architecture in the production root is covered automatically) and superbuild-only: the `HIPKERNELPROVIDER_ENABLE_PACKAGING_PROBES` option is `OFF` by default. A probe packs one instance per compile group; the lane's own architecture is covered in full by the normal build. They do not cover ASM SDPA, C++/runtime gfx950 paths, install staging, or standalone-UKD references (probe derive fails configure on those). See the [descriptor-packaging README](descriptor-packaging/README.md#packaging-probes).
+
 ### Testing
 
 After building, run the test suites:

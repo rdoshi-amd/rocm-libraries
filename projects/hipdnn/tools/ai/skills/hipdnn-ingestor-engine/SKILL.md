@@ -60,6 +60,12 @@ Completion requires:
 - Exact-engine quick/standard numerics and required negative cases, with selected,
   served, skipped and failed counts. Zero selected, all-skipped or another engine's work
   is not correctness evidence. An extension must dispatch its new candidate.
+- For a new architecture, one `hkp_add_packaging_probe(ARCH <gfx>)` line (opt-in per
+  architecture, superbuild-only, option `HIPKERNELPROVIDER_ENABLE_PACKAGING_PROBES` OFF by
+  default; one instance per compile group; excludes ASM SDPA, C++/runtime gfx950 paths,
+  install staging and standalone-UKD references), with the probe ctest entry
+  `hkp-probe-<arch>` run. A new pack under an already probed architecture is covered
+  automatically.
 - Rebuilt/reinstalled artifacts after tuning or regeneration, then fresh final gates.
   Every final corpus input has an attributable runtime outcome and the complete join
   required by [workloads.md](workloads.md); missing, ambiguous or error outcomes block

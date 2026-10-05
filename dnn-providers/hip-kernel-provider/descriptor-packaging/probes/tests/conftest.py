@@ -10,11 +10,18 @@ _PROBES_TESTS_DIR = Path(__file__).resolve().parent
 _PKG_DIR = _PROBES_TESTS_DIR.parent.parent
 _HKP_DIR = _PKG_DIR.parent
 
+# hkp_pack is imported to pin the probe tools' arch rules to the packer's.
+if str(_PKG_DIR / "python") not in sys.path:
+    sys.path.insert(0, str(_PKG_DIR / "python"))
+
 ARCH = "gfx950"
 STAMP_NAME = ".hkp-packed.stamp"
 HKP_PACK = _PKG_DIR / "tools" / "hkp_pack.py"
 PROBE_ASSERT = _PKG_DIR / "tools" / "hkp_probe_assert.py"
-ROCKE_FIXTURE = _PKG_DIR / "tests" / "fixtures" / "rocke"
+PROBE_DERIVE = _PKG_DIR / "tools" / "hkp_probe_derive_root.py"
+FIXTURES = _PKG_DIR / "tests" / "fixtures"
+ROCKE_FIXTURE = FIXTURES / "rocke"
+MAIN_FIXTURE = FIXTURES / "main"
 _ROCKE_SOURCE_DIRS = (
     _HKP_DIR / "rocke" / "platform" / "python",
     _HKP_DIR / "rocke" / "library",
@@ -47,14 +54,12 @@ def comgr_lib():
     return os.environ.get("ROCKE_COMGR_LIB") or None
 
 
-@pytest.fixture(scope="module")
-def packed_root(tmp_path_factory, rocm_kpack_dir, hipcc, comgr_lib):
-    """Pack the rocke fixture once for gfx950 and return the output root.
+def pack_root(src, work, rocm_kpack_dir, hipcc, comgr_lib):
+    """Pack `src` for ARCH with the real packer; return the output root.
 
     The stamp file is written by CMake in production; it is created here so the
     stamp assertion has something to find.
     """
-    work = tmp_path_factory.mktemp("probe_pack")
     out = work / "out"
     wheel_stamp = work / "rocke-wheel.stamp"
     wheel_stamp.write_text(hashlib.sha256(b"probe-test-wheel").hexdigest() + "\n")
@@ -69,7 +74,7 @@ def packed_root(tmp_path_factory, rocm_kpack_dir, hipcc, comgr_lib):
             sys.executable,
             str(HKP_PACK),
             "--source-root",
-            str(ROCKE_FIXTURE),
+            str(src),
             "--out-root",
             str(out),
             "--arches",
@@ -93,3 +98,30 @@ def packed_root(tmp_path_factory, rocm_kpack_dir, hipcc, comgr_lib):
         pytest.fail(f"hkp_pack failed ({result.returncode}):\n{result.stderr}")
     (out / STAMP_NAME).write_text("")
     return out
+
+
+def run_assert(out_root, expect_path, rocm_kpack_dir, expect_comgr=None):
+    cmd = [
+        sys.executable,
+        str(PROBE_ASSERT),
+        "--out-root",
+        str(out_root),
+        "--arch",
+        ARCH,
+        "--expect",
+        str(expect_path),
+        "--kpack-python-dir",
+        rocm_kpack_dir,
+        "--stamp-name",
+        STAMP_NAME,
+    ]
+    if expect_comgr is not None:
+        cmd += ["--expect-comgr", str(expect_comgr)]
+    return subprocess.run(cmd, capture_output=True, text=True)
+
+
+@pytest.fixture(scope="module")
+def packed_root(tmp_path_factory, rocm_kpack_dir, hipcc, comgr_lib):
+    """The rocke fixture packed once for ARCH."""
+    work = tmp_path_factory.mktemp("probe_pack")
+    return pack_root(ROCKE_FIXTURE, work, rocm_kpack_dir, hipcc, comgr_lib)

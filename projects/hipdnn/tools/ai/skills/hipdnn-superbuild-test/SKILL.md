@@ -117,6 +117,15 @@ The exact article/engine/config for the external suite is resolved at build time
 discovery for available commands, then inspect the specific CTest registration when
 proving a named engine; a generic `command:` line is not that proof.
 
+## Packaging probes
+
+When the build was configured with `HIPKERNELPROVIDER_ENABLE_PACKAGING_PROBES=ON`
+(superbuild-only, OFF by default), the probe ctest entries are `hkp-probe-<arch>` plus
+`hkp-probe-tools`; select them with the anchored `-R '^hkp-probe-'` and
+`--no-tests=error`. Probes are opt-in per architecture and pack one instance per compile
+group; the lane's own architecture is covered in full by the normal build. A pass does not
+cover ASM SDPA, C++/runtime gfx950 paths, install staging or standalone-UKD references.
+
 ## Ingestor proof boundaries
 
 [The ingestor RUNBOOK](../hipdnn-ingestor-engine/RUNBOOK.md) is the sole ordered

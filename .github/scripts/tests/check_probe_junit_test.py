@@ -10,7 +10,7 @@ from pathlib import Path
 sys.path.insert(0, os.fspath(Path(__file__).parent.parent))
 import check_probe_junit as cpj
 
-MANIFEST = ["hkp-probe-gfx950_attention_dense", "hkp-probe-tools"]
+MANIFEST = ["hkp-probe-gfx950", "hkp-probe-tools"]
 
 
 def case_xml(name: str, child: str = "") -> str:

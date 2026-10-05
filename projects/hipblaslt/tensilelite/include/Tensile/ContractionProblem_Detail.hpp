@@ -80,6 +80,15 @@ namespace TensileLite
         }
     };
 
+    // The predicates read beta only as beta == 0 (BetaZero, BufferLoadOffsetLimitCheck_Beta) and
+    // beta == 1 (BetaOne), so the cache key keeps just that category. betaRestriction() does not
+    // cover beta == 1: for complex types hipBLASLt stores |beta| in beta() but derives the
+    // restriction from the complex value.
+    inline int cacheKeyBetaCategory(ContractionProblemGemm const& problem)
+    {
+        return problem.beta() == 0.0 ? 0 : problem.beta() == 1.0 ? 1 : 2;
+    }
+
     template <>
     struct Comparison<ContractionProblemGemm>
     {
@@ -186,14 +195,12 @@ namespace TensileLite
                                         rhs.gateResidual().dataType(),
                                         lhs.getParams().activationEnum(),
                                         rhs.getParams().activationEnum(),
-                                        lhs.computeType(),
-                                        rhs.computeType(),
                                         lhs.amaxd().dataType(),
                                         rhs.amaxd().dataType(),
                                         lhs.cEqualsD(),
                                         rhs.cEqualsD(),
-                                        lhs.beta(),
-                                        rhs.beta(),
+                                        cacheKeyBetaCategory(lhs),
+                                        cacheKeyBetaCategory(rhs),
                                         lhs.alphaRestriction(),
                                         rhs.alphaRestriction(),
                                         lhs.betaRestriction(),
@@ -268,10 +275,9 @@ namespace std
                                           problem.getParams().factorDim(),
                                           problem.gateResidual().dataType(),
                                           problem.getParams().activationEnum(),
-                                          problem.computeType(),
                                           problem.amaxd().dataType(),
                                           problem.cEqualsD(),
-                                          problem.beta(),
+                                          TensileLite::cacheKeyBetaCategory(problem),
                                           problem.alphaRestriction(),
                                           problem.betaRestriction(),
                                           problem.sparse(),

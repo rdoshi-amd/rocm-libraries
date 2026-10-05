@@ -566,10 +566,35 @@ TEST(CachingLibraryCollision, smoke_CEqualsDIsPartOfKey)
                                               withCEqualsD(false));
 }
 
-TEST(CachingLibraryCollision, smoke_BetaIsPartOfKey)
+// The beta restriction is the same on every problem here, so only the beta category keeps them
+// apart. hipBLASLt builds such a problem for a complex beta of i: beta() is |beta| = 1 and the
+// restriction is Any.
+TEST(CachingLibraryCollision, smoke_BetaZeroAndOneArePartOfKey)
 {
-    expectRejectedProblemIsNotServedFromCache(
-        std::make_shared<Predicates::Contraction::BetaZero>(), makeProblem(0.0), makeProblem(1.0));
+    auto withBeta = [](double beta) {
+        auto problem = makeProblem(beta);
+        problem.setBetaRestriction(ScalarValue::Any);
+        return problem;
+    };
+    auto betaZero = std::make_shared<Predicates::Contraction::BetaZero>();
+    expectRejectedProblemIsNotServedFromCache(betaZero, withBeta(0.0), withBeta(1.0));
+    expectRejectedProblemIsNotServedFromCache(betaZero, withBeta(0.0), withBeta(0.5));
+    auto betaOne = std::make_shared<Predicates::Contraction::BetaOne>();
+    expectRejectedProblemIsNotServedFromCache(betaOne, withBeta(1.0), withBeta(0.0));
+    expectRejectedProblemIsNotServedFromCache(betaOne, withBeta(1.0), withBeta(0.5));
+}
+
+// No predicate tells two beta values other than 0 and 1 apart, so they share one cache entry.
+TEST(CachingLibraryCollision, smoke_OtherBetaValuesShareCacheEntry)
+{
+    auto sub = std::make_shared<PredicateSubLibrary>(
+        std::make_shared<Predicates::True<ContractionProblemGemm>>());
+    CachingLibrary<ContractionProblemGemm> library(sub);
+    auto                                   gpu = makeGpu();
+
+    EXPECT_EQ(library.findTopSolutions(makeProblem(0.5), gpu, 1).size(), 1u);
+    EXPECT_EQ(library.findTopSolutions(makeProblem(2.0), gpu, 1).size(), 1u);
+    EXPECT_EQ(sub->findTopCalls, 1);
 }
 
 TEST(CachingLibraryCollision, smoke_AlphaAndBetaRestrictionsArePartOfKey)

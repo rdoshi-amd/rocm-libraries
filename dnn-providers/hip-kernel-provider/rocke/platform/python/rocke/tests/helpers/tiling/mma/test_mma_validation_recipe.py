@@ -44,6 +44,9 @@ def _mma(shape=(32, 32, 16), atom=(16, 16, 16), **kw):
     ((48, 16, 32), (16, 16, 16)),   # rectangular + k_sub > 1
 ])
 def test_canonical_layouts_byte_identical_to_plan_accessors(shape, atom):
+    # p is canonical-style (no style=), so its style-faithful a_layout/b_layout/c_layout ARE the canonical
+    # encodings -- this pins the helper to what CanonicalStyle produces. Under a non-canonical style the
+    # accessors differ from canonical_layouts by design.
     p = TileMmaPlan(shape, a="f16", b="f16", c="f32", target="gfx90a", tiling=Tiling(atom_shape=atom))
     assert canonical_layouts(p.traits, p.subtiles) == (p.a_layout, p.b_layout, p.c_layout)
 
@@ -65,9 +68,9 @@ def test_canonical_layouts_matches_canonical_style_operands():
 
 def test_accepts_machine_native_accumulator():
     mma = _mma()
-    a = make_fragment(mma.a_operand_desc, F16)
-    b = make_fragment(mma.b_operand_desc, F16)
-    c = make_fragment(mma.c_native_desc, F32)
+    a = make_fragment(mma.a_desc, F16)
+    b = make_fragment(mma.b_desc, F16)
+    c = make_fragment(mma.c_desc, F32)
     _validate_mma_issue(a, b, c, mma.plan)   # the machine-native C -- must not raise
 
 
@@ -76,20 +79,21 @@ def test_rejects_swapped_accumulator_canonical():
     # it owns output (0,1), but the machine derives (1,0). The accumulator check pins the register-to-(m,n)
     # map, so the mislabel is rejected -- this store-to-wrong-coordinate was silently accepted before.
     mma = _mma()
-    a = make_fragment(mma.a_operand_desc, F16)
-    b = make_fragment(mma.b_operand_desc, F16)
+    a = make_fragment(mma.a_desc, F16)
+    b = make_fragment(mma.b_desc, F16)
     c_bad = make_fragment(mma.c_desc.swap_dims(0, 1), F32)
     with pytest.raises(ValueError, match="accumulator .C. not consistent"):
         _validate_mma_issue(a, b, c_bad, mma.plan)
 
 
 def test_rejects_canonical_accumulator_under_interleaved():
-    # An interleaved-style plan derives a different accumulator than the canonical c_desc, so feeding the
-    # canonical c_desc is a mislabel. The accumulator check catches it.
+    # An interleaved plan derives its own accumulator from the interleaved operands. Feeding a CANONICAL
+    # C is a mislabel; the accumulator check catches it. The canonical C is built from a canonical plan --
+    # the interleaved object no longer exposes a canonical accessor (its c_desc IS the interleaved C).
     mma = _mma(style=InterleavedStyle())
-    a = make_fragment(mma.a_operand_desc, F16)
-    b = make_fragment(mma.b_operand_desc, F16)
-    c_bad = make_fragment(mma.c_desc, F32)
+    a = make_fragment(mma.a_desc, F16)
+    b = make_fragment(mma.b_desc, F16)
+    c_bad = make_fragment(_mma().c_desc, F32)
     with pytest.raises(ValueError, match="accumulator .C. not consistent"):
         _validate_mma_issue(a, b, c_bad, mma.plan)
 
@@ -115,17 +119,17 @@ def test_rejects_reorderable_k_misorder():
     # error. The driver issues no reorder, so it must still REJECT; a valid kernel would transform_fragment
     # one operand first. This is the one path where an un-reordered warning would otherwise miscompile.
     mma = _mma(shape=(16, 16, 32))   # k_sub = 2 gives K register buckets to permute
-    a_reordered = mma.a_operand_desc.reorder_registers((1, 2, 0))
+    a_reordered = mma.a_desc.reorder_registers((1, 2, 0))
     m_sub, n_sub, _ = mma.subtiles
-    a_canon, _, _ = canonical_layouts(mma.traits, mma.subtiles)
+    a_canon = mma.a_desc.layout
     # Self-check the construction: A is still SOUND, and the pair is genuinely a reorder-fixable WARNING --
     # so this test cannot pass for the wrong reason if the layout math shifts.
     assert mma_operand_layout_sound(a_reordered.layout, a_canon, role="A").severity == "ok"
-    assert mma_pair_k_aligned(a_reordered.layout, mma.b_operand_desc.layout,
+    assert mma_pair_k_aligned(a_reordered.layout, mma.b_desc.layout,
                               a_free_atoms=m_sub, b_free_atoms=n_sub).severity == "warning"
     a = make_fragment(a_reordered, F16)
-    b = make_fragment(mma.b_operand_desc, F16)
-    c = make_fragment(mma.c_native_desc, F32)
+    b = make_fragment(mma.b_desc, F16)
+    c = make_fragment(mma.c_desc, F32)
     with pytest.raises(ValueError, match="not K-aligned"):
         _validate_mma_issue(a, b, c, mma.plan)
 
@@ -136,12 +140,12 @@ def test_rejects_unsound_operand():
     # error -- and must do so BEFORE the accumulator check, which flows operands through the machine and is
     # undefined on an unsound one.
     mma = _mma(shape=(32, 16, 32))
-    a_unsound = mma.a_operand_desc.reorder_registers((1, 0, 2, 3))
-    a_canon, _, _ = canonical_layouts(mma.traits, mma.subtiles)
+    a_unsound = mma.a_desc.reorder_registers((1, 0, 2, 3))
+    a_canon = mma.a_desc.layout
     assert mma_operand_layout_sound(a_unsound.layout, a_canon, role="A").severity == "error"  # self-check
     a = make_fragment(a_unsound, F16)
-    b = make_fragment(mma.b_operand_desc, F16)
-    c = make_fragment(mma.c_native_desc, F32)
+    b = make_fragment(mma.b_desc, F16)
+    c = make_fragment(mma.c_desc, F32)
     with pytest.raises(ValueError, match="operand not sound"):
         _validate_mma_issue(a, b, c, mma.plan)
 
@@ -153,11 +157,11 @@ def test_soundness_gate_accepts_rectangular_wave():
     # verify_mma_soundness must PASS it: it threads the per-atom free-atom counts so the K-match is per
     # atom, not a whole-fragment compare that would false-error. (This case previously had no coverage.)
     mma = _mma(shape=(32, 16, 16))   # m_sub = 2, n_sub = 1
-    a_canon, b_canon, c_canon = canonical_layouts(mma.traits, mma.subtiles)
+    a_canon, b_canon, c_canon = mma.a_desc.layout, mma.b_desc.layout, mma.c_desc.layout
     op = PipelineOp(
         kind="mma", seq=0,
-        a_enc=mma.a_operand_desc.layout, b_enc=mma.b_operand_desc.layout,
-        c_enc=mma.c_native_desc.layout, a_canon=a_canon, b_canon=b_canon, c_canon=c_canon,
+        a_enc=mma.a_desc.layout, b_enc=mma.b_desc.layout,
+        c_enc=mma.c_desc.layout, a_canon=a_canon, b_canon=b_canon, c_canon=c_canon,
         a_free_atoms=2, b_free_atoms=1,
     )
     pipeline = types.SimpleNamespace(ops=[op])

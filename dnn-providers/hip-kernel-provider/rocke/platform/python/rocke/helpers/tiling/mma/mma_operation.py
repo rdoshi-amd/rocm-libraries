@@ -86,25 +86,16 @@ class TileMma:
     def c_layout(self): return self._plan.c_layout
 
     @property
+    def a_desc(self): return self._plan.a_desc
+
+    @property
+    def b_desc(self): return self._plan.b_desc
+
+    @property
     def c_desc(self): return self._plan.c_desc
 
     @property
     def style(self): return self._plan.style
-
-    @property
-    def a_operand_desc(self): return self._plan.a_operand_desc
-
-    @property
-    def b_operand_desc(self): return self._plan.b_operand_desc
-
-    @property
-    def c_native_desc(self): return self._plan.c_native_desc
-
-    def a_desc(self):
-        return self._plan.a_desc()
-
-    def b_desc(self):
-        return self._plan.b_desc()
 
     def emit_op(self):
         return self._plan.emit_op()

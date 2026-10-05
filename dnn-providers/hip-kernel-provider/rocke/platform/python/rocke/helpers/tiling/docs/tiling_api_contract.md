@@ -106,7 +106,7 @@ implements the protocol. The rules a new style MUST honor -- so it stays correct
   contents is deferred -- no shipped kernel both clips and stages through LDS yet.*
 - **Operands only; C is always derived.** A style influences the accumulator ONLY through the
   K-distribution its operands present to the atom; it must not supply a C descriptor. The runtime
-  C-oracle (`_c_native_desc == derive_c_distribution(...)`) catches a style whose C geometry the
+  C-oracle (`c_desc == derive_c_distribution(...)`) catches a style whose C geometry the
   atom-derived descriptor cannot express.
 - **Which gates police it:** `mma_operand_layout_sound` + `mma_pair_k_aligned` (per-operand soundness +
   pairwise K-match, against the canonical machine from the `canonical_layouts` helper -- never the style's

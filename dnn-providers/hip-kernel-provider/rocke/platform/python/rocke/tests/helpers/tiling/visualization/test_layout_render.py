@@ -59,6 +59,23 @@ def test_register_and_logical_components_render(tmp_path):
 def test_mma_tee_renders(tmp_path):
     p = lr.MmaTee.from_mma(_mma()).render(str(tmp_path), name="tee")
     assert os.path.getsize(p) > 0
+def test_from_mma_default_renders_canonical_not_the_configured_style():
+    # Plan-3 guard: the viz default stays CANONICAL even for a STYLED mma. from_mma must source its
+    # operand pictures from the canonical machine, NOT the style-faithful a_layout (which now returns the
+    # interleaved layout). Without this the viz would silently render the interleaved operand by default,
+    # and every other viz test uses a canonical fixture so none would catch it.
+    from rocke.helpers.tiling.mma import Tiling
+    from rocke.helpers.tiling.mma.styles import InterleavedStyle
+    from rocke.helpers.tiling.transforms import as_forward_map
+    atom = Tiling(atom_shape=(16, 16, 16))
+    styled = TileMma((32, 32, 16), a="f16", b="f16", c="f32", target="gfx90a", tiling=atom,
+                     style=InterleavedStyle())
+    canon = TileMma((32, 32, 16), a="f16", b="f16", c="f32", target="gfx90a", tiling=atom)  # canonical sibling
+    # self-check: the configured a_layout really is NON-canonical, or this test proves nothing.
+    assert styled.a_layout != canon.a_desc.layout
+    tee = lr.MmaTee.from_mma(styled)
+    assert as_forward_map(tee.a_enc) == as_forward_map(canon.a_desc.layout)   # default renders canonical
+    assert as_forward_map(tee.a_enc) != as_forward_map(styled.a_layout)       # NOT the configured style
 def test_logical_view_modes(tmp_path):
     mma = _mma()
     base = dict(dist=mma.a_layout, dims=("M", "K"), row_coord=0, label_coords="logical")

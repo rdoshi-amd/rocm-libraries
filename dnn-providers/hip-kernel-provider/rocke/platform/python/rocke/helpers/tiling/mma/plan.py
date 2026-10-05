@@ -24,7 +24,7 @@ from ..encoding import WarpDistributionEncoding
 from ..fragments import TileDesc
 from ..traits import MmaTraits, MmaTraitsCatalog, load_mma_traits
 from .styles import CanonicalStyle, LayoutStyle
-from .warp_encoding import a_warp_encoding, b_warp_encoding, c_warp_encoding, canonical_layouts
+from .warp_encoding import canonical_layouts
 
 __all__ = ["Tiling", "TileMmaPlan"]
 
@@ -269,73 +269,51 @@ class TileMmaPlan:
         return self._traits
 
     @property
-    def a_layout(self) -> WarpDistributionEncoding:
-        """A operand layout for the WHOLE wave tile (M and K subtiles folded in)."""
-        return a_warp_encoding(
-            self._traits, m_iter=self._m_subtiles, k_iter=self._k_subtiles
-        )
-
-    @property
-    def b_layout(self) -> WarpDistributionEncoding:
-        """B operand layout for the WHOLE wave tile (N and K subtiles folded in)."""
-        return b_warp_encoding(
-            self._traits, n_iter=self._n_subtiles, k_iter=self._k_subtiles
-        )
-
-    @property
-    def c_layout(self) -> WarpDistributionEncoding:
-        """C accumulator layout for the WHOLE wave tile (M and N subtiles; K contracted)."""
-        return c_warp_encoding(
-            self._traits, m_iter=self._m_subtiles, n_iter=self._n_subtiles
-        )
-
-    def a_desc(self):
-        """A operand `TileDesc` -- wave (M, K) shape + canonical `a_layout`, ready for `load_fragment`.
-        For a non-canonical operand layout, pass ``style=`` and use :attr:`a_operand_desc`."""
-        layout = a_warp_encoding(self._traits, m_iter=self._m_subtiles, k_iter=self._k_subtiles)
-        return TileDesc((self._shape[0], self._shape[2]), layout)
-
-    def b_desc(self):
-        """B operand `TileDesc` -- wave (N, K) shape + canonical `b_layout` (see :meth:`a_desc`)."""
-        layout = b_warp_encoding(self._traits, n_iter=self._n_subtiles, k_iter=self._k_subtiles)
-        return TileDesc((self._shape[1], self._shape[2]), layout)
-
-    @property
-    def c_desc(self):
-        """C accumulator `TileDesc` -- wave (M, N) shape + `c_layout` (no interleaved variant)."""
-        return TileDesc((self._shape[0], self._shape[1]), self.c_layout)
-
-    @property
-    def style(self) -> LayoutStyle:
-        """The resolved layout style (default :class:`CanonicalStyle`)."""
-        return self._style
-
-    @property
-    def a_operand_desc(self) -> TileDesc:
-        """A operand MMA-ready `TileDesc` for the whole wave tile, as the resolved STYLE produces it.
-        DISTINCT from `a_layout`: canonical makes them coincide; interleaved reorders the registers.
-        A fragment is built from THIS (and the driver slices it); `a_layout`/`b_layout` stay the
-        atom-canonical, style-immutable `mma_operand_layout_sound` machine reference."""
+    def a_desc(self) -> TileDesc:
+        """A operand MMA-ready `TileDesc` for the whole wave tile, in the CONFIGURED style. The object
+        returns what the author set: canonical by default, or the style's reordered operand when a
+        ``style=`` was given. The canonical machine reference is NOT on the object -- the soundness
+        checks build it from the ``canonical_layouts`` helper."""
         return self._style.operand_desc(
             self._traits, role="A", free_sub=self._m_subtiles, k_sub=self._k_subtiles
         )
 
     @property
-    def b_operand_desc(self) -> TileDesc:
-        """B operand MMA-ready `TileDesc` for the whole wave tile, as the resolved STYLE produces it
-        (see :attr:`a_operand_desc`)."""
+    def b_desc(self) -> TileDesc:
+        """B operand MMA-ready `TileDesc` for the whole wave tile, in the CONFIGURED style (see
+        :attr:`a_desc`)."""
         return self._style.operand_desc(
             self._traits, role="B", free_sub=self._n_subtiles, k_sub=self._k_subtiles
         )
 
     @property
-    def c_native_desc(self) -> TileDesc:
-        """The DERIVED native C accumulator `TileDesc` for the resolved style. Always atom-derived -- a
+    def c_desc(self) -> TileDesc:
+        """The DERIVED native C accumulator `TileDesc` for the CONFIGURED style. Always atom-derived -- a
         style never supplies a C descriptor; it only influences C via the K-distribution its operands
         present to the atom (validated by the C-oracle at construction)."""
         return self._style.accumulator_desc(
             self._traits, m_sub=self._m_subtiles, n_sub=self._n_subtiles
         )
+
+    @property
+    def a_layout(self) -> WarpDistributionEncoding:
+        """A operand layout for the WHOLE wave tile, in the configured style (``a_desc.layout``)."""
+        return self.a_desc.layout
+
+    @property
+    def b_layout(self) -> WarpDistributionEncoding:
+        """B operand layout for the WHOLE wave tile, in the configured style (``b_desc.layout``)."""
+        return self.b_desc.layout
+
+    @property
+    def c_layout(self) -> WarpDistributionEncoding:
+        """C accumulator layout for the WHOLE wave tile, in the configured style (``c_desc.layout``)."""
+        return self.c_desc.layout
+
+    @property
+    def style(self) -> LayoutStyle:
+        """The resolved layout style (default :class:`CanonicalStyle`)."""
+        return self._style
 
     def _assert_operands_sound(self) -> None:
         """Per-operand soundness at CONSTRUCTION: each operand descriptor the style produces must be a
@@ -347,8 +325,8 @@ class TileMmaPlan:
 
         a_canon, b_canon, _ = canonical_layouts(self._traits, self.subtiles)
         for role, operand_desc, canon in (
-            ("A", self.a_operand_desc, a_canon),
-            ("B", self.b_operand_desc, b_canon),
+            ("A", self.a_desc, a_canon),
+            ("B", self.b_desc, b_canon),
         ):
             d = mma_operand_layout_sound(operand_desc.layout, canon, role=role)
             if d.severity != "ok":
@@ -363,10 +341,10 @@ class TileMmaPlan:
         from ..transforms._core import as_forward_map
 
         a_canon, b_canon, c_canon = canonical_layouts(self._traits, self.subtiles)
-        native = as_forward_map(self.c_native_desc.layout)
+        native = as_forward_map(self.c_desc.layout)
         oracle = derive_c_distribution(
-            self.a_operand_desc.layout,
-            self.b_operand_desc.layout,
+            self.a_desc.layout,
+            self.b_desc.layout,
             a_canon=a_canon,
             b_canon=b_canon,
             c_canon=c_canon,

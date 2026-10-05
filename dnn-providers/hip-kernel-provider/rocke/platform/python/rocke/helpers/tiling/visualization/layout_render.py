@@ -1809,10 +1809,13 @@ class MmaTee:
         wave shape, and the canonical machine refs (so C is derived by flowing the A/B labels through the
         machine). Supply a different ``a_enc``/``b_enc`` via overrides to feed non-canonical distributions."""
         t = mma.traits
-        # a_enc/b_enc/c_enc = the encodings to RENDER (the public accessor). a_canon/b_canon/c_canon = the
-        # canonical reference from the `canonical_layouts` helper (so C derives through the fixed machine).
-        a_canon, b_canon, c_canon = canonical_layouts(mma.traits, mma.subtiles)
-        base = dict(a_enc=mma.a_layout, b_enc=mma.b_layout, c_enc=mma.c_layout, atom_shape=mma.atom_shape,
+        # a_enc/b_enc/c_enc default to the CANONICAL machine (the same `canonical_layouts` refs), matching
+        # the documented default-canonical render. The object's style-faithful `a_layout`/etc. are
+        # deliberately NOT read here, so the viz default is decoupled from the configured style; pass an
+        # `a_enc`/`b_enc` override to render a styled operand. C derives by flowing the supplied labels
+        # through the refs.
+        a_canon, b_canon, c_canon = canonical_layouts(t, mma.subtiles)
+        base = dict(a_enc=a_canon, b_enc=b_canon, c_enc=c_canon, atom_shape=mma.atom_shape,
                     a_canon=a_canon, b_canon=b_canon, c_canon=c_canon,
                     a_dtype_bits=_dtype_bits(t.input_dtype), b_dtype_bits=_dtype_bits(t.input_dtype),
                     c_dtype_bits=_dtype_bits(t.output_dtype), in_dtype=t.input_dtype, out_dtype=t.output_dtype,

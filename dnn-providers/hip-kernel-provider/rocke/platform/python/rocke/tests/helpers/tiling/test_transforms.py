@@ -203,9 +203,10 @@ def test_interleaved_style_operand_desc_is_distinct() -> None:
                     tiling=Tiling(atom_shape=(16, 16, 16)))
     inter = TileMma((32, 32, 32), a="f16", b="f16", c="f32", target="gfx90a",
                     tiling=Tiling(atom_shape=(16, 16, 16)), style=InterleavedStyle())
-    assert canon.a_operand_desc == canon.a_desc()
-    assert inter.a_operand_desc != inter.a_desc()
-    assert inter.b_operand_desc != inter.b_desc()
+    # canonical and interleaved styles produce DIFFERENT operand layouts over the same machine. canon is a
+    # canonical-style object, so its own accessor IS the canonical reference (no helper needed here).
+    assert inter.a_desc.layout != canon.a_desc.layout
+    assert inter.b_desc.layout != canon.b_desc.layout
 
 
 # --- reorder_between: derive the in-register reorder that bridges coalesced -> requested order ---

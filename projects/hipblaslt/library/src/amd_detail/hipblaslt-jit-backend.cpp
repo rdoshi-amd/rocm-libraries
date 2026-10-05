@@ -9,6 +9,7 @@
 #include "hipblaslt_internal.hpp"
 #include "rocblaslt.h"
 #include "rocblaslt_arch_revision.hpp"
+#include "rocblaslt_mat_utils.hpp"
 #include <Tensile/hip/HipHardware.hpp>
 #include <algorithm>
 #include <map>
@@ -538,6 +539,11 @@ namespace hipblaslt_ext::experimental
                     return HIPBLAS_STATUS_INVALID_VALUE;
                 }
                 diagnostics.backend = jit->components().backend->info().name;
+                if(validateWorkspaceSize(__func__, workspaceLimit) != rocblaslt_status_success)
+                {
+                    diagnostics.message = "The workspace limit exceeds UINT32_MAX bytes";
+                    return HIPBLAS_STATUS_INVALID_VALUE;
+                }
                 int current         = -1;
                 if(hipGetDevice(&current) != hipSuccess)
                     return HIPBLAS_STATUS_INTERNAL_ERROR;
@@ -624,6 +630,11 @@ namespace hipblaslt_ext::experimental
                 auto components     = jit->components();
                 const auto& info    = components.backend->info();
                 diagnostics.backend = info.name;
+                if(validateWorkspaceSize(__func__, workspaceLimit) != rocblaslt_status_success)
+                {
+                    diagnostics.message = "The workspace limit exceeds UINT32_MAX bytes";
+                    return HIPBLAS_STATUS_INVALID_VALUE;
+                }
                 int current         = -1;
                 if(hipGetDevice(&current) != hipSuccess)
                     return HIPBLAS_STATUS_INTERNAL_ERROR;

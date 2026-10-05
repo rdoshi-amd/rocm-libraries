@@ -104,10 +104,10 @@ def tearDownModule():
 class TestWarpTileRow(unittest.TestCase):
     def test_matches_dispatcher_arch_specs(self):
         row = WARP_TILE_SUPPORTED_COMBINATIONS["gfx1250"]
-        for dtype, tiles in gub.GFX1250_WARP_TILES.items():
+        for dtype, tiles in vu.GFX1250_WARP_TILES.items():
             (key,) = [k for k in row if k.startswith(f"{dtype}_{dtype}_")]
             self.assertEqual(sorted(map(list, tiles)), sorted(row[key]), dtype)
-        self.assertEqual({k.split("_")[0] for k in row}, set(gub.GFX1250_WARP_TILES))
+        self.assertEqual({k.split("_")[0] for k in row}, set(vu.GFX1250_WARP_TILES))
 
     def test_row_not_applied_to_other_arches(self):
         # 32x32x16 is not a gfx1250 WMMA tile but is valid on gfx942/gfx950.
@@ -155,7 +155,7 @@ class _ConfigLintMixin:
         name = k["name"]
         self.assertIn(
             [t["warp_tile_m"], t["warp_tile_n"], t["warp_tile_k"]],
-            list(gub.GFX1250_WARP_TILES[dtype]),
+            list(vu.GFX1250_WARP_TILES[dtype]),
             name,
         )
         self.assertTrue(

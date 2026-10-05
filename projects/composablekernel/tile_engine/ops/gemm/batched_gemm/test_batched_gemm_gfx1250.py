@@ -353,6 +353,10 @@ class TestDtypeLayoutCoverage(unittest.TestCase):
         # Other (arch, dtype) pairs are left to the shared table.
         self.assertTrue(vu.op_warp_tile_allowed("gfx942", "fp16", [16, 16, 4]))
 
+    def test_only_opted_in_ops_use_op_rows(self):
+        self.assertTrue(BatchedGemmKernelBuilder.USE_OP_WARP_TILE_ROWS)
+        self.assertFalse(BatchedGemmKernelBuilder.__bases__[0].USE_OP_WARP_TILE_ROWS)
+
     def test_op_rows_match_dispatcher_arch_specs(self):
         for arch, rows in vu.OP_ARCH_WARP_TILES.items():
             spec = WARP_TILE_SUPPORTED_COMBINATIONS[arch]

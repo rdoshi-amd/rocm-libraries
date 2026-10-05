@@ -34,17 +34,8 @@ def _import_split_trait():
     return trait_parse_module.split_trait
 
 
-def _import_validation_utils():
-    module_path = Path(__file__).resolve().parent.parent / "gemm_validation_utils.py"
-    spec = importlib.util.spec_from_file_location("gemm_validation_utils", module_path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
 GemmKernelBuilder = _import_gemm_kernel_builder()
 split_trait = _import_split_trait()
-_vu = _import_validation_utils()
 
 # Must match BATCHED_SUPPORTED_DTYPES/LAYOUTS in dispatcher batched_gemm_utils.py
 # (not imported here: that module pulls numpy/ctypes into CMake codegen).
@@ -73,6 +64,9 @@ def check_batched_gemm_pipelines(pipelines):
 
 
 class BatchedGemmKernelBuilder(GemmKernelBuilder):
+    # bf16/fp32/fp8/bf8 reach gfx1250, gfx1201 and fp32 rows the shared table lacks.
+    USE_OP_WARP_TILE_ROWS = True
+
     def __init__(
         self,
         working_path,
@@ -112,14 +106,6 @@ class BatchedGemmKernelBuilder(GemmKernelBuilder):
             trait_config.get("pipeline", {}).get("values", []) or []
         )
         return super()._generate_trait_combinations()
-
-    def _validate_tile_config(self, *dims_and_pipeline):
-        """Drop warp tiles the arch has no MFMA/WMMA instruction for (op-local)."""
-        if not _vu.op_warp_tile_allowed(
-            self.gpu_target, self.datatype, dims_and_pipeline[6:9]
-        ):
-            return False
-        return super()._validate_tile_config(*dims_and_pipeline)
 
     def _check_pipeline_allowed_for_op(self, pipeline, epilogue, *pads):
         check_batched_gemm_pipelines([pipeline])

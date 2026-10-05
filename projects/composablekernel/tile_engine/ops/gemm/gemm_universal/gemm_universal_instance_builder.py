@@ -38,22 +38,11 @@ def _import_split_trait():
 GemmKernelBuilder = _import_gemm_kernel_builder()
 split_trait = _import_split_trait()
 
-def _import_validation_utils():
-    parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    spec = importlib.util.spec_from_file_location(
-        "gemm_validation_utils", os.path.join(parent_dir, "gemm_validation_utils.py")
-    )
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-_vu = _import_validation_utils()
-# gfx1250 WMMA warp tiles per datatype, shared with the other GEMM ops that opt in.
-GFX1250_WARP_TILES = _vu.GFX1250_WARP_TILES
-
 
 class GemmUniversalKernelBuilder(GemmKernelBuilder):
+    # gfx1250 WMMA rows (and gfx1201 bf16/fp8/bf8) are not in the shared table.
+    USE_OP_WARP_TILE_ROWS = True
+
     def __init__(
         self,
         kernel_name_prefix,
@@ -78,37 +67,6 @@ class GemmUniversalKernelBuilder(GemmKernelBuilder):
             seed=seed,
             tier=tier,
             manifest_path=manifest_path,
-        )
-
-    def _validate_tile_config(
-        self,
-        tile_m,
-        tile_n,
-        tile_k,
-        warp_m,
-        warp_n,
-        warp_k,
-        warp_tile_m,
-        warp_tile_n,
-        warp_tile_k,
-        pipeline,
-    ):
-        """Restrict gfx1250 warp tiles to its WMMA row, then run the shared checks."""
-        if not _vu.op_warp_tile_allowed(
-            self.gpu_target, self.datatype, (warp_tile_m, warp_tile_n, warp_tile_k)
-        ):
-            return False
-        return super()._validate_tile_config(
-            tile_m,
-            tile_n,
-            tile_k,
-            warp_m,
-            warp_n,
-            warp_k,
-            warp_tile_m,
-            warp_tile_n,
-            warp_tile_k,
-            pipeline,
         )
 
     def _generate_all_individual(self, num_workers=None):

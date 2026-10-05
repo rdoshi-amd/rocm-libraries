@@ -1,6 +1,6 @@
 /*! \file */
 /* ************************************************************************
-* Copyright (C) 2020-2025 Advanced Micro Devices, Inc. All rights Reserved.
+* Copyright (C) 2020-2026 Advanced Micro Devices, Inc. All rights Reserved.
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy
 * of this software and associated documentation files (the "Software"), to deal
@@ -77,7 +77,7 @@ rocsparse_status rocsparse::coo2dense_template(rocsparse_handle          handle,
     ROCSPARSE_CHECKARG_ARRAY(5, nnz, coo_val);
     ROCSPARSE_CHECKARG_ARRAY(6, nnz, coo_row_ind);
     ROCSPARSE_CHECKARG_ARRAY(7, nnz, coo_col_ind);
-    ROCSPARSE_CHECKARG_ARRAY(8, (m * n), A);
+    ROCSPARSE_CHECKARG_ARRAY(8, (static_cast<int64_t>(m) * n), A);
 
     // Stream
     hipStream_t stream = handle->stream;
@@ -91,7 +91,13 @@ rocsparse_status rocsparse::coo2dense_template(rocsparse_handle          handle,
     // RETURN_IF_HIP_ERROR(hipMemset2DAsync(A, sizeof(T) * lda, 0, sizeof(T) * mn, nm, stream));
 
     // Set memory to zero.
-    RETURN_IF_ROCSPARSE_ERROR(rocsparse::valset_2d(handle, m, n, lda, static_cast<T>(0), A, order));
+    RETURN_IF_ROCSPARSE_ERROR(rocsparse::valset_2d(handle,
+                                                   static_cast<int64_t>(m),
+                                                   static_cast<int64_t>(n),
+                                                   lda,
+                                                   static_cast<T>(0),
+                                                   A,
+                                                   order));
 
     if(nnz > 0)
     {

@@ -1003,6 +1003,38 @@ namespace
         EXPECT_EQ(hipGetLastError(), hipSuccess);
     }
 
+    // Empty outputs have no elements to verify, even when the unused operands are null.
+    TEST(FastCheckDevice_pre_checkin, empty_results_launch_nothing)
+    {
+        for(auto dims : {std::vector<int64_t>{0, 5, 1},
+                         std::vector<int64_t>{5, 0, 1},
+                         std::vector<int64_t>{5, 5, 0}})
+            for(int64_t k : {0, 7})
+            {
+                SCOPED_TRACE(::testing::Message() << "M=" << dims[0] << ", N=" << dims[1]
+                                                  << ", batch=" << dims[2] << ", K=" << k);
+                FastCheckProblem p;
+                p.M           = dims[0];
+                p.N           = dims[1];
+                p.K           = k;
+                p.beta        = 1;
+                p.batch_count = dims[2];
+                auto expected = fast_check_expected(p);
+                ASSERT_TRUE(expected.status.passed) << expected.status.message;
+                auto host = fast_check_result(p, expected);
+                EXPECT_TRUE(host.passed) << host.message;
+                (void)hipGetLastError();
+                auto device = fast_check_result_device(p, expected, nullptr);
+                EXPECT_TRUE(device.passed) << device.message;
+                EXPECT_EQ(hipGetLastError(), hipSuccess);
+
+                // No-work handling must not mask an error reported by the expected pass.
+                expected.status = {false, "invalid inputs"};
+                EXPECT_FALSE(fast_check_result(p, expected).passed);
+                EXPECT_FALSE(fast_check_result_device(p, expected, nullptr).passed);
+            }
+    }
+
     // An exact result beyond the range the compute type holds exactly is reported as such: its
     // GPU value depends on the summation order, so it is neither right nor wrong.
     TEST(FastCheck_pre_checkin, results_beyond_the_compute_range_are_reported)

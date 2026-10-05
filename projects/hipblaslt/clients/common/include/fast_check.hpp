@@ -55,6 +55,8 @@ struct FastCheckMatrix
 };
 
 // D = alpha * diag(scale_alpha_vec) * op(A) * op(B) + beta * C + bias * 1^T, per batch.
+// Dimensions and batch_count must be nonnegative. If M, N or batch_count is zero,
+// there are no output elements and verification does not read any operands.
 struct FastCheckProblem
 {
     int64_t M           = 0;

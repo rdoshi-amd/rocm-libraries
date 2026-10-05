@@ -246,6 +246,26 @@ if(BUILD_TESTING)
                  rocke_moe_fused_mega_spec_guards)
   endif()
 
+  # Host-side stream-K partition math: the launch grid it sizes is invisible to
+  # the byte-identity gate, so the C port is pinned to the Python reference
+  # vectors here (mirrors tests/instances/test_streamk_iter_partition.py).
+  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/instances/streamk_iter_partition.cpp")
+    add_executable(rocke_streamk_iter_partition instances/streamk_iter_partition.cpp)
+    target_link_libraries(rocke_streamk_iter_partition PRIVATE rocke_core)
+    if(UNIX)
+      target_link_libraries(rocke_streamk_iter_partition PRIVATE m)
+    endif()
+    add_test(NAME rocke_streamk_iter_partition COMMAND rocke_streamk_iter_partition)
+    set_tests_properties(rocke_streamk_iter_partition PROPERTIES LABELS "ckc;unit;host")
+    rocke_cxx_test_installed_name(_rocke_installed_name rocke_streamk_iter_partition)
+    set_target_properties(rocke_streamk_iter_partition
+                          PROPERTIES OUTPUT_NAME "${_rocke_installed_name}")
+    install(TARGETS rocke_streamk_iter_partition
+            RUNTIME DESTINATION ${ROCKE_CXX_TEST_INSTALL_DIR})
+    set_property(GLOBAL APPEND PROPERTY ROCKE_INSTALL_TEST_TARGETS
+                 rocke_streamk_iter_partition)
+  endif()
+
   # Apply YAML-driven quick/standard/comprehensive/full tier labels to the
   # tests above. Must run in THIS directory scope: CMake (pre-3.28,
   # which this project's cmake_minimum_required predates) only allows

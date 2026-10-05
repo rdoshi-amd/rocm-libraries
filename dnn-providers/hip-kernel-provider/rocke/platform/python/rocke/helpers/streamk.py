@@ -55,13 +55,19 @@ from ..core.ir import IRBuilder, Value
 
 
 __all__ = [
+    "StreamKIterPartition",
     "StreamKPartition",
     "StreamKReductionStrategy",
     "compute_streamk_grid_size",
     "emit_streamk_decode",
+    "emit_streamk_iter_range",
     "emit_streamk_partial_load_accumulate",
     "emit_streamk_partial_store",
+    "emit_streamk_sk_start_iter",
+    "streamk_end_iter",
+    "streamk_iter_partition",
     "streamk_num_macro_tiles",
+    "streamk_start_iter",
 ]
 
 
@@ -233,3 +239,219 @@ def emit_streamk_partial_load_accumulate(
     (``WaitStorePartialDone``).
     """
     return b.global_load_f32(workspace, workspace_off)
+
+
+# ---------------------------------------------------------------------------
+# Iteration-balanced stream-K (CK Tile StreamKTilePartitioner)
+# ---------------------------------------------------------------------------
+#
+# The partition above hands every CTA exactly one ``tile_k`` slice. CK Tile's
+# production partitioner instead balances *iterations*: output tiles that
+# divide evenly across the CTA pool run data-parallel (one CTA per tile, the
+# full K loop), and only the remainder is spread over ``max_active_wgs``
+# stream-K CTAs, each owning a contiguous range of MAC-loop iterations that
+# may straddle output-tile boundaries. rocKE compiles one kernel per shape, so
+# the whole partition is resolved host-side and folded into the IR as
+# constants; the device only maps its linear CTA id onto an iteration range.
+
+
+def _ceil_div(a: int, b: int) -> int:
+    return -(-a // b)
+
+
+@dataclass(frozen=True)
+class StreamKIterPartition:
+    """CK Tile ``StreamKTilePartitionerBase``, resolved at build time.
+
+    ``m_tiles`` / ``n_tiles`` count output tiles (a caller folding a batch
+    dimension into M passes the folded count). ``iters_per_tile`` is the
+    number of ``tile_k`` MAC iterations per output tile. ``max_active_wgs``
+    is the CTA pool the stream-K remainder is spread over; every stream-K
+    CTA must be co-resident with the CTAs it waits on, so it must not exceed
+    the number of workgroups the device can hold at once.
+    """
+
+    m_tiles: int
+    n_tiles: int
+    iters_per_tile: int
+    max_active_wgs: int
+    persistent: bool = False
+
+    @property
+    def num_tiles(self) -> int:
+        return self.m_tiles * self.n_tiles
+
+    @property
+    def sk_tiles(self) -> int:
+        """Output tiles handled by stream-K CTAs (0 means all-DP).
+
+        CK's "DP + 2-tile SK": when the tiles do not divide the CTA pool,
+        one full wave of tiles plus the remainder go stream-K so the last
+        wave is balanced; a remainder too small to give every stream-K CTA
+        at least one iteration falls back to all-DP.
+        """
+        rem = self.num_tiles % self.max_active_wgs
+        if rem == 0:
+            return 0
+        if self.num_tiles > self.max_active_wgs:
+            tiles = self.max_active_wgs + rem
+        else:
+            tiles = self.num_tiles
+        if tiles * self.iters_per_tile < self.max_active_wgs:
+            return 0
+        return tiles
+
+    @property
+    def sk_ctas(self) -> int:
+        return self.max_active_wgs if self.sk_tiles else 0
+
+    @property
+    def total_sk_iters(self) -> int:
+        return self.sk_tiles * self.iters_per_tile
+
+    @property
+    def iters_per_sk_cta(self) -> int:
+        return self.total_sk_iters // self.sk_ctas if self.sk_ctas else 0
+
+    @property
+    def extra_iters(self) -> int:
+        """Stream-K CTAs ``[0, extra_iters)`` own one extra iteration."""
+        return self.total_sk_iters % self.sk_ctas if self.sk_ctas else 0
+
+    @property
+    def dp_tiles(self) -> int:
+        return self.num_tiles - self.sk_tiles
+
+    @property
+    def total_dp_iters(self) -> int:
+        return self.dp_tiles * self.iters_per_tile
+
+    @property
+    def grid_size(self) -> int:
+        """Launch grid (x): the CTA pool when persistent, else DP + SK CTAs."""
+        if self.persistent:
+            return self.max_active_wgs
+        return self.dp_tiles + self.sk_ctas
+
+    @property
+    def max_linear_partners(self) -> int:
+        """Upper bound on the CTAs a tile owner has to fold in (Linear).
+
+        The owner is whichever CTA covers the tile's first iteration; it may
+        have started in the previous tile, so it is only guaranteed one
+        iteration here. Every later contributor covers at least
+        ``iters_per_sk_cta`` iterations until the tile ends.
+        """
+        if not self.sk_ctas:
+            return 0
+        return _ceil_div(self.iters_per_tile - 1, self.iters_per_sk_cta)
+
+    @property
+    def tree_rounds(self) -> int:
+        """Pairwise fan-in rounds bounding the Tree fixup: ``ceil(log2)`` of
+        the most CTAs that can contribute to one tile."""
+        contributors = self.max_linear_partners + 1
+        return (contributors - 1).bit_length()
+
+    @property
+    def flags_bytes(self) -> int:
+        """One i32 flag per stream-K CTA, padded to 256 bytes (CK layout)."""
+        return _ceil_div(4 * self.sk_ctas, 256) * 256
+
+
+def streamk_iter_partition(
+    *,
+    m_tiles: int,
+    n_tiles: int,
+    iters_per_tile: int,
+    max_active_wgs: int,
+    persistent: bool = False,
+) -> StreamKIterPartition:
+    """Validated constructor for :class:`StreamKIterPartition`."""
+    for name, v in (
+        ("m_tiles", m_tiles),
+        ("n_tiles", n_tiles),
+        ("iters_per_tile", iters_per_tile),
+        ("max_active_wgs", max_active_wgs),
+    ):
+        if v <= 0:
+            raise ValueError(f"stream-K partition: {name} must be > 0 (got {v})")
+    return StreamKIterPartition(
+        m_tiles=m_tiles,
+        n_tiles=n_tiles,
+        iters_per_tile=iters_per_tile,
+        max_active_wgs=max_active_wgs,
+        persistent=persistent,
+    )
+
+
+def streamk_start_iter(part: StreamKIterPartition, sk_cta: int) -> int:
+    """Global first MAC iteration of stream-K CTA ``sk_cta``."""
+    return (
+        part.total_dp_iters
+        + sk_cta * part.iters_per_sk_cta
+        + min(sk_cta, part.extra_iters)
+    )
+
+
+def streamk_end_iter(part: StreamKIterPartition, sk_cta: int) -> int:
+    """One past the last MAC iteration of stream-K CTA ``sk_cta``."""
+    return (
+        streamk_start_iter(part, sk_cta)
+        + part.iters_per_sk_cta
+        + (1 if sk_cta < part.extra_iters else 0)
+    )
+
+
+def emit_streamk_sk_start_iter(
+    b: IRBuilder, sk_cta: Value, part: StreamKIterPartition
+) -> Value:
+    """SSA :func:`streamk_start_iter` for a runtime stream-K CTA index."""
+    c_dp_iters = b.const_i32(part.total_dp_iters)
+    c_per_cta = b.const_i32(part.iters_per_sk_cta)
+    c_extra = b.const_i32(part.extra_iters)
+    body = b.mul(sk_cta, c_per_cta)
+    lead = b.smin(sk_cta, c_extra)
+    return b.add(c_dp_iters, b.add(body, lead))
+
+
+class _IterRange(NamedTuple):
+    """The SSA bundle returned by :func:`emit_streamk_iter_range`."""
+
+    start: Value  # i32 global first iteration (SGPR)
+    end: Value  # i32 one past the last iteration (SGPR)
+    sk_cta: Value  # i32 stream-K CTA index; meaningless for a DP CTA
+
+
+def emit_streamk_iter_range(
+    b: IRBuilder, cta: Value, part: StreamKIterPartition, *, dp: bool
+) -> _IterRange:
+    """Map a CTA onto its contiguous range of global MAC iterations.
+
+    ``dp=True`` (non-persistent launch): CTAs ``[0, dp_tiles)`` each own one
+    whole tile and the rest are stream-K CTAs, selected branch-free so the
+    GEMM body is emitted once. ``dp=False``: ``cta`` already is a stream-K
+    CTA index (the persistent launch runs its DP sweep separately).
+    """
+    if dp:
+        c_dp_tiles = b.const_i32(part.dp_tiles)
+        sk_cta = b.sub(cta, c_dp_tiles)
+    else:
+        sk_cta = cta
+    sk_start = emit_streamk_sk_start_iter(b, sk_cta, part)
+    c_per_cta = b.const_i32(part.iters_per_sk_cta)
+    c_extra = b.const_i32(part.extra_iters)
+    c_one = b.const_i32(1)
+    c_zero = b.const_i32(0)
+    sk_len = b.add(c_per_cta, b.select(b.cmp_lt(sk_cta, c_extra), c_one, c_zero))
+    if dp:
+        c_ipt = b.const_i32(part.iters_per_tile)
+        is_dp = b.cmp_lt(cta, c_dp_tiles)
+        start = b.select(is_dp, b.mul(cta, c_ipt), sk_start)
+        length = b.select(is_dp, c_ipt, sk_len)
+    else:
+        start = sk_start
+        length = sk_len
+    start = b.to_sgpr_u32(start)
+    end = b.to_sgpr_u32(b.add(start, length))
+    return _IterRange(start=start, end=end, sk_cta=sk_cta)

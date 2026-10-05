@@ -232,10 +232,12 @@ jobs:
       - name: Build
         run: cmake --build build
 
-      # The probes pack the production gfx950 rocKE descriptors for an
+      # The probes pack the production gfx950 descriptors for an
       # architecture this lane does not build (GPU_TARGETS is the lane's own).
-      # Their pack targets are not part of the default build, and the ctest
-      # entries fail without their output, so build them before "Run tests".
+      # Their pack targets are part of `all` (ALL custom targets), so Build above
+      # already ran them; this step stays so a probe failure is labelled and the
+      # aggregate target is exercised. The ctest entries fail without their
+      # output.
       - name: Build packaging probes
         run: cmake --build build --target hkp_packaging_probes
 
@@ -494,10 +496,12 @@ jobs:
       - name: Build
         run: cmake --build build
 
-      # The probes pack the production gfx950 rocKE descriptors for an
+      # The probes pack the production gfx950 descriptors for an
       # architecture this lane does not build (GPU_TARGETS is the lane's own).
-      # Their pack targets are not part of the default build, and the ctest
-      # entries fail without their output, so build them before "Run tests".
+      # Their pack targets are part of `all` (ALL custom targets), so Build above
+      # already ran them; this step stays so a probe failure is labelled and the
+      # aggregate target is exercised. The ctest entries fail without their
+      # output.
       - name: Build packaging probes
         run: cmake --build build --target hkp_packaging_probes
 

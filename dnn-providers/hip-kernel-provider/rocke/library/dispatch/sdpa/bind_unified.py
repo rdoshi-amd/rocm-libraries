@@ -42,7 +42,7 @@ _PROBE_NHEAD_Q = 32
 _PROBE_NHEAD_K = 8
 _PROBE_SHAPES = (
     (2048, 2048),  # prefill
-    (1, 4096),     # decode
+    (1, 4096),  # decode
 )
 
 # ── SDPA-level decline predicates ─────────────────────────────────────────────

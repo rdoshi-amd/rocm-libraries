@@ -20,8 +20,8 @@ class SdpaRequest:
     """
 
     arch: str
-    dtype: str      # "fp16" | "bf16"  (or "f16" alias — normalized in __post_init__)
-    head_dim: int   # unified across Q, K, V (square only)
+    dtype: str  # "fp16" | "bf16"  (or "f16" alias — normalized in __post_init__)
+    head_dim: int  # unified across Q, K, V (square only)
     # Extend in ST9 (DV-01) — do not add fields here without ST0 sign-off.
 
     def __post_init__(self) -> None:

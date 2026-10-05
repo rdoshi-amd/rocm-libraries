@@ -69,6 +69,19 @@ GFX1250_COMP_ASYNC_8BIT_WARP_TILE_K_REJECT_REASON = (
     "warp_tile_k=128 (XOR-swizzled 8-bit async load), so it requires "
     "warp_tile_k >= 128"
 )
+# fp32 A/B on gfx1250. Same rules and text as the dispatcher codegen_common:
+# comp_tdm / comp_tdm_v2 give wrong results for every layout but rcr, and an
+# fp32 C tile of 512 or more accumulators per lane (tile_m*tile_n /
+# (num_waves*32), e.g. 256x256 on 4 waves) spills VGPRs and gives wrong results.
+GFX1250_TDM_FP32_LAYOUT_REJECT_REASON = (
+    "comp_tdm/comp_tdm_v2 with fp32 A/B on gfx1250 gives wrong results for "
+    "every layout but rcr, so fp32 TDM requires layout=rcr"
+)
+GFX1250_FP32_MAX_ACC_PER_LANE = 512
+GFX1250_FP32_ACC_REJECT_REASON = (
+    f"fp32 on gfx1250 spills VGPRs at >= {GFX1250_FP32_MAX_ACC_PER_LANE} "
+    "accumulators per lane (tile_m*tile_n/(num_waves*32)) and gives wrong results"
+)
 
 
 # Ops whose kernels have no async (comp_async) or TDM (comp_tdm, comp_tdm_v2 +
@@ -161,6 +174,26 @@ def gfx1250_comp_async_8bit_warp_tile_k_reject_reason(
     )
     if is_8bit and warp_tile_k < GFX1250_COMP_ASYNC_8BIT_MIN_WARP_TILE_K:
         return GFX1250_COMP_ASYNC_8BIT_WARP_TILE_K_REJECT_REASON
+    return ""
+
+
+def gfx1250_tdm_fp32_layout_reject_reason(pipeline, a_datatype, b_datatype, layout):
+    """Reason string if comp_tdm / comp_tdm_v2 has fp32 A or B on a layout other
+    than rcr, else "". An empty layout is not checked."""
+    if pipeline not in GEMM_TDM_PIPELINES or not layout:
+        return ""
+    if "fp32" in (a_datatype, b_datatype) and layout != "rcr":
+        return GFX1250_TDM_FP32_LAYOUT_REJECT_REASON
+    return ""
+
+
+def gfx1250_fp32_tile_reject_reason(gpu_target, datatype, tile_m, tile_n, num_waves):
+    """Reason string if an fp32 tile has too many accumulators per lane on
+    gfx1250 (every pipeline), else ""."""
+    if datatype != "fp32" or _base_gfx_arch(gpu_target) != GFX1250_ONLY_PIPELINE_ARCH:
+        return ""
+    if tile_m * tile_n >= GFX1250_FP32_MAX_ACC_PER_LANE * num_waves * 32:
+        return GFX1250_FP32_ACC_REJECT_REASON
     return ""
 
 
@@ -1020,6 +1053,13 @@ def is_tile_config_valid(
         logging.debug(f"LDS validation failed: {lds_error}")
         return False
 
+    fp32_reason = gfx1250_fp32_tile_reject_reason(
+        gpu_target, a_datatype, tile_m, tile_n, warp_m * warp_n * warp_k
+    )
+    if fp32_reason:
+        logging.debug(f"Tile validation failed: {fp32_reason}")
+        return False
+
     if _uses_gfx1250_gemm_pipeline(pipeline, kernel_name_prefix):
         # Non-MX comp_async / comp_tdm*: route on the op, not on the pipeline
         # string, so these never reach the MX-only validate_gemm_mx rules.
@@ -1041,11 +1081,13 @@ def is_tile_config_valid(
         if not gfx1250_valid:
             logging.debug(f"gfx1250 pipeline validation failed: {gfx1250_error}")
             return False
-        warp_tile_k_reason = gfx1250_comp_async_8bit_warp_tile_k_reject_reason(
+        dtype_reason = gfx1250_comp_async_8bit_warp_tile_k_reject_reason(
             pipeline, a_datatype, b_datatype, warp_tile_k
+        ) or gfx1250_tdm_fp32_layout_reject_reason(
+            pipeline, a_datatype, b_datatype, layout
         )
-        if warp_tile_k_reason:
-            logging.debug(f"gfx1250 pipeline validation failed: {warp_tile_k_reason}")
+        if dtype_reason:
+            logging.debug(f"gfx1250 pipeline validation failed: {dtype_reason}")
             return False
 
         gemm_valid, gemm_valid_error = validate_gemm(

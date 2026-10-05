@@ -2806,6 +2806,10 @@ def expand_sweep(
             and wm * wn == 8
         ):
             continue
+        if _codegen_common().gfx1250_fp32_tile_reject_reason(
+            arch, dtype, tm, tn, wm * wn * wk
+        ):
+            continue
         if not _gfx1250_pipeline_supported(
             pipe,
             sched,

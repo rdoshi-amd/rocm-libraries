@@ -63,6 +63,18 @@ def _write_config(tmp, pipelines, epilogues):
     return path
 
 
+def _write_tile_config(tmp, **values):
+    """CI config with the given tile_config entries replaced by value lists."""
+    with open(_CI_CONFIG) as f:
+        cfg = json.load(f)
+    for key, vals in values.items():
+        cfg["tile_config"][key] = {"values": list(vals)}
+    path = os.path.join(tmp, "tile_cfg.json")
+    with open(path, "w") as f:
+        json.dump(cfg, f)
+    return path
+
+
 def _kernels(config_path, gpu_target="gfx1250", dtype="fp16", layout="rcr"):
     with tempfile.TemporaryDirectory() as tmp:
         return _builder(
@@ -340,6 +352,57 @@ class TestDtypeLayoutCoverage(unittest.TestCase):
                 with self.subTest(dtype=dtype, layout=layout):
                     tiles = _warp_tiles(_kernels(_CI_CONFIG, "gfx1250", dtype, layout))
                     self.assertEqual(tiles, {(16, 16, wmma)})
+
+    def test_gfx1250_fp32_tdm_rcr_only(self):
+        """fp32 comp_tdm / comp_tdm_v2 give wrong results off rcr on gfx1250."""
+        for layout in ("rcr", "rrr", "crr", "ccr"):
+            with self.subTest(layout=layout):
+                pipes = {
+                    k["trait_combo"][0]
+                    for k in _kernels(_CI_CONFIG, "gfx1250", "fp32", layout)
+                }
+                self.assertIn("compv3", pipes)
+                self.assertEqual(
+                    pipes & set(_TDM_PIPELINES),
+                    set(_TDM_PIPELINES) if layout == "rcr" else set(),
+                )
+        reason = vu.gfx1250_tdm_fp32_layout_reject_reason
+        self.assertEqual(reason("comp_tdm", "fp32", "fp32", "rcr"), "")
+        self.assertEqual(
+            reason("comp_tdm", "fp32", "fp32", "rrr"),
+            vu.GFX1250_TDM_FP32_LAYOUT_REJECT_REASON,
+        )
+        self.assertEqual(reason("comp_tdm_v2", "fp16", "fp16", "ccr"), "")
+        self.assertEqual(reason("compv3", "fp32", "fp32", "ccr"), "")
+
+    def test_gfx1250_fp32_accumulators_per_lane(self):
+        """fp32 tiles with >= 512 accumulators per lane spill on gfx1250."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write_tile_config(
+                tmp, tile_m=[128, 256], tile_n=[256], warp_m=[2, 4], warp_k=[1]
+            )
+            for arch, dtype in (("gfx1250", "fp32"), ("gfx1250", "fp16")):
+                tiles = {
+                    (
+                        k["tile_config"]["tile_m"],
+                        k["tile_config"]["tile_n"],
+                        k["tile_config"]["warp_m"] * k["tile_config"]["warp_n"],
+                    )
+                    for k in _kernels(path, arch, dtype)
+                }
+                with self.subTest(dtype=dtype):
+                    # 256 acc/lane (128x256 on 4 waves, 256x256 on 8) is kept.
+                    self.assertIn((128, 256, 4), tiles)
+                    self.assertIn((256, 256, 8), tiles)
+                    # 512 acc/lane (256x256 on 4 waves) only for non-fp32.
+                    self.assertEqual((256, 256, 4) in tiles, dtype != "fp32")
+        self.assertEqual(
+            vu.gfx1250_fp32_tile_reject_reason("gfx1250", "fp32", 256, 256, 4),
+            vu.GFX1250_FP32_ACC_REJECT_REASON,
+        )
+        self.assertEqual(
+            vu.gfx1250_fp32_tile_reject_reason("gfx942", "fp32", 256, 256, 4), ""
+        )
 
     def test_gfx9_fp32_uses_fp32_mfma_tiles(self):
         for arch in ("gfx942", "gfx950"):

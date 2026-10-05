@@ -519,6 +519,36 @@ class TestGfx1250Enablement(unittest.TestCase):
             tiles = {(c.warp_tile_m, c.warp_tile_n, c.warp_tile_k) for c in configs}
             self.assertEqual(tiles, {(16, 16, wmma)}, dtype)
 
+    def test_gfx1250_fp32_tdm_rcr_only(self):
+        # fp32 comp_tdm / comp_tdm_v2 give wrong results off rcr on gfx1250.
+        cfg_path = str(_CONFIG_DIR / "default_ci_config_gfx1250.json")
+        tdm = {"comp_tdm", "comp_tdm_v2"}
+        for layout in BATCHED_SUPPORTED_LAYOUTS:
+            cfgs = expand_sweep(cfg_path, arch="gfx1250", dtype="fp32", layout=layout)
+            pipes = {c.pipeline for c in cfgs}
+            self.assertIn("compv3", pipes, layout)
+            self.assertEqual(pipes & tdm, tdm if layout == "rcr" else set(), layout)
+
+    def test_gfx1250_fp32_accumulators_per_lane(self):
+        # fp32 tiles with >= 512 accumulators per lane spill on gfx1250.
+        import tempfile
+
+        cfg = json.loads((_CONFIG_DIR / "default_ci_config_gfx1250.json").read_text())
+        sizes = {"tile_m": [128, 256], "tile_n": [256], "warp_m": [2, 4]}
+        for key, vals in sizes.items():
+            cfg["tile_config"][key] = {"values": vals}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "tile_cfg.json"
+            path.write_text(json.dumps(cfg))
+            for dtype in ("fp32", "fp16"):
+                tiles = {
+                    (c.tile_m, c.tile_n, c.wave_m * c.wave_n)
+                    for c in expand_sweep(str(path), arch="gfx1250", dtype=dtype)
+                }
+                self.assertIn((128, 256, 4), tiles, dtype)
+                self.assertIn((256, 256, 8), tiles, dtype)
+                self.assertEqual((256, 256, 4) in tiles, dtype != "fp32", dtype)
+
     def test_codegen_arch_filter_uses_the_dtype_warp_tiles(self):
         # fp32 must map to its own arch_specs row, not fall back to fp16's.
         import tempfile

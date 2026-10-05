@@ -84,8 +84,7 @@ namespace hipblaslt_jit
         std::vector<Recipe> candidates(const origami::hardware_t&        hardware,
                                        origami::data_type_t              dtype,
                                        const std::vector<CandidateSeed>& seeds,
-                                       size_t                            workspaceLimit,
-                                       bool                              persistent)
+                                       size_t                            workspaceLimit)
         {
             // Use the target's instruction catalog for every datatype. Tensile
             // subsequently validates the complete instruction and tile combination.
@@ -141,7 +140,7 @@ namespace hipblaslt_jit
                         for(const auto& policy : seed.policies)
                         {
                             if((policy.strategy == ExecutionPolicy::Strategy::StreamK) != streamK
-                               || (streamK && (!workspaceLimit || !persistent)))
+                               || (streamK && !workspaceLimit))
                                 continue;
                             for(const auto& rule : seed.depthRules)
                                 for(const auto& hint : seed.cacheHints)
@@ -225,9 +224,7 @@ namespace hipblaslt_jit
                              && !problem.sparse();
         const auto seeds   = modeled ? knowledge.seeds(operation, target)
                                      : std::vector<CandidateSeed>{};
-        // TensileLite does not generate a Stream-K kernel with an auxiliary output.
-        const auto recipes
-            = candidates(analytical, request.mi_dtype, seeds, workspaceLimit, !problem.useE());
+        const auto recipes = candidates(analytical, request.mi_dtype, seeds, workspaceLimit);
         // Both mapping selectors require at least one CU per XCD. Do not let
         // an unsupported budget reach their integer divisions or replace it.
         require(origami::resolve_num_cus(request.num_cus, analytical.N_CU) >= analytical.NUM_XCD,

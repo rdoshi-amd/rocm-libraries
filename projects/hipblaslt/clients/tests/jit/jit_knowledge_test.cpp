@@ -729,8 +729,8 @@ namespace
             require(ids == alone, "The same data-parallel candidates without workspace");
             auto aux = problem;
             aux.setUseE(true);
-            require(rank(target, aux, 1 << 30).ranked.size() == dataParallel.size(),
-                    "With an auxiliary output only the data-parallel candidates");
+            require(rank(target, aux, 1 << 30).ranked.size() == all.size(),
+                    "An auxiliary output keeps the Stream-K candidates");
 
             // A co-tenant leaves fewer CUs: only gfx950's Origami then picks dynamic.
             size_t dynamic = 0;

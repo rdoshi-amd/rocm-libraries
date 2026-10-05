@@ -114,9 +114,8 @@ occupancy 1 remain explicit model inputs, and the recipe keeps TensileLite's
 non-persistent `TileProcessingStrategy=None`. Every applicable prediction is transferred;
 defaults supply only settings that this model does not predict.
 
-On gfx942, gfx950 and gfx1250, when the request allows workspace and has no
-auxiliary output, the catalog also offers each configuration as a Hybrid
-Stream-K kernel under the `origami.gemm.persistent.v1` contract, with
+On gfx942, gfx950 and gfx1250, when the request allows workspace, the catalog
+also offers each configuration as a Hybrid Stream-K kernel under the `origami.gemm.persistent.v1` contract, with
 `stream_k=5`. One `rank_configs` call ranks both kinds, and a data-parallel
 candidate stays ahead of a Stream-K one of equal latency. The kernel is compiled with `TileProcessingStrategy=StreamK`,
 `WorkAssignment=Hybrid`, `StreamKAtomic=0`, `GlobalSplitU=0`,

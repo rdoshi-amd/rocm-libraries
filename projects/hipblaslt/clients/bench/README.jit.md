@@ -122,8 +122,7 @@ Tuned seeds (`tensilelite.tuned.v1`) keep their tuned split-K (`GlobalSplitU`)
 and execution policy (`TileProcessingStrategy`, `WorkAssignment`). The catalog's
 data-parallel recipes (`origami.gemm.dp.v1`) keep `GlobalSplitU: 1` and
 `TileProcessingStrategy: None`. On gfx942, gfx950 and gfx1250, when the request
-allows workspace and has no auxiliary output, the catalog also offers Hybrid
-Stream-K candidates (`origami.gemm.persistent.v1`), whose grid, reduction and
+allows workspace, the catalog also offers Hybrid Stream-K candidates (`origami.gemm.persistent.v1`), whose grid, reduction and
 mapping the runtime chooses at each launch. Without workspace, the predictor
 skips Stream-K seeds and seeds with a fixed `GlobalSplitU` above 1. The [JIT guide](../../JIT.md#predictor-and-tuningknowledge)
 describes both. For an exact recipe, use the

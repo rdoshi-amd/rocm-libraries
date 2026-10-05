@@ -61,6 +61,7 @@
 #define ROCKE_WGRAD_LDS_K_OUTER_ARCH "gfx950"
 #include <stddef.h>
 
+#include "rocke/helper_rocke.helpers.streamk.h" /* rocke_streamk_iter_partition_t */
 #include "rocke/helper_rocke.instances.common.conv_implicit_gemm.h" /* rocke_conv_problem_t */
 #include "rocke/ir.h"
 #include "rocke/lower_llvm.h"
@@ -172,6 +173,19 @@ typedef struct rocke_implicit_gemm_conv_wgrad_spec
      * cut that R-fold and Stage 2 folds them back with a fixed unrolled add.
      * Scratch size is groups * R * wg_M * wg_N * 4 bytes. */
     int ws_replicas; /* default 8 */
+
+    /* Stream-K execution (CK Tile StreamKTilePartitioner). Mirrors
+     * WgradConvSpec.streamk / streamk_reduction / streamk_ctas:
+     *   streamk           "off" | "dp_sk" | "persistent"
+     *   streamk_reduction "linear" | "tree" | "atomic" | "workspace"
+     *   streamk_ctas      CTA pool the stream-K remainder is spread over;
+     *                     -1 (auto) is rejected by the builder, like split_k=-1.
+     * "off" keeps every existing config byte-identical.  Stream-K folds the
+     * conv groups into GEMM-M, so it is the one path on which this port
+     * accepts groups > 1. */
+    const char* streamk; /* default "off" */
+    const char* streamk_reduction; /* default "linear" */
+    int streamk_ctas; /* default -1 */
 } rocke_implicit_gemm_conv_wgrad_spec_t;
 
 /* Default-constructed spec (every field == Python dataclass default). */
@@ -208,6 +222,10 @@ int rocke_wgrad_conv_spec_wg_N(const rocke_implicit_gemm_conv_wgrad_spec_t* s);
  *                    Stage 2's ordered fold over those slabs cannot un-reorder
  *                    sums that were already reordered inside one.
  *
+ *   streamk "linear"/"tree" -> true.  The owner of each tile folds the other
+ *                    contributors' partials in a fixed order and stores once.
+ *   streamk "atomic"/"workspace" -> false, for the split-K reasons above.
+ *
  * So a deterministic wgrad is still available -- ask for split_k <= 1 -- but a
  * split-K wgrad, two-stage or not, is not one.  Hosts that need bit-exactness
  * should gate on this predicate rather than on two_stage. */
@@ -218,6 +236,28 @@ bool rocke_wgrad_conv_spec_is_deterministic(const rocke_implicit_gemm_conv_wgrad
  * Returns 0 when two_stage=false or split_k <= 1 (no workspace needed).
  * Analogous to rocke_streamk_gemm_workspace_bytes / rocke_moe_fused_workspace_bytes. */
 size_t rocke_wgrad_conv_workspace_bytes(const rocke_implicit_gemm_conv_wgrad_spec_t* s);
+
+/* ---- stream-K host-side helpers (Python wgrad_streamk_*) ---- */
+
+/* Python wgrad_streamk_partition(spec): the iteration partition the kernel and
+ * its launch grid share.  Requires streamk != "off" and streamk_ctas > 0;
+ * otherwise *out_status (if non-NULL) is ROCKE_ERR_VALUE and the result is
+ * zeroed. */
+rocke_streamk_iter_partition_t
+    rocke_wgrad_conv_streamk_partition(const rocke_implicit_gemm_conv_wgrad_spec_t* s,
+                                       rocke_status_t* out_status);
+
+/* Python wgrad_streamk_grid(spec): one-dimensional launch grid. */
+rocke_status_t rocke_wgrad_conv_streamk_grid(const rocke_implicit_gemm_conv_wgrad_spec_t* s,
+                                             int out[3]);
+
+/* Python wgrad_streamk_workspace_layout(spec): (flags_bytes, partials_bytes) of
+ * a linear/tree kernel; both 0 for the atomic and workspace reductions. */
+rocke_status_t rocke_wgrad_conv_streamk_workspace_layout(
+    const rocke_implicit_gemm_conv_wgrad_spec_t* s, size_t* flags_bytes, size_t* partials_bytes);
+
+/* Python wgrad_streamk_workspace_nbytes(spec). */
+size_t rocke_wgrad_conv_streamk_workspace_bytes(const rocke_implicit_gemm_conv_wgrad_spec_t* s);
 
 /* spec.wg_K: output spatial positions (N * Ho * Wo [* Do]). */
 int rocke_wgrad_conv_spec_wg_K(const rocke_implicit_gemm_conv_wgrad_spec_t* s);

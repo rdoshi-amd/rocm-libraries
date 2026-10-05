@@ -295,7 +295,7 @@ machine.
 
 | Tool | Answers | Invocation |
 |---|---|---|
-| `tools/verify_variant_sets.py` | Structural nesting/runtime tuple identity, sentinels and vocabulary; artifact-bound compiler agreement is the distinct, stronger mode | `verify_variant_sets.py --mode {full,structural} [--arch A] [--profile P] [--kpack-python-dir D] LABEL ROOT...`. `--mode` is required and has no default: `structural` reports compiled specialization agreement as NOT CHECKED by name and still exits 0 on the rest; `full` fails on a missing, unsupported or mismatched producing-build record **and** on any check that could not run (`GATE FAILED (N check(s) NOT RUN: ...)`). `--profile` supplies the bundle to gate and the matcher vocabulary, which full mode requires over string fields no declaration spells out |
+| `tools/verify_variant_sets.py` | Structural nesting/runtime tuple identity, sentinels and vocabulary; artifact-bound compiler agreement is the distinct, stronger mode | `verify_variant_sets.py --mode {full,structural} [--arch A] [--profile P] [--kpack-python-dir D] [--generic-targets-json T] LABEL ROOT...`. `--mode` is required and has no default: `structural` reports compiled specialization agreement as NOT CHECKED by name and still exits 0 on the rest; `full` fails on a missing, unsupported or mismatched producing-build record **and** on any check that could not run (`GATE FAILED (N check(s) NOT RUN: ...)`). `--profile` supplies the bundle to gate and the matcher vocabulary, which full mode requires over string fields no declaration spells out |
 | `tools/variant_reachability.py` | Can any shape in the corpus actually select each variant, or is one dead weight? | `variant_reachability.py --kdp K --shapes S [--profile P]` |
 | `tools/launch_surface.py` | Is every surface the C++ restates from the kernel's Python declared, guarded and tested? | `launch_surface.py PROFILE --check [--allow-unguarded]` |
 | `tools/coverage_gate.py` | Structural, loading and serving obligations, reported separately; an unmet required obligation cannot pass | `coverage_gate.py --tree T --mode {full,structural} [--arch A] [--validator V] [--expect-engine E] [--min-served N]`; `--mode` is required and governs what rung 1 may claim. A missing `--validator` makes rung 2 `loads-not-run`, a failure rather than a skip; an offline result is not serving evidence |
@@ -496,11 +496,36 @@ Run, in this order, **before any UUID is minted**:
    plan-build time against a real device.
 3. Every kernel's `metadata` type-checks against the KMD, with no mandatory field (one with
    no `default_value`) omitted; the real loader drops the whole pack instead.
-4. Every kernel's `arch` is a subset of its pack's `arch`.
+4. Every kernel's `arch` is a subset of its pack's `arch`, compared as expanded device
+   sets (a generic stands for its table members), and the generic-target rules below hold.
 5. Every `arch` entry is a plausible `gfx`-prefixed base id (lowercase, no feature suffix):
    an error if malformed, a **warning** if well-formed but unrecognized (e.g. `gfx94` for
    `gfx942`), since either looks like an ordinary INFO decline at match time and this tool
-   keeps no exhaustive arch list.
+   keeps no exhaustive arch list. A generic named in the table is recognized.
+
+### Generic targets and tiered `arch` matching
+
+An `arch` entry may be an LLVM generic target (`gfx11-generic`). Membership is data in
+`plugin_sdk/data/gpu_generic_targets.json`; `codegen/generic_targets.py` reads that file
+(no flag) and mirrors the loader's and the packer's tier rules, held equal by the golden
+vectors in `plugin_sdk/tests/data/arch_tier_vectors.json` (`tests/test_generic_targets.py`).
+A device is matched per `arch` list at one tier: an explicit entry (the device's own base
+id) beats a generic containing it, which beats an empty list. Consequences for a config:
+
+- De-duplication (`build_kdp`) refuses a tuple shared by two kernels only where they select
+  a device at the **same** tier. A generic kernel and an explicit member kernel with one
+  tuple coexist (the explicit one wins on its own device), as do an empty-`arch` kernel and
+  a concrete one; two kernels under the same generic, or two empty lists, still collide.
+- A list may not hold a generic with one of its members, nor two generics sharing a member;
+  an unknown generic-shaped name is an error. The packer enforces the same rules.
+- In a pack whose `arch` lists a generic, a kernel with its own non-empty `arch` must list
+  every generic of the pack and only entries the pack lists; a kernel with no `arch`
+  inherits the pack. A kernel may not name a generic its pack does not list. An `hsaco`
+  kernel is stamped with its own `arch`, else the whole pack list, which satisfies this.
+- The emitted inventory (and so the generated census) gives every member of a generic row
+  the generic's descriptors, and the census checks coverage with the SDK's `archSupports`.
+  An `hsaco` object packed under a generic must really be generic-compatible; neither the
+  generator nor the packer checks this (a mismatch fails at module load).
 
 ## Source adapters (`codegen/sources/`)
 
@@ -518,8 +543,8 @@ descriptor that names it and `symbol` its kernel. `file` must stay inside the so
 with no root-relative fallback. `hkp_pack` packs that object as-is, without compiling, so
 like `hip` the specialization declares `metadata_fields: []`. The packer does not check the
 object's format or target processor: every hsaco kernel must carry a non-empty per-kernel `arch` listing the
-arch(es) its object runs on (a generic-target object lists each one), and the loader
-rejects one without.
+arch(es) its object runs on (a generic-target object lists the generic, or each member
+under an explicit pack), and the loader rejects one without.
 `hsaco_file` is rejected explicitly, naming `supportsSourceKind()` as the missing
 prerequisite on `IKernelDispatchHandler`.
 

@@ -752,18 +752,52 @@ class TestCatalogIdentity:
         assert "SAME candidate" in message
         assert "kernel_source/priority differ" not in message
 
-    def test_a_wildcard_arch_overlapping_a_concrete_one_is_refused(self):
-        """An absent ``arch`` is the loader's wildcard: treated as no coverage it sits
-        beside a concrete candidate holding the same tuple and collides on that
-        device."""
+    def test_a_wildcard_arch_and_a_concrete_one_with_one_tuple_both_survive(self):
+        """An empty ``arch`` is the unrestricted tier and a concrete entry outranks it
+        on its own device, so the two never tie and the matcher never sees one tuple
+        twice."""
         config, pack, left, right = self._twin_config()
         pack.arch = []
         left.arch = []  # every device
         right.arch = ["gfx942"]
         right.kernel_source.entry_point = "ScaleAddOther"
 
-        with pytest.raises(ValueError, match="overlapping architectures"):
+        kdp = build_kdp(config, pack, mint_ids(config))
+        assert [k["name"] for k in kdp["kernelDescriptors"]] == [
+            "twin.left",
+            "twin.right",
+        ]
+
+    def test_a_generic_and_an_explicit_member_with_one_tuple_both_survive(self):
+        """gfx1151 is inside gfx11-generic: on that device the explicit entry outranks
+        the generic, so the tuple is carried once per tier."""
+        config, pack, left, right = self._twin_config()
+        pack.arch = ["gfx1151", "gfx11-generic"]
+        left.arch = ["gfx11-generic"]
+        right.arch = ["gfx1151"]
+        right.kernel_source.entry_point = "ScaleAddOther"
+        # Only tuple identity is under test; the config loader owns the pack rule.
+        kdp = build_kdp(config, pack, mint_ids(config))
+        assert [k["name"] for k in kdp["kernelDescriptors"]] == [
+            "twin.left",
+            "twin.right",
+        ]
+
+    def test_two_kernels_one_tuple_under_the_same_generic_are_refused_naming_both(
+        self,
+    ):
+        """Both select gfx1100 at the generic tier: one tuple twice drops the engine."""
+        config, pack, left, right = self._twin_config()
+        pack.arch = ["gfx11-generic"]
+        left.arch = []
+        right.arch = []
+        right.kernel_source.entry_point = "ScaleAddOther"
+
+        with pytest.raises(ValueError) as excinfo:
             build_kdp(config, pack, mint_ids(config))
+        message = str(excinfo.value)
+        assert "twin.left" in message and "twin.right" in message
+        assert "gfx11-generic" in message
 
     def test_an_omitted_field_and_the_kmd_default_are_one_key(self):
         """One tuple omits an optional field; the other states it at exactly the KMD
@@ -1033,6 +1067,44 @@ class TestEmittedInventory:
         assert inventory["arches"]["gfx942"]["descriptor_count"] == 1
         assert inventory["arches"]["gfx950"]["descriptor_count"] == 1
         assert inventory["total_descriptor_count"] == 1
+
+    def test_inventory_gives_every_member_the_generic_rows(self):
+        """A generic pack ships in every member's folder, so each member's row holds the
+        generic's descriptors, its own, and the wildcard's; a member of no generic row
+        gets only its own and the wildcard's."""
+        generic = make_pack(
+            name="generic",
+            arch=["gfx11-generic"],
+            kernels=[make_kernel(name="generic.k", metadata={"block_size": 64})],
+        )
+        explicit = make_pack(
+            name="explicit",
+            arch=["gfx1151"],
+            kernels=[make_kernel(name="explicit.k", metadata={"block_size": 128})],
+        )
+        other = make_pack(
+            name="other",
+            arch=["gfx942"],
+            kernels=[make_kernel(name="other.k", metadata={"block_size": 256})],
+        )
+        everywhere = make_pack(
+            name="everywhere",
+            arch=[],
+            kernels=[make_kernel(name="any.k", metadata={"block_size": 512})],
+        )
+        config = make_minimal_config(packs=[generic, explicit, other, everywhere])
+        documents = build_kdp_documents(config, mint_ids(config))
+        arches = emitted_inventory(config, documents)["arches"]
+
+        names = {a: set(row["descriptor_names"]) for a, row in arches.items()}
+        assert names["gfx1100"] == {"generic.k", "any.k"}
+        assert names["gfx1153"] == {"generic.k", "any.k"}
+        assert names["gfx1151"] == {"generic.k", "explicit.k", "any.k"}
+        assert names["gfx942"] == {"other.k", "any.k"}
+        assert names["gfx11-generic"] == {"generic.k", "any.k"}
+        assert "gfx1154" not in names
+        stems = {config.kdp_stem(p) for p in (generic, everywhere)}
+        assert set(arches["gfx1100"]["pack_names"]) == stems
 
     def test_the_packaged_dialect_reports_the_kind_that_actually_ships(self):
         """hkp_pack lowers ``rocke``/``hip`` to ``kpack`` before the loader reads it, so
@@ -1717,6 +1789,29 @@ class TestProjectedMetadataIsTypeChecked:
 
 
 class TestPackagedHsacoKdp:
+    def test_hsaco_kernel_inheriting_a_generic_pack_arch_conforms_to_the_pack_rule(
+        self,
+    ):
+        """hkp_pack requires an own arch on an hsaco kernel, so the generator stamps the
+        whole pack list; that stamp lists every generic of the pack and only entries the
+        pack lists, which is the pack rule the config loader enforces."""
+        from codegen.config_loader import _check_generic_arch
+
+        kernel = make_kernel(
+            name="test.hsaco",
+            kernel_source=KernelSource(
+                kind="hsaco", file="HsacoFixture.co", symbol="HsacoFixtureAdd"
+            ),
+        )
+        config = make_minimal_config(
+            dialect="packaged",
+            kernel_source_kind="hsaco",
+            packs=[make_pack(kernels=[kernel], arch=["gfx942", "gfx11-generic"])],
+        )
+        _check_generic_arch(config)
+        kdp = build_kdp(config, config.packs[0], mint_ids(config))
+        assert kdp["kernelDescriptors"][0]["arch"] == ["gfx942", "gfx11-generic"]
+
     def test_every_hsaco_ukd_carries_exactly_kind_file_symbol(self):
         """hkp_pack validates a closed field set per kind, so a UKD carrying any other
         kind's key is refused at pack time."""

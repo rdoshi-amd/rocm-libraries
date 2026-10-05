@@ -189,6 +189,99 @@ class TestKernelArchSubsetOfPackCheck:
         _check_kernel_arch_subset_of_pack(config)  # does not raise
 
 
+class TestGenericArchRules:
+    """The packer's generic-target rules (``hkp_pack.validate_generic_arch``), applied
+    before a UUID is minted so a config the generator accepts is one the packer
+    accepts. ``gfx11-generic`` holds gfx1100..gfx1153; ``gfx12-generic`` holds
+    gfx1200/gfx1201."""
+
+    @staticmethod
+    def _config(pack_arch, kernel_arch):
+        kernel = make_kernel(arch=kernel_arch)
+        return make_minimal_config(packs=[make_pack(arch=pack_arch, kernels=[kernel])])
+
+    def test_generic_pack_with_a_kernel_naming_a_member_is_rejected(self):
+        from codegen.config_loader import _check_generic_arch
+
+        config = self._config(["gfx11-generic"], ["gfx1151"])
+        with pytest.raises(ConfigError, match="must list every generic of the pack"):
+            _check_generic_arch(config)
+
+    def test_generic_pack_accepts_a_kernel_with_no_own_arch(self):
+        from codegen.config_loader import _check_generic_arch
+
+        _check_generic_arch(self._config(["gfx11-generic"], []))
+
+    def test_generic_pack_accepts_a_kernel_declaring_exactly_the_generic(self):
+        from codegen.config_loader import _check_generic_arch
+
+        _check_generic_arch(self._config(["gfx11-generic"], ["gfx11-generic"]))
+
+    def test_mixed_generic_pack_kernel_listing_every_entry_is_accepted(self):
+        from codegen.config_loader import _check_generic_arch
+
+        config = self._config(["gfx942", "gfx11-generic"], ["gfx942", "gfx11-generic"])
+        _check_generic_arch(config)
+
+    def test_mixed_generic_pack_kernel_missing_the_generic_is_rejected(self):
+        from codegen.config_loader import _check_generic_arch
+
+        config = self._config(["gfx942", "gfx11-generic"], ["gfx942"])
+        with pytest.raises(ConfigError, match="must list every generic of the pack"):
+            _check_generic_arch(config)
+
+    @pytest.mark.parametrize("pack_arch", [[], ["gfx942"], ["gfx942", "gfx12-generic"]])
+    def test_a_kernel_naming_a_generic_the_pack_does_not_list_is_rejected(
+        self, pack_arch
+    ):
+        from codegen.config_loader import _check_generic_arch
+
+        config = self._config(pack_arch, ["gfx11-generic"])
+        with pytest.raises(ConfigError, match="the pack does not list 'gfx11-generic'"):
+            _check_generic_arch(config)
+
+    @pytest.mark.parametrize(
+        "arch, shared",
+        [
+            (["gfx11-generic", "gfx1151"], "gfx11-generic contains gfx1151"),
+            (["gfx1151", "gfx11-generic"], "gfx11-generic contains gfx1151"),
+        ],
+    )
+    def test_a_generic_and_its_member_in_one_arch_list_is_rejected(self, arch, shared):
+        from codegen.config_loader import _check_generic_arch
+
+        with pytest.raises(ConfigError, match=shared):
+            _check_generic_arch(self._config(arch, []))
+        # The kernel's own list is held to the same rule.
+        with pytest.raises(ConfigError, match=shared):
+            _check_generic_arch(self._config(["gfx942", "gfx11-generic"], arch))
+
+    def test_unknown_generic_name_is_rejected(self):
+        from codegen.config_loader import _check_generic_arch
+
+        with pytest.raises(
+            ConfigError, match="'gfx9-4-generic' is a generic target name absent"
+        ):
+            _check_generic_arch(self._config(["gfx9-4-generic"], []))
+
+    def test_known_generic_produces_no_unrecognised_arch_warning(self):
+        from codegen.config_loader import _check_arch_shape
+
+        config = self._config(["gfx11-generic"], [])
+        assert _check_arch_shape(config) == []
+
+    def test_an_expanded_subset_is_accepted_by_the_coverage_check(self):
+        from codegen.config_loader import _check_kernel_arch_subset_of_pack
+
+        # Loader-equivalent coverage: gfx1151 is inside gfx11-generic's members, but
+        # gfx1250 is not.
+        _check_kernel_arch_subset_of_pack(self._config(["gfx11-generic"], ["gfx1151"]))
+        with pytest.raises(ConfigError, match="reaches past the pack's arch"):
+            _check_kernel_arch_subset_of_pack(
+                self._config(["gfx11-generic"], ["gfx1250"])
+            )
+
+
 class TestArchShapeCheck:
     """Pre-mint check #5: arch entries are plausible gfx-prefixed base ids
     (error), and unrecognized-but-well-formed ids warn rather than error."""

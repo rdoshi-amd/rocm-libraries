@@ -343,13 +343,34 @@ class TestTheDeskCheckIdentityIsEngineWideAndArchAware:
         assert "loader-tuple collisions" in result.stdout
         assert "gfx950" in result.stdout
 
-    def test_a_wildcard_arch_overlaps_a_concrete_one(self, gate):
-        """An absent arch list is "every device", so it meets the concrete pack on that
-        pack's own device."""
+    def test_a_wildcard_arch_and_a_concrete_one_do_not_collide(self, gate):
+        """An absent arch list is the unrestricted tier; the concrete pack outranks it on
+        its own device, so the catalog holds one candidate per device and never one
+        tuple twice."""
         self._two_packs(gate, "wildcard", None, ["gfx950"])
         result = gate.run("w", "wildcard", profiled=False)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "loader-tuple" not in result.stdout
+
+    def test_a_generic_and_an_explicit_member_do_not_collide(self, gate):
+        self._two_packs(gate, "member", ["gfx11-generic"], ["gfx1151"])
+        result = gate.run("m", "member", profiled=False)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "loader-tuple" not in result.stdout
+
+    def test_two_packs_naming_the_same_generic_collide(self, gate):
+        self._two_packs(gate, "twice", ["gfx11-generic"], ["gfx11-generic"])
+        result = gate.run("t", "twice", profiled=False)
         assert result.returncode == 1, result.stdout
         assert "loader-tuple collisions" in result.stdout
+        assert "generic tier" in result.stdout
+        assert "gfx1151" in result.stdout
+
+    def test_two_wildcard_packs_collide_at_the_unrestricted_tier(self, gate):
+        self._two_packs(gate, "wild2", None, None)
+        result = gate.run("w2", "wild2", profiled=False)
+        assert result.returncode == 1, result.stdout
+        assert "unrestricted tier" in result.stdout
 
     def test_one_and_one_point_zero_are_one_tuple_on_a_float_field(self, gate):
         """The catalog holds a value of the field's declared type, so 1 and 1.0 on a
@@ -1206,3 +1227,54 @@ class TestRealArchiveSelectedConsumer:
         assert "packed dialect" in result.stdout
         structural = self.run(root, python_dir, tmp_path, mode="structural")
         assert structural.returncode == 0, structural.stdout + structural.stderr
+
+
+@pytest.mark.needs_rocm_kpack
+class TestAGenericDocumentIsReadWithItsGenericArchiveKey:
+    """The archive of a generic copy is keyed by the generic's name, so a member being
+    checked reads it under that key."""
+
+    @staticmethod
+    def _entry(arch):
+        ukd = _packed_ukd()
+        ukd["arch"] = arch
+        return type(
+            "Entry", (), {"ukd": ukd, "arch": arch, "origin_dir": None, "inline": False}
+        )
+
+    def test_a_generic_document_is_read_with_its_generic_archive_key(self, tmp_path):
+        python_dir = _kpack_python_dir()
+        kpack, compression = load_kpack(python_dir)
+        path = tmp_path / "kpack" / "test.kpack"
+        path.parent.mkdir(parents=True)
+        archive = kpack.PackedKernelArchive(
+            group_name="test",
+            gfx_arch_family="gfx11-generic",
+            gfx_arches=["gfx11-generic"],
+            compressor=compression.ZstdCompressor(compression_level=3),
+        )
+        archive.add_kernel(
+            archive.prepare_kernel(
+                relative_path="v0",
+                gfx_arch="gfx11-generic",
+                hsaco_data=_PAYLOAD,
+                metadata={},
+            )
+        )
+        archive.finalize_archive()
+        archive.write(path)
+
+        table = gate_module.gtmod.GenericTargets.load(
+            gate_module.gtmod.DEFAULT_TABLE_PATH
+        )
+        payloads = gate_module.Payloads(python_dir, table)
+
+        generic = self._entry(["gfx11-generic"])
+        generic.origin_dir = str(tmp_path)
+        assert payloads.read(generic, "gfx1151") == _PAYLOAD
+
+        # The control: a document naming the member has no member-keyed archive here.
+        member = self._entry(["gfx1151"])
+        member.origin_dir = str(tmp_path)
+        with pytest.raises(gate_module.GateError, match="carries no member"):
+            payloads.read(member, "gfx1151")

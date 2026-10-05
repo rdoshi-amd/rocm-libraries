@@ -5,8 +5,9 @@ installed trees. Exits non-zero on any failure. The numbered sections in
   1. BINARY NESTING -- the larger set can still choose every binary the
      smaller one could.
   2. LOADER-TUPLE UNIQUENESS -- with absent keys filled from the KMD
-     `default_value`, each tuple is unique per device. A duplicate rejects the
-     whole engine at load.
+     `default_value`, each tuple is unique per device and tier: two entries
+     collide only where both select a device at the same tier (explicit,
+     generic, unrestricted). A duplicate rejects the whole engine at load.
   3. NO SENTINEL -- `-1` never reaches a shipped descriptor.
   4. METADATA MATCHES ITS BINARY -- the matcher selects on metadata, the spec
      decides what was built.
@@ -51,6 +52,7 @@ def _agreement_python_root() -> Path:
 sys.path.insert(0, str(_agreement_python_root()))
 
 from hkp_pack import agreement, descriptor_context  # noqa: E402
+from hkp_pack import generic_targets as gtmod  # noqa: E402
 from hkp_pack.errors import HkpPackError  # noqa: E402
 
 
@@ -208,6 +210,37 @@ def _specialization_twins(order: list, by_label: dict, knobs: set) -> list:
     return violations
 
 
+_TIER_NAMES = {
+    gtmod.TIER_EXPLICIT: "explicit",
+    gtmod.TIER_GENERIC: "generic",
+    gtmod.TIER_UNRESTRICTED: "unrestricted",
+}
+
+
+def _tie(left: list, right: list, table) -> tuple[str, str]:
+    """Where two competing arch lists tie: the devices and the tier name. Two empty
+    lists tie everywhere, at the unrestricted tier."""
+    if not left and not right:
+        return "every arch", _TIER_NAMES[gtmod.TIER_UNRESTRICTED]
+    candidates = set()
+    for entry in (*left, *right):
+        if gtmod.is_generic_shaped(entry):
+            if table.has(entry):
+                candidates.update(table.members(entry))
+        else:
+            candidates.add(entry)
+    ties = {}
+    for device in candidates:
+        tier = gtmod.list_tier(left, device, table)
+        if tier is not None and tier == gtmod.list_tier(right, device, table):
+            ties[device] = tier
+    best = min(ties.values())
+    return (
+        ", ".join(sorted(d for d, t in ties.items() if t == best)),
+        _TIER_NAMES[best],
+    )
+
+
 def effective_arch(
     bundles: list[descriptor_context.Bundle], requested: str | None
 ) -> str:
@@ -232,8 +265,9 @@ class Payloads:
     descriptor that cannot produce them has not shown its evidence is about the
     artifact it ships, so that is a failure rather than an unchecked property."""
 
-    def __init__(self, kpack_python_dir: str | None = None):
+    def __init__(self, kpack_python_dir: str | None = None, generic_targets=None):
         self._dir = kpack_python_dir
+        self._table = generic_targets
         self._archives: dict = {}
         self._module = None
 
@@ -269,8 +303,13 @@ class Payloads:
                 f"{entry.ukd.get('name')}: kernel_source.library resolves to "
                 f"{archive_path}, which does not exist."
             )
+        # A generic document's archive is keyed by the generic's name, not by the
+        # member being checked.
+        if self._table is None:
+            self._table = gtmod.GenericTargets.load(gtmod.DEFAULT_TABLE_PATH)
+        key = descriptor_context.archive_arch(entry.arch, arch, self._table)
         try:
-            blob = self._archive(archive_path).get_kernel(toc_key, arch)
+            blob = self._archive(archive_path).get_kernel(toc_key, key)
         except HkpPackError:
             raise
         except Exception as exc:
@@ -280,7 +319,7 @@ class Payloads:
         if blob is None:
             raise GateError(
                 f"{entry.ukd.get('name')}: {archive_path} carries no member "
-                f"{toc_key!r} for {arch}."
+                f"{toc_key!r} for {key}."
             )
         return blob
 
@@ -303,6 +342,7 @@ def check(
     mode: str,
     arch: str | None = None,
     payloads: Payloads | None = None,
+    generic_targets=None,
 ):
     """Run every property this mode can honestly claim, and name the rest.
 
@@ -312,6 +352,8 @@ def check(
     under `--mode full`; `unverified` is a check that ran and found nothing to
     bind, which neither fails the gate nor joins the pass line.
     """
+    if generic_targets is None:
+        generic_targets = gtmod.GenericTargets.load(gtmod.DEFAULT_TABLE_PATH)
     index = descriptor_context.Index(root)
     schemas = index.schemas()
     all_bundles = descriptor_context.resolve_bundles(index)
@@ -353,19 +395,14 @@ def check(
     collisions = []
     for i, (left, left_key) in enumerate(completed):
         for right, right_key in completed[i + 1 :]:
-            if left_key != right_key or not agreement.overlap(left.arch, right.arch):
+            if left_key != right_key or not gtmod.compete(
+                left.arch, right.arch, generic_targets
+            ):
                 continue
-            # A wildcard covers whatever the other side names, so the overlap it
-            # reports is that side's list rather than an empty intersection.
-            both = set(left.arch) & set(right.arch)
-            either = set(left.arch) | set(right.arch)
-            where = (
-                ", ".join(sorted(both if left.arch and right.arch else either))
-                or "every arch"
-            )
+            where, tier = _tie(left.arch, right.arch, generic_targets)
             collisions.append(
                 f"{left.ukd.get('name')} and {right.ukd.get('name')} complete to one "
-                f"tuple on {where}"
+                f"tuple on {where} at the {tier} tier"
             )
     if collisions:
         failures.append(
@@ -478,7 +515,9 @@ def check(
     # producing compile's evidence says what the binary was built with. Full
     # mode checks it against the payload bytes; structural mode names it.
     if mode == "full":
-        records = descriptor_context.consumer_records(all_bundles, schemas, arch)
+        records = descriptor_context.consumer_records(
+            all_bundles, schemas, arch, generic_targets
+        )
         for bundle in bundles:
             for entry in bundle.entries:
                 name = entry.ukd.get("name")
@@ -610,6 +649,13 @@ def main(argv=None) -> int:
         "bytes a packed descriptor names under --mode full. Omit it to use the "
         "installed one.",
     )
+    parser.add_argument(
+        "--generic-targets-json",
+        default=str(gtmod.DEFAULT_TABLE_PATH),
+        help="The generic GPU target table (gpu_generic_targets.json). Tuple "
+        "collisions are judged per arch tier and a generic stands for its table "
+        "members. Defaults to the table in this checkout.",
+    )
     args = parser.parse_args(argv)
 
     if len(args.pairs) % 2:
@@ -623,8 +669,13 @@ def main(argv=None) -> int:
 
     sets, by_label, bad, skipped, knobs = {}, {}, [], [], set()
     unverified: list[str] = []
-    payloads = Payloads(args.kpack_python_dir) if args.mode == "full" else None
     try:
+        generic_targets = gtmod.GenericTargets.load(args.generic_targets_json)
+        payloads = (
+            Payloads(args.kpack_python_dir, generic_targets)
+            if args.mode == "full"
+            else None
+        )
         arch = None
         if args.mode == "full":
             probe = descriptor_context.resolve_bundles(
@@ -633,7 +684,7 @@ def main(argv=None) -> int:
             arch = effective_arch(probe, args.arch)
         for label, root in roots:
             binaries, descriptors, failures, unchecked, unbound, declared = check(
-                label, root, profile, args.mode, arch, payloads
+                label, root, profile, args.mode, arch, payloads, generic_targets
             )
             sets[label] = binaries
             by_label[label] = descriptors

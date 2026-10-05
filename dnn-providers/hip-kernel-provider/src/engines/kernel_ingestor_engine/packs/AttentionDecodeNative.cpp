@@ -265,7 +265,7 @@ std::optional<BoundTokens> graphMatches(const MatchContext& context)
     {
         return std::nullopt;
     }
-    // --- 8. Every optional attribute this kernel cannot honour, declined explicitly.
+    // Decline optional attributes the fixed kernel cannot honour.
 
     // Additive attention bias.
     if(attributes.attn_mask_tensor_uid().has_value())
@@ -277,7 +277,7 @@ std::optional<BoundTokens> graphMatches(const MatchContext& context)
     {
         return std::nullopt;
     }
-    // varlen, both spellings.
+    // Query lengths are fixed; only the KV length is dynamic.
     if(attributes.seq_len_q_tensor_uid().has_value())
     {
         return std::nullopt;
@@ -321,7 +321,7 @@ std::optional<BoundTokens> graphMatches(const MatchContext& context)
     {
         return std::nullopt;
     }
-    // ALiBi slopes and padding masks.
+    // ALiBi slopes are unsupported; the supplied KV length handles padding.
     if(attributes.alibi_mask())
     {
         return std::nullopt;
@@ -506,7 +506,8 @@ public:
                                 hipMemcpyHostToDevice,
                                 handle.getStream()));
         const void* unused = nullptr;
-        // As with other device length inputs, caller must provide 1 <= length <= capacity.
+        // Caller supplies 1 <= length <= capacity and zero-initializes the full K/V
+        // cache before each new sequence. Length masks scores, not full-tile V loads.
         p.code.kernelForStream(handle.getStream())
             .launch(handle.getStream(),
                     o,

@@ -101,7 +101,7 @@ protected:
         return p;
     }
 };
-TEST_P(IntegrationGpuAttentionDecode, AppendsOneTokenPerCallAcrossPageBoundary)
+TEST_P(IntegrationGpuAttentionDecode, InitializesAndReusesCacheAcrossPageBoundary)
 {
     Graph graph;
     graph.set_io_data_type(DataType::BFLOAT16)
@@ -156,85 +156,102 @@ TEST_P(IntegrationGpuAttentionDecode, AppendsOneTokenPerCallAcrossPageBoundary)
                                                {4, allocate(2048)},
                                                {5, allocate(4)}};
     std::vector<uint16_t> hq(1024);
-    std::vector<uint16_t> hk(32768, bf16(30.0F));
-    std::vector<uint16_t> hv(32768, bf16(-30.0F));
+    std::vector<uint16_t> hk(32768);
+    std::vector<uint16_t> hv(32768);
     std::vector<uint16_t> ho(1024);
-    ASSERT_EQ(hipMemcpyAsync(buffers[2], hk.data(), 65536, hipMemcpyHostToDevice, _stream),
-              hipSuccess);
-    ASSERT_EQ(hipMemcpyAsync(buffers[3], hv.data(), 65536, hipMemcpyHostToDevice, _stream),
-              hipSuccess);
     float maxError = 0;
-    for(int32_t step = 1; step <= 128; ++step)
+    // Reuse the same plan, buffers and workspace for a second sequence. Poison
+    // before each reset so the initialization contract cannot pass by accident.
+    for(int sequence = 0; sequence < 2; ++sequence)
     {
-        SCOPED_TRACE(step);
-        const size_t base = static_cast<size_t>(step - 1) * 256;
-        for(size_t i = 0; i < 256; ++i)
-        {
-            hk[base + i] = bf16(std::sin(static_cast<float>(base + i) * 0.037F));
-            hv[base + i] = bf16(std::cos(static_cast<float>(base + i) * 0.023F));
-        }
-        for(size_t i = 0; i < hq.size(); ++i)
-        {
-            hq[i]
-                = bf16(std::sin(static_cast<float>(i) * 0.019F + static_cast<float>(step) * 0.13F));
-        }
-        ASSERT_EQ(hipMemcpyAsync(static_cast<uint16_t*>(buffers[2]) + base,
-                                 hk.data() + base,
-                                 512,
-                                 hipMemcpyHostToDevice,
-                                 _stream),
+        SCOPED_TRACE(sequence);
+        std::fill(hk.begin(), hk.end(), uint16_t{0x7fc0});
+        std::fill(hv.begin(), hv.end(), uint16_t{0x7fc0});
+        ASSERT_EQ(hipMemcpyAsync(buffers[2], hk.data(), 65536, hipMemcpyHostToDevice, _stream),
                   hipSuccess);
-        ASSERT_EQ(hipMemcpyAsync(static_cast<uint16_t*>(buffers[3]) + base,
-                                 hv.data() + base,
-                                 512,
-                                 hipMemcpyHostToDevice,
-                                 _stream),
+        ASSERT_EQ(hipMemcpyAsync(buffers[3], hv.data(), 65536, hipMemcpyHostToDevice, _stream),
                   hipSuccess);
-        ASSERT_EQ(hipMemcpyAsync(buffers[1], hq.data(), 2048, hipMemcpyHostToDevice, _stream),
-                  hipSuccess);
-        ASSERT_EQ(hipMemcpyAsync(buffers[5], &step, 4, hipMemcpyHostToDevice, _stream), hipSuccess);
-        ASSERT_TRUE(ok(graph.execute(_handle, buffers, workspace)));
-        ASSERT_EQ(hipMemcpyAsync(ho.data(), buffers[4], 2048, hipMemcpyDeviceToHost, _stream),
-                  hipSuccess);
+        // Required once per new sequence, ordered before appends and execution.
+        ASSERT_EQ(hipMemsetAsync(buffers[2], 0, 65536, _stream), hipSuccess);
+        ASSERT_EQ(hipMemsetAsync(buffers[3], 0, 65536, _stream), hipSuccess);
         ASSERT_EQ(hipStreamSynchronize(_stream), hipSuccess);
-        for(size_t h = 0; h < 8; ++h)
+        std::fill(hk.begin(), hk.end(), uint16_t{0});
+        std::fill(hv.begin(), hv.end(), uint16_t{0});
+        for(int32_t step = 1; step <= 128; ++step)
         {
-            std::vector<float> scores(static_cast<size_t>(step));
-            for(size_t t = 0; t < scores.size(); ++t)
+            SCOPED_TRACE(step);
+            const size_t base = static_cast<size_t>(step - 1) * 256;
+            for(size_t i = 0; i < 256; ++i)
             {
-                float dot = 0;
-                for(size_t d = 0; d < 128; ++d)
-                {
-                    dot += fp32(hq[h * 128 + d]) * fp32(hk[t * 256 + (h / 4) * 128 + d]);
-                }
-                scores[t] = dot / std::sqrt(128.0F);
+                hk[base + i] = bf16(
+                    std::sin(static_cast<float>(base + i) * 0.037F + static_cast<float>(sequence)));
+                hv[base + i] = bf16(
+                    std::cos(static_cast<float>(base + i) * 0.023F + static_cast<float>(sequence)));
             }
-            const float maximum = *std::max_element(scores.begin(), scores.end());
-            float sum = 0;
-            for(float& score : scores)
+            for(size_t i = 0; i < hq.size(); ++i)
             {
-                score = std::exp(score - maximum);
-                sum += score;
+                hq[i] = bf16(
+                    std::sin(static_cast<float>(i) * 0.019F + static_cast<float>(step) * 0.13F));
             }
-            for(size_t d = 0; d < 128; ++d)
+            ASSERT_EQ(hipMemcpyAsync(static_cast<uint16_t*>(buffers[2]) + base,
+                                     hk.data() + base,
+                                     512,
+                                     hipMemcpyHostToDevice,
+                                     _stream),
+                      hipSuccess);
+            ASSERT_EQ(hipMemcpyAsync(static_cast<uint16_t*>(buffers[3]) + base,
+                                     hv.data() + base,
+                                     512,
+                                     hipMemcpyHostToDevice,
+                                     _stream),
+                      hipSuccess);
+            ASSERT_EQ(hipMemcpyAsync(buffers[1], hq.data(), 2048, hipMemcpyHostToDevice, _stream),
+                      hipSuccess);
+            ASSERT_EQ(hipMemcpyAsync(buffers[5], &step, 4, hipMemcpyHostToDevice, _stream),
+                      hipSuccess);
+            ASSERT_TRUE(ok(graph.execute(_handle, buffers, workspace)));
+            ASSERT_EQ(hipMemcpyAsync(ho.data(), buffers[4], 2048, hipMemcpyDeviceToHost, _stream),
+                      hipSuccess);
+            ASSERT_EQ(hipStreamSynchronize(_stream), hipSuccess);
+            for(size_t h = 0; h < 8; ++h)
             {
-                float expected = 0;
+                std::vector<float> scores(static_cast<size_t>(step));
                 for(size_t t = 0; t < scores.size(); ++t)
                 {
-                    expected += scores[t] * fp32(hv[t * 256 + (h / 4) * 128 + d]) / sum;
+                    float dot = 0;
+                    for(size_t d = 0; d < 128; ++d)
+                    {
+                        dot += fp32(hq[h * 128 + d]) * fp32(hk[t * 256 + (h / 4) * 128 + d]);
+                    }
+                    scores[t] = dot / std::sqrt(128.0F);
                 }
-                const float actual = fp32(ho[h * 128 + d]);
-                ASSERT_TRUE(std::isfinite(actual));
-                const float error = std::abs(expected - actual);
-                maxError = std::max(maxError, error);
-                ASSERT_LE(error, 0.015F + 0.015F * std::abs(expected))
-                    << "head=" << h << " d=" << d;
+                const float maximum = *std::max_element(scores.begin(), scores.end());
+                float sum = 0;
+                for(float& score : scores)
+                {
+                    score = std::exp(score - maximum);
+                    sum += score;
+                }
+                for(size_t d = 0; d < 128; ++d)
+                {
+                    float expected = 0;
+                    for(size_t t = 0; t < scores.size(); ++t)
+                    {
+                        expected += scores[t] * fp32(hv[t * 256 + (h / 4) * 128 + d]) / sum;
+                    }
+                    const float actual = fp32(ho[h * 128 + d]);
+                    ASSERT_TRUE(std::isfinite(actual));
+                    const float error = std::abs(expected - actual);
+                    maxError = std::max(maxError, error);
+                    ASSERT_LE(error, 0.015F + 0.015F * std::abs(expected))
+                        << "head=" << h << " d=" << d;
+                }
             }
         }
     }
-    std::cout
-        << "DECODE_RESULT engine=hipkernel:AttentionDecode steps=128 elements=131072 max_abs_error="
-        << maxError << '\n';
+    std::cout << "DECODE_RESULT engine=hipkernel:AttentionDecode sequences=2 steps=256 "
+                 "elements=262144 max_abs_error="
+              << maxError << '\n';
 }
 INSTANTIATE_TEST_SUITE_P(Masks, IntegrationGpuAttentionDecode, ::testing::Values(false, true));
 } // namespace

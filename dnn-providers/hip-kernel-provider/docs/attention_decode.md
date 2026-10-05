@@ -20,6 +20,17 @@ Q/K/V/O buffers must be 16-byte aligned; the length and workspace must be at
 least 4-byte aligned. Operands and scratch must not overlap. All tensors are
 nonvirtual device buffers. Accumulation is FLOAT.
 
+Before the first append, zero-initialize the full K and V cache allocations on
+(or ordered before) the execution stream. Repeat this initialization when
+starting a new sequence or reusing cache storage, then append the first token.
+Do not clear the cache between appends within a sequence.
+
+The kernels load complete 64-token tiles. The length masks attention scores,
+but does not prevent reads of unused K/V slots; in particular, zero probability
+times a NaN V operand still produces NaN. Uninitialized or nonfinite unused
+storage is therefore outside this initial interface's supported input domain.
+The adapter does not initialize or sanitize the caller's cache.
+
 The caller must keep `1 <= seq_len_kv <= C` and order cache/length writes before
 execution on the hipDNN stream. Length includes the current token. Device length
 values are not copied to the host or validated at launch. An invalid length is
@@ -41,7 +52,8 @@ graph.create_execution_plan_ext(
     hipdnn_data_sdk::utilities::engineNameToId("hipkernel:AttentionDecode"), {});
 graph.check_support();
 graph.build_plans();
-// Allocate graph.get_workspace_size(...), then reuse this plan:
+// Allocate graph.get_workspace_size(...). Zero the full K/V cache before each
+// new sequence, then reuse this plan within the sequence:
 // append K/V, write Q and seq_len_kv, graph.execute(handle, buffers, workspace).
 ```
 

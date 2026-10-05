@@ -7,6 +7,7 @@
 #include <hipdnn_flatbuffers_sdk/data_objects/graph_generated.h>
 #include <hipdnn_flatbuffers_sdk/flatbuffer_utilities/GraphWrapper.hpp>
 #include <hipdnn_plugin_sdk/ingestor/NativeRegistry.hpp>
+#include <limits>
 namespace
 {
 namespace d = hipdnn_flatbuffers_sdk::data_objects;
@@ -97,6 +98,63 @@ TEST(AttentionDecodeMatchers, DeclinesWrongShapeLayoutAndLengthDescriptor)
     EXPECT_FALSE(accepts([](auto& g, auto&) { g.tensors[4]->data_type = d::DataType::FLOAT; }));
     EXPECT_FALSE(accepts([](auto& g, auto&) { g.tensors[4]->dims[0] = 2; }));
     EXPECT_FALSE(accepts([](auto&, auto& a) { a.seq_len_kv_tensor_uid = flatbuffers::nullopt; }));
+}
+TEST(AttentionDecodeMatchers, ChecksCapacityEndpoints)
+{
+    for(const int64_t capacity : {64, 65536, 0, -64, 63, 65537, 65600})
+    {
+        SCOPED_TRACE(capacity);
+        EXPECT_EQ(accepts([&](auto& g, auto&) {
+                      for(const size_t index : {1U, 2U})
+                      {
+                          g.tensors[index]->dims[2] = capacity;
+                          g.tensors[index]->strides[0] = capacity * 256;
+                      }
+                  }),
+                  capacity == 64 || capacity == 65536);
+    }
+}
+TEST(AttentionDecodeMatchers, RequiresFiniteExplicitScale)
+{
+    EXPECT_FALSE(accepts([](auto&, auto& a) { a.attn_scale_value = flatbuffers::nullopt; }));
+    for(const float scale : {std::numeric_limits<float>::quiet_NaN(),
+                             std::numeric_limits<float>::infinity(),
+                             -std::numeric_limits<float>::infinity()})
+    {
+        EXPECT_FALSE(accepts([&](auto&, auto& a) { a.attn_scale_value = scale; }));
+    }
+    for(const float scale : {0.0F, -0.5F, 1.0F})
+    {
+        EXPECT_TRUE(accepts([&](auto&, auto& a) { a.attn_scale_value = scale; }));
+    }
+}
+TEST(AttentionDecodeMatchers, RequiresNonvirtualWellFormedDeviceOperands)
+{
+    for(size_t index = 0; index < 5; ++index)
+    {
+        SCOPED_TRACE(index);
+        EXPECT_FALSE(accepts([&](auto& g, auto&) { g.tensors[index]->virtual_ = true; }));
+        EXPECT_FALSE(accepts([&](auto& g, auto&) { g.tensors[index]->strides.clear(); }));
+        EXPECT_FALSE(accepts([&](auto& g, auto&) { g.tensors[index]->dims.clear(); }));
+    }
+    EXPECT_FALSE(accepts([](auto& g, auto&) { g.tensors.pop_back(); }));
+}
+TEST(AttentionDecodeMatchers, IgnoresOnlyUnitExtentStrides)
+{
+    EXPECT_TRUE(accepts([](auto& g, auto&) {
+        for(auto& tensor : g.tensors)
+        {
+            for(size_t axis = 0; axis < tensor->dims.size(); ++axis)
+            {
+                if(tensor->dims[axis] == 1)
+                {
+                    tensor->strides[axis] = 7;
+                }
+            }
+        }
+    }));
+    EXPECT_FALSE(accepts([](auto& g, auto&) { g.tensors[0]->strides[1] = 7; }));
+    EXPECT_FALSE(accepts([](auto& g, auto&) { g.tensors[1]->strides[2] = 7; }));
 }
 } // namespace
 #endif

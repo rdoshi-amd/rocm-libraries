@@ -177,6 +177,11 @@ if(GPU_TARGETS MATCHES "gfx94|gfx95|gfx90a|gfx11|gfx12")
     foreach(test_target ${CK_TILE_GEMM_TEST_TARGETS})
         set_tests_properties(${test_target} PROPERTIES LABELS "CK_TILE_GEMM_TESTS")
     endforeach()
+    # The loop above replaces the SMOKE_TEST label, and the gfx1250 CI stage only runs "ninja smoke".
+    # Keep the gfx125 async-LDS tests in that set.
+    foreach(test_target ${CK_TILE_GEMM_ASYNC_WMMA_TARGETS})
+        set_property(TEST ${test_target} APPEND PROPERTY LABELS "SMOKE_TEST")
+    endforeach()
 
     # Umbrella target to build and run all ck_tile gemm tests
     # Usage: ninja ck_tile_gemm_tests

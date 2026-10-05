@@ -3,6 +3,7 @@
 
 #ifdef HIPDNN_ENABLE_KERNEL_INGESTOR
 
+#include <algorithm>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -10,6 +11,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -98,9 +100,9 @@ TEST(TestKernelIngestorStateManager, KernelLevelMatcherPrunesTheCatalog)
     const auto definitions = manager->unsortedDefinitions(context);
 
     ASSERT_EQ(definitions.size(), 2U);
-    for(const auto& definition : definitions)
+    for(const KernelDefinition* definition : definitions)
     {
-        EXPECT_EQ(definition.getStringMetadata(DTYPE), "FLOAT");
+        EXPECT_EQ(definition->getStringMetadata(DTYPE), "FLOAT");
     }
 }
 
@@ -186,7 +188,7 @@ TEST(TestKernelIngestorStateManager, EvaluatesASharedGraphMatcherOncePerGraphNot
     // evaluation; the unshared one adds the second.
     EXPECT_EQ(counters().graphCalls, 2);
     ASSERT_EQ(catalog.entries.size(), 1U);
-    EXPECT_EQ(catalog.entries.front().packId, second.id);
+    EXPECT_EQ(catalog.entries.front()->packId, second.id);
 }
 
 TEST(TestKernelIngestorStateManager, ASharedGraphMatcherFailurePrunesEveryPackListingIt)
@@ -249,11 +251,11 @@ TEST(TestKernelIngestorStateManager, AdmitsTwoPacksSharingATupleUnderDisjointArc
 
     const auto onGfx90a = definitionsFor(0, "gfx90a:sramecc+:xnack-");
     ASSERT_EQ(onGfx90a.size(), 1u);
-    EXPECT_EQ(onGfx90a.front().kernelId, testId(0x90));
+    EXPECT_EQ(onGfx90a.front()->kernelId, testId(0x90));
 
     const auto onGfx942 = definitionsFor(1, "gfx942:sramecc+");
     ASSERT_EQ(onGfx942.size(), 1u);
-    EXPECT_EQ(onGfx942.front().kernelId, testId(0x92));
+    EXPECT_EQ(onGfx942.front()->kernelId, testId(0x92));
 }
 
 /// The same thing one level down, and the reason a kernel carries an arch at all: two
@@ -290,11 +292,11 @@ TEST(TestKernelIngestorStateManager, AdmitsTwoKernelsOfOnePackSharingATupleUnder
     // what separates these -- a pack-level filter alone would hand both to both.
     const auto onGfx90a = definitionsFor(0, "gfx90a:sramecc+:xnack-");
     ASSERT_EQ(onGfx90a.size(), 1u);
-    EXPECT_EQ(onGfx90a.front().kernelId, testId(0x90));
+    EXPECT_EQ(onGfx90a.front()->kernelId, testId(0x90));
 
     const auto onGfx942 = definitionsFor(1, "gfx942:sramecc+");
     ASSERT_EQ(onGfx942.size(), 1u);
-    EXPECT_EQ(onGfx942.front().kernelId, testId(0x92));
+    EXPECT_EQ(onGfx942.front()->kernelId, testId(0x92));
 }
 
 /// Narrowing does not buy an escape from uniqueness: two kernels a gfx942 device would
@@ -418,7 +420,7 @@ TEST(TestKernelIngestorStateManager, APackIsPrunedWhenAnyOfItsCriteriaFails)
     const auto catalog = manager.unsortedCatalog(MatchContext{graph, 0, properties});
 
     ASSERT_EQ(catalog.entries.size(), 1U);
-    EXPECT_EQ(catalog.entries.front().packId, survivingPack.id);
+    EXPECT_EQ(catalog.entries.front()->packId, survivingPack.id);
 }
 
 TEST(TestKernelIngestorStateManager, EveryPackOfOneEngineSharesWhatTheGraphMatchBound)
@@ -717,7 +719,7 @@ TEST(TestKernelIngestorStateManager, SortedDefinitionsAreRankedBestFirst)
     const auto sorted = manager->sortedDefinitions(context);
 
     ASSERT_EQ(sorted.size(), 2U);
-    EXPECT_EQ(sorted.front().getIntMetadata(BLOCK_SIZE), 256);
+    EXPECT_EQ(sorted.front()->getIntMetadata(BLOCK_SIZE), 256);
 }
 
 TEST(TestKernelIngestorStateManager, RankingReusesTheAlreadyMatchedCatalog)
@@ -734,6 +736,38 @@ TEST(TestKernelIngestorStateManager, RankingReusesTheAlreadyMatchedCatalog)
 
     EXPECT_EQ(counters().graphMatchCalls, 1);
     EXPECT_EQ(counters().kernelCalls, 3);
+}
+
+/// A catalog references the manager's own definitions instead of carrying copies of them:
+/// every lookup of a cached graph, and the ranking built from it, hands back the same
+/// addresses. A catalog holding copies would produce fresh ones per lookup.
+TEST(TestKernelIngestorStateManager, CatalogLookupsReferenceTheManagersOwnDefinitions)
+{
+    const ScopedSymbols symbols("test.graph", acceptGraph, "test.kernel", countingFloatKernels);
+    const auto manager = makeStateManager();
+    const TestGraph graph(makeGraphId(0x42));
+    const auto properties = testDeviceProperties();
+    const MatchContext context{graph, 0, properties};
+
+    const auto first = manager->unsortedCatalog(context);
+    const auto second = manager->unsortedCatalog(context);
+    const auto sorted = manager->sortedCatalog(context);
+
+    ASSERT_EQ(counters().graphMatchCalls, 1) << "the second lookup must be a cache hit";
+    ASSERT_EQ(first.entries.size(), 2U);
+    ASSERT_EQ(second.entries.size(), first.entries.size());
+    for(size_t i = 0; i < first.entries.size(); ++i)
+    {
+        EXPECT_EQ(second.entries[i], first.entries[i])
+            << "entry " << i << " is not the definition the manager holds";
+    }
+
+    ASSERT_EQ(sorted.entries.size(), first.entries.size());
+    for(const KernelDefinition* entry : sorted.entries)
+    {
+        EXPECT_NE(std::find(first.entries.begin(), first.entries.end(), entry), first.entries.end())
+            << "ranking must reorder the manager's definitions, not copies of them";
+    }
 }
 
 TEST(TestKernelIngestorStateManager, KnobValuesComeFromTheCatalogInRankedOrder)
@@ -823,7 +857,7 @@ TEST(TestKernelIngestorStateManager, RefusesToConstructAgainstAnUnregisteredDisp
     }
 }
 
-TEST(TestKernelIngestorStateManager, GetDispatchDetailsThrowsOnADanglingDispatchId)
+TEST(TestKernelIngestorStateManager, DispatchLookupsThrowOnADanglingDispatchId)
 {
     // Built directly since validation cannot see a definition never in a pack. The
     // dangling id must not be one the manager registered, or this fails at resolve
@@ -833,16 +867,24 @@ TEST(TestKernelIngestorStateManager, GetDispatchDetailsThrowsOnADanglingDispatch
     auto kernel = makeDefinition(testId(0x01), 64);
     kernel.dispatchId = testId(0xDD);
 
-    try
+    // Workspace sizing takes the handler-only lookup and plan construction the copying
+    // one; both must fail the same way rather than hand back a null handler.
+    const std::vector<std::pair<std::string, std::function<void()>>> lookups{
+        {"dispatchHandlerFor", [&] { static_cast<void>(manager->dispatchHandlerFor(kernel)); }},
+        {"getDispatchDetails", [&] { static_cast<void>(manager->getDispatchDetails(kernel)); }}};
+    for(const auto& [name, lookup] : lookups)
     {
-        manager->getDispatchDetails(kernel);
-        FAIL() << "expected an unknown-dispatch-descriptor failure";
-    }
-    catch(const std::runtime_error& error)
-    {
-        EXPECT_NE(std::string(error.what()).find("names unknown dispatch descriptor"),
-                  std::string::npos)
-            << "threw for the wrong reason: " << error.what();
+        try
+        {
+            lookup();
+            ADD_FAILURE() << name << ": expected an unknown-dispatch-descriptor failure";
+        }
+        catch(const std::runtime_error& error)
+        {
+            EXPECT_NE(std::string(error.what()).find("names unknown dispatch descriptor"),
+                      std::string::npos)
+                << name << " threw for the wrong reason: " << error.what();
+        }
     }
 }
 
@@ -870,8 +912,8 @@ TEST(TestKernelIngestorStateManager, CompletesAnOmittedFieldFromItsSchemaDefault
     const auto definitions = manager.unsortedDefinitions(MatchContext{graph, 0, properties});
 
     ASSERT_EQ(definitions.size(), 1U);
-    EXPECT_EQ(definitions.front().getIntMetadata(BLOCK_SIZE), 64);
-    EXPECT_EQ(definitions.front().getStringMetadata(DTYPE), "FLOAT");
+    EXPECT_EQ(definitions.front()->getIntMetadata(BLOCK_SIZE), 64);
+    EXPECT_EQ(definitions.front()->getStringMetadata(DTYPE), "FLOAT");
 }
 
 // The source-kind gate: KPACK indexes, the two kinds with no adapter are dropped, and a
@@ -901,13 +943,13 @@ TEST(TestKernelIngestorStateManager, IndexesAKpackKernel)
     const auto definitions = manager.unsortedDefinitions(MatchContext{graph, 0, properties});
 
     ASSERT_EQ(definitions.size(), 1U);
-    const auto& source = definitions.front().source;
+    const auto& source = definitions.front()->source;
     EXPECT_EQ(source.kind, KernelSourceKind::KPACK);
     EXPECT_EQ(source.library, "kpack/hip_kernel_provider_gfx942.kpack");
     EXPECT_EQ(source.tocKey, "test-toc-key");
     EXPECT_EQ(source.symbol, "TestKernel");
     EXPECT_EQ(source.sha256, std::string(64, 'a'));
-    EXPECT_EQ(definitions.front().name, "kernel_kpack");
+    EXPECT_EQ(definitions.front()->name, "kernel_kpack");
 }
 
 /// Admitting KPACK must not admit the two kinds nothing can dispatch. They are dropped
@@ -977,8 +1019,8 @@ TEST(TestKernelIngestorStateManager, DropsOnlyTheUnadaptedKernelAndKeepsItsPack)
     const auto definitions = manager.unsortedDefinitions(MatchContext{graph, 0, properties});
 
     ASSERT_EQ(definitions.size(), 1U);
-    EXPECT_EQ(definitions.front().getIntMetadata(BLOCK_SIZE), 256);
-    EXPECT_EQ(definitions.front().name, "kernel_sibling");
+    EXPECT_EQ(definitions.front()->getIntMetadata(BLOCK_SIZE), 256);
+    EXPECT_EQ(definitions.front()->name, "kernel_sibling");
     EXPECT_TRUE(recorder.hasLogContaining(HIPDNN_SEV_ERROR, "kernel 'kernel_hsaco'"))
         << recorder.getRecordedLogsAsString();
 }
@@ -1010,7 +1052,7 @@ TEST(TestKernelIngestorStateManager, CarriesTheOriginDirectoryIntoTheDefinition)
     const auto definitions = manager.unsortedDefinitions(MatchContext{graph, 0, properties});
 
     ASSERT_EQ(definitions.size(), 1U);
-    EXPECT_EQ(definitions.front().originDirectory, origin);
+    EXPECT_EQ(definitions.front()->originDirectory, origin);
 }
 
 struct StateManagerConstructionThrowCase

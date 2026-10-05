@@ -151,7 +151,7 @@ TEST(TestIngestorStateManagerConcurrency, RanksConsistentlyFromManyThreads)
             const MatchContext context{graph, 0, properties};
             const auto ranked = manager->sortedDefinitions(context);
             ASSERT_EQ(ranked.size(), 2U);
-            EXPECT_EQ(ranked.front().getIntMetadata(std::string(BLOCK_SIZE)), 256);
+            EXPECT_EQ(ranked.front()->getIntMetadata(std::string(BLOCK_SIZE)), 256);
         }
     });
 }

@@ -672,8 +672,7 @@ namespace
     /// Public layout contract; w4a16_datagen.hpp must match.
     constexpr size_t c_blockScaleAZeroPointAlignment = 256;
 
-    /// Byte offset of the zero-point region within the scaleA allocation:
-    /// scales first, then zero-points at the next alignment boundary.
+    /// Zero-points follow scales at the next alignment boundary.
     inline size_t blockScaleAZeroPointOffset(int64_t m, int64_t k, int groupSize)
     {
         const size_t scaleBytes
@@ -702,9 +701,7 @@ namespace
         return blockScaleAGroupSize(fmt) != 0;
     }
 
-    /// Select the Tensile scale mode for A/B. Shared by ConstructTensileProblem
-    /// and updateTensileProblem so the two cannot drift: an incomplete copy here
-    /// silently falls back to Signed / bf16 rather than failing.
+    /// Shared scale-mode mapping for problem construction and updates.
     inline void setTensileScaleAB(const RocblasltContractionProblem&   prob,
                                   TensileLite::ContractionProblemGemm& tensileProblem)
     {
@@ -770,9 +767,7 @@ namespace
         default:;
         }
 
-        // w4a16: A is int4 in memory only. The kernel dequantizes it into B's
-        // type before the MAC, so the compute input type for both operands is
-        // B's type.
+        // A dequantizes to B's type before the MAC; both compute input types match B.
         if(typeA == rocisa::DataType::Int4)
         {
             return typeB;
@@ -1176,9 +1171,7 @@ namespace
         return isW4A16(problem) ? 0 : benchScaleBFormat(problem);
     }
 
-    /// hipblaslt-bench --int4_encoding spelling, or "" when there is nothing to
-    /// log. An unrecognized encoding yields "" rather than "invalid" so the flag
-    /// and its value are dropped together instead of leaving a bare --flag.
+    /// Return the bench encoding name, or empty to omit an inapplicable/unknown encoding.
     inline const char* benchInt4Encoding(const TensileLite::ContractionProblemGemm& problem)
     {
         if(!isW4A16(problem))
@@ -2224,8 +2217,7 @@ namespace
         case RocblasltContractionProblem::ScalingFormat::None:
         case RocblasltContractionProblem::ScalingFormat::Scalar:
         case RocblasltContractionProblem::ScalingFormat::Vector:
-        // w4a16 block scales are not MX scales: they travel as the ordinary
-        // scaleA pointer and are handled by the setUseScaleAB("Block") branch.
+        // Block scales use the ordinary scaleA pointer.
         case RocblasltContractionProblem::ScalingFormat::Block_32:
         case RocblasltContractionProblem::ScalingFormat::Block_64:
         case RocblasltContractionProblem::ScalingFormat::Block_128:
@@ -2260,8 +2252,7 @@ namespace
         case RocblasltContractionProblem::ScalingFormat::None:
         case RocblasltContractionProblem::ScalingFormat::Scalar:
         case RocblasltContractionProblem::ScalingFormat::Vector:
-        // w4a16 block scales are not MX scales: they travel as the ordinary
-        // scaleA pointer and are handled by the setUseScaleAB("Block") branch.
+        // Block scales use the ordinary scaleA pointer.
         case RocblasltContractionProblem::ScalingFormat::Block_32:
         case RocblasltContractionProblem::ScalingFormat::Block_64:
         case RocblasltContractionProblem::ScalingFormat::Block_128:
@@ -2513,8 +2504,7 @@ namespace
         case RocblasltContractionProblem::ScalingFormat::None:
         case RocblasltContractionProblem::ScalingFormat::Scalar:
         case RocblasltContractionProblem::ScalingFormat::Vector:
-        // w4a16 block scales are not MX scales: they travel as the ordinary
-        // scaleA pointer and are handled by the setUseScaleAB("Block") branch.
+        // Block scales use the ordinary scaleA pointer.
         case RocblasltContractionProblem::ScalingFormat::Block_32:
         case RocblasltContractionProblem::ScalingFormat::Block_64:
         case RocblasltContractionProblem::ScalingFormat::Block_128:
@@ -2548,8 +2538,7 @@ namespace
         case RocblasltContractionProblem::ScalingFormat::None:
         case RocblasltContractionProblem::ScalingFormat::Scalar:
         case RocblasltContractionProblem::ScalingFormat::Vector:
-        // w4a16 block scales are not MX scales: they travel as the ordinary
-        // scaleA pointer and are handled by the setUseScaleAB("Block") branch.
+        // Block scales use the ordinary scaleA pointer.
         case RocblasltContractionProblem::ScalingFormat::Block_32:
         case RocblasltContractionProblem::ScalingFormat::Block_64:
         case RocblasltContractionProblem::ScalingFormat::Block_128:

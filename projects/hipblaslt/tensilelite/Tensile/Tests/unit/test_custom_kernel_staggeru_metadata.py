@@ -479,16 +479,7 @@ def test_compiled_stagger_stays_reachable_by_the_host_clamp(name):
     assert unreachable is None, unreachable
 
 
-# Kernels that declare StaggerU: 0 and contain a wrap site anyway.  Each is safe
-# only because it also inherits SupportCustomStaggerU: True and does unpack the
-# runtime argument, so what it actually staggers by is whatever the host packs --
-# zero, for a solution declaring zero.  Pinned so a new one has to be looked at
-# by a human rather than joining the exception quietly.
-#
-# The four gfx950 entries got there by editing a staggering kernel's declaration
-# down afterwards.  The gfx1151 w4a16 entries did not: they were generated
-# with StaggerU 0, and the wrap site is present only because
-# SupportCustomStaggerU emits the runtime path unconditionally.
+# Reviewed exceptions: wrap sites are safe because the runtime StaggerU argument is zero.
 STAGGERS_DESPITE_DECLARING_ZERO = frozenset(
     {
         "RuntimeGroup_Prefill_I4H_HHS_SABBGU8_MT128x112x64_W8_gfx1151",

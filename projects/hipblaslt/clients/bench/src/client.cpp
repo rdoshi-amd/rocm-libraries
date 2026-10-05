@@ -1230,9 +1230,7 @@ try
                                         + hip_datatype_to_string(arg.d_type));
     }
 
-    // w4a16: int4 A, 16-bit activations, and a group A-scale whose element type
-    // matches B's. All three travel together, so reject any partial request here
-    // rather than in the library.
+    // Require int4 A, 16-bit B, and group scales together.
     {
         const auto encoding = string_to_int4_encoding(int4_encoding);
         if(encoding == HIPBLASLT_INT4_ENCODING_END_EXT)

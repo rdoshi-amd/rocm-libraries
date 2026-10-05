@@ -601,11 +601,7 @@ RocblasltContractionProblem construct_rocblaslt_problem(rocblaslt_handle        
                                         effective_sm_count_target(handle, matmul_descr, nullptr),
                                         effective_uniform_summation_order(handle, matmul_descr)};
 
-    // Assigned after construction, like streamKFlags: it is a solution
-    // predicate, so every path that searches for a solution (the heuristic,
-    // getAllAlgos, isAlgoSupported) needs it, not just the launch path in
-    // rocblaslt_mat.cpp. Leaving it at the default would silently match the
-    // Signed kernel for an unsigned-encoded problem.
+    // Set encoding on every solution-search path to prevent matching the wrong kernel.
     problem.int4EncodingA = matmul_descr->int4_encoding_a_ext;
 
     if(scaleAlphaVec)

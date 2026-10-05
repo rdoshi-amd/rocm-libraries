@@ -747,9 +747,7 @@ void testing_aux_matmul_set_get_attr(const Arguments& arg)
         == HIPBLASLT_MATMUL_MATRIX_SCALE_VEC16_UE4M3); // validate round-trip
     ASSERT_TRUE(scale_mode_b_r == HIPBLASLT_MATMUL_MATRIX_SCALE_VEC16_UE4M3); // ditto
 
-    // The w4a16 A-scale modes. Every one of them, because the setter is a switch
-    // and the getter an independent if-chain: a mode added to one and not the
-    // other round-trips as some *other* mode rather than failing.
+    // Round-trip every mode through the independent setter and getter mappings.
     const hipblasLtMatmulMatrixScale_t w4a16Modes[] = {
         HIPBLASLT_MATMUL_MATRIX_SCALE_VEC32_EXT,
         HIPBLASLT_MATMUL_MATRIX_SCALE_VEC64_EXT,
@@ -2804,9 +2802,7 @@ inline void testing_aux_rocblaslt_utility_func(const Arguments& arg)
         std::string_view{rocblaslt_compute_type_to_string(static_cast<rocblaslt_compute_type>(999))}
         == "Invalid");
 
-    // Test hipblaslt_int4_encoding_to_string / string_to_int4_encoding. log_bench
-    // emits the name and hipblaslt-bench parses it back, so every encoding must
-    // survive the round trip for a logged w4a16 command to replay.
+    // Encoding names emitted by log_bench must round-trip through the parser.
     for(int e = 0; e < HIPBLASLT_INT4_ENCODING_END_EXT; ++e)
     {
         const auto  encoding = static_cast<hipblasLtInt4Encoding_t>(e);

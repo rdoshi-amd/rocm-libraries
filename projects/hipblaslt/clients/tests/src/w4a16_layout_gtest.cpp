@@ -1,13 +1,7 @@
 // Copyright Advanced Micro Devices, Inc., or its affiliates.
 // SPDX-License-Identifier: MIT
 
-/// scaleA layout for the asymmetric w4a16 modes: scales first, then packed int4
-/// zero-points at the next 256-byte boundary.
-///
-/// Computed in two places that must agree -- w4a16::zeroPointOffset here and
-/// c_blockScaleAZeroPointAlignment in tensile_host.cpp -- which cannot share a
-/// definition. This pins the client half; a divergence in the other shows up as
-/// wrong matmul_w4a16 results.
+/// Verify 256-byte zero-point alignment; tensile_host.cpp must use the same layout.
 
 #include "w4a16_datagen.hpp"
 

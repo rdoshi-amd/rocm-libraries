@@ -3182,9 +3182,7 @@ namespace TensileLite
                 }
             };
 
-            // w4a16 group scaling. Contractions.py emits these two predicates
-            // only when UseScaleAB == "Block", so ordinary solutions are
-            // unaffected.
+            // These predicates apply only to UseScaleAB="Block".
             struct ScaleBlockSizeA
                 : public Predicate_CRTP<ScaleBlockSizeA, ContractionProblemGemm>
             {

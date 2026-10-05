@@ -144,8 +144,7 @@ int main()
     std::vector<uint16_t> got(size_t(m) * n);
     CHECK_HIP(hipMemcpy(got.data(), dD, got.size() * 2, hipMemcpyDeviceToHost));
 
-    // D is bf16, so the expected error is its own rounding: one ulp is 2^-8 of
-    // the magnitude. An absolute number would say nothing on its own.
+    // Normalize error by the BF16 rounding scale.
     double maxErr = 0, maxRef = 0, maxUlps = 0;
     for(int64_t j = 0; j < n; j++)
         for(int64_t i = 0; i < m; i++)

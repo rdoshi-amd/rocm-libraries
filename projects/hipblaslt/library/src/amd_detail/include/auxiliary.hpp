@@ -247,9 +247,7 @@ constexpr hipDataType string_to_hip_datatype_assert(const std::string& value)
     return datatype;
 }
 
-// The w4a16 int4 encodings, named after hipblasLtInt4Encoding_t with the
-// HIPBLASLT_INT4_ENCODING_ prefix and _EXT suffix dropped. Shared by
-// hipblaslt-bench's --int4_encoding and log_bench so a logged command replays.
+// Encoding names shared by hipblaslt-bench and log_bench.
 HIPBLASLT_EXPORT
 constexpr const char* hipblaslt_int4_encoding_to_string(hipblasLtInt4Encoding_t value)
 {
@@ -267,10 +265,7 @@ constexpr const char* hipblaslt_int4_encoding_to_string(hipblasLtInt4Encoding_t 
 //! Accepted --int4_encoding spellings, for help text and error messages.
 constexpr const char* c_int4_encoding_names = "signed, unsigned_bias8";
 
-//! Returns HIPBLASLT_INT4_ENCODING_END_EXT when `value` names no encoding. The
-//! bare numerals are accepted so pre-existing scripts keep working.
-//! Takes a string_view rather than a std::string (as the datatype helpers above
-//! do) so that constexpr is real here and not merely decorative.
+//! Return HIPBLASLT_INT4_ENCODING_END_EXT for unknown names; also accept legacy numerals.
 HIPBLASLT_EXPORT
 constexpr hipblasLtInt4Encoding_t string_to_int4_encoding(std::string_view value)
 {

@@ -3,12 +3,7 @@
 
 #pragma once
 
-// Input generation for w4a16: int4 weights in A, one 16-bit scale per K group
-// of a row, optionally a packed int4 zero-point per group.
-//
-// Same contract as generateMXInput: packed data and scales go to the caller's
-// buffers, and the dequantized values come back as floats laid out like A, so
-// the CPU reference is an ordinary float GEMM.
+// Generate packed W4A16 inputs and dequantized floats for the CPU reference.
 
 #include "datatype_interface.hpp"
 #include <hipblaslt/hipblaslt.h>
@@ -54,8 +49,7 @@ namespace w4a16
     /// Must match c_blockScaleAZeroPointAlignment in tensile_host.cpp.
     constexpr size_t zeroPointAlignment = 256;
 
-    /// Byte offset of the zero-point region within the scaleA allocation:
-    /// scales first, then zero-points at the next alignment boundary.
+    /// Zero-points follow scales at the next alignment boundary.
     inline size_t zeroPointOffset(int64_t m, int64_t kGroups)
     {
         const size_t scaleBytes = static_cast<size_t>(m) * static_cast<size_t>(kGroups) * 2;
@@ -72,15 +66,8 @@ namespace w4a16
     }
 }
 
-/// Fill `packedA` with int4 weights and `scale` with their group scales (plus
-/// packed zero-points when `zeroPoint`), returning the dequantized weights.
-///
-/// A is K-contiguous with row stride `lda` (the TN layout the kernels need), so
-/// (m, k) sits at m*lda + k in the returned vector too, and the reference GEMM
-/// can take it in place of A.
-///
-/// Rounded through `scaleType` to match the kernel, which converts (q - z) * s
-/// to bf16/fp16 on the way into LDS.
+/// Generate packed weights, group scales, and optional zero-points. Return dequantized
+/// weights at row stride lda, rounded through scaleType to match the kernel.
 inline std::vector<float> generateW4A16Input(void*       packedA,
                                              void*       scale,
                                              hipDataType scaleType,

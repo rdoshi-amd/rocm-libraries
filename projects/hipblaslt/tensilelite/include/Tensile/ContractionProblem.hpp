@@ -370,9 +370,7 @@ namespace TensileLite
             MXSA          = 15,
             MXSB          = 16,
             GATE_RESIDUAL = 17,
-            // w4a16 asymmetric: packed signed int4 zero-points, one per K-group,
-            // on the same [M][ceil(K/G)] grid as SCALEA. Two per byte over the
-            // flattened index. See setScaleBlockSizeA.
+            // Packed per-group zero-points; see setScaleBlockSizeA for layout.
             SCALEZEROA    = 18,
             TENSOR_COUNT
         };
@@ -801,14 +799,7 @@ namespace TensileLite
             m_useScaleAB = useScaleAB;
         }
 
-        /// w4a16 group scaling (useScaleAB == "Block"): one scale per `blockSize`
-        /// consecutive K elements of a row of A. Shapes the ordinary SCALEA
-        /// tensor as a dense [rows][kGroups] with the group dimension innermost,
-        /// so the scale travels as the ordinary scaleA pointer.
-        ///
-        /// `rows` is A's free size (M) and `kGroups` is ceil(K / blockSize); both
-        /// are passed in because this is called after the A tensor exists but
-        /// its index layout differs between the library and client callers.
+        /// Shape SCALEA as [rows][kGroups], where rows=M and kGroups=ceil(K/blockSize).
         void setScaleBlockSizeA(int              blockSize,
                                 rocisa::DataType scaleType,
                                 size_t           rows,
@@ -834,16 +825,12 @@ namespace TensileLite
             }
         }
 
-        /// How the int4 weights in A are encoded. The element value is always
-        /// (q - z); only q's storage differs. Mirrors ProblemType's
-        /// "Int4EncodingA".
+        /// Int4 weight encoding; UnsignedBias8 uses implicit zero-point 8 when symmetric.
         enum class Int4Encoding : int
         {
             /// Two's-complement int4 in [-8, 7], nibbles in K order.
             Signed = 0,
-            /// Unsigned int4 in [0, 15] with an implicit zero-point of 8 when
-            /// there is no zero-point tensor; nibbles in K order. This is the
-            /// GPTQ / compressed-tensors checkpoint encoding.
+            /// Unsigned int4 in K order; implicit zero-point 8 without a zero-point tensor.
             UnsignedBias8 = 1,
         };
 
@@ -1015,9 +1002,7 @@ namespace TensileLite
 
         void setScaleA(rocisa::DataType type, size_t length)
         {
-            // In "Block" mode setScaleBlockSizeA already shaped SCALEA as the
-            // [M][ceil(K/G)] group-scale tensor; do not overwrite it with a
-            // scalar/vector descriptor.
+            // Preserve the group-scale descriptor set by setScaleBlockSizeA.
             if(m_useScaleAB == "Block")
                 return;
             m_scaleAType = type;

@@ -1861,10 +1861,7 @@ void testing_matmul(const Arguments& arg)
         }
     }
 
-    // w4a16: the shape limits are the kernels' own. A is packed int4 read
-    // K-contiguously, its group scale has no batch dimension, and there is no
-    // tail loop, so anything outside this is rejected up front rather than
-    // reaching the heuristic as an unsatisfiable problem.
+    // Require K-contiguous A, unbatched scales, and shapes supported without a tail loop.
     if(isW4A16Scaling(arg.scaleA))
     {
         const int   groupSize = w4a16GroupSize(arg.scaleA);
@@ -2184,9 +2181,7 @@ void testing_matmul_with_bias(const Arguments& arg,
                 size_scaleAVec[i] = M[i];
             else if(isW4A16Scaling(arg.scaleA))
             {
-                // Dense [M][ceil(K/G)] scales of B's type, then -- when the mode
-                // is asymmetric -- the packed int4 zero-points. Counted in bytes,
-                // matching the byte-typed buffer allocated for it below.
+                // Byte count for scales of B's type and optional packed zero-points.
                 size_scaleAVec[i] = w4a16::scaleBytes(
                     M[i], (K[i] + w4a16GroupSize(arg.scaleA) - 1) / w4a16GroupSize(arg.scaleA),
                     isW4A16ZeroPoint(arg.scaleA));
@@ -2904,8 +2899,7 @@ void testing_matmul_with_bias(const Arguments& arg,
         size_t scaleA_col = ((transA == HIPBLAS_OP_T) ? 1 : blockSize(arg.scaleA));
         if(isW4A16Scaling(arg.scaleA))
         {
-            // Like the MX branch below: write the packed weights and their
-            // scales, and keep the dequantized floats as the reference A.
+            // Keep dequantized A for the reference GEMM.
             refA.emplace_back(generateW4A16Input(hA[i].buf(),
                                                  hScaleA[i].buf(),
                                                  TiB,
@@ -3494,8 +3488,7 @@ void testing_matmul_with_bias(const Arguments& arg,
                 }
                 else if(isW4A16Scaling(arg.scaleA))
                 {
-                    // The client enum mirrors hipblasLtMatmulMatrixScale_t for
-                    // these, so the value carries across unchanged.
+                    // Client scale values match the public API enum.
                     mode = static_cast<hipblasLtMatmulMatrixScale_t>(arg.scaleA);
                     CHECK_HIPBLASLT_ERROR(
                         hipblasLtMatmulDescSetAttribute(matmul[0][i],
@@ -4062,9 +4055,7 @@ void testing_matmul_with_bias(const Arguments& arg,
                         case hipblaslt_scaling_format::Block_32_UE8M0_32_8_EXT:
                             return HIPBLASLT_MATMUL_MATRIX_SCALE_BLK32_UE8M0_32_8_EXT;
                         default:
-                            // The client enum mirrors hipblasLtMatmulMatrixScale_t
-                            // for the w4a16 group scales, so the value carries
-                            // across unchanged; everything else is scalar.
+                            // Client scale values match the public API enum.
                             if(isW4A16Scaling(f))
                                 return static_cast<hipblasLtMatmulMatrixScale_t>(f);
                             return HIPBLASLT_MATMUL_MATRIX_SCALE_SCALAR_32F;
@@ -4075,10 +4066,7 @@ void testing_matmul_with_bias(const Arguments& arg,
                     extepilogue[gemmIdx].setAuxDataType(aux_type);
                     extepilogue[gemmIdx].setAuxLeadingDimension(lde[gemmIdx]);
                     extepilogue[gemmIdx].setAuxBatchStride(stride_e[gemmIdx]);
-                    // Leave the format at None when no scale was requested, as
-                    // the C path does: setting it unconditionally maps none to
-                    // Scalar, and rocblaslt_epilogue_valid_args rejects a
-                    // problem whose two non-None scale formats differ.
+                    // Preserve None: assigning Scalar would fail scale-format validation.
                     if(arg.scaleA != hipblaslt_scaling_format::none)
                         extepilogue[gemmIdx].setScalingAType(toMatrixScale(arg.scaleA));
                     if(arg.scaleB != hipblaslt_scaling_format::none)
@@ -5042,10 +5030,7 @@ void testing_matmul_with_bias(const Arguments& arg,
             void* scaleDValue = arg.scaleD ? hScaleD[gemmIdx].buf() : (void*)(&scale);
             void* scaleEValue = arg.scaleE ? hScaleE[gemmIdx].buf() : (void*)(&scale);
 
-            // w4a16 joins MX here: its reference is a float A with the group
-            // scale already applied, so the CPU GEMM runs unaware of either
-            // encoding. isBlockScaling() stays false for it, so the scale is not
-            // applied a second time.
+            // Reference A is already dequantized; do not apply its scale again.
             bool const isScaleAMXFormat = isBlockScaling(arg.scaleA) || isW4A16Scaling(arg.scaleA);
             bool const isScaleBMXFormat = isBlockScaling(arg.scaleB);
 

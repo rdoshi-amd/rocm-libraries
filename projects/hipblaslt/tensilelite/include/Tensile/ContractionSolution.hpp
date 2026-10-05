@@ -1353,14 +1353,10 @@ namespace TensileLite
             bool swizzleTensorB             = false;
             bool fusedGemmA2A               = false;
             int  metadataLayout             = 0;
-            // w4a16 group scaling (useScaleAB == "Block"): K-group size of the
-            // dense [M][ceil(K/G)] ScaleA tensor.  Its element type is B's.
+            // K-group size for dense [M][ceil(K/G)] scales of B's type.
             int              scaleBlockSizeA = 0;
-            // Asymmetric w4a16: a packed int4 zero-point per group accompanies
-            // the scale, and the kernel computes (q - z)*s instead of q*s.
+            // Enable per-group zero-points: (q - z)*s.
             bool             scaleZeroPointA = false;
-            // Mirrors ProblemType's "Int4EncodingA"; see
-            // ContractionProblemGemm::Int4Encoding.
             ContractionProblemGemm::Int4Encoding int4EncodingA
                 = ContractionProblemGemm::Int4Encoding::Signed;
             int  mxBlockA                   = 0;

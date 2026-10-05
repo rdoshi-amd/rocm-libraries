@@ -431,28 +431,12 @@ _defaultProblemType = {
     "UseGateResidual": False,  # =True apply gate residual: D = gate * spmm_result + gate
     "BiasSrc": "D",  # This parameter is used in gradient + bias. Support A, B, D.
     "UseScaleAB": "",  # Support "", "Scalar", "Vector", and "Block"
-    # "Block" is the w4a16 group-scale mode: ScaleA points at a dense
-    # [M][ceil(K/ScaleBlockSizeA)] tensor holding one scale per ScaleBlockSizeA
-    # consecutive K elements of a row of A.  The kernel dequantizes A
-    # (DataTypeA, e.g. I4) into MacDataTypeA with it after the global load and
-    # before the LDS write, so the main loop stays a plain MacDataTypeA GEMM.
-    # The scale has DataTypeB's type -- it is converted with the MAC type's own
-    # widening, so it shares it -- and so needs no parameter of its own.
-    # ScaleZeroPointA below makes it asymmetric.
+    # Block scales: dense [M][ceil(K/G)] in DataTypeB, applied before LDS writes.
     "ScaleBlockSizeA": 0,  # 0 = off, else the K-group size (32, 64 or 128)
     "ScaleBlockSizesA": [],  # Accepted groups for a custom runtime-group kernel.
-    # Asymmetric w4a16: a signed int4 zero-point per group, packed two per byte,
-    # in a second region of the same allocation. The kernel computes
-    # (q - z) * s instead of q * s.
+    # Packed per-group zero-points; see setScaleBlockSizeA for layout.
     "ScaleZeroPointA": False,
-    # How the int4 weights in A are encoded. The value of an element is always
-    # (q - z), but q's storage differs:
-    #   "Signed"               two's-complement int4, q in [-8, 7], nibbles in
-    #                          K order (element 2n in the low nibble of byte n).
-    #   "UnsignedBias8"        unsigned int4, q in [0, 15], with an implicit
-    #                          zero-point of 8 when ScaleZeroPointA is off.
-    #                          Nibbles in K order. This is what GPTQ and
-    #                          compressed-tensors checkpoints store natively.
+    # Int4 weight encoding; UnsignedBias8 uses implicit zero-point 8 when symmetric.
     "Int4EncodingA": "Signed",
     "UseScaleCD": False,  # =True use scaleC, scaleD
     "UseScaleAlphaVec": 0,  # =1 support alpha vector on M direction, =2 support bias vector on N direction, =3 support alpha vector on both M,N direction

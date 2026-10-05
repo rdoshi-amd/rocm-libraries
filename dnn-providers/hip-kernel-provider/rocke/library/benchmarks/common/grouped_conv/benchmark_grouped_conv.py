@@ -542,22 +542,23 @@ def main() -> int:
     )
     parser.add_argument(
         "--streamk",
-        default="off",
-        choices=["off", "dp_sk", "persistent"],
+        default="auto",
+        choices=["auto", "off", "dp_sk", "persistent"],
         help=(
-            "wgrad only: ask the dispatcher for the stream-K kernel "
-            "(dp_sk = data-parallel + stream-K CTAs, persistent = one CTA per CU "
-            "round-robining tiles); off keeps the grid-per-tile kernel (default)"
+            "wgrad only: auto (default) lets the dispatcher pick stream-K where it "
+            "is expected to win; off never uses it; dp_sk (data-parallel + "
+            "stream-K CTAs) / persistent (a fixed CTA pool round-robining tiles) "
+            "force it"
         ),
     )
     parser.add_argument(
         "--streamk-reduction",
-        default="linear",
+        default="auto",
         dest="streamk_reduction",
-        choices=["linear", "tree", "workspace"],
+        choices=["auto", "linear", "tree", "workspace"],
         help=(
             "wgrad stream-K fixup: linear/tree (deterministic flag hand-off) or "
-            "workspace (f32 scratch atomics + reduce kernel) (default: linear)"
+            "workspace (f32 scratch atomics + reduce kernel); auto = workspace"
         ),
     )
     parser.add_argument(
@@ -843,7 +844,7 @@ def main() -> int:
             dtype=dtype,
             direction=args.direction,
         )
-        if args.streamk != "off":
+        if args.direction == "wgrad":
             req_base.update(
                 streamk=args.streamk, streamk_reduction=args.streamk_reduction
             )

@@ -440,10 +440,47 @@ class TestStreamKSelection(unittest.TestCase):
                         self.assertFalse(ws.two_stage)
                         self.assertEqual(ws.epilogue, "default")
 
-    def test_default_request_is_unchanged(self):
+    def test_auto_keeps_short_k_shapes_on_split_k(self):
+        # Default request: streamk="auto". A short reduction (wg_K = 2*14*14)
+        # never reaches the iteration threshold, so the split-K kernel stays.
         r = dispatch_conv_grouped(_wgrad("gfx950", G=4))
+        self.assertEqual(r.request.streamk, "auto")
         self.assertEqual(r.spec.streamk, "off")
         self.assertEqual(r.spec.to_wgrad_spec(_problem(r.request)).streamk, "off")
+
+    def test_auto_picks_streamk_for_few_tiles_long_k(self):
+        # Few output tiles (K=96, C=24, 3x3) on a long reduction (N*Ho*Wo is
+        # 128*96*96): the shape stream-K is selected for.
+        for arch in ("gfx942", "gfx950"):
+            r = dispatch_conv_grouped(_wgrad(arch, N=128, C=24, K=96, Hi=96, Wi=96))
+            with self.subTest(arch=arch):
+                self.assertEqual(r.spec.streamk, "dp_sk")
+                self.assertEqual(r.spec.streamk_reduction, "workspace")
+                self.assertEqual(r.spec.split_k, 1)
+                self.assertTrue(any("streamk=dp_sk" in e for e in r.explanation))
+
+    def test_auto_respects_thresholds(self):
+        from dispatch.grouped_convolution import (
+            _WGRAD_STREAMK_MAX_TILES,
+            _WGRAD_STREAMK_MIN_ITERS_PER_TILE,
+            _wgrad_streamk_auto,
+        )
+
+        long_k = _wgrad("gfx950", N=128, C=24, K=96, Hi=96, Wi=96)
+        self.assertTrue(_wgrad_streamk_auto(long_k, 64, 64, 64))
+        # Same shape with a tile_k that leaves fewer iterations than the floor.
+        big_tk = -(-(128 * 96 * 96) // (_WGRAD_STREAMK_MIN_ITERS_PER_TILE - 1))
+        self.assertFalse(_wgrad_streamk_auto(long_k, 64, 64, big_tk))
+        # Many tiles: 16 M tiles x 144 N tiles is far above the ceiling.
+        many = _wgrad("gfx950", N=128, C=1024, K=1024, Hi=96, Wi=96)
+        self.assertGreater(16 * 144, _WGRAD_STREAMK_MAX_TILES)
+        self.assertFalse(_wgrad_streamk_auto(many, 64, 64, 64))
+
+    def test_off_and_gfx1250_never_pick_streamk(self):
+        req = _wgrad("gfx950", N=128, C=24, K=96, Hi=96, Wi=96, streamk="off")
+        self.assertEqual(dispatch_conv_grouped(req).spec.streamk, "off")
+        r = dispatch_conv_grouped(_wgrad("gfx1250", N=128, C=24, K=96, Hi=96, Wi=96))
+        self.assertEqual(r.spec.streamk, "off")
 
     def test_streamk_builds_from_dispatch(self):
         from kernels.common.conv_implicit_gemm_wgrad import (
@@ -454,7 +491,9 @@ class TestStreamKSelection(unittest.TestCase):
         k = build_implicit_gemm_conv_wgrad(
             r.spec.to_wgrad_spec(_problem(r.request)), arch="gfx950"
         )
-        self.assertIn("_sk256", k.name)
+        # streamk_reduction defaults to the workspace reduction, whose pool is
+        # sized to the occupancy target: 256 CUs x (16 waves / 4 per CTA).
+        self.assertIn("_sk1024_skrworkspace", k.name)
 
     def test_gfx1250_turns_streamk_away(self):
         with self.assertRaises(ValueError) as cm:
@@ -466,6 +505,7 @@ class TestStreamKSelection(unittest.TestCase):
 
         self.assertTrue(_request_errors(_wgrad("gfx950", streamk="sideways")))
         self.assertTrue(_request_errors(_wgrad("gfx950", streamk_reduction="atomic")))
+        self.assertFalse(_request_errors(_wgrad("gfx950", streamk="auto")))
         fwd = ConvGroupedRequest(
             N=2, C=64, K=64, Hi=8, Wi=8, Y=3, X=3, arch="gfx950", streamk="dp_sk"
         )

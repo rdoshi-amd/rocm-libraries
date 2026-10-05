@@ -69,11 +69,14 @@ struct ClaimPhase
 
 /// Runs one bundle against the engine under test and decides what that says.
 ///
-/// Fallback chain: golden → GPU ref → CPU ref (RFC 0010 §4.4). The engine runs first,
-/// and a decline is a SKIP and a break a FAIL without consulting any oracle; the chain
-/// is only walked for an engine that ran. One with nothing left to verify it SKIPs,
-/// or FAILs under policy.failOnNoOracle. A chain whose last oracle errored rather
-/// than declined is a FAIL either way.
+/// Fallback chain: golden → GPU ref → CPU ref (RFC 0010 §4.4). In the reference modes
+/// (auto, gpu, cpu) the engine runs first, and a decline is a SKIP and a break a FAIL
+/// without consulting any oracle; the chain is only walked for an engine that ran.
+/// When nothing in it can verify the bundle, it is unverifiable: a SKIP, or a FAIL
+/// under policy.failOnNoOracle. When the last reference tried errored rather than
+/// declined, the oracle itself is broken, and that FAILs either way.
+/// --verification-mode=golden has no chain: it FAILs before running the engine if the
+/// bundle has no golden data.
 ///
 /// Inputs are read-only (shared); outputs are separate allocations per executor.
 ///
@@ -317,13 +320,10 @@ private:
     static void reportOutcome(const VerificationOutcome& outcome);
 
     // Records the bundle as unverifiable and yields the skip outcome for TestBody()
-    // to issue.
+    // to issue. Its message, "Unverifiable: <reason> (<bundle>)", is also what
+    // --fail-on-no-oracle FAILs with, so one log grep finds both.
     VerificationOutcome unverifiable(const std::string& reason,
                                      VerificationDepth reached = VerificationDepth::NOT_REACHED);
-
-    // The one wording of "unverifiable", shared by the SKIP above and the FAIL that
-    // --fail-on-no-oracle turns it into, so a log grep finds both.
-    std::string unverifiableMessage(const std::string& reason) const;
 
     // The single definition of "this graph's claims are this run's business": an engine
     // was named to check against, this is not an authoring run, and a sidecar exists.
@@ -397,7 +397,7 @@ private:
     /// A reference executor whose isApplicable() said it can take this graph.
     struct ResolvedReference
     {
-        ReferenceExecutorType type;
+        ReferenceExecutorType type = ReferenceExecutorType::CPU;
         IReferenceGraphExecutor* executor = nullptr;
     };
 
@@ -420,10 +420,11 @@ private:
         /// Some reference errored rather than declined; it is in the reference-error
         /// report, and the no-oracle message says so.
         bool refErrored = false;
-        /// The last reference tried errored rather than declined: the oracle the
-        /// verdict rested on broke. The bundle fails whatever policy.failOnNoOracle
-        /// says. An error followed by a decline further down the chain is not.
-        bool endedInError = false;
+        /// Set while the last reference tried is one that errored, to what was
+        /// recorded in the reference-error report; cleared when a later one declines.
+        /// Still set once the chain is spent means the oracle the verdict rested on is
+        /// broken -- see lastOracleErrored().
+        std::optional<std::string> lastError;
     };
 
     OracleChain resolveOracles(VerificationMode mode);
@@ -434,9 +435,19 @@ private:
     VerificationOutcome runReferenceMode(GraphSession& session);
     VerificationOutcome runOracleChain(OutputTensors& engineOutputs, OracleChain& chain);
 
-    // Every oracle in `chain` declined. Recorded as unverifiable; SKIPs, or FAILs
-    // under policy.failOnNoOracle -- unless the last one errored, which always FAILs.
-    VerificationOutcome noOracle(const OracleChain& chain, VerificationDepth reached);
+    // The two ways a spent chain ends, both after the engine ran (EXECUTED).
+    //
+    // The last reference tried errored: an explicit mode's only oracle, or auto
+    // mode's last resort, is broken. An ORACLE FAIL whatever policy.failOnNoOracle
+    // says, worded as the reference error itself rather than as "Unverifiable" -- the
+    // bundle is not in the Unverifiable report.
+    VerificationOutcome lastOracleErrored(const OracleChain& chain) const;
+    // Every oracle declined, possibly after an earlier one errored. Recorded as
+    // unverifiable; a SKIP, or under policy.failOnNoOracle a FAIL (ORACLE if one
+    // errored along the way, HARNESS if not).
+    VerificationOutcome noOracle(const OracleChain& chain);
+    // "tried: ..." for both messages above.
+    std::string describeTried(const OracleChain& chain) const;
 
     // nullopt when the inputs are ready; otherwise the outcome to return.
     std::optional<VerificationOutcome> prepareInputs();

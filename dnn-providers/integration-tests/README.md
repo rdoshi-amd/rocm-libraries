@@ -240,7 +240,10 @@ skip — `dvc pull` the op, or use `auto`.
 A reference that cannot run an op declines, and the chain moves on. A reference
 that errors is listed under "REFERENCE EXECUTOR ERRORS" and the chain also moves on,
 but if it was the last one tried (the only one in `gpu`/`cpu` mode, the CPU
-reference in `auto`), the bundle FAILs whatever `--fail-on-no-oracle` says.
+reference in `auto`), the bundle FAILs whatever `--fail-on-no-oracle` says. That
+FAIL is a broken oracle, not a coverage gap: its message is the reference error, and
+the bundle is not listed under "UNVERIFIABLE BUNDLES". Only the no-oracle SKIP, and
+the FAIL `--fail-on-no-oracle` turns it into, start with `Unverifiable:`.
 
 Each verification test body prints the oracle that graded it, between its
 `[ RUN ]` and result lines, and the coverage summary totals them:

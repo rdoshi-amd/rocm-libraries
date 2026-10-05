@@ -381,12 +381,12 @@ std::optional<IntegrationBundleVerificationHarness::ResolvedReference>
                 return ResolvedReference{type, executor};
             }
             chain.tried.push_back(label + " (not applicable)");
-            chain.endedInError = false;
+            chain.lastError.reset();
         }
         catch(const ReferenceCapabilityError& e)
         {
             chain.tried.push_back(label + " (not applicable: " + e.what() + ")");
-            chain.endedInError = false;
+            chain.lastError.reset();
         }
         catch(const std::exception& e)
         {
@@ -398,7 +398,7 @@ std::optional<IntegrationBundleVerificationHarness::ResolvedReference>
             reason.append(" ").append(detail);
             recordRefError(reason);
             chain.refErrored = true;
-            chain.endedInError = true;
+            chain.lastError = std::move(reason);
             std::string tried = label;
             tried.append(" (").append(detail).append(")");
             chain.tried.push_back(std::move(tried));
@@ -506,7 +506,7 @@ VerificationOutcome
             return compareOutputs(engineOutputs, refOutputs, result.site, verifierFor(ref->type));
         case RefStatus::CAPABILITY_MISS:
             chain.tried.push_back(label + " (cannot run this op: " + result.message + ")");
-            chain.endedInError = false;
+            chain.lastError.reset();
             break;
         case RefStatus::RUNTIME_ERROR:
         {
@@ -526,7 +526,7 @@ VerificationOutcome
             reason.append(" errored (").append(context).append("): ").append(result.message);
             recordRefError(reason);
             chain.refErrored = true;
-            chain.endedInError = true;
+            chain.lastError = std::move(reason);
             chain.tried.push_back(label + " (errored: " + result.message + ")");
             break;
         }
@@ -536,53 +536,64 @@ VerificationOutcome
         }
     }
 
-    return noOracle(chain, VerificationDepth::EXECUTED);
+    // The chain is spent. An oracle that broke and one that declined are different
+    // verdicts: the first is a bug in the oracle, the second leaves the bundle
+    // unverifiable.
+    if(chain.lastError.has_value())
+    {
+        return lastOracleErrored(chain);
+    }
+    return noOracle(chain);
 }
 
-VerificationOutcome IntegrationBundleVerificationHarness::noOracle(const OracleChain& chain,
-                                                                   VerificationDepth reached)
+VerificationOutcome
+    IntegrationBundleVerificationHarness::lastOracleErrored(const OracleChain& chain) const
 {
-    std::string tried;
-    for(const auto& entry : chain.tried)
-    {
-        tried += (tried.empty() ? "" : ", ") + entry;
-    }
-    // An explicit mode never consults golden data. Say so when it is there, so the
-    // message does not send anyone looking for data that is sitting in the bundle.
-    if(!chain.autoMode && _bundle->hasGoldenOutputs)
-    {
-        tried += "; golden data is present but not used under --verification-mode="
-                 + chain.explicitMode;
-    }
+    // Led by the reference error as recorded, so the FAIL and its entry in the
+    // reference-error report read the same.
+    std::string message = *chain.lastError;
+    message.append("; ").append(describeTried(chain));
+    message.append(" (").append(_bundlePath.string()).append(")");
+    return VerificationOutcome::failed(
+        VerificationDepth::EXECUTED, FailureOrigin::ORACLE, std::move(message));
+}
 
+VerificationOutcome IntegrationBundleVerificationHarness::noOracle(const OracleChain& chain)
+{
     // Auto mode exhausted every oracle; an explicit mode only the one it demanded.
-    const std::string verdict = chain.autoMode ? "no oracle can verify this bundle"
-                                               : "the requested oracle cannot verify this bundle";
-
-    std::string reason = verdict;
-    reason.append("; tried: ").append(tried);
+    std::string reason = chain.autoMode ? "no oracle can verify this bundle"
+                                        : "the requested oracle cannot verify this bundle";
+    reason.append("; ").append(describeTried(chain));
     if(chain.refErrored)
     {
         reason.insert(0, "a reference executor errored (see the reference-error report) and ");
     }
 
-    // The chain's last word was an error -- an explicit mode's only oracle, or auto
-    // mode's last resort, broke. That is a bug in the oracle, already in the
-    // reference-error report, and FAILs whatever the opt-in below says. An error
-    // followed by a decline is treated like any other decline.
-    if(chain.endedInError)
-    {
-        return VerificationOutcome::failed(
-            reached, FailureOrigin::ORACLE, unverifiableMessage(reason));
-    }
-
-    VerificationOutcome outcome = unverifiable(reason, reached);
+    VerificationOutcome outcome = unverifiable(reason, VerificationDepth::EXECUTED);
     if(!_deps.policy.failOnNoOracle)
     {
         return outcome;
     }
     const FailureOrigin origin = chain.refErrored ? FailureOrigin::ORACLE : FailureOrigin::HARNESS;
-    return VerificationOutcome::failed(reached, origin, std::move(outcome.message));
+    return VerificationOutcome::failed(
+        VerificationDepth::EXECUTED, origin, std::move(outcome.message));
+}
+
+std::string IntegrationBundleVerificationHarness::describeTried(const OracleChain& chain) const
+{
+    std::string tried = "tried: ";
+    for(std::size_t i = 0; i < chain.tried.size(); ++i)
+    {
+        tried.append(i == 0 ? "" : ", ").append(chain.tried[i]);
+    }
+    // An explicit mode never consults golden data. Say so when it is there, so the
+    // message does not send anyone looking for data that is sitting in the bundle.
+    if(!chain.autoMode && _bundle->hasGoldenOutputs)
+    {
+        tried.append("; golden data is present but not used under --verification-mode=")
+            .append(chain.explicitMode);
+    }
+    return tried;
 }
 
 // ---- inputs ----------------------------------------------------------------
@@ -872,13 +883,9 @@ VerificationOutcome IntegrationBundleVerificationHarness::unverifiable(const std
                                                                        VerificationDepth reached)
 {
     _deps.reporter->recordUnverifiable(_bundlePath.string(), reason);
-    return VerificationOutcome::skipped(reached, unverifiableMessage(reason));
-}
-
-std::string
-    IntegrationBundleVerificationHarness::unverifiableMessage(const std::string& reason) const
-{
-    return "Unverifiable: " + reason + " (" + _bundlePath.string() + ")";
+    std::string message = "Unverifiable: ";
+    message.append(reason).append(" (").append(_bundlePath.string()).append(")");
+    return VerificationOutcome::skipped(reached, std::move(message));
 }
 
 void IntegrationBundleVerificationHarness::recordRefError(const std::string& reason)

@@ -352,6 +352,40 @@ TEST_F(TestVerificationModePathsFixture, AutoNoGoldenDeviceOutputErrorFailsWitho
     EXPECT_THAT(_verifiers, ::testing::Not(::testing::Contains(Verifier::CPU_REFERENCE)));
 }
 
+// The last resort breaks at execute(). The oracle the verdict rested on is broken,
+// so this is an ORACLE FAIL without the opt-in, worded as the reference error --
+// as on develop -- and not as an unverifiable bundle.
+TEST_F(TestVerificationModePathsFixture, AutoLastResortRuntimeErrorFails)
+{
+    using ::testing::_;
+    useMatchingEngine();
+    declineUpFront(_mocks.gpuReference);
+    ON_CALL(_mocks.cpuReference, execute(_, _, _))
+        .WillByDefault(::testing::Throw(std::runtime_error("stub: CPU ref crashed")));
+    expectEngineRuns();
+
+    std::vector<std::string> refErrors;
+    testing_support::captureReferenceErrors(_mocks.reporter, refErrors);
+    std::vector<std::string> unverifiable;
+    testing_support::captureUnverifiable(_mocks.reporter, unverifiable);
+
+    ::testing::TestPartResultArray results;
+    runCapturing(loadBundle("auto_last_resort_error", /*includeGoldenOutput=*/false),
+                 VerificationMode::AUTO,
+                 &results);
+
+    EXPECT_TRUE(testing_support::anyFailed(results));
+    EXPECT_FALSE(testing_support::anySkipped(results));
+    ASSERT_EQ(refErrors.size(), 1U);
+    EXPECT_THAT(refErrors.front(),
+                ::testing::HasSubstr("CPU reference errored (auto mode, last resort): "
+                                     "stub: CPU ref crashed"));
+    const std::string messages = testing_support::allMessages(results);
+    EXPECT_THAT(messages, ::testing::HasSubstr(refErrors.front()));
+    EXPECT_THAT(messages, ::testing::Not(::testing::HasSubstr("Unverifiable:")));
+    EXPECT_TRUE(unverifiable.empty());
+}
+
 // ── GOLDEN mode ─────────────────────────────────────────────────────────────
 
 TEST_F(TestVerificationModePathsFixture, GoldenModeWithDataPasses)
@@ -460,6 +494,8 @@ TEST_F(TestVerificationModePathsFixture, DeviceModeRefRuntimeErrorFails)
 
     std::vector<std::string> refErrors;
     testing_support::captureReferenceErrors(_mocks.reporter, refErrors);
+    std::vector<std::string> unverifiable;
+    testing_support::captureUnverifiable(_mocks.reporter, unverifiable);
 
     ::testing::TestPartResultArray results;
     runCapturing(
@@ -473,9 +509,12 @@ TEST_F(TestVerificationModePathsFixture, DeviceModeRefRuntimeErrorFails)
     EXPECT_THAT(refErrors.front(),
                 ::testing::HasSubstr("GPU reference errored (verification-mode=gpu)"));
     EXPECT_THAT(refErrors.front(), ::testing::HasSubstr("stub: GPU ref crashed"));
+    // The FAIL is a broken oracle, not an unverifiable bundle: it reads as the
+    // reference error itself, and the bundle is not in the Unverifiable report.
     const std::string messages = testing_support::allMessages(results);
-    EXPECT_THAT(messages, ::testing::HasSubstr("a reference executor errored"));
-    EXPECT_THAT(messages, ::testing::HasSubstr("stub: GPU ref crashed"));
+    EXPECT_THAT(messages, ::testing::HasSubstr(refErrors.front()));
+    EXPECT_THAT(messages, ::testing::Not(::testing::HasSubstr("Unverifiable:")));
+    EXPECT_TRUE(unverifiable.empty());
 }
 
 // ── Explicit CPU mode ───────────────────────────────────────────────────────
@@ -741,8 +780,11 @@ TEST_F(TestVerificationModePathsFixture, AutoLastResortApplicabilityErrorFails)
     EXPECT_FALSE(testing_support::anySkipped(results));
     ASSERT_EQ(refErrors.size(), 1U);
     EXPECT_THAT(refErrors.front(), ::testing::HasSubstr("stub: CPU probe crashed"));
-    EXPECT_THAT(testing_support::allMessages(results),
-                ::testing::HasSubstr("CPU reference (errored checking applicability"));
+    // Led by the reference error, with what came before it in the chain.
+    const std::string messages = testing_support::allMessages(results);
+    EXPECT_THAT(messages, ::testing::HasSubstr(refErrors.front()));
+    EXPECT_THAT(messages, ::testing::HasSubstr("tried: golden (absent), GPU reference (not"));
+    EXPECT_THAT(messages, ::testing::Not(::testing::HasSubstr("Unverifiable:")));
 }
 
 TEST_F(TestVerificationModePathsFixture, AutoApplicabilityErrorFallsThroughToCpu)

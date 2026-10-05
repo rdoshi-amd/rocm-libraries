@@ -11,40 +11,26 @@ from pathlib import Path
 
 import pytest
 
-from conftest import MAIN_FIXTURE, PROBE_DERIVE
+from probe_support import MAIN_FIXTURE, PROBE_DERIVE, run_derive
 
 
-def _run(src: Path, arch: str, out: Path):
-    return subprocess.run(
-        [
-            sys.executable,
-            str(PROBE_DERIVE),
-            "--from",
-            str(src),
-            "--arch",
-            arch,
-            "--out",
-            str(out),
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+def _run(src: Path, arch: str, out: Path, ukds=()):
+    return run_derive(src, arch, out, ukds)
 
 
-def _derive(src: Path, arch: str, out: Path):
-    r = _run(src, arch, out)
+def _derive(src: Path, arch: str, out: Path, ukds=()):
+    r = _run(src, arch, out, ukds)
     assert r.returncode == 0, r.stderr
     return json.loads((out.parent / "expect.json").read_text())
 
 
-def _rocke(name, builder="b1", arch=None, **extra):
+def _rocke(name, builder="b1", arch=None, source="s.py"):
     ukd = {
         "id": f"id-{name}",
         "name": name,
         "kernel_source": {
             "kind": "rocke",
-            "source": "s.py",
+            "source": source,
             "builder": builder,
             "spec": {"n": len(name)},
         },
@@ -113,6 +99,17 @@ def test_one_ukd_per_compile_group(tmp_path):
     assert sorted(_kept(tmp_path / "w" / "root")) == sorted(e["name"] for e in expect)
 
 
+def test_rocke_group_key_includes_source(tmp_path):
+    # The same builder name in two modules is two compile paths.
+    ukds = [
+        _rocke("r_a", "b1", source="common.py"),
+        _rocke("r_b", "b1", source="arch.py"),
+    ]
+    _write_root(tmp_path / "src", ukds)
+    expect = _derive(tmp_path / "src", "gfx950", tmp_path / "w" / "root")
+    assert sorted(e["name"] for e in expect) == ["r_a", "r_b"]
+
+
 def test_hsaco_compiles_nothing_so_one_per_kdp(tmp_path):
     ukds = [_other("hsaco", "z_hsaco"), _other("hsaco", "y_hsaco"), _rocke("r")]
     _write_root(tmp_path / "src", ukds)
@@ -156,6 +153,9 @@ def test_passthrough_kind_expect_carries_authored_kernel_source(tmp_path):
 
 def test_pick_is_independent_of_authored_order(tmp_path):
     ukds = [_rocke(n) for n in ("m", "c", "x", "a2", "a1")]
+    # Ids sort opposite to names, so a pick by id would choose differently.
+    for i, u in enumerate(sorted(ukds, key=lambda u: u["name"])):
+        u["id"] = f"id-{len(ukds) - i}"
     for i, order in enumerate(itertools.permutations(ukds, 3)):
         src, out = tmp_path / f"src{i}", tmp_path / f"w{i}" / "root"
         _write_root(src, order)
@@ -214,6 +214,18 @@ def test_expect_records_kdp_relative_path(tmp_path):
     assert expect == [{"kdp": "sub/dir/x.kdp.json", "name": "a", "kind": "rocke"}]
 
 
+def test_dot_prefixed_kdp_is_copied_but_not_expected(tmp_path):
+    # The packer skips dot-prefixed paths, so derive must not expect their UKDs.
+    src = tmp_path / "src"
+    _write_root(src, [_rocke("a")])
+    _write_root(src, [_rocke("hidden")], kdp_file=".hidden/x.kdp.json")
+    expect = _derive(src, "gfx950", tmp_path / "w" / "root")
+    assert [e["name"] for e in expect] == ["a"]
+    assert (tmp_path / "w/root/.hidden/x.kdp.json").read_bytes() == (
+        src / ".hidden/x.kdp.json"
+    ).read_bytes()
+
+
 # --- configure-time refusals (exit 2, nothing written) ----------------------
 def _refused(tmp_path, ukds, message, kdp_arch=("gfx950",)):
     _write_root(tmp_path / "src", ukds, kdp_arch=kdp_arch)
@@ -266,6 +278,19 @@ def test_unsupported_kind_for_other_arch_is_ignored(tmp_path):
     ] == ["a"]
 
 
+@pytest.mark.parametrize(
+    "ukd, field",
+    [
+        ({**_hip("h"), "kernel_source": {"kind": "hip", "source": "a.cpp"}}, "build"),
+        ({**_rocke("r"), "kernel_source": {"kind": "rocke", "builder": "b"}}, "source"),
+    ],
+    ids=["hip-build", "rocke-source"],
+)
+def test_group_key_field_absent_exits_2(tmp_path, ukd, field):
+    # Absent is not null: a typo in a group_by field would otherwise merge groups.
+    _refused(tmp_path, [ukd], f"has no kernel_source field {field!r}")
+
+
 def test_ukd_arch_outside_kdp_arch_exits_2(tmp_path):
     # The packer rejects this root; derive must not hide it by dropping the UKD.
     _refused(tmp_path, [_rocke("a", arch=["gfx942"])], "not a subset of the KDP arch")
@@ -283,6 +308,104 @@ def test_malformed_kdp_exits_2(tmp_path):
     assert r.returncode == 2
     assert "bad.kdp.json is unreadable" in r.stderr
     assert "Traceback" not in r.stderr
+
+
+# --- --ukd: keep exactly the listed UKDs -------------------------------------
+def test_ukd_list_keeps_exactly_the_listed_ukds(tmp_path):
+    # Several of one compile group, and a pick the default mode would not make.
+    ukds = [_rocke("r_a"), _rocke("r_b"), _rocke("r_c"), _hip("h_a"), _hip("h_b")]
+    _write_root(tmp_path / "src", ukds)
+    out = tmp_path / "w" / "root"
+    expect = _derive(tmp_path / "src", "gfx950", out, ukds=["r_c", "r_b", "h_b"])
+    assert [(e["kind"], e["name"]) for e in expect] == [
+        ("rocke", "r_b"),
+        ("rocke", "r_c"),
+        ("hip", "h_b"),
+    ]
+    assert _kept(out) == ["r_b", "r_c", "h_b"]
+
+
+def test_ukd_list_omits_kdps_keeping_nothing(tmp_path):
+    src, out = tmp_path / "src", tmp_path / "w" / "root"
+    _write_root(src, [_rocke("a")], kdp_file="keep.kdp.json")
+    _write_root(src, [_rocke("b")], kdp_file="drop.kdp.json")
+    # Derived once without --ukd, so the omission must also remove the stale copy.
+    _derive(src, "gfx950", out)
+    expect = _derive(src, "gfx950", out, ukds=["a"])
+    assert [(e["kdp"], e["name"]) for e in expect] == [("keep.kdp.json", "a")]
+    assert not (out / "drop.kdp.json").exists()
+    assert (out / "x.kmd.json").is_file()
+
+
+def test_ukd_list_copies_kdps_not_shipping_for_arch(tmp_path):
+    src, out = tmp_path / "src", tmp_path / "w" / "root"
+    _write_root(src, [_rocke("a")], kdp_file="keep.kdp.json")
+    _write_root(src, [_rocke("b")], kdp_arch=("gfx942",), kdp_file="other.kdp.json")
+    _derive(src, "gfx950", out, ukds=["a"])
+    copied = (out / "other.kdp.json").read_bytes()
+    assert copied == (src / "other.kdp.json").read_bytes()
+
+
+def _ukd_refused(tmp_path, ukds, listed, message):
+    _write_root(tmp_path / "src", ukds, kdp_arch=("gfx942", "gfx950"))
+    r = _run(tmp_path / "src", "gfx950", tmp_path / "w" / "root", ukds=listed)
+    assert r.returncode == 2, r.stderr
+    assert r.stderr.startswith("hkp_probe_derive:")
+    assert message in r.stderr
+    assert not (tmp_path / "w").exists()
+
+
+def test_ukd_list_unknown_name_exits_2(tmp_path):
+    _ukd_refused(tmp_path, [_rocke("a")], ["a", "nope"], "['nope'] matched no")
+
+
+def test_ukd_list_name_only_for_other_arch_exits_2(tmp_path):
+    ukds = [_rocke("a"), _rocke("b", arch=["gfx942"])]
+    _ukd_refused(tmp_path, ukds, ["a", "b"], "['b'] matched no")
+
+
+def test_ukd_list_name_only_in_kdp_for_other_arch_exits_2(tmp_path):
+    src = tmp_path / "src"
+    _write_root(src, [_rocke("a")], kdp_file="keep.kdp.json")
+    _write_root(src, [_rocke("b")], kdp_arch=("gfx942",), kdp_file="other.kdp.json")
+    r = _run(src, "gfx950", tmp_path / "w" / "root", ukds=["a", "b"])
+    assert r.returncode == 2, r.stderr
+    assert "['b'] matched no" in r.stderr
+
+
+def test_ukd_list_duplicate_entry_exits_2(tmp_path):
+    _ukd_refused(tmp_path, [_rocke("a")], ["a", "a"], "['a'] more than once")
+
+
+def test_ukd_list_ignores_standalone_ref_in_kdp_keeping_nothing(tmp_path):
+    src = tmp_path / "src"
+    _write_root(src, [_rocke("a")], kdp_file="keep.kdp.json")
+    _write_root(src, [_rocke("b"), "ukd-standalone-id"], kdp_file="drop.kdp.json")
+    expect = _derive(src, "gfx950", tmp_path / "w" / "root", ukds=["a"])
+    assert [e["name"] for e in expect] == ["a"]
+
+
+def test_ukd_list_standalone_ref_in_kept_kdp_exits_2(tmp_path):
+    _ukd_refused(
+        tmp_path,
+        [_rocke("a"), "ukd-standalone-id"],
+        ["a"],
+        "standalone UKD references unsupported by probe derive",
+    )
+
+
+def test_ukd_list_unregistered_kind_of_kept_ukd_exits_2(tmp_path):
+    _ukd_refused(
+        tmp_path, [_rocke("a"), _other("mystery", "m")], ["m"], "has no probe support"
+    )
+
+
+def test_ukd_list_ignores_unlisted_ukds_of_kept_kdp(tmp_path):
+    # Neither the kind nor the group key of an unlisted UKD matters.
+    ukds = [_rocke("a"), _other("mystery", "m"), _other("hip", "h_no_build")]
+    _write_root(tmp_path / "src", ukds)
+    expect = _derive(tmp_path / "src", "gfx950", tmp_path / "w" / "root", ukds=["a"])
+    assert [e["name"] for e in expect] == ["a"]
 
 
 # --- idempotence ------------------------------------------------------------
@@ -324,12 +447,12 @@ def test_rederive_follows_source_changes(tmp_path):
     (out / "stale.txt").write_text("stale")
     (out / "stale_dir").mkdir()
     (out / "stale_dir" / "f.json").write_text("{}")
-    (src / "x.kmd.json").write_text('{"id": "kmd2"}\n')
     _write_root(src, [_rocke("b"), _rocke("0first")])
+    (src / "x.kmd.json").write_text('{"id": "kmd2"}\n')
     expect = _derive(src, "gfx950", out)
     assert [e["name"] for e in expect] == ["0first"]
     assert _kept(out) == ["0first"]
-    assert (out / "x.kmd.json").read_text() == '{"id": "kmd"}\n'
+    assert (out / "x.kmd.json").read_text() == '{"id": "kmd2"}\n'
     assert sorted(p.name for p in out.rglob("*")) == ["x.kdp.json", "x.kmd.json"]
 
 

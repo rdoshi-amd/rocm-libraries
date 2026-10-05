@@ -4,20 +4,25 @@
 
 """Prove that every declared hipDNN packaging probe ran and passed.
 
-The superbuild lanes run the packaging probes through ctest --output-junit. ctest exits 0 for a
-junit file that lists fewer tests than were declared, and a skipped test is not
-a failure to it. This script compares the junit file against the manifest the
-CMake configure wrote (one ctest test name per line) so that "declared N, ran
-fewer", "skipped" and "ran nothing" are all red.
+The superbuild lanes run the whole ctest suite once with --output-junit. ctest
+exits 0 when a test is disabled or not run, so this script reads that junit file
+and checks it against the manifest the CMake configure wrote (one ctest test
+name per line). Testcases not named in the manifest are ignored.
+
+For every manifest name, the junit must hold exactly one testcase with that
+name, and that testcase must have run (status "run" or "fail"; without a status
+attribute, no <skipped> child) and must have no <failure> or <error> child.
 
 Usage:
-    check_probe_junit.py --junit build/probe-junit.xml \
+    check_probe_junit.py --junit build/ctest-junit.xml \
         --manifest build/hkp-probes/manifest.txt
 
 Exit codes:
-    0  every manifest name ran exactly once; no failure, error or skip
+    0  every manifest name ran exactly once and passed
     1  one or more checks failed; each prints
-       "check_probe_junit: FAIL <id>: <detail>"
+       "check_probe_junit: FAIL <id>: <detail>", where <id> is one of
+       manifest-unreadable, manifest-too-small, junit-unreadable,
+       name-missing, name-duplicate, not-run, failure, error
 """
 
 import argparse
@@ -31,6 +36,18 @@ MIN_MANIFEST_ENTRIES = 2
 
 def read_manifest(path: Path) -> list[str]:
     return [line.strip() for line in path.read_text().splitlines() if line.strip()]
+
+
+def ran(case: ET.Element) -> bool:
+    """Return whether ctest ran the testcase.
+
+    ctest writes status "run", "fail", "disabled" or "notrun"; only the first
+    two mean the test executed.
+    """
+    status = case.get("status")
+    if status is None:
+        return case.find("skipped") is None
+    return status in ("run", "fail")
 
 
 def check(junit_path: Path, manifest_path: Path) -> list[tuple[str, str]]:
@@ -56,30 +73,35 @@ def check(junit_path: Path, manifest_path: Path) -> list[tuple[str, str]]:
         failures.append(("junit-unreadable", f"{junit_path}: {exc}"))
         return failures
 
-    cases = list(root.iter("testcase"))
-    ran = [case.get("name", "") for case in cases]
+    cases: dict[str, list[ET.Element]] = {name: [] for name in names}
+    for case in root.iter("testcase"):
+        found = cases.get(case.get("name", ""))
+        if found is not None:
+            found.append(case)
 
-    if len(cases) != len(names):
-        failures.append(
-            (
-                "count-mismatch",
-                f"junit has {len(cases)} testcase(s), manifest declares {len(names)}",
-            )
-        )
-    for name in names:
-        if name not in ran:
+    for name, found in cases.items():
+        if not found:
             failures.append(
                 ("name-missing", f"declared test '{name}' is not in the junit")
             )
-
-    for case in cases:
-        name = case.get("name", "")
-        if case.find("skipped") is not None or case.get("status") == "notrun":
-            failures.append(("skipped", f"test '{name}' did not run"))
-        if case.find("failure") is not None:
-            failures.append(("failure", f"test '{name}' failed"))
-        if case.find("error") is not None:
-            failures.append(("error", f"test '{name}' errored"))
+            continue
+        if len(found) > 1:
+            failures.append(
+                (
+                    "name-duplicate",
+                    f"declared test '{name}' appears {len(found)} times in the junit",
+                )
+            )
+        for case in found:
+            if not ran(case):
+                status = case.get("status")
+                failures.append(
+                    ("not-run", f"test '{name}' did not run (status={status})")
+                )
+            if case.get("status") == "fail" or case.find("failure") is not None:
+                failures.append(("failure", f"test '{name}' failed"))
+            if case.find("error") is not None:
+                failures.append(("error", f"test '{name}' errored"))
 
     return failures
 

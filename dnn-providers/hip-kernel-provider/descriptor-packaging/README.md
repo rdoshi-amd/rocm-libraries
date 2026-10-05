@@ -265,50 +265,138 @@ its default. The reason is in the `hkp_wire_pack_target()` header in
 
 ## Packaging probes
 
-A packaging probe proves that one integration's descriptors **pack for one explicit
-architecture**, independent of the architectures the build itself targets. The packer's
-architecture list is `GPU_TARGETS` and nothing else, so a lane that builds gfx942 (Linux)
-or gfx1151 (Windows) never exercises the gfx950 production bundle. A probe closes that
-gap: it runs the real packer through `hkp_wire_pack_target()` with its own architecture,
-then a ctest entry asserts the packed output.
+A packaging probe packs one descriptor root for one explicit architecture through the real
+packer (`hkp_wire_pack_target()`), independent of the architectures the build targets, and
+a ctest entry then asserts the packed output. The packer's architecture list is
+`GPU_TARGETS` and nothing else, so without a probe a lane never packs an architecture it
+does not build. A probe may use any architecture, built by the lane or not.
+
+Probes are superbuild-only and exist only under `HIPKERNELPROVIDER_ENABLE_PACKAGING_PROBES`
+(default `OFF`). They are declared in `probes/probes.cmake`. With the option `ON`, the
+probe pack targets are part of `all`, and the aggregate target `hkp_packaging_probes`
+builds them alone. Probe output is written under `<build>/hkp-probes/<NAME>/`, outside both
+shipped descriptor trees, and is never installed. With the option `OFF` the only difference
+is that cache entry; the probe module is never read.
 
 **What a probe proves**
 
-- The real production descriptors (UUID ids, the specialization contract, the real
-  KMD/UED/UDD/UHD) load, pass the pack-time agreement check and compile through comgr.
-- The rocKE sources come from the wheel the packer is given, not from the in-tree source
-  tree the pytest suite imports.
+- The descriptors it packs, taken from the real root (ids, the specialization contract,
+  the real KMD/UED/UDD/UHD), load, pass the pack-time agreement check and go through the
+  packer for that architecture, including the compile for compiled kinds.
 - The architecture and output wiring of the CMake pack target: `--arches`, the stamp, the
-  interpreter and wheel directory, comgr forwarding (the last is asserted via `provenance-comgr` only; no local mutation measures it).
-- The output: a kpack archive for exactly that architecture, with the expected UKD count
-  and shipped provenance.
+  interpreter and wheel directory, comgr forwarding (the last is asserted via
+  `provenance-comgr` only; no local mutation measures it).
+- The output: exactly one architecture directory, exactly the expected UKDs, an archive
+  entry for each kpack-output UKD, and the provenance each producer kind ships.
+- rocKE only: the packer records a wheel (`provenance-wheel`). The wheel mutation check
+  below shows that the rocKE sources come from that wheel, not from the in-tree source the
+  pytest suite imports.
 
 **What it does not prove**
 
-- Variants within a compile group: one instance per group is packed (see below). The
-  lane's own architecture is covered in full by the normal build.
-- ASM SDPA (prebuilt `.co` files that kpack only stores: nothing compiles and nothing
-  reads the archive), the C++/runtime gfx950 paths, and install staging.
+- UKDs it does not pack: the other variants of a compile group in the default sample, or
+  the UKDs not listed in `UKDS`.
+- Anything outside the descriptor root and the packer, for example the gfx950 ASM SDPA
+  (prebuilt `.co` files) and C++/runtime paths, and install staging.
 - Device behavior: no kernel is launched, no numerics are checked.
-- Anything about integrations without a probe.
-- That the CI job runs: that is the workflow's job (`--no-tests=error`, the manifest check
-  below).
+- Integrations and architectures without a probe.
+- That the CI job runs: that is the job of `--no-tests=error` and the junit check below.
 
-Probes are **opt-in per architecture and superbuild-only**: they exist only under
-`HIPKERNELPROVIDER_ENABLE_PACKAGING_PROBES` (default `OFF`, CI-only), declared one
-`hkp_add_packaging_probe(ARCH ...)` line per architecture. A new pack under an already
-probed architecture in the production root is covered automatically. With the option
-`ON`, the pack targets and `hkp_packaging_probes` are part of `all`; the CI
-"Build packaging probes" step builds them explicitly for labelling. Probe output is never
-installed and is written under `<build>/hkp-probes/<name>/`, outside both shipped
-descriptor trees. With the option `OFF` the only difference is that cache entry; the probe
-module is never read.
+### How to use
+
+Probing is author-controlled: each integration declares what to probe, one
+`hkp_add_packaging_probe()` line in `probes/probes.cmake`.
+
+```cmake
+# Default sample: one UKD per compile group of every KDP in the root shipping for gfx950.
+hkp_add_packaging_probe(ARCH gfx950)
+# One integration, a chosen representative set.
+hkp_add_packaging_probe(ARCH gfx950 NAME attention_dense
+    UKDS attention_dense.bf16_d64_hq8_kv1_c1_bm128_bn64.gfx950
+         attention_dense.bf16_d64_hq8_kv1_c1_bm256_bn32.gfx950)
+```
+
+- **With `UKDS`**, the probe packs exactly the listed UKDs, selected by UKD `name`. Pick a
+  minimal representative set: one UKD per compile path you want checked on every PR. Probe
+  as much as you consider necessary; every listed UKD is packed, and compiled for a
+  compiled kind, in every CI run. A KDP that keeps none of the listed UKDs is left out of
+  the derived root. Give the line a `NAME`, since the default name is shared with the
+  default-sample probe of the same architecture.
+- **Without `UKDS`**, the probe packs the default sample: one UKD per compile group of
+  every KDP in the root that ships for `ARCH` (see the compile-group table below). A new
+  pack under that architecture is then covered with no new line.
+
+A listed name that is not kept fails configure: no KDP shipping for `ARCH` holds an inline
+UKD with that name that itself ships for `ARCH` (a misspelled name, a UKD for another
+architecture, or one reached only through a standalone-UKD reference). Listing a name twice
+also fails configure.
+
+| Argument | Meaning |
+|---|---|
+| `ARCH` | Required. The one architecture to pack, e.g. `gfx950`; must match `^gfx[0-9a-z]+$`. Passed to the packer as `--arches`. |
+| `ROOT` | Optional descriptor root to probe. Defaults to the production root (`HIPKERNELPROVIDER_PRODUCTION_DESCRIPTOR_SOURCE_ROOT`). A relative path is resolved against `probes/`; a trailing `/` is ignored. |
+| `NAME` | Optional probe name; must match `^[A-Za-z0-9_.+-]+$`, must not be dots only, and must not be `tools`. Defaults to `<ARCH>` for the production root and `<ROOT basename>_<ARCH>` for another `ROOT`. Pack target `hkp_packaging_probe_<NAME>`, ctest entry `hkp-probe-<NAME>`. Declaring a name twice is a configure error. |
+| `UKDS` | Optional UKD `name`s to pack instead of the default sample. Each entry is non-empty and listed once. |
+| `PACK_JOBS` | Optional prewarm worker count; defaults to `1`. |
+
+A probe has no producer-kind argument: the kinds present are discovered from the
+descriptors, and the assertion expects each UKD's provenance by its authored
+`kernel_source.kind`. Probes cover `hip`, `rocke`, `hsaco` and `embedded_source`, the kinds
+registered in `tools/hkp_probe_kinds.py`. Each entry gives the `kernel_source` fields that
+define a compile group, the provenance checks a shipped UKD must satisfy, and the packed
+**output type**: `kpack` (the packer packs the UKD into the archive and ships a
+`kind: kpack` UKD: `hip`, `rocke`, `hsaco`) or `passthrough` (the packer ships the UKD as
+authored and nothing enters the archive: `embedded_source`).
+
+The archive checks (`kpack-missing`, `kpack-empty`, `kpack-toc`, `sha256`, `symbol`) run
+only when the expected list holds at least one kpack-output UKD. A probe of only
+pass-through UKDs ships descriptors and no `kpack/` directory; the archive is then not
+required and an archive that happens to exist is ignored.
+
+Configuration fails, never skips, when: `ARCH` is missing or malformed; `NAME` is malformed,
+`tools` or declared twice; `ROOT` is not a directory; no KDP under the root ships for
+`ARCH`; a `UKDS` entry is empty, repeated or not kept; a KDP the probe keeps references a
+standalone UKD (a `kernelDescriptors` entry that is not an object; derive supports inline
+UKDs only); a kept UKD has a kind not registered in `tools/hkp_probe_kinds.py`; two kept
+UKDs of one KDP share a name; in the default sample, a UKD's `kernel_source` lacks one of
+its kind's compile-group fields; the probe output root would sit under a shipped
+descriptor tree; no probe is declared; or pytest is not importable by `Python3_EXECUTABLE`.
+
+### The derived root and the default sample
+
+At configure, `tools/hkp_probe_derive_root.py` copies the root into
+`<build>/hkp-probes/<NAME>/root`. Every KDP shipping for `ARCH` has its
+`kernelDescriptors` reduced to the probed UKDs, among the UKDs that themselves ship for
+`ARCH`: the `UKDS` list (one `--ukd` per entry), or else one UKD per **compile group**.
+With `UKDS`, a KDP that keeps nothing is left out; other files are copied unchanged. The
+compile group is the part of a UKD that selects its compile path:
+
+| Producer kind | Compile group |
+|---|---|
+| `rocke` | `(kind, source, builder)` |
+| `hip` | `(kind, source, build)` |
+| `hsaco` | one per KDP (list more with `UKDS`) |
+| `embedded_source` | one per KDP (list more with `UKDS`; ships as authored, no archive entry) |
+
+The kept UKD is the first of its group by sorted `name`, so a KDP whose UKDs share one
+compile path keeps one UKD.
+
+- **Variants inside a group are not compiled** by the default sample. Breakage specific to
+  one spec of a shared builder is caught only if that UKD is listed in `UKDS`.
+- **The key is the UKD `name`, not its `id`.** Ids are `uuid4` values regenerated on every
+  ingestor run; names encode the specialization and are unique.
+- **Arch matching follows the packer** (`arch_matches`, `_arch_subset_ok`): an empty or
+  absent `arch` list is a wildcard.
+- Derive also writes `expect.json` (kept KDP, UKD name and kind; pass-through kinds also
+  carry the authored `kernel_source`) beside the root; the assertion expects exactly that
+  set.
+- The derive step re-runs when any file under the root changes, and rewrites only files
+  whose content differs, so a reconfigure leaves the pack stamp fresh.
 
 ### Running the probes locally
 
 From the repository root. The paths below are the workstation's; substitute your ROCm and
-rocm_kpack locations. The `GPU_TARGETS` value must differ from every probe architecture
-(see "Adding a probe").
+rocm_kpack locations.
 
 ```bash
 cmake --preset hipdnn-dev-all -GNinja -B build-probe \
@@ -321,7 +409,7 @@ cmake --preset hipdnn-dev-all -GNinja -B build-probe \
     -DPython3_EXECUTABLE=/usr/bin/python3 -DPython_EXECUTABLE=/usr/bin/python3 \
     -DENABLE_CLANG_FORMAT=OFF -DENABLE_CLANG_TIDY=OFF -DROCM_LIBS_ENABLE_ROOT_CTEST=ON \
     -DHIPKERNELPROVIDER_ENABLE_PACKAGING_PROBES=ON
-cmake --build build-probe --target hkp_packaging_probes
+cmake --build build-probe --target hkp_packaging_probes   # or the full build
 ctest --test-dir build-probe -R '^hkp-probe-' --no-tests=error --output-on-failure \
     --output-junit probe-junit.xml
 python3 .github/scripts/check_probe_junit.py \
@@ -329,88 +417,23 @@ python3 .github/scripts/check_probe_junit.py \
 ```
 
 The selector is `^hkp-probe-`, anchored: `-R` is an unanchored regex. It matches every
-probe (`hkp-probe-<name>`) and `hkp-probe-tools`, the pytest suite of the probe tooling
+probe (`hkp-probe-<NAME>`) and `hkp-probe-tools`, the pytest suite of the probe tooling
 (`probes/tests/`). `--no-tests=error` makes an empty selection a failure instead of a
-green run that proved nothing. `manifest.txt` is written at configure and lists the
-ctest names that must run; the junit check fails unless every one ran with no failure,
-error or skip. Configuring without the option and running the same build and ctest lines
-fails (unknown target, then "No tests were found").
+green run that proved nothing. `manifest.txt` is written at configure and lists the ctest
+names that must run; the junit check fails unless every one ran and passed (a skipped,
+disabled or missing entry fails), and ignores testcases not in the manifest, so it also
+accepts the junit of a full ctest run. Configuring without the option and running the same
+build and ctest lines fails (unknown target, then "No tests were found").
 
-Locally on Linux the build is quick (the wheel environment plus a one-instance-per-group
-pack) and the per-arch ctest entries a few seconds; `hkp-probe-tools` (the probe tooling's own pytest suite, which really compiles hip and rocke fixtures) takes longer. There is no local Windows reproduction.
+In CI both superbuild lanes configure with the option `ON`. The probe packs run in the
+Build step as part of `all`; the probe ctest entries run once, inside the lane's normal
+"Run tests" ctest, which writes `build/ctest-junit.xml`. The "Check packaging probes ran"
+step then runs only `check_probe_junit.py` on that junit against the manifest. It runs
+whenever "Run tests" ran, pass or fail.
 
-### `hkp_add_packaging_probe` arguments
-
-Declared in `probes/probes.cmake`, defined in `cmake/HkpPackagingProbes.cmake`. The
-normal declaration is one line per architecture: `hkp_add_packaging_probe(ARCH gfx950)`.
-
-| Argument | Meaning |
-|---|---|
-| `ARCH` | Required. The one architecture to pack, e.g. `gfx950`. Passed to the packer as `--arches`. |
-| `ROOT` | Optional descriptor root to probe. Defaults to the production root (`HIPKERNELPROVIDER_PRODUCTION_DESCRIPTOR_SOURCE_ROOT`). |
-| `NAME` | Optional probe name. Defaults to `<ARCH>` for the production root and `<ROOT basename>_<ARCH>` for another `ROOT`. Pack target `hkp_packaging_probe_<NAME>`, ctest entry `hkp-probe-<NAME>` (e.g. `hkp-probe-gfx950`). Declaring a name twice is a configure error. |
-| `PACK_JOBS` | Optional prewarm worker count; defaults to `1`. |
-
-A probe has no producer-kind or per-KDP argument: the producer kinds present in the root
-are discovered from its descriptors, and the assertion expects each UKD's provenance by
-its authored `kernel_source.kind`. Probes cover `hip`, `rocke`, `hsaco` and
-`embedded_source`, the kinds registered in `tools/hkp_probe_kinds.py`. Each entry gives the
-`kernel_source` fields that define a compile group, the provenance checks a shipped UKD must
-satisfy, and the packed **output type**: `kpack` (the packer packs the UKD into the archive
-and ships a `kind: kpack` UKD: `hip`, `rocke`, `hsaco`) or `passthrough` (the packer ships the
-UKD as authored and nothing enters the archive: `embedded_source`). A kind whose output is
-one of these types, using provenance checks that already exist, is probeable with one entry
-there plus one end-to-end test case; the kinds list in this paragraph is edited with it. A
-kind the packer does not support yet needs packer work first. Any kind not registered, in a
-UKD kept for the probed arch, makes configure fail and fails `no-rules-for-kind` in the
-assertion; such a UKD must live in a KDP that does not ship for a probed arch, or the probe
-needs a design decision.
-
-The archive rule: the archive checks (`kpack-missing`, `kpack-empty`, `kpack-toc`, `sha256`,
-`symbol`, `signature`) run only when the expected list holds at least one kpack-output UKD.
-A root of only pass-through UKDs ships descriptors and no `kpack/` directory; the archive is
-then not required and an archive that happens to exist is ignored.
-
-Non-goals: a pass-through kind probes one UKD per KDP (`group_by` is empty), not every
-`source_file` and `entry_point`; standalone-UKD references are rejected by derive; a further
-output type (for example a runtime-compiled kind) is a new decision when it lands, not an
-entry.
-
-Configuration fails, never skips, when: `ARCH` is missing; `ROOT` is not a directory;
-no KDP under the root ships for `ARCH`; a
-KDP shipping for `ARCH` references a standalone UKD (a `kernelDescriptors` entry that is
-not an object; derive supports inline UKDs only); the probe output root would sit under a
-shipped descriptor tree; a UKD kept for `ARCH` has a kind not registered in `tools/hkp_probe_kinds.py`; no probe is declared; or pytest is not importable by
-`Python3_EXECUTABLE`.
-
-### The derived-root compile-group rule
-
-At configure, `tools/hkp_probe_derive_root.py` copies the root into
-`<build>/hkp-probes/<NAME>/root` unchanged, except that every KDP shipping for `ARCH` has
-its `kernelDescriptors` reduced to one UKD per **compile group**, among the UKDs that
-themselves ship for `ARCH`. The group is the part of a UKD that selects its compile path:
-
-| Producer kind | Compile group |
-|---|---|
-| `rocke` | `(kind, builder)` |
-| `hip` | `(kind, source, build)` |
-| `hsaco` | one per KDP (compiles nothing) |
-| `embedded_source` | one per KDP (compiles nothing; ships as authored, no archive entry) |
-
-The kept UKD is the first by sorted `name`. The probe therefore packs the real
-descriptors and compiles every distinct compile path once instead of every variant.
-A production KDP whose UKDs share one builder keeps one UKD.
-
-- **Variants inside a group are not compiled.** Breakage specific to one spec of a shared
-  builder is not caught; that is the accepted gap of the design.
-- **The key is the UKD `name`, not its `id`.** Ids are `uuid4` values regenerated on every
-  ingestor run; names encode the specialization and are unique.
-- **Arch matching follows the packer** (`arch_matches`, `_arch_subset_ok`): an empty or
-  absent `arch` list is a wildcard.
-- Derive also writes `expect.json` (kept KDP, UKD name and kind; pass-through kinds also carry the authored `kernel_source`) beside the root; the
-  assertion expects exactly that set.
-- The derive step re-runs when any file under the root changes, and rewrites only files
-  whose content differs, so a reconfigure leaves the pack stamp fresh.
+Locally on Linux the build is quick (the wheel environment plus the probed UKDs) and each
+probe ctest entry takes a few seconds; `hkp-probe-tools` takes longer, since it really
+compiles hip and rocke fixtures. There is no local Windows reproduction.
 
 ### Assertion ids
 
@@ -419,48 +442,52 @@ A production KDP whose UKDs share one builder keeps one UKD.
 
 | Id | Fails when |
 |---|---|
-| `out-root-missing` | The probe output root does not exist: build `hkp_packaging_probes` first. |
+| `out-root-missing` | The probe output root does not exist: build the probe pack target first. |
 | `stamp-missing` | The pack stamp is absent. |
 | `arch-dir-missing` / `extra-arch-dir` | `<out>/<arch>/` is absent, or another `gfx*` directory is present. |
 | `kpack-missing` / `kpack-empty` | Kpack output is expected and `<out>/<arch>/kpack/hip_kernel_provider_<arch>.kpack` is absent or empty. |
-| `no-kdp` | No `*.kdp.json` under `<out>/<arch>`. |
+| `no-kdp` | No `*.kdp.json` under `<out>/<arch>`, or one is unreadable or not a JSON object. |
 | `ukd-kind` | A shipped UKD's `kernel_source.kind` differs from what its expected kind's output type requires: `kpack` for kpack output, the authored kind for pass-through output. |
-| `arch-field` | A KDP or UKD `arch` is not exactly the probe architecture (always required for a pass-through UKD). |
+| `arch-field` | A shipped UKD's `arch` is not exactly `[<arch>]` (an absent `arch` fails too), or a KDP's `arch`, when present, is not exactly `[<arch>]`. |
 | `passthrough-source` | A pass-through UKD's `kernel_source` differs from the authored one recorded in `expect.json`. |
 | `passthrough-provenance` | A pass-through UKD's `provenance.source_label` is empty, or `provenance.source_file` differs from `kernel_source.source_file`. |
-| `kpack-toc` | The archive has no entry for a UKD's `toc_key` and architecture. |
+| `kpack-toc` | The archive is unreadable, or has no entry for a UKD's `toc_key` and architecture. |
 | `sha256` | The blob's sha256 differs from `kernel_source.sha256`. |
-| `signature` | A UKD has an empty `signature`. |
+| `signature` | A kpack UKD's `kernel_source.signature` is empty or not a list. |
 | `symbol` | A UKD's `symbol` does not appear in its blob. |
 | `provenance-origin` | `origin_kind` differs from the UKD's expected kind (the authored `kernel_source.kind`). |
 | `no-rules-for-kind` | A UKD's expected kind has no entry in `tools/hkp_probe_kinds.py`: a new producer kind must add its entry. |
-| `provenance-wheel` | `rocke_wheel_sha256` is missing or empty: the wheel did not supply rocKE. |
+| `provenance-wheel` | `rocke_wheel_sha256` is missing or empty: the packer recorded no rocKE wheel. |
 | `provenance-comgr` | The comgr recorded at pack time is not the expected library (or is empty). Catches a stale system comgr shadowing the intended one. |
 | `ukd-count` | The number of shipped UKDs found in the expected list (`expect.json`, written by derive) differs from its length, is zero, or a shipped UKD is not in the list. |
 
-### Adding a probe
+### How to extend
 
-Required for every new architecture or integration. **No CMake guard enforces this:** a
-new integration without a probe configures, builds and passes CI, and its packaging for
-an architecture the lanes do not build is then unchecked.
+No CMake guard requires a probe: an integration without one configures, builds and passes
+CI, and its packaging for an architecture the lanes do not build is then unchecked.
 
-1. Add one `hkp_add_packaging_probe(ARCH <gfx>)` line to `probes/probes.cmake`. No
-   workflow edit: the superbuild lanes build `hkp_packaging_probes` and select
-   `^hkp-probe-`, and the manifest counts every declared probe. A new pack under an
-   architecture that is already probed needs no new line.
-2. **The probe architecture must differ from the lane's `GPU_TARGETS`** (gfx942 on the
-   Linux job, gfx1151 on the Windows job). If they are equal, the architecture-wiring
-   mutation below becomes unobservable on that job. If a probe must use a lane's
-   architecture, change the job's `GPU_TARGETS` first.
-3. Reconfigure and run the local block above; the new `hkp-probe-<NAME>` entry and the
-   manifest line must appear.
-4. Run the mutation checks below. Each must turn the probe red, and each edit must be
-   reverted afterwards.
+- **New architecture:** one `hkp_add_packaging_probe(ARCH <gfx>)` line.
+- **New integration:** one line with `NAME <integration>` and `UKDS` naming its
+  representative UKDs.
+- **Another descriptor root:** one line with `ROOT <dir>`.
+- **New producer kind:** the packer must support the `kernel_source.kind` first. Then one
+  `KINDS` entry in `tools/hkp_probe_kinds.py` (compile-group fields, provenance checks by
+  name, output type), one end-to-end test in `probes/tests/`, and the kinds list above.
+- **New provenance check:** a function in `_PROVENANCE_CHECKS` (`tools/hkp_probe_assert.py`),
+  its name in the kind's `provenance`, a row in the assertion-id table and a test showing
+  the check fails on a mutated output.
+- **New output type** (for example a runtime-compiled kind): an `_OUTPUT_CHECKS` entry plus
+  the derive and assert sites that branch on the output type (`expect.json` content, the
+  archive rule). This is a design decision, not an entry.
+
+After adding a probe line, reconfigure and run the local block above: the new
+`hkp-probe-<NAME>` entry and its manifest line must appear. Then run the mutation checks
+below.
 
 ### Mutation checks when adding a probe
 
-After each mutation: reconfigure, then build `hkp_packaging_probes`, then run the probe
-ctest entry, then revert the edit.
+Each mutation must turn the probe red. After each one: reconfigure, build the probe, run
+its ctest entry, then revert the edit.
 
 ```bash
 cmake build-probe
@@ -471,19 +498,21 @@ ctest --test-dir build-probe -R '^hkp-probe-<NAME>$' --output-on-failure
 1. **Derived descriptors reach the compiler.**
    - Replace the `ARCH` of the probe with an architecture no KDP in the root ships for:
      configure must fail (no KDP under the root ships for it).
-   - Add a standalone-UKD reference (a non-object `kernelDescriptors` entry) to a KDP that
-     ships for the probe architecture: configure must fail with
+   - Add a standalone-UKD reference (a non-object `kernelDescriptors` entry) to a KDP the
+     probe keeps: configure must fail with
      `standalone UKD references unsupported by probe derive`.
-   - Set a compile-affecting spec field of that UKD to a value the builder rejects (for
-     dense attention: `block_n` in `kernel_source.spec` from `64` to `7`): the build must
-     fail in the packer (`invalid spec ...`).
-   - Make a UKD `metadata` field disagree with the compiled specialization (`block_n` in
-     `metadata` from `64` to `128`): the build must fail with the pack-time agreement
-     error (`compiled specialization disagrees with metadata`).
+   - For a compiled kind, set a compile-affecting spec field of a probed UKD to a value
+     the compiler rejects: the build must fail in the packer. rocKE dense attention, for
+     example: `block_n` in `kernel_source.spec` from `64` to `7` fails with
+     `invalid spec ...`.
+   - Make a probed UKD's `metadata` disagree with the compiled specialization: the build
+     must fail with the pack-time agreement error. rocKE dense attention, for example:
+     `block_n` in `metadata` from `64` to `128` fails with
+     `compiled specialization disagrees with metadata`.
    - Also run `hip-kernel-provider-hkp-pack` on the mutated tree and record whether it
      stays green. For the gfx950 dense-attention probe it does, which is what makes the
      probe more than the existing test.
-2. **The wheel supplies rocKE.** In `rocke/platform/pyproject.toml` change
+2. **rocKE only: the wheel supplies rocKE.** In `rocke/platform/pyproject.toml` change
    `rocke = ["**/*.json"]` to `rocke = ["analysis/**/*.json"]`, so the built wheel lacks
    `core/arch/data/arch_specs.json`. The probe build must fail with
    `FileNotFoundError ... arch_specs.json` from the private wheel directory, while
@@ -500,16 +529,17 @@ ctest --test-dir build-probe -R '^hkp-probe-<NAME>$' --output-on-failure
 
    A fresh checkout (CI) has neither directory.
 3. **The architecture and outputs are wired.** In `cmake/HkpPackagingProbes.cmake`:
-   - Replace the `ARCHES` argument of the pack target with the lane's architecture
-     (`gfx942`): the build must fail with `produced nothing: no KDP survived arch pruning`.
+   - Replace the `ARCHES` argument of the pack target with an architecture no KDP in the
+     root ships for: the build must fail with
+     `produced nothing: no KDP survived arch pruning`.
    - Replace it with an empty string: the build succeeds, and the ctest entry must fail
      `hkp_probe_assert: FAIL arch-dir-missing`.
    - After a good build, delete `build-probe/hkp-probes/<NAME>/out/.hkp-packed.stamp`: the
      ctest entry must fail `hkp_probe_assert: FAIL stamp-missing`.
 
 The wheel, architecture-wiring, spec and metadata mutations above turned the gfx950 probe
-red when run locally on Linux. The Windows half of the wheel check, and comgr forwarding (covered only by
-`provenance-comgr`), are verified by CI only.
+red when run locally on Linux. The Windows half of the wheel check, and comgr forwarding
+(covered only by `provenance-comgr`), are verified by CI only.
 
 ## Running the tests
 

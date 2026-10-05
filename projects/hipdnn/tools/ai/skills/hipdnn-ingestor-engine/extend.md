@@ -100,12 +100,9 @@ through that suite's ordinary host run. [native-pack.md](native-pack.md) owns
 eligibility. Device proof must explicitly select and numerically verify the new
 candidate; passing the unchanged default is not extension acceptance.
 
-An addition under an architecture that already has a packaging probe is covered by it
-automatically; a new architecture needs one `hkp_add_packaging_probe(ARCH <gfx>)` line
-(opt-in per architecture, superbuild-only, option `HIPKERNELPROVIDER_ENABLE_PACKAGING_PROBES`
-OFF by default). The probe packs one instance per compile group and does not cover ASM
-SDPA, C++/runtime gfx950 paths, install staging or standalone-UKD references (derive fails
-configure on those); the lane's own architecture is covered in full by the normal build.
+When the addition adds a compile path or an architecture that its integration's packaging
+probe does not pack, add a representative UKD name to that probe's `UKDS` (or a probe line
+for the new architecture) and run `hkp-probe-<NAME>`, as in RUNBOOK's final step.
 
 The handoff identifies retained IDs/references, changed/new files, baseline/final
 installations, whole-engine results and the addition's actual dispatch. RUNBOOK stage 5

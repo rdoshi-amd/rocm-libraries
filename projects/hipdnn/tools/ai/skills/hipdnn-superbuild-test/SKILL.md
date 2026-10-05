@@ -120,11 +120,18 @@ proving a named engine; a generic `command:` line is not that proof.
 ## Packaging probes
 
 When the build was configured with `HIPKERNELPROVIDER_ENABLE_PACKAGING_PROBES=ON`
-(superbuild-only, OFF by default), the probe ctest entries are `hkp-probe-<arch>` plus
-`hkp-probe-tools`; select them with the anchored `-R '^hkp-probe-'` and
-`--no-tests=error`. Probes are opt-in per architecture and pack one instance per compile
-group; the lane's own architecture is covered in full by the normal build. A pass does not
-cover ASM SDPA, C++/runtime gfx950 paths, install staging or standalone-UKD references.
+(superbuild-only, OFF by default), the probe ctest entries are `hkp-probe-<NAME>`, one per
+`hkp_add_packaging_probe()` line, plus `hkp-probe-tools`. A full ctest run includes them;
+to run them alone, select with the anchored `-R '^hkp-probe-'` and `--no-tests=error`.
+`<build-dir>/hkp-probes/manifest.txt` lists the entries that must run. Check a ctest junit
+(`--output-junit`) against it with `.github/scripts/check_probe_junit.py --junit <junit>
+--manifest <manifest>`, which fails on any listed entry missing, not run, failed or
+errored and ignores the other testcases.
+
+In the superbuild CI lanes the probes run once, inside the "Run tests" ctest, which writes
+`build/ctest-junit.xml`; the "Check packaging probes ran" step then runs only the junit
+check, whenever "Run tests" ran, pass or fail. A pass does not cover device behavior,
+install staging, UKDs the probe does not pack, or standalone-UKD references.
 
 ## Ingestor proof boundaries
 

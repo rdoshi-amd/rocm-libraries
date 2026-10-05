@@ -2,15 +2,27 @@
 """Derive a minimal descriptor root for a packaging probe.
 
 Copies every file under `--from` to `--out`, except that each KDP shipping for
-`--arch` has its inline `kernelDescriptors` reduced to one UKD per compile group
-among the UKDs that themselves ship for `--arch`:
+`--arch` has its inline `kernelDescriptors` reduced to the UKDs the probe packs,
+among the UKDs that themselves ship for `--arch`.
 
-    one entry per kind in hkp_probe_kinds.py: rocke (kind, builder), hip (kind, source,
-    build), hsaco and embedded_source (kind: compile nothing, so one UKD per KDP)
+Default mode (no `--ukd`): one UKD per compile group, where the group key is the
+kind plus the kernel_source fields hkp_probe_kinds.KINDS names for it:
 
-The pick within a group is the first by sorted UKD `name`. Packing the derived
-root therefore exercises every compile path once instead of every variant.
-KDPs that do not ship for `--arch` are copied unchanged; the packer prunes them.
+    rocke (kind, source, builder), hip (kind, source, build), hsaco and
+    embedded_source (kind: compile nothing, so one UKD per KDP)
+
+Every field of the key must be present in kernel_source. The pick within a group is
+the first by sorted UKD `name`. Packing the derived root therefore exercises every
+compile path once instead of every variant. Authors who want more than one UKD of a
+group list them with `--ukd`.
+
+`--ukd <name>` mode (repeatable): each KDP keeps exactly the UKDs whose `name` is
+listed. A KDP shipping for `--arch` that keeps nothing is omitted from the derived
+root, so the packer cannot pack it in full. KDPs that keep nothing are not inspected
+for standalone references or kinds.
+
+In both modes KDPs that do not ship for `--arch` are copied unchanged; the packer
+prunes them.
 
 `expect.json` is written beside `--out` (`<out parent>/expect.json`): a list of
 {"kdp": <KDP path relative to the root>, "name": <UKD name>, "kind": <authored
@@ -18,16 +30,18 @@ kernel_source.kind>}, one entry per kept UKD, for hkp_probe_assert.py. Entries o
 whose packed output is a pass-through also carry the authored "kernel_source".
 
 Files are written only when their content differs and files absent from the
-source are removed, so deriving twice leaves every mtime of the derived root
+derived set are removed, so deriving twice leaves every mtime of the derived root
 alone and the pack stamp stays fresh across a reconfigure.
 
 Arch rules are the packer's (`hkp_pack.descriptors.arch_matches` and
 `_arch_subset_ok`): an empty or absent `arch` list is a wildcard.
 
 Exit code 0 on success. Exit code 2, with a `hkp_probe_derive: ...` message on
-stderr, when the root cannot be derived: a KDP shipping for `--arch` references
-a standalone UKD (`kernelDescriptors` entry that is not an object), a kept UKD
-has a kind not in hkp_probe_kinds.KINDS, a UKD is malformed, or the source is unreadable.
+stderr, when the root cannot be derived: a KDP that keeps UKDs (or, in default mode,
+any KDP shipping for `--arch`) references a standalone UKD (`kernelDescriptors` entry
+that is not an object), a kept UKD has a kind not in hkp_probe_kinds.KINDS, a
+default-mode candidate lacks a group key field, a UKD is malformed, the source is
+unreadable, or a `--ukd` name is listed twice or kept by no KDP.
 """
 
 from __future__ import annotations
@@ -63,7 +77,8 @@ def arch_subset_ok(ukd_arch, kdp_arch):
     return set(ukd_arch) <= set(kdp_arch)
 
 
-def _group_key(ukd, where):
+def _check_kind(ukd, where):
+    """Return (kernel_source, kind); DeriveError when the kind is unregistered."""
     source = ukd.get("kernel_source")
     kind = source.get("kind") if isinstance(source, dict) else None
     if kind not in KINDS:
@@ -74,9 +89,36 @@ def _group_key(ukd, where):
             "packer work first; until then keep such UKDs in a KDP that does not "
             "ship for the probed arch"
         )
+    return source, kind
+
+
+def _group_key(ukd, where):
+    source, kind = _check_kind(ukd, where)
+    for f in KINDS[kind].group_by:
+        if f not in source:
+            raise DeriveError(
+                f"{where} of kind {kind!r} has no kernel_source field {f!r}, which "
+                "the compile group key of that kind requires"
+            )
     return (kind,) + tuple(
-        json.dumps(source.get(f), sort_keys=True) for f in KINDS[kind].group_by
+        json.dumps(source[f], sort_keys=True) for f in KINDS[kind].group_by
     )
+
+
+def _standalone_error(rel, entry):
+    return DeriveError(
+        f"{rel} references a standalone UKD ({entry!r}): standalone UKD "
+        "references unsupported by probe derive"
+    )
+
+
+def _check_unique_names(rel, kept):
+    names = [e["name"] for e in kept]
+    if len(set(names)) != len(names):
+        raise DeriveError(
+            f"{rel} kept UKDs share a name, so expect.json could not tell them "
+            f"apart: {sorted(names)}"
+        )
 
 
 def _derive_kdp(kdp, rel, arch):
@@ -87,10 +129,7 @@ def _derive_kdp(kdp, rel, arch):
     candidates = []
     for entry in entries:
         if not isinstance(entry, dict):
-            raise DeriveError(
-                f"{rel} references a standalone UKD ({entry!r}): standalone UKD "
-                "references unsupported by probe derive"
-            )
+            raise _standalone_error(rel, entry)
         where = f"{rel}: UKD '{entry.get('id', '?')}'"
         if not isinstance(entry.get("name"), str):
             raise DeriveError(f"{where} has no string 'name'")
@@ -106,17 +145,45 @@ def _derive_kdp(kdp, rel, arch):
     for key, entry in sorted(candidates, key=lambda c: c[1]["name"]):
         picks.setdefault(key, entry)
     kept = [e for e in entries if any(e is p for p in picks.values())]
-    names = [e["name"] for e in kept]
-    if len(set(names)) != len(names):
-        raise DeriveError(
-            f"{rel} kept UKDs from different compile groups share a name, so "
-            f"expect.json could not tell them apart: {sorted(names)}"
-        )
+    _check_unique_names(rel, kept)
     return kept
 
 
-def _plan(src, arch):
-    """Return (files, expect): files maps relative posix path -> source Path or bytes."""
+def _derive_kdp_listed(kdp, rel, arch, wanted):
+    """Return the UKDs of a KDP shipping for `arch` whose name is in `wanted`."""
+    entries = kdp.get("kernelDescriptors")
+    if not isinstance(entries, list):
+        raise DeriveError(f"{rel} 'kernelDescriptors' is not a list")
+    kept = [
+        e
+        for e in entries
+        if isinstance(e, dict)
+        and e.get("name") in wanted
+        and arch_matches(e, arch)
+        and arch_subset_ok(e.get("arch") or [], kdp.get("arch") or [])
+    ]
+    if not kept:
+        return kept
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise _standalone_error(rel, entry)
+    for entry in kept:
+        _check_kind(entry, f"{rel}: UKD '{entry.get('id', '?')}'")
+    _check_unique_names(rel, kept)
+    return kept
+
+
+def _plan(src, arch, ukds=None):
+    """Return (files, expect): files maps relative posix path -> source Path or bytes.
+
+    `ukds` is the list of UKD names to keep, or None for one UKD per compile group.
+    """
+    if ukds is not None:
+        dupes = sorted({n for n in ukds if ukds.count(n) > 1})
+        if dupes:
+            raise DeriveError(f"--ukd lists {dupes} more than once")
+        wanted = set(ukds)
+
     files = {}
     for p in sorted(src.rglob("*")):
         if p.is_file():
@@ -137,9 +204,16 @@ def _plan(src, arch):
             raise DeriveError(f"{rel} is not a JSON object")
         if not arch_matches(kdp, arch):
             continue
-        kept = _derive_kdp(kdp, rel, arch)
+        if ukds is None:
+            kept = _derive_kdp(kdp, rel, arch)
+        else:
+            kept = _derive_kdp_listed(kdp, rel, arch, wanted)
         if not kept:
-            # Every UKD filters out for this arch: the packer drops the whole KDP.
+            if ukds is not None:
+                # Only listed UKDs are packed, so this KDP must not ship in full.
+                del files[rel]
+            # Default mode: every UKD filters out for this arch, so the packer drops
+            # the whole KDP.
             continue
         kdp["kernelDescriptors"] = kept
         files[rel] = (json.dumps(kdp, indent=2) + "\n").encode("utf-8")
@@ -149,6 +223,15 @@ def _plan(src, arch):
                 # The packer ships the block as authored; the assertion compares it.
                 entry["kernel_source"] = u["kernel_source"]
             expect.append(entry)
+
+    if ukds is not None:
+        missing = sorted(wanted - {e["name"] for e in expect})
+        if missing:
+            raise DeriveError(
+                f"--ukd {missing} matched no inline UKD shipping for {arch} in a KDP "
+                f"shipping for {arch} (standalone UKD references are unsupported by "
+                "probe derive)"
+            )
     return files, expect
 
 
@@ -190,12 +273,17 @@ def _sync(out, files):
             shutil.rmtree(p)
 
 
-def derive_root(src: Path, arch: str, out: Path) -> str | None:
-    """Write the derived root to `out`; return an error message, or None on success."""
+def derive_root(
+    src: Path, arch: str, out: Path, ukds: list[str] | None = None
+) -> str | None:
+    """Write the derived root to `out`; return an error message, or None on success.
+
+    `ukds` lists the UKD names to keep (`--ukd`); None keeps one per compile group.
+    """
     if not src.is_dir():
         return f"{_PREFIX} {src} is not a directory"
     try:
-        files, expect = _plan(src, arch)
+        files, expect = _plan(src, arch, ukds)
     except DeriveError as exc:
         return f"{_PREFIX} {exc}"
 
@@ -217,9 +305,16 @@ def main(argv: list[str] | None = None) -> int:
         "--arch", required=True, help="architecture to probe, e.g. gfx950"
     )
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument(
+        "--ukd",
+        dest="ukds",
+        action="append",
+        metavar="NAME",
+        help="keep the UKD with this name (repeatable); default: one per compile group",
+    )
     args = parser.parse_args(argv)
 
-    error = derive_root(args.src, args.arch, args.out)
+    error = derive_root(args.src, args.arch, args.out, args.ukds)
     if error is not None:
         print(error, file=sys.stderr)
         return 2

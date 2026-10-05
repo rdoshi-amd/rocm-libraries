@@ -34,25 +34,34 @@ function(_hkp_probe_check_out_root name out_root)
 endfunction()
 
 # ---------------------------------------------------------------------------
-# _hkp_probe_derive_root(<name> <from_dir> <arch> <out_dir> <expect_var>)
+# _hkp_probe_derive_root(<name> <from_dir> <arch> <out_dir> <expect_var> [<ukd>...])
 #   Derive the probe root at configure time (FATAL with the tool's stderr when the root
-#   cannot be derived, e.g. a KDP for <arch> references a standalone UKD) and re-run
-#   configure when a source file changes. The tool writes <out_dir>/../expect.json, the
-#   list of kept UKDs the assertion expects; <expect_var> receives its path. FATAL when
-#   that list is empty: no KDP under <from_dir> ships for <arch>, so the pack would
-#   prune everything. Deriving is idempotent, so a reconfigure leaves the derived root's
-#   mtimes alone and does not re-pack.
+#   cannot be derived, e.g. a kept KDP references a standalone UKD, or a listed UKD is
+#   kept nowhere) and re-run configure when a source file or the derive tooling
+#   changes. Each <ukd> is passed as one --ukd; with none, derive keeps one UKD per
+#   compile group. The tool writes <out_dir>/../expect.json, the list of kept UKDs the
+#   assertion expects; <expect_var> receives its path. FATAL when that list is empty: no
+#   KDP under <from_dir> ships for <arch>, so the pack would prune everything. Deriving
+#   is idempotent, so a reconfigure leaves the derived root's mtimes alone and does not
+#   re-pack.
 # ---------------------------------------------------------------------------
 function(_hkp_probe_derive_root name from_dir arch out_dir expect_var)
     file(GLOB_RECURSE _derive_inputs CONFIGURE_DEPENDS "${from_dir}/*")
     set_property(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" APPEND
-                 PROPERTY CMAKE_CONFIGURE_DEPENDS ${_derive_inputs})
+                 PROPERTY CMAKE_CONFIGURE_DEPENDS ${_derive_inputs}
+                          "${HKP_PKG_DIR}/tools/hkp_probe_derive_root.py"
+                          "${HKP_PKG_DIR}/tools/hkp_probe_kinds.py")
+    set(_ukd_args "")
+    foreach(_ukd IN LISTS ARGN)
+        list(APPEND _ukd_args --ukd "${_ukd}")
+    endforeach()
     execute_process(
         COMMAND "${Python3_EXECUTABLE}"
                 "${HKP_PKG_DIR}/tools/hkp_probe_derive_root.py"
                 --from "${from_dir}"
                 --arch "${arch}"
                 --out "${out_dir}"
+                ${_ukd_args}
         RESULT_VARIABLE _derive_rc
         OUTPUT_VARIABLE _derive_out
         ERROR_VARIABLE _derive_err)
@@ -76,26 +85,82 @@ function(_hkp_probe_derive_root name from_dir arch out_dir expect_var)
 endfunction()
 
 # ---------------------------------------------------------------------------
-# hkp_add_packaging_probe(ARCH <gfxNNN> [ROOT <dir>] [NAME <n>] [PACK_JOBS <j>])
+# _hkp_probe_check_name(<name>)
+#   FATAL unless <name> is usable as a target, ctest and directory name, is not the
+#   reserved `tools`, is not declared yet, and the call comes from a probes file loaded
+#   by hkp_load_packaging_probes().
+# ---------------------------------------------------------------------------
+function(_hkp_probe_check_name name)
+    if(NOT name MATCHES "^[A-Za-z0-9_.+-]+$" OR name MATCHES "^\\.+$")
+        message(FATAL_ERROR
+            "hkp probe '${name}': NAME must match [A-Za-z0-9_.+-]+ and not be "
+            "dots only (it names a target, a ctest entry and a build directory); "
+            "pass NAME explicitly.")
+    endif()
+    if(name STREQUAL "tools")
+        message(FATAL_ERROR
+            "hkp probe '${name}': NAME 'tools' is reserved for the probe "
+            "tooling test hkp-probe-tools.")
+    endif()
+    get_property(_toolchain_set GLOBAL PROPERTY HKP_PROBE_TOOLCHAIN_SET)
+    if(NOT _toolchain_set)
+        message(FATAL_ERROR
+            "hkp probe '${name}': hkp_add_packaging_probe is only valid from a "
+            "probes file loaded by hkp_load_packaging_probes().")
+    endif()
+    get_property(_names GLOBAL PROPERTY HKP_PROBE_NAMES)
+    if(name IN_LIST _names)
+        message(FATAL_ERROR "hkp probe '${name}' is declared twice.")
+    endif()
+endfunction()
+
+# ---------------------------------------------------------------------------
+# _hkp_probe_check_ukds(<name> [<ukd>...])
+#   FATAL when a UKDS entry is empty or listed twice.
+# ---------------------------------------------------------------------------
+function(_hkp_probe_check_ukds name)
+    set(_seen "")
+    foreach(_ukd IN LISTS ARGN)
+        if(_ukd STREQUAL "")
+            message(FATAL_ERROR "hkp probe '${name}': UKDS holds an empty UKD name.")
+        endif()
+        if(_ukd IN_LIST _seen)
+            message(FATAL_ERROR
+                "hkp probe '${name}': UKDS lists '${_ukd}' more than once.")
+        endif()
+        list(APPEND _seen "${_ukd}")
+    endforeach()
+endfunction()
+
+# ---------------------------------------------------------------------------
+# hkp_add_packaging_probe(ARCH <gfxNNN> [ROOT <dir>] [NAME <n>] [UKDS <ukd-name>...]
+#                         [PACK_JOBS <j>])
 #   Declare one probe: pack a descriptor root for ARCH and assert the output.
 #
 #   ROOT defaults to the production descriptors, HIPKERNELPROVIDER_PRODUCTION_DESCRIPTOR_
-#   SOURCE_ROOT. It is copied at configure time into the build tree with every KDP that
-#   ships for ARCH trimmed to one UKD per compile group (see hkp_probe_derive_root.py),
-#   so the probe packs the real descriptors but compiles each distinct compile path
-#   once. The assertion expects exactly the kept UKDs, each with the provenance of its
-#   producer kind (see hkp_probe_assert.py). Adding a pack under an already probed ARCH
-#   needs no new declaration.
+#   SOURCE_ROOT; a relative ROOT is resolved against the directory of the probes file.
+#   It is copied at configure time into the build tree with every KDP that ships for
+#   ARCH trimmed (see hkp_probe_derive_root.py). Without UKDS, each such KDP keeps one
+#   UKD per compile group, so the probe packs the real descriptors but compiles each
+#   distinct compile path once. With UKDS, the probe packs exactly the listed UKDs (by
+#   UKD name): KDPs keeping none of them are left out of the derived root, and
+#   configure fails when a listed name is kept by no KDP shipping for ARCH. The
+#   assertion expects exactly the kept UKDs, each with the provenance of its producer
+#   kind (see hkp_probe_assert.py). Adding a pack under an already probed ARCH needs no
+#   new declaration unless the probe lists UKDS.
 #
-#   NAME defaults to <ARCH> for the production root and <ROOT basename>_<ARCH> for
-#   another ROOT. Creates pack target hkp_packaging_probe_<NAME> (stamp and output under
+#   ARCH must match gfx[0-9a-z]+. NAME defaults to <ARCH> for the production root and
+#   <ROOT basename>_<ARCH> for another ROOT; it must match [A-Za-z0-9_.+-]+, must not be
+#   dots only, and must not be `tools` (hkp-probe-tools is the probe tooling test).
+#   UKDS entries must be non-empty and unique. Creates pack target
+#   hkp_packaging_probe_<NAME> (stamp and output under
 #   ${CMAKE_BINARY_DIR}/hkp-probes/<NAME>/out) and ctest entry hkp-probe-<NAME>. The
-#   pack target is part of `all` (hkp_wire_pack_target declares it so), as is the
-#   aggregate hkp_packaging_probes. Only callable from a probes file loaded by
-#   hkp_load_packaging_probes().
+#   pack targets are part of `all` (hkp_wire_pack_target declares them so); the
+#   aggregate hkp_packaging_probes builds every probe's pack. Only callable from a
+#   probes file loaded by hkp_load_packaging_probes().
 # ---------------------------------------------------------------------------
 function(hkp_add_packaging_probe)
-    cmake_parse_arguments(PARSE_ARGV 0 ARG "" "ARCH;ROOT;NAME;PACK_JOBS" "")
+    cmake_parse_arguments(PARSE_ARGV 0 ARG "" "ARCH;ROOT;NAME;PACK_JOBS" "UKDS")
 
     if(ARG_UNPARSED_ARGUMENTS)
         message(FATAL_ERROR
@@ -104,31 +169,34 @@ function(hkp_add_packaging_probe)
     if(NOT ARG_ARCH)
         message(FATAL_ERROR "hkp probe: hkp_add_packaging_probe requires ARCH.")
     endif()
+    if(NOT ARG_ARCH MATCHES "^gfx[0-9a-z]+$")
+        message(FATAL_ERROR
+            "hkp probe: ARCH '${ARG_ARCH}' is not one architecture of the form "
+            "gfx[0-9a-z]+.")
+    endif()
     if(NOT ARG_ROOT)
         set(ARG_ROOT "${HIPKERNELPROVIDER_PRODUCTION_DESCRIPTOR_SOURCE_ROOT}")
         set(_default_name "${ARG_ARCH}")
     else()
+        # A function sees the CMAKE_CURRENT_LIST_DIR of its caller: the probes file.
+        get_filename_component(ARG_ROOT "${ARG_ROOT}" ABSOLUTE
+                               BASE_DIR "${CMAKE_CURRENT_LIST_DIR}")
         get_filename_component(_root_base "${ARG_ROOT}" NAME)
         set(_default_name "${_root_base}_${ARG_ARCH}")
     endif()
     if(NOT ARG_NAME)
         set(ARG_NAME "${_default_name}")
     endif()
+    _hkp_probe_check_name("${ARG_NAME}")
     if(NOT IS_DIRECTORY "${ARG_ROOT}")
         message(FATAL_ERROR
             "hkp probe '${ARG_NAME}': ROOT is not a directory: '${ARG_ROOT}'")
     endif()
-
-    get_property(_toolchain_set GLOBAL PROPERTY HKP_PROBE_TOOLCHAIN_SET)
-    if(NOT _toolchain_set)
+    if("UKDS" IN_LIST ARG_KEYWORDS_MISSING_VALUES)
         message(FATAL_ERROR
-            "hkp probe '${ARG_NAME}': hkp_add_packaging_probe is only valid from a "
-            "probes file loaded by hkp_load_packaging_probes().")
+            "hkp probe '${ARG_NAME}': UKDS needs at least one UKD name.")
     endif()
-    get_property(_names GLOBAL PROPERTY HKP_PROBE_NAMES)
-    if(ARG_NAME IN_LIST _names)
-        message(FATAL_ERROR "hkp probe '${ARG_NAME}' is declared twice.")
-    endif()
+    _hkp_probe_check_ukds("${ARG_NAME}" "${ARG_UKDS}")
 
     get_property(_kpack_dir GLOBAL PROPERTY HKP_PROBE_ROCM_KPACK_DIR)
     get_property(_hipcc GLOBAL PROPERTY HKP_PROBE_HIPCC)
@@ -142,7 +210,7 @@ function(hkp_add_packaging_probe)
 
     set(_root "${_probe_dir}/root")
     _hkp_probe_derive_root("${ARG_NAME}" "${ARG_ROOT}" "${ARG_ARCH}" "${_root}"
-                           _expect_file)
+                           _expect_file ${ARG_UKDS})
 
     set(_pack_jobs 1)
     if(ARG_PACK_JOBS)
@@ -193,6 +261,8 @@ function(hkp_load_packaging_probes rocm_kpack_dir hipcc rocke_comgr_lib)
     set_property(GLOBAL PROPERTY HKP_PROBE_TOOLCHAIN_SET TRUE)
 
     include("${HKP_PKG_DIR}/probes/probes.cmake")
+    # Calls from anywhere but the probes file hit the guard in hkp_add_packaging_probe.
+    set_property(GLOBAL PROPERTY HKP_PROBE_TOOLCHAIN_SET FALSE)
 
     get_property(_names GLOBAL PROPERTY HKP_PROBE_NAMES)
     if(NOT _names)

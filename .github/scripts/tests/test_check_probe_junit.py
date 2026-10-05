@@ -13,10 +13,15 @@ import check_probe_junit as cpj
 MANIFEST = ["hkp-probe-gfx950", "hkp-probe-tools"]
 
 
-def case_xml(name: str, child: str = "") -> str:
+def case_xml(name: str, child: str = "", status: str | None = None) -> str:
     body = f"<{child}/>" if child else ""
-    status = "notrun" if child == "skipped" else "run"
-    return f'<testcase name="{name}" classname="{name}" time="1" status="{status}">{body}</testcase>'
+    if status is None:
+        status = {"skipped": "notrun", "failure": "fail"}.get(child, "run")
+    status_attr = f' status="{status}"' if status else ""
+    return (
+        f'<testcase name="{name}" classname="{name}" time="1"{status_attr}>'
+        f"{body}</testcase>"
+    )
 
 
 def junit_xml(cases: list[str]) -> str:
@@ -33,7 +38,7 @@ class CheckProbeJunitTest(unittest.TestCase):
         self.dir = Path(tmp.name)
 
     def run_check(self, xml: str, manifest: list[str]) -> list[str]:
-        junit_path = self.dir / "probe-junit.xml"
+        junit_path = self.dir / "ctest-junit.xml"
         manifest_path = self.dir / "manifest.txt"
         junit_path.write_text(xml)
         manifest_path.write_text("".join(f"{n}\n" for n in manifest))
@@ -45,13 +50,47 @@ class CheckProbeJunitTest(unittest.TestCase):
 
     def test_skipped_test_fails(self):
         xml = junit_xml([case_xml(MANIFEST[0]), case_xml(MANIFEST[1], "skipped")])
-        self.assertEqual(self.run_check(xml, MANIFEST), ["skipped"])
+        self.assertEqual(self.run_check(xml, MANIFEST), ["not-run"])
 
-    def test_fewer_testcases_than_manifest_fails(self):
-        xml = junit_xml([case_xml(MANIFEST[0])])
-        self.assertEqual(
-            self.run_check(xml, MANIFEST), ["count-mismatch", "name-missing"]
+    def test_disabled_test_without_skipped_child_fails(self):
+        xml = junit_xml(
+            [case_xml(MANIFEST[0], status="disabled"), case_xml(MANIFEST[1])]
         )
+        self.assertEqual(self.run_check(xml, MANIFEST), ["not-run"])
+
+    def test_unknown_status_fails(self):
+        xml = junit_xml([case_xml(MANIFEST[0], status="bogus"), case_xml(MANIFEST[1])])
+        self.assertEqual(self.run_check(xml, MANIFEST), ["not-run"])
+
+    def test_skipped_child_without_status_fails(self):
+        xml = junit_xml(
+            [case_xml(MANIFEST[0], "skipped", status=""), case_xml(MANIFEST[1])]
+        )
+        self.assertEqual(self.run_check(xml, MANIFEST), ["not-run"])
+
+    def test_missing_status_without_skipped_child_passes(self):
+        xml = junit_xml([case_xml(n, status="") for n in MANIFEST])
+        self.assertEqual(self.run_check(xml, MANIFEST), [])
+
+    def test_unrelated_testcases_are_ignored(self):
+        xml = junit_xml(
+            [
+                case_xml("hipdnn-unit-tests"),
+                case_xml(MANIFEST[0]),
+                case_xml("other-disabled", status="disabled"),
+                case_xml("other-failed", "failure"),
+                case_xml(MANIFEST[1]),
+            ]
+        )
+        self.assertEqual(self.run_check(xml, MANIFEST), [])
+
+    def test_duplicate_declared_name_fails(self):
+        xml = junit_xml([case_xml(n) for n in MANIFEST] + [case_xml(MANIFEST[0])])
+        self.assertEqual(self.run_check(xml, MANIFEST), ["name-duplicate"])
+
+    def test_declared_name_missing_fails(self):
+        xml = junit_xml([case_xml(MANIFEST[0]), case_xml("hipdnn-unit-tests")])
+        self.assertEqual(self.run_check(xml, MANIFEST), ["name-missing"])
 
     def test_empty_manifest_fails(self):
         xml = junit_xml([case_xml(n) for n in MANIFEST])
@@ -67,25 +106,25 @@ class CheckProbeJunitTest(unittest.TestCase):
         xml = junit_xml([case_xml(MANIFEST[0], "failure"), case_xml(MANIFEST[1])])
         self.assertEqual(self.run_check(xml, MANIFEST), ["failure"])
 
+    def test_fail_status_without_failure_child_fails(self):
+        xml = junit_xml([case_xml(MANIFEST[0], status="fail"), case_xml(MANIFEST[1])])
+        self.assertEqual(self.run_check(xml, MANIFEST), ["failure"])
+
     def test_error_fails(self):
         xml = junit_xml([case_xml(MANIFEST[0]), case_xml(MANIFEST[1], "error")])
         self.assertEqual(self.run_check(xml, MANIFEST), ["error"])
-
-    def test_declared_name_missing_with_equal_count_fails(self):
-        xml = junit_xml([case_xml(MANIFEST[0]), case_xml("hkp-probe-other")])
-        self.assertEqual(self.run_check(xml, MANIFEST), ["name-missing"])
 
     def test_unparseable_junit_fails(self):
         self.assertEqual(self.run_check("<testsuite", MANIFEST), ["junit-unreadable"])
 
     def test_missing_manifest_fails(self):
-        junit_path = self.dir / "probe-junit.xml"
+        junit_path = self.dir / "ctest-junit.xml"
         junit_path.write_text(junit_xml([case_xml(n) for n in MANIFEST]))
         failures = cpj.check(junit_path, self.dir / "absent.txt")
         self.assertEqual([c for c, _ in failures], ["manifest-unreadable"])
 
     def test_main_exit_codes(self):
-        junit_path = self.dir / "probe-junit.xml"
+        junit_path = self.dir / "ctest-junit.xml"
         manifest_path = self.dir / "manifest.txt"
         manifest_path.write_text("".join(f"{n}\n" for n in MANIFEST))
         argv = [

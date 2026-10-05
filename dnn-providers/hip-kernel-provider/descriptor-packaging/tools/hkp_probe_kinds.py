@@ -27,8 +27,10 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class Kind:
     # kernel_source fields that define a compile group within a KDP: UKDs of one kind
-    # agreeing on all of them share a compile path, so one stands for the group. Empty
-    # means the kind compiles nothing and one UKD per KDP stands for it.
+    # agreeing on all of them share a compile path, so by default one stands for the
+    # group. Every field must be present in kernel_source. Empty means the kind compiles
+    # nothing and one UKD per KDP stands for it; authors who want more UKDs of a group
+    # packed list them by name (hkp_add_packaging_probe UKDS).
     group_by: tuple[str, ...]
     # Names of provenance checks (hkp_probe_assert._PROVENANCE_CHECKS) a shipped UKD of
     # this kind must satisfy, beyond provenance.origin_kind == the kind itself.
@@ -38,7 +40,7 @@ class Kind:
 
 
 KINDS = {
-    "rocke": Kind(group_by=("builder",), provenance=("wheel", "comgr")),
+    "rocke": Kind(group_by=("source", "builder"), provenance=("wheel", "comgr")),
     "hip": Kind(group_by=("source", "build"), provenance=()),
     "hsaco": Kind(group_by=(), provenance=()),
     "embedded_source": Kind(group_by=(), provenance=(), output="passthrough"),

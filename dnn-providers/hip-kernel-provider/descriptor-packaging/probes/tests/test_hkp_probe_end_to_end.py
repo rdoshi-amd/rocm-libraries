@@ -7,19 +7,19 @@ KDP paths derive records are the ones the packed output carries.
 
 import json
 import shutil
-import subprocess
-import sys
 
 import pytest
 
-from conftest import (
+from probe_support import (  # noqa: F401 (pytest fixtures)
     ARCH,
     EMPTY_ARCH_FIXTURE,
     HSACO_FIXTURES,
-    MAIN_FIXTURE,
-    PROBE_DERIVE,
     ROCKE_FIXTURE,
-    pack_root,
+    comgr_lib,
+    derive_and_pack,
+    hip_source,
+    hipcc,
+    rocm_kpack_dir,
     run_assert,
 )
 
@@ -34,18 +34,6 @@ _HIP_EXPECT = [
         "kind": "hip",
     },
 ]
-
-
-def _hip_source(dst):
-    """The main fixture without its standalone UKD, which derive refuses."""
-    shutil.copytree(MAIN_FIXTURE, dst)
-    (dst / "pointwise_add_b128.ukd.json").unlink()
-    kdp = json.loads((dst / "pointwise.kdp.json").read_text())
-    kdp["kernelDescriptors"] = [
-        u for u in kdp["kernelDescriptors"] if isinstance(u, dict)
-    ]
-    (dst / "pointwise.kdp.json").write_text(json.dumps(kdp, indent=2))
-    return dst
 
 
 def _hsaco_source(dst, arch=ARCH):
@@ -65,32 +53,11 @@ def _hsaco_source(dst, arch=ARCH):
     return dst
 
 
-def _derive_and_pack(src, work, rocm_kpack_dir, hipcc, comgr_lib):
-    derived = work / "probe" / "root"
-    r = subprocess.run(
-        [
-            sys.executable,
-            str(PROBE_DERIVE),
-            "--from",
-            str(src),
-            "--arch",
-            "gfx950",
-            "--out",
-            str(derived),
-        ],
-        capture_output=True,
-        text=True,
-    )
-    assert r.returncode == 0, r.stderr
-    out = pack_root(derived, work, rocm_kpack_dir, hipcc, comgr_lib)
-    return out, work / "probe" / "expect.json"
-
-
 @pytest.fixture(scope="module")
 def hip_probe(tmp_path_factory, rocm_kpack_dir, hipcc, comgr_lib):
     work = tmp_path_factory.mktemp("hip_probe")
-    return _derive_and_pack(
-        _hip_source(work / "src"), work, rocm_kpack_dir, hipcc, comgr_lib
+    return derive_and_pack(
+        hip_source(work / "src"), work, rocm_kpack_dir, hipcc, comgr_lib
     )
 
 
@@ -98,9 +65,9 @@ def hip_probe(tmp_path_factory, rocm_kpack_dir, hipcc, comgr_lib):
 def mixed_probe(tmp_path_factory, rocm_kpack_dir, hipcc, comgr_lib):
     work = tmp_path_factory.mktemp("mixed_probe")
     src = work / "src"
-    _hip_source(src / "hip")
+    hip_source(src / "hip")
     shutil.copytree(ROCKE_FIXTURE, src / "rocke")
-    return _derive_and_pack(src, work, rocm_kpack_dir, hipcc, comgr_lib)
+    return derive_and_pack(src, work, rocm_kpack_dir, hipcc, comgr_lib)
 
 
 def test_hip_root_passes(hip_probe, rocm_kpack_dir):
@@ -108,29 +75,6 @@ def test_hip_root_passes(hip_probe, rocm_kpack_dir):
     assert json.loads(expect.read_text()) == _HIP_EXPECT
     result = run_assert(out, expect, rocm_kpack_dir)
     assert result.returncode == 0, result.stderr
-
-
-def test_hip_root_with_broken_hip_source_does_not_pack(
-    tmp_path, rocm_kpack_dir, hipcc, comgr_lib
-):
-    src = _hip_source(tmp_path / "src")
-    (src / "PointwiseAdd.cpp").write_text("this is not C++\n")
-    derived = tmp_path / "probe" / "root"
-    subprocess.run(
-        [
-            sys.executable,
-            str(PROBE_DERIVE),
-            "--from",
-            str(src),
-            "--arch",
-            "gfx950",
-            "--out",
-            str(derived),
-        ],
-        check=True,
-    )
-    with pytest.raises(pytest.fail.Exception, match="hkp_pack failed"):
-        pack_root(derived, tmp_path, rocm_kpack_dir, hipcc, comgr_lib)
 
 
 def test_mixed_root_passes_with_per_ukd_kinds(mixed_probe, rocm_kpack_dir, comgr_lib):
@@ -160,7 +104,7 @@ def test_mixed_root_origin_is_checked_per_ukd(mixed_probe, rocm_kpack_dir, tmp_p
 
 def test_hsaco_root_passes(tmp_path, rocm_kpack_dir, hipcc, comgr_lib):
     src = _hsaco_source(tmp_path / "src")
-    out, expect = _derive_and_pack(src, tmp_path, rocm_kpack_dir, hipcc, comgr_lib)
+    out, expect = derive_and_pack(src, tmp_path, rocm_kpack_dir, hipcc, comgr_lib)
     entries = json.loads(expect.read_text())
     assert [(e["kdp"], e["kind"]) for e in entries] == [("solo.kdp.json", "hsaco")]
     result = run_assert(out, expect, rocm_kpack_dir)
@@ -169,9 +113,9 @@ def test_hsaco_root_passes(tmp_path, rocm_kpack_dir, hipcc, comgr_lib):
 
 def test_hip_and_hsaco_mixed_root_passes(tmp_path, rocm_kpack_dir, hipcc, comgr_lib):
     src = tmp_path / "src"
-    _hip_source(src / "hip")
+    hip_source(src / "hip")
     _hsaco_source(src / "hsaco")
-    out, expect = _derive_and_pack(src, tmp_path, rocm_kpack_dir, hipcc, comgr_lib)
+    out, expect = derive_and_pack(src, tmp_path, rocm_kpack_dir, hipcc, comgr_lib)
     kinds = {e["kdp"]: e["kind"] for e in json.loads(expect.read_text())}
     assert kinds == {
         "hip/pointwise.kdp.json": "hip",
@@ -188,9 +132,29 @@ def test_hsaco_ukd_for_other_arch_is_not_packed_or_expected(
     # gfx942-only hsaco beside a gfx950 hip root: derive ignores it, the pack ships
     # nothing for it, and the assertion still passes on the hip UKDs alone.
     src = tmp_path / "src"
-    _hip_source(src / "hip")
+    hip_source(src / "hip")
     _hsaco_source(src / "hsaco", arch="gfx942")
-    out, expect = _derive_and_pack(src, tmp_path, rocm_kpack_dir, hipcc, comgr_lib)
+    out, expect = derive_and_pack(src, tmp_path, rocm_kpack_dir, hipcc, comgr_lib)
     assert {e["kind"] for e in json.loads(expect.read_text())} == {"hip"}
+    result = run_assert(out, expect, rocm_kpack_dir)
+    assert result.returncode == 0, result.stderr
+
+
+# --- UKDS: the probe packs exactly the listed UKDs ----------------------------
+# Not the default pick of its group (that is "PointwiseAdd f32 block64"), and both in
+# pointwise.kdp.json, so pointwise_wild.kdp.json keeps nothing and is left out.
+_LISTED = ["PointwiseMul f32 block64", "PointwiseAdd f32 block64"]
+
+
+def test_listed_ukds_pack_and_pass(tmp_path, rocm_kpack_dir, hipcc, comgr_lib):
+    src = hip_source(tmp_path / "src")
+    out, expect = derive_and_pack(
+        src, tmp_path, rocm_kpack_dir, hipcc, comgr_lib, ukds=_LISTED
+    )
+    entries = json.loads(expect.read_text())
+    assert sorted((e["kdp"], e["name"]) for e in entries) == sorted(
+        ("pointwise.kdp.json", n) for n in _LISTED
+    )
+    assert not (out / ARCH / "pointwise_wild.kdp.json").exists()
     result = run_assert(out, expect, rocm_kpack_dir)
     assert result.returncode == 0, result.stderr

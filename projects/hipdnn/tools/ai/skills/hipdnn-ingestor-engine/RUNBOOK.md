@@ -329,7 +329,10 @@ rocKE is likewise resolved once for **every** root, test roots included, so an
 unresolvable comgr is fatal at configure even in a hip-only build.
 
 There is **no per-producer production switch**: producer selection is per-UKD on
-`kernel_source.kind`, so one root feeds every producer.
+`kernel_source.kind`, so one root feeds every producer. Whoever adds a new
+`kernel_source.kind` to the packer also adds its entry to
+`descriptor-packaging/tools/hkp_probe_kinds.py`; a probe keeping a UKD of an unregistered
+kind fails configure.
 
 Production packaging is wired on exactly one condition — the root named by
 `HIPKERNELPROVIDER_PRODUCTION_SOURCE_ROOT` holds at least one **non-hidden
@@ -353,19 +356,6 @@ appears below.
 native pack whose symbols a bundle's UKDs must name before it serves. The packaging
 dependencies are documented from the repository root in
 `dnn-providers/hip-kernel-provider/descriptor-packaging/README.md`.
-
-**Required: add a packaging probe for every new architecture.** CI builds only a few
-architectures, so packaging for the others breaks silently unless a probe packs them.
-Probes are opt-in per architecture: declare one `hkp_add_packaging_probe(ARCH <gfx>)` line
-in `dnn-providers/hip-kernel-provider/descriptor-packaging/probes/probes.cmake`, then run
-the mutation checks listed under "Packaging probes" in the descriptor-packaging README. A
-new pack under an architecture that is already probed, in the production root, is covered
-automatically and needs no new line. Probes are superbuild-only
-(`HIPKERNELPROVIDER_ENABLE_PACKAGING_PROBES`, OFF by default) and pack one instance per
-compile group; the lane's own architecture is covered in full by the normal build. They
-do not cover ASM SDPA, C++/runtime gfx950 paths, install staging, or standalone-UKD
-references (derive fails configure on those). No CMake guard detects a missing probe, so
-this step is the only enforcement; no workflow edit is needed.
 
 Build the provider, validator and required test targets through the configured
 superbuild. For packaged engines, run `hkp_packaging_product` after the full build and
@@ -690,6 +680,13 @@ accounting.
 **Gate:** zero wrong answers, complete final-runtime accounting, and no missing,
 ambiguous, erroneous or unexplained in-scope outcomes. Changed installed artifacts
 invalidate old evidence and return to stages 3–5.
+
+**Final step: packaging probe.** Add
+`hkp_add_packaging_probe(ARCH <gfx> NAME <integration> UKDS <representative UKD names>)`
+to `dnn-providers/hip-kernel-provider/descriptor-packaging/probes/probes.cmake`, configure
+with `-DHIPKERNELPROVIDER_ENABLE_PACKAGING_PROBES=ON`, and run
+`ctest -R '^hkp-probe-' --no-tests=error`; `hkp-probe-<NAME>` must pass. See "Packaging
+probes" in the descriptor-packaging README.
 
 ## 8. Handoff
 

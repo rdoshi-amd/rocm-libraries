@@ -1,5 +1,14 @@
+"""Paths, helpers and fixtures shared by the probe tooling tests.
+
+There is no conftest.py here: tests/ imports its own conftest by module name, and a
+second conftest.py would replace it when both directories are collected in one run.
+Test modules import the fixtures they use from this module.
+"""
+
 import hashlib
+import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -102,6 +111,13 @@ def pack_root(src, work, rocm_kpack_dir, hipcc, comgr_lib):
     return out
 
 
+@pytest.fixture(scope="module")
+def packed_root(tmp_path_factory, rocm_kpack_dir, hipcc, comgr_lib):
+    """The rocke fixture packed once for ARCH."""
+    work = tmp_path_factory.mktemp("probe_pack")
+    return pack_root(ROCKE_FIXTURE, work, rocm_kpack_dir, hipcc, comgr_lib)
+
+
 def run_assert(out_root, expect_path, rocm_kpack_dir, expect_comgr=None):
     cmd = [
         sys.executable,
@@ -122,8 +138,38 @@ def run_assert(out_root, expect_path, rocm_kpack_dir, expect_comgr=None):
     return subprocess.run(cmd, capture_output=True, text=True)
 
 
-@pytest.fixture(scope="module")
-def packed_root(tmp_path_factory, rocm_kpack_dir, hipcc, comgr_lib):
-    """The rocke fixture packed once for ARCH."""
-    work = tmp_path_factory.mktemp("probe_pack")
-    return pack_root(ROCKE_FIXTURE, work, rocm_kpack_dir, hipcc, comgr_lib)
+def run_derive(src, arch, out, ukds=()):
+    """Run the derive tool; one --ukd per entry of `ukds`."""
+    cmd = [
+        sys.executable,
+        str(PROBE_DERIVE),
+        "--from",
+        str(src),
+        "--arch",
+        arch,
+        "--out",
+        str(out),
+    ]
+    for name in ukds:
+        cmd += ["--ukd", name]
+    return subprocess.run(cmd, capture_output=True, text=True, check=False)
+
+
+def hip_source(dst):
+    """The main fixture without its standalone UKD, which derive refuses."""
+    shutil.copytree(MAIN_FIXTURE, dst)
+    (dst / "pointwise_add_b128.ukd.json").unlink()
+    kdp = json.loads((dst / "pointwise.kdp.json").read_text())
+    kdp["kernelDescriptors"] = [
+        u for u in kdp["kernelDescriptors"] if isinstance(u, dict)
+    ]
+    (dst / "pointwise.kdp.json").write_text(json.dumps(kdp, indent=2))
+    return dst
+
+
+def derive_and_pack(src, work, rocm_kpack_dir, hipcc, comgr_lib, ukds=()):
+    """Derive `src` for ARCH, pack the derived root; return (out root, expect path)."""
+    r = run_derive(src, ARCH, work / "probe" / "root", ukds)
+    assert r.returncode == 0, r.stderr
+    out = pack_root(work / "probe" / "root", work, rocm_kpack_dir, hipcc, comgr_lib)
+    return out, work / "probe" / "expect.json"

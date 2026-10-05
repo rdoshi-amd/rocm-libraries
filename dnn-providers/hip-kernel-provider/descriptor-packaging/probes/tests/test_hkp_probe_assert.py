@@ -3,7 +3,15 @@ import shutil
 
 import pytest
 
-from conftest import ARCH, STAMP_NAME, run_assert
+from probe_support import (  # noqa: F401 (pytest fixtures)
+    ARCH,
+    STAMP_NAME,
+    comgr_lib,
+    hipcc,
+    packed_root,
+    rocm_kpack_dir,
+    run_assert,
+)
 
 KDP = f"{ARCH}/attention.kdp.json"
 KDP_IN_ARCH_DIR = "attention.kdp.json"
@@ -128,6 +136,14 @@ def test_ukd_count_mismatch(tree):
     _assert_fails(tree.run(), "ukd-count")
 
 
+def test_ukd_shipped_twice_fails_count(tree):
+    # Every shipped UKD is in the expect list, but one ships twice: matched > expected.
+    tree.mutate_kdp(
+        lambda kdp: kdp["kernelDescriptors"].append(kdp["kernelDescriptors"][0])
+    )
+    _assert_fails(tree.run(), "ukd-count")
+
+
 def test_ukd_count_zero_is_failure(tree):
     tree.mutate_kdp(lambda kdp: kdp.update(kernelDescriptors=[]))
     tree.write_expect([])
@@ -149,6 +165,11 @@ def test_ukd_kind(tree):
 
 def test_arch_field_ukd(tree):
     tree.mutate_ukd(lambda u: u.update(arch=["gfx942"]))
+    _assert_fails(tree.run(), "arch-field")
+
+
+def test_arch_field_ukd_absent(tree):
+    tree.mutate_ukd(lambda u: u.pop("arch"))
     _assert_fails(tree.run(), "arch-field")
 
 
@@ -240,6 +261,31 @@ def test_corrupt_kpack_reports_toc_failure(tree):
     kpack_path.write_bytes(b"not a kpack archive" * 8)
     result = tree.run()
     _assert_fails(result, "kpack-toc")
+    assert "Traceback" not in result.stderr
+
+
+def test_non_object_kdp_reports_no_kdp(tree):
+    (tree.root / KDP).write_text("[]", encoding="utf-8")
+    result = tree.run()
+    _assert_fails(result, "no-kdp")
+    assert "Traceback" not in result.stderr
+
+
+def test_duplicate_expect_entry_exits_2(tree):
+    tree.write_expect([tree.entry(), tree.entry()])
+    result = tree.run()
+    assert result.returncode == 2, result.stderr
+    assert "Traceback" not in result.stderr
+
+
+def test_rocm_kpack_not_importable_exits_2(tree, tmp_path):
+    # A rocm_kpack package without the kpack module: the import fails whatever the
+    # interpreter has installed, because --kpack-python-dir is searched first.
+    (tmp_path / "fake" / "rocm_kpack").mkdir(parents=True)
+    (tmp_path / "fake" / "rocm_kpack" / "__init__.py").write_text("")
+    result = run_assert(tree.root, tree.expect_path, str(tmp_path / "fake"))
+    assert result.returncode == 2, result.stderr
+    assert "cannot import rocm_kpack" in result.stderr
     assert "Traceback" not in result.stderr
 
 

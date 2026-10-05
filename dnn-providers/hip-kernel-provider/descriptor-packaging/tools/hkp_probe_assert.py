@@ -34,8 +34,8 @@ Assertion ids:
     ukd-kind           a UKD's shipped kernel_source.kind is not what its expected
                        kind's output type requires ("kpack", or the authored kind for
                        a pass-through)
-    arch-field         a KDP `arch`, or a UKD `arch` (always required for a
-                       pass-through UKD), is not [<arch>]
+    arch-field         a KDP `arch` present and not [<arch>], or a UKD `arch` absent
+                       or not [<arch>]
     passthrough-source a pass-through UKD's kernel_source differs from the authored one
     passthrough-provenance
                        a pass-through UKD's provenance.source_label is empty or its
@@ -200,12 +200,7 @@ _PROVENANCE_CHECKS = {"wheel": _check_wheel, "comgr": _check_comgr}
 
 
 def _check_provenance(args, label, ukd, kind, failures):
-    entry = KINDS.get(kind)
-    if entry is None:
-        failures.add(
-            "no-rules-for-kind", f"{label} expected kind {kind!r} has no rules"
-        )
-        return
+    entry = KINDS[kind]
     prov = ukd.get("provenance") or {}
     origin = prov.get("origin_kind")
     if origin != kind:
@@ -227,8 +222,8 @@ def _check_kpack_ukd(args, label, ukd, expected, archive, failures):
         )
         return
 
-    if "arch" in ukd and ukd["arch"] != [args.arch]:
-        failures.add("arch-field", f"{label} arch is {ukd['arch']!r}")
+    if ukd.get("arch") != [args.arch]:
+        failures.add("arch-field", f"{label} arch is {ukd.get('arch')!r}")
 
     signature = source.get("signature")
     if not isinstance(signature, list) or not signature:

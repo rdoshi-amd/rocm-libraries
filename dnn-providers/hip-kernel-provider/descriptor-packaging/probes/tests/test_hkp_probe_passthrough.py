@@ -6,17 +6,17 @@ ships descriptors and no kpack archive, which is what these tests rely on.
 
 import json
 import shutil
-import subprocess
-import sys
 
 import pytest
 
-from conftest import (
+from probe_support import (  # noqa: F401 (pytest fixtures)
     ARCH,
     EMPTY_ARCH_FIXTURE,
-    MAIN_FIXTURE,
-    PROBE_DERIVE,
-    pack_root,
+    comgr_lib,
+    derive_and_pack,
+    hip_source,
+    hipcc,
+    rocm_kpack_dir,
     run_assert,
 )
 
@@ -35,38 +35,6 @@ def _embedded_source(dst):
     kdp["kernelDescriptors"][0]["kernel_source"] = dict(_EMBEDDED)
     (dst / "solo.kdp.json").write_text(json.dumps(kdp, indent=2))
     return dst
-
-
-def _hip_source(dst):
-    shutil.copytree(MAIN_FIXTURE, dst)
-    (dst / "pointwise_add_b128.ukd.json").unlink()
-    kdp = json.loads((dst / "pointwise.kdp.json").read_text())
-    kdp["kernelDescriptors"] = [
-        u for u in kdp["kernelDescriptors"] if isinstance(u, dict)
-    ]
-    (dst / "pointwise.kdp.json").write_text(json.dumps(kdp, indent=2))
-    return dst
-
-
-def _derive_and_pack(src, work, rocm_kpack_dir, hipcc, comgr_lib):
-    derived = work / "probe" / "root"
-    r = subprocess.run(
-        [
-            sys.executable,
-            str(PROBE_DERIVE),
-            "--from",
-            str(src),
-            "--arch",
-            ARCH,
-            "--out",
-            str(derived),
-        ],
-        capture_output=True,
-        text=True,
-    )
-    assert r.returncode == 0, r.stderr
-    out = pack_root(derived, work, rocm_kpack_dir, hipcc, comgr_lib)
-    return out, work / "probe" / "expect.json"
 
 
 class _Tree:
@@ -105,7 +73,7 @@ def _fails(result, assertion_id):
 def emb_packed(tmp_path_factory, rocm_kpack_dir, hipcc, comgr_lib):
     work = tmp_path_factory.mktemp("emb_probe")
     _embedded_source(work / "src" / "emb")
-    return _derive_and_pack(work / "src", work, rocm_kpack_dir, hipcc, comgr_lib)
+    return derive_and_pack(work / "src", work, rocm_kpack_dir, hipcc, comgr_lib)
 
 
 @pytest.fixture(scope="module")
@@ -113,8 +81,8 @@ def mixed_packed(tmp_path_factory, rocm_kpack_dir, hipcc, comgr_lib):
     work = tmp_path_factory.mktemp("emb_hip_probe")
     src = work / "src"
     _embedded_source(src / "emb")
-    _hip_source(src / "hip")
-    return _derive_and_pack(src, work, rocm_kpack_dir, hipcc, comgr_lib)
+    hip_source(src / "hip")
+    return derive_and_pack(src, work, rocm_kpack_dir, hipcc, comgr_lib)
 
 
 @pytest.fixture
@@ -249,3 +217,29 @@ def test_expect_entry_of_passthrough_kind_without_kernel_source_exits_2(emb):
 def test_expected_passthrough_but_shipped_ukd_missing_fails_count(emb):
     emb.mutate_expect(lambda entries: entries.append(dict(entries[0], name="another")))
     _fails(emb.run(), "ukd-count")
+
+
+def test_two_listed_passthrough_ukds_in_one_kdp_pack_and_pass(
+    tmp_path, rocm_kpack_dir, hipcc, comgr_lib
+):
+    # UKDS may keep several pass-through UKDs of one KDP; default mode keeps one.
+    src = _embedded_source(tmp_path / "src" / "emb")
+    kdp = json.loads((src / "solo.kdp.json").read_text())
+    first = kdp["kernelDescriptors"][0]
+    second = json.loads(json.dumps(first))
+    second.update(id="ukd-solo-second", name="second")
+    second["kernel_source"]["entry_point"] = "PointwiseMul"
+    kdp["kernelDescriptors"].append(second)
+    (src / "solo.kdp.json").write_text(json.dumps(kdp, indent=2))
+    listed = [first["name"], "second"]
+    out, expect = derive_and_pack(
+        tmp_path / "src", tmp_path, rocm_kpack_dir, hipcc, comgr_lib, ukds=listed
+    )
+    entries = json.loads(expect.read_text())
+    assert sorted(e["name"] for e in entries) == sorted(listed)
+    assert {e["kernel_source"]["entry_point"] for e in entries} == {
+        "PointwiseAdd",
+        "PointwiseMul",
+    }
+    result = run_assert(out, expect, rocm_kpack_dir)
+    assert result.returncode == 0, result.stderr

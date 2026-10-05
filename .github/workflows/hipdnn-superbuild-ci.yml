@@ -232,15 +232,6 @@ jobs:
       - name: Build
         run: cmake --build build
 
-      # The probes pack the production gfx950 descriptors for an
-      # architecture this lane does not build (GPU_TARGETS is the lane's own).
-      # Their pack targets are part of `all` (ALL custom targets), so Build above
-      # already ran them; this step stays so a probe failure is labelled and the
-      # aggregate target is exercised. The ctest entries fail without their
-      # output.
-      - name: Build packaging probes
-        run: cmake --build build --target hkp_packaging_probes
-
       # Packing is skipped with a STATUS message, so a resolution regression
       # would otherwise pass CI while producing no archives.
       - name: Verify kpack archives were produced
@@ -255,17 +246,20 @@ jobs:
       - name: Add ROCm bin to PATH
         run: echo "$ROCM_SDK_PATH/bin" >> "$GITHUB_PATH"
 
+      # --output-junit is relative to --test-dir: this writes build/ctest-junit.xml.
       - name: Run tests
-        run: ctest --test-dir build --output-on-failure
+        id: run-tests
+        run: ctest --test-dir build --output-on-failure --output-junit ctest-junit.xml
 
-      # ctest reports skipped and missing tests as success. Re-run the probe
-      # entries alone and compare the junit against the manifest configure
-      # wrote, so a probe that did not run fails the job.
+      # ctest counts a disabled or not-run test as success. Read the junit
+      # "Run tests" wrote and fail if a declared packaging probe (listed in the
+      # manifest configure wrote) did not run or failed. Runs whenever "Run
+      # tests" ran, pass or fail, so a probe failure is reported by name.
       - name: Check packaging probes ran
+        if: ${{ !cancelled() && steps.run-tests.outcome != 'skipped' }}
         run: |
-          ctest --test-dir build -R '^hkp-probe-' --no-tests=error --output-on-failure --output-junit probe-junit.xml
           "$VENV_PYTHON" .github/scripts/check_probe_junit.py \
-            --junit build/probe-junit.xml \
+            --junit build/ctest-junit.xml \
             --manifest build/hkp-probes/manifest.txt
 
       - name: Patch ROCm SDK with superbuild outputs
@@ -496,15 +490,6 @@ jobs:
       - name: Build
         run: cmake --build build
 
-      # The probes pack the production gfx950 descriptors for an
-      # architecture this lane does not build (GPU_TARGETS is the lane's own).
-      # Their pack targets are part of `all` (ALL custom targets), so Build above
-      # already ran them; this step stays so a probe failure is labelled and the
-      # aggregate target is exercised. The ctest entries fail without their
-      # output.
-      - name: Build packaging probes
-        run: cmake --build build --target hkp_packaging_probes
-
       # Packing is skipped with a STATUS message, so a resolution regression
       # would otherwise pass CI while producing no archives.
       - name: Verify kpack archives were produced
@@ -515,17 +500,20 @@ jobs:
           test "${#kpacks[@]}" -gt 0 || { echo "no .kpack archives produced" >&2; exit 1; }
           printf '%s\n' "${kpacks[@]}"
 
+      # --output-junit is relative to --test-dir: this writes build/ctest-junit.xml.
       - name: Run tests
-        run: ctest --test-dir build --output-on-failure
+        id: run-tests
+        run: ctest --test-dir build --output-on-failure --output-junit ctest-junit.xml
 
-      # ctest reports skipped and missing tests as success. Re-run the probe
-      # entries alone and compare the junit against the manifest configure
-      # wrote, so a probe that did not run fails the job.
+      # ctest counts a disabled or not-run test as success. Read the junit
+      # "Run tests" wrote and fail if a declared packaging probe (listed in the
+      # manifest configure wrote) did not run or failed. Runs whenever "Run
+      # tests" ran, pass or fail, so a probe failure is reported by name.
       - name: Check packaging probes ran
+        if: ${{ !cancelled() && steps.run-tests.outcome != 'skipped' }}
         run: |
-          ctest --test-dir build -R '^hkp-probe-' --no-tests=error --output-on-failure --output-junit probe-junit.xml
           "$VENV_PYTHON" .github/scripts/check_probe_junit.py \
-            --junit build/probe-junit.xml \
+            --junit build/ctest-junit.xml \
             --manifest build/hkp-probes/manifest.txt
 
       # Golden-data validation used to live here as a schedule-gated re-run of the

@@ -68,8 +68,8 @@ AMD copyright header's end year (`// Copyright (c) 2020-2025 ...` → `...
 2020-2026 ...`) on every one of the 19 touched `examples/*.cu` files, no
 exceptions — but did **not** do the same for any of the 302 other touched
 files under `thrust/`, `testing/`, or `test/` that carry the same header
-style. Treat the bump as an `examples/`-specific, mechanical gate (see
-`rocthrust-cccl-sync-finalize/SKILL.md`'s step 5), not a rule to apply
+style. Treat the bump as an `examples/`-specific rule (audited by
+`rocthrust-cccl-sync-finalize/SKILL.md`'s check 5), not a rule to apply
 elsewhere. For a ported file outside `examples/` that needs a new or
 updated header for some other reason, ask the human rather than assuming
 either upstream's or rocThrust's existing convention applies by default.
@@ -108,9 +108,9 @@ step 3 for how each tag changes the default classification. Two traps:
   of upstream's. A same-named path there is not a counterpart.
 
 New test/example files this widened scope surfaces need their own
-CMake-registration check — see `rocthrust-cccl-sync-finalize/SKILL.md`'s
-step 4 (test/example CMake-wiring check), which is a gate, not just a
-summary.
+CMake registration in the same item. `rocthrust-cccl-sync-finalize/SKILL.md`'s
+check 4 (test/example CMake wiring) reports any that are missing as
+blocking, but it doesn't add them.
 
 ### 7. `test/` — an AMD-only mirror of `testing/`, not a copy
 `projects/rocthrust/test/` (singular) is a separate, hand-maintained GTest

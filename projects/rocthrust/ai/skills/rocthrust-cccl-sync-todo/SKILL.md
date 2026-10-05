@@ -33,8 +33,8 @@ stages, each with their own skill:
   time, in order, porting each upstream commit by hand and committing it as
   one local commit per item.
 - **`rocthrust-cccl-sync-finalize`** — once every item in `todo.md` is
-  ticked, runs the pre-landing checks, bumps `thrust/version.h`, and updates
-  the CHANGELOG, committing that as the branch's last commit.
+  ticked, audits the sync branch and reports findings, without changing
+  anything.
 
 ## Conventions
 
@@ -194,8 +194,8 @@ subject rather than moving the item.
 
 This skill's job ends at producing `todo.md`. Do not open, read the diff of,
 or apply any of the listed commits — that is `rocthrust-cccl-sync-resolve`'s
-job. Do not touch `thrust/version.h`, `CHANGELOG.md`, or run any build —
-that is `rocthrust-cccl-sync-finalize`'s job.
+job. Do not touch `thrust/version.h` or `CHANGELOG.md`, or run any build;
+none of the skills in this family do those.
 
 ## Handoff
 

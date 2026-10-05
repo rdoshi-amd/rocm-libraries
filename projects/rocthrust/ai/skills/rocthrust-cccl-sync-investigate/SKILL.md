@@ -18,8 +18,8 @@ It is the first stage of the sync pipeline, followed by:
   report's confirmed `CURRENT_TAG`/`TO_TAG` rather than recomputing them.
 - **`rocthrust-cccl-sync-resolve`** — ports the `todo.md` commits one at a
   time, strictly in order.
-- **`rocthrust-cccl-sync-finalize`** — pre-landing checks, `THRUST_VERSION`
-  bump, and CHANGELOG entry once every `todo.md` item is ticked.
+- **`rocthrust-cccl-sync-finalize`** — read-only audit of the sync branch
+  once every `todo.md` item is ticked.
 
 ## What this skill mutates
 

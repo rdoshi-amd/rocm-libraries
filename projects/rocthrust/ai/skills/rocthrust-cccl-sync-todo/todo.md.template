@@ -3,8 +3,8 @@
 We are in the middle of a manual-port sync of upstream CCCL/Thrust commits
 into rocThrust. There is no git merge in progress and never will be — this
 sync is a series of hand-ported commits, one local commit per item below,
-followed by a final commit from `rocthrust-cccl-sync-finalize`. This file
-tracks which upstream commits still need to be ported.
+audited at the end by `rocthrust-cccl-sync-finalize`. This file tracks
+which upstream commits still need to be ported.
 
 ## Sync parameters
 

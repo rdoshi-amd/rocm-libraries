@@ -31,9 +31,9 @@ them.
    or batch), porting each commit's Thrust changes by hand, ticking it off
    and committing it as one local commit per item (never pushed).
 4. **`rocthrust-cccl-sync-finalize`** — run once every `todo.md` item is
-   ticked. Runs a readiness/lint gate, the CMake-wiring and copyright-header
-   checks, bumps `THRUST_VERSION`, and writes the CHANGELOG entry,
-   committing that as the sync branch's last commit.
+   ticked. A read-only audit: completeness/lint, file renames, counterpart
+   sweep, CMake wiring and `examples/` copyright headers. It reports
+   findings and changes nothing — no CHANGELOG, no version bump, no commit.
 
 ## Starting a new session
 
@@ -45,7 +45,7 @@ its own trigger phrasing. For example:
 - *"Kick off a CCCL sync into rocThrust."* → `rocthrust-cccl-sync-todo`
 - *"Continue the sync"* / *"work the next todo.md item"* →
   `rocthrust-cccl-sync-resolve`
-- *"Everything in todo.md is ticked, land it."* →
+- *"Everything in todo.md is ticked, audit the sync."* →
   `rocthrust-cccl-sync-finalize`
 
 There's no need to name a skill explicitly or read `SKILL.md` yourself
@@ -78,8 +78,8 @@ this directory.
   every commit and requires the disposition to be recorded in the
   `todo.md` tick-note, even when the answer is "no change needed" —
   `rocthrust-todo-lint.sh` (see `rocthrust-cccl-sync-resolve/scripts/`)
-  mechanically enforces this and is a hard gate in `-finalize`'s readiness
-  check.
+  mechanically enforces this, and `-finalize`'s audit reports any violation
+  as blocking.
 - **`todo.md` and any investigation/report `.md` files are scratch state**,
   never committed — safe to discard once a sync lands, or attach to a
   tracking ticket.
@@ -95,7 +95,7 @@ ai/skills/
     SKILL.md, scripts/, todo.md.template
   rocthrust-cccl-sync-resolve/       per-commit port loop
     SKILL.md, scripts/, porting-categories.md
-  rocthrust-cccl-sync-finalize/      version bump, CHANGELOG, build, land
+  rocthrust-cccl-sync-finalize/      read-only audit of the sync branch
     SKILL.md
 ```
 

@@ -101,23 +101,9 @@ struct TdmMultiDEpilogue : public TdmEpilogue<Problem_>
         }
         else
         {
-            constexpr index_t waveNum      = kBlockSize / get_warp_size();
-            constexpr auto outLdsTileDistr = make_static_tile_distribution(
-                tile_distribution_encoding<
-                    sequence<>,
-                    tuple<sequence<waveNum, kMPerBlock / waveNum>, sequence<kNPerBlock>>,
-                    tuple<sequence<1>>,
-                    tuple<sequence<0>>,
-                    sequence<1, 2>,
-                    sequence<1, 0>>{},
-                bool_constant<true>{});
-
-            TDMConfig tdm_config;
-
-            constexpr auto lds_block_desc = Base::MakeLdsBlockDescriptor();
-
-            auto o_lds_block = make_tensor_view<address_space_enum::lds>(
-                static_cast<ODataType*>(p_smem), lds_block_desc);
+            // Same LDS layout and TDM store distribution as TdmEpilogue (E is row-major).
+            auto o_lds_block =
+                impl::tdm_row_major_lds_view<ODataType, kMPerBlock, kNPerBlock>(p_smem);
 
             const auto acc_dstr = o_acc_tile.get_tile_distribution();
 
@@ -131,7 +117,9 @@ struct TdmMultiDEpilogue : public TdmEpilogue<Problem_>
                 make_tile_window(o_lds_block,
                                  make_tuple(number<kMPerBlock>{}, number<kNPerBlock>{}),
                                  {0, 0},
-                                 outLdsTileDistr);
+                                 impl::tdm_wave_linear_distr<kBlockSize, kMPerBlock, kNPerBlock>());
+
+            TDMConfig tdm_config;
 
             // Wait for all outstanding TDM loads of the main loop before LDS is reused.
             s_wait_tensorcnt_barrier<0 /*tensor_cnt*/, 0 /*lgkmcnt*/>();

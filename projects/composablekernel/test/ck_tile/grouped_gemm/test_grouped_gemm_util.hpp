@@ -336,7 +336,7 @@ class TestCkTileGroupedGemm : public ::testing::Test
         using Kernel =
             typename TdmGroupedGemmKernelBuilder<GroupedGemKernelParam, ALayout, BLayout, CLayout>::
                 Kernel;
-        static_assert(Kernel::kTupleOnlyPipeline, "expected a TDM grouped GEMM kernel");
+        static_assert(Kernel::kIsTdmPipeline, "expected a TDM grouped GEMM kernel");
 
         auto kargs           = Kernel::MakeKargs(gemm_descs);
         const bool supported = Kernel::IsSupportedArgument(kargs);

@@ -19,7 +19,8 @@ if(GPU_TARGETS MATCHES "gfx125")
     set(TDM_CONTRACTION_COMPILE_FAIL_CASES
         "NUM_D|TDM batched contraction does not support D tensors"
         "PAD_N|TDM batched contraction requires kPadK == false and kPadN == false"
-        "MULTI_ABD|TDM batched contraction multi-ABD: TdmEpilogue overwrites E, so multi-ABD accumulation is unsupported")
+        "MULTI_ABD|TDM batched contraction multi-ABD: TdmEpilogue overwrites E, so multi-ABD accumulation is unsupported"
+        "CSHUFFLE_EPILOGUE|TDM batched contraction requires TdmEpilogue")
 
     # Compile only for the gfx125x targets that were requested.
     set(TDM_CONTRACTION_ARCHS ${SUPPORTED_GPU_TARGETS})

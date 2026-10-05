@@ -10,17 +10,10 @@
 #include "ck_tile/ops/gemm/pipeline/gemm_pipeline_ag_bg_cr_comp_v3.hpp"
 #include "ck_tile/ops/gemm/pipeline/gemm_pipeline_ag_bg_cr_scheduler.hpp"
 #include "ck_tile/ops/gemm/kernel/gemm_kernel.hpp"
+#include "ck_tile/ops/epilogue/tdm_epilogue.hpp"
 #include "ck_tile/host.hpp"
 
 #include <hip/hip_runtime.h>
-
-namespace ck_tile {
-// Forward declaration only; the definition lives in ck_tile/ops/epilogue/tdm_epilogue.hpp.
-// Used to check that a TDM grouped GEMM instance is paired with the TDM epilogue without
-// forcing every user of this header to pull in the epilogue.
-template <typename Problem_>
-struct TdmEpilogue;
-} // namespace ck_tile
 
 #if __clang_major__ >= 23
 #pragma clang diagnostic push
@@ -158,36 +151,22 @@ struct GroupedGemmKernel
     // pipeline defines it, false otherwise (the TDM pipelines do not define it).
     static constexpr bool UsePersistentKernel = Base::PersistentKernel;
 
-    private:
-    template <typename P>
-    static constexpr bool IsTdmEpilogue(const TdmEpilogue<P>*)
-    {
-        return true;
-    }
-    static constexpr bool IsTdmEpilogue(const void*) { return false; }
+    /// @brief True for the gfx125 TDM pipelines (see UniversalGemmKernel::kIsTdmPipeline).
+    /// A misdetected non-TDM pipeline cannot silently take the TDM path: it would also need
+    /// a TdmEpilogue to pass the static_asserts below.
+    static constexpr bool kIsTdmPipeline = Base::kIsTdmPipeline;
 
-    public:
-    /// @brief True when the pipeline only accepts tuple A/B windows (TDM pipelines).
-    /// The only pipelines that define skipCheckValidLaunchParams are the gfx1250 TDM
-    /// pipelines (GemmPipelineAgBgCrCompTDMV1 and V2, which inherits it). If another
-    /// pipeline ever defines that member, revisit this trait. A misdetected non-TDM pipeline
-    /// cannot silently take the TDM path: it would also need a TdmEpilogue to pass the
-    /// static_asserts below. A dedicated marker trait in the TDM pipeline headers is left
-    /// as a follow-up so this change stays local to the grouped kernel.
-    static constexpr bool kTupleOnlyPipeline = Base::has_skip_check_valid_launch_params::value;
-
-    static_assert(!kTupleOnlyPipeline || !UsePersistentKernel,
+    static_assert(!kIsTdmPipeline || !UsePersistentKernel,
                   "TDM grouped GEMM: persistent/tile-loop not supported yet");
-    static_assert(!kTupleOnlyPipeline || !Base::ClusterLaunch,
+    static_assert(!kIsTdmPipeline || !Base::ClusterLaunch,
                   "TDM grouped GEMM: cluster launch unsupported (1-D group-offset grid)");
-    static_assert(!kTupleOnlyPipeline || NumDTensor_ == 0,
+    static_assert(!kIsTdmPipeline || NumDTensor_ == 0,
                   "TDM grouped GEMM: TdmEpilogue supports no D tensors");
-    static_assert(!kTupleOnlyPipeline ||
-                      IsTdmEpilogue(static_cast<const EpiloguePipeline*>(nullptr)),
+    static_assert(!kIsTdmPipeline || is_tdm_epilogue_v<EpiloguePipeline>,
                   "TDM grouped GEMM requires TdmEpilogue");
     // TDM clips A/B/E against the tensor-view extents, so padded views would move the clip
     // bound past the real M/N/K and let tail tiles touch adjacent data.
-    static_assert(!kTupleOnlyPipeline ||
+    static_assert(!kIsTdmPipeline ||
                       (!GemmPipeline::kPadM && !GemmPipeline::kPadN && !GemmPipeline::kPadK),
                   "TDM grouped GEMM requires kPadM, kPadN and kPadK == false");
 
@@ -204,7 +183,7 @@ struct GroupedGemmKernel
                       (NumDTensor_ == 2 ? "MultiD" : "NoMultiD"),
                       (GemmPipeline::DoubleSmemBuffer ? "DoubleSmemBuffer" : "SingleSmemBuffer"));
         // clang-format on
-        if constexpr(kTupleOnlyPipeline)
+        if constexpr(kIsTdmPipeline)
         {
             name += "_tdm";
         }
@@ -322,36 +301,22 @@ struct GroupedGemmKernel
     CK_TILE_HOST static bool
     IsSupportedArgument(const std::vector<GemmTransKernelArg<NumDTensor_>>& kargs)
     {
-        if constexpr(kTupleOnlyPipeline)
+        if constexpr(kIsTdmPipeline)
         {
             // Base::IsSupportedArgument returns true unconditionally for TDM pipelines, so the
-            // TDM-specific constraints are checked here before querying the device, so invalid
+            // TDM-specific constraints are checked here, before querying the device, so invalid
             // arguments are rejected deterministically on any host.
             for(const auto& karg : kargs)
             {
-                if(karg.group_karg.k_batch != 1)
+                const auto& g = karg.group_karg;
+                if(!Base::IsTdmArgumentSupported(
+                       "grouped GEMM", g.k_batch, g.K, g.as_ptr[0], g.bs_ptr[0], g.e_ptr))
                 {
-                    if(ck_tile::EnvIsEnabled(CK_TILE_ENV(CK_TILE_LOGGING)))
-                    {
-                        CK_TILE_ERROR("TDM grouped GEMM does not support split-K (k_batch != 1)!");
-                    }
-                    return false;
-                }
-                if(karg.group_karg.K <= 0)
-                {
-                    if(ck_tile::EnvIsEnabled(CK_TILE_ENV(CK_TILE_LOGGING)))
-                    {
-                        CK_TILE_ERROR("TDM grouped GEMM requires K > 0!");
-                    }
                     return false;
                 }
             }
-            if(!is_gfx125_supported())
+            if(!Base::IsTdmDeviceSupported("grouped GEMM"))
             {
-                if(ck_tile::EnvIsEnabled(CK_TILE_ENV(CK_TILE_LOGGING)))
-                {
-                    CK_TILE_ERROR("TDM grouped GEMM requires a gfx125 device!");
-                }
                 return false;
             }
         }
@@ -396,7 +361,7 @@ struct GroupedGemmKernel
 
         // TO DO:
         // Can we simplify this branching logic?
-        if constexpr(kTupleOnlyPipeline)
+        if constexpr(kIsTdmPipeline)
         {
             // TDM pipelines only accept tuple A/B windows, which Base::RunGemm builds. The host
             // rejects k_batch != 1; trap here rather than silently producing wrong results.

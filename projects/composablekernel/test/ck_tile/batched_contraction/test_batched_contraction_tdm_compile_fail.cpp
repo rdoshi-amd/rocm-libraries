@@ -32,13 +32,14 @@ using DsDataType                = ck_tile::tuple<>;
 using DsLayout                  = ck_tile::tuple<>;
 constexpr ck_tile::index_t NumD = 0;
 constexpr bool kPadN            = true;
-#elif defined(CK_TDM_CONTRACTION_FAIL_MULTI_ABD)
+#elif defined(CK_TDM_CONTRACTION_FAIL_MULTI_ABD) || \
+    defined(CK_TDM_CONTRACTION_FAIL_CSHUFFLE_EPILOGUE)
 using DsDataType                = ck_tile::tuple<>;
 using DsLayout                  = ck_tile::tuple<>;
 constexpr ck_tile::index_t NumD = 0;
 constexpr bool kPadN            = false;
 #else
-#error "Define one of CK_TDM_CONTRACTION_FAIL_{NUM_D,PAD_N,MULTI_ABD}"
+#error "Define one of CK_TDM_CONTRACTION_FAIL_{NUM_D,PAD_N,MULTI_ABD,CSHUFFLE_EPILOGUE}"
 #endif
 
 constexpr ck_tile::index_t M_Warp_Tile = 16;
@@ -80,7 +81,12 @@ using EpilogueProblem = ck_tile::CShuffleEpilogueProblem<DataType,
                                                          1,
                                                          1,
                                                          true>;
-using Epilogue        = ck_tile::TdmEpilogue<EpilogueProblem>;
+#if defined(CK_TDM_CONTRACTION_FAIL_CSHUFFLE_EPILOGUE)
+// A TDM pipeline paired with a non-TDM epilogue.
+using Epilogue = ck_tile::CShuffleEpilogue<EpilogueProblem>;
+#else
+using Epilogue = ck_tile::TdmEpilogue<EpilogueProblem>;
+#endif
 
 #if defined(CK_TDM_CONTRACTION_FAIL_MULTI_ABD)
 using Problem = ck_tile::BatchedContractionMultiABDProblem<ck_tile::tuple<DataType, DataType>,

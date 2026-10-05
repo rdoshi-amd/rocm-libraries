@@ -6,6 +6,7 @@
 #include "ck_tile/core.hpp"
 #include "ck_tile/ops/batched_contraction/pipeline/batched_contraction_problem.hpp"
 #include "ck_tile/ops/batched_contraction/utils/tensor_descriptor_utils.hpp"
+#include "ck_tile/ops/epilogue/tdm_epilogue.hpp"
 #include "ck_tile/ops/gemm/kernel/universal_gemm_kernel.hpp"
 
 #if __clang_major__ >= 23
@@ -315,8 +316,7 @@ struct BatchedContractionKernel
 
     /// True when GemmPipeline is a TDM (tensor data mover) pipeline. TDM pipelines load A/B and
     /// store E through hardware tensor descriptors, so they take a dedicated RunGemmTdm path.
-    static constexpr bool kIsTdmPipeline =
-        UniversalGemmKernel::has_skip_check_valid_launch_params::value;
+    static constexpr bool kIsTdmPipeline = UniversalGemmKernel::kIsTdmPipeline;
 
     // Tensor descriptor utilities with vectorization support
     using DescriptorUtils = TensorDescriptorUtils<NumDimG,
@@ -349,31 +349,14 @@ struct BatchedContractionKernel
     {
         if constexpr(kIsTdmPipeline)
         {
-            // TdmEpilogue always overwrites E, so split-K accumulation is not possible, and the
-            // TDM pipelines require at least one K tile and only exist on gfx125x.
-            if(kargs.k_batch != 1 || kargs.K_total <= 0 || !ck_tile::is_gfx125_supported())
+            if(!UniversalGemmKernel::IsTdmArgumentSupported("batched contraction",
+                                                            kargs.k_batch,
+                                                            kargs.K_total,
+                                                            kargs.a_ptr,
+                                                            kargs.b_ptr,
+                                                            kargs.e_ptr) ||
+               !UniversalGemmKernel::IsTdmDeviceSupported("batched contraction"))
             {
-                if(ck_tile::EnvIsEnabled(CK_TILE_ENV(CK_TILE_LOGGING)))
-                {
-                    CK_TILE_ERROR(
-                        "TDM batched contraction requires k_batch == 1, K > 0 and gfx125x!");
-                }
-                return false;
-            }
-            // The TDM descriptor addresses global memory in elements from a byte base address,
-            // so each base pointer must be aligned to its element size.
-            const auto is_elem_aligned = [](const void* p, std::size_t elem_size) {
-                return reinterpret_cast<std::uintptr_t>(p) % elem_size == 0;
-            };
-            if(!is_elem_aligned(kargs.a_ptr, sizeof(ADataType)) ||
-               !is_elem_aligned(kargs.b_ptr, sizeof(BDataType)) ||
-               !is_elem_aligned(kargs.e_ptr, sizeof(EDataType)))
-            {
-                if(ck_tile::EnvIsEnabled(CK_TILE_ENV(CK_TILE_LOGGING)))
-                {
-                    CK_TILE_ERROR(
-                        "TDM batched contraction requires element-aligned A/B/E pointers!");
-                }
                 return false;
             }
         }
@@ -527,6 +510,8 @@ struct BatchedContractionKernel
                                           const index_t i_m,
                                           const index_t i_n)
     {
+        static_assert(is_tdm_epilogue_v<EpiloguePipeline>,
+                      "TDM batched contraction requires TdmEpilogue");
         static_assert(NumDTensor == 0, "TDM batched contraction does not support D tensors");
         static_assert(!GemmPipeline::kPadK && !GemmPipeline::kPadN,
                       "TDM batched contraction requires kPadK == false and kPadN == false");

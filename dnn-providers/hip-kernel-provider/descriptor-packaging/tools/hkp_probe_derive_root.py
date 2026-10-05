@@ -6,7 +6,7 @@ Copies every file under `--from` to `--out`, except that each KDP shipping for
 among the UKDs that themselves ship for `--arch`:
 
     one entry per kind in hkp_probe_kinds.py: rocke (kind, builder), hip (kind, source,
-    build), hsaco (kind: compiles nothing, so one UKD per KDP)
+    build), hsaco and embedded_source (kind: compile nothing, so one UKD per KDP)
 
 The pick within a group is the first by sorted UKD `name`. Packing the derived
 root therefore exercises every compile path once instead of every variant.

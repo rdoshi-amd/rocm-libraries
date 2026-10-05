@@ -337,7 +337,7 @@ error or skip. Configuring without the option and running the same build and cte
 fails (unknown target, then "No tests were found").
 
 Locally on Linux the build is quick (the wheel environment plus a one-instance-per-group
-pack) and the ctest entries a few seconds. There is no local Windows reproduction.
+pack) and the per-arch ctest entries a few seconds; `hkp-probe-tools` (the probe tooling's own pytest suite, which really compiles hip and rocke fixtures) takes longer. There is no local Windows reproduction.
 
 ### `hkp_add_packaging_probe` arguments
 

@@ -102,7 +102,14 @@ _CASES = [
 @pytest.mark.parametrize("case", _CASES)
 @pytest.mark.parametrize("kv_layout", ["strided", "paged"])
 def test_strided_kv_decode(
-    gpu, monkeypatch, dtype, case, kv_layout, graph=False, default_stream=False
+    gpu,
+    monkeypatch,
+    dtype,
+    case,
+    kv_layout,
+    graph=False,
+    default_stream=False,
+    block_size=16,
 ):
     torch, arch = gpu
     from kernels.common import attention_unified as au
@@ -124,8 +131,8 @@ def test_strided_kv_decode(
         k, v = _cache(torch, k_host, k_layout), _cache(torch, v_host, v_layout)
         block_table = None
     else:
-        k, block_table = _paged_cache(torch, k_host, 16)
-        v, _ = _paged_cache(torch, v_host, 16)
+        k, block_table = _paged_cache(torch, k_host, block_size)
+        v, _ = _paged_cache(torch, v_host, block_size)
     cu_q = torch.arange(batch + 1, dtype=torch.int32).cuda()
     lengths_host = [capacity, max(0, capacity - 3), 0]
     lengths = torch.tensor(lengths_host, dtype=torch.int32).cuda()
@@ -138,7 +145,7 @@ def test_strided_kv_decode(
         num_query_heads=q_heads,
         num_kv_heads=kv_heads,
         head_size=dim,
-        block_size=16,
+        block_size=block_size,
         max_seqlen_q=1,
         max_seqlen_k=capacity,
         dtype=dtype,
@@ -161,6 +168,7 @@ def test_strided_kv_decode(
         arch=arch,
         dtype=dtype,
         kv_layout="strided",
+        kv_block_size=block_size,
         sliding_window=window,
         target_ctas=8,
     )
@@ -233,4 +241,19 @@ def test_strided_decode_graph_replay(
         kv_layout,
         graph=True,
         default_stream=default_stream,
+    )
+
+
+@pytest.mark.parametrize("dtype", ["fp16", "bf16"])
+@pytest.mark.parametrize("block_size", [32, 64])
+@pytest.mark.parametrize("window", [0, 17])
+def test_strided_decode_tile_policy(gpu, monkeypatch, dtype, block_size, window):
+    case = (*_CASES[2][:-1], window)
+    test_strided_kv_decode(
+        gpu,
+        monkeypatch,
+        dtype,
+        case,
+        "strided",
+        block_size=block_size,
     )

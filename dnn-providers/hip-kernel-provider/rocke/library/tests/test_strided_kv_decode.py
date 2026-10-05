@@ -3,6 +3,7 @@
 
 """CPU contracts for non-paged KV metadata and the tiled decode ABI."""
 
+from dataclasses import replace
 from importlib import import_module
 import hashlib
 import json
@@ -198,3 +199,195 @@ def test_native_strided_builder_matches_python(arch, flavor, monkeypatch):
         asdict(spec), arch
     )
     assert actual == expected
+
+
+class _IntegerLikeMask:
+    def __init__(self, value):
+        self.value = value
+
+    def __index__(self):
+        return self.value
+
+
+def _strided_request(arch):
+    from dispatch.attention import AttentionRequest
+
+    return AttentionRequest(
+        batch=3,
+        nhead_q=8,
+        nhead_k=2,
+        seqlen_q=1,
+        seqlen_k=65,
+        hdim_q=128,
+        hdim_v=128,
+        arch=arch,
+        dtype="bf16",
+        kv_layout="strided",
+        kv_block_size=32,
+        target_ctas=8,
+    )
+
+
+@pytest.mark.parametrize("arch", ["gfx942", "gfx950"])
+@pytest.mark.parametrize("mask", [0, 1, 2])
+def test_strided_mask_uses_integer_protocol(arch, mask):
+    from dispatch.attention.strided_decode import make_candidate
+
+    candidate = make_candidate()
+    req = _strided_request(arch)
+    ordinary = candidate.admits(replace(req, mask_type=mask))
+    integer_like = candidate.admits(replace(req, mask_type=_IntegerLikeMask(mask)))
+    assert integer_like == ordinary
+    assert integer_like[0] == (mask != 1)
+
+
+@pytest.mark.parametrize("arch", ["gfx942", "gfx950"])
+@pytest.mark.parametrize("block_size", [16, 32, 64])
+def test_strided_selection_uses_runtime_policy(arch, block_size, monkeypatch):
+    from dispatch.attention import dispatch_attention
+    from dispatch.attention.common import _problem
+    from kernels.common import attention_unified as au
+
+    req = replace(_strided_request(arch), kv_block_size=block_size)
+    problem = _problem(req)
+    # Off-device selection must not use the host's architecture policy.
+    monkeypatch.setattr(au, "_resolve_attention_arch", lambda: "gfx1250")
+    selected = dispatch_attention(req).spec
+    segment, reduce = au._strided_3d_specs_from_problem(problem, arch=arch)
+    assert (selected.kernel_spec, selected.reduce_spec) == (segment, reduce)
+    assert segment.waves_per_eu is None
+    monkeypatch.setattr(au, "_resolve_attention_arch", lambda: arch)
+    paged = au._tiled_3d_spec_from_problem(problem)
+    assert segment == replace(
+        paged, kv_layout="strided", use_wide_kv_load=False, use_i64_kv_addr=False
+    )
+    explicit, explicit_reduce = au._strided_3d_specs_from_problem(
+        replace(problem, waves_per_eu=3), arch=arch
+    )
+    assert explicit.waves_per_eu == explicit_reduce.waves_per_eu == 3
+
+
+@pytest.fixture
+def strided_binding_case():
+    from dispatch.attention import dispatch_attention
+    from dispatch.attention.common import _problem
+
+    req = _strided_request("gfx942")
+    result = dispatch_attention(req)
+    tensors = {
+        name: object() for name in ("q", "k", "v", "out", "cu_seqlens_q", "seqused_k")
+    }
+    tensors["problem"] = _problem(req)
+    return req, result, tensors
+
+
+def test_strided_binding_scale_stream_and_unknown_options(
+    strided_binding_case, monkeypatch
+):
+    from kernels.common import attention_unified as au
+
+    req, result, tensors = strided_binding_case
+    calls = []
+    monkeypatch.setattr(
+        au, "run_unified_attention_torch", lambda **kw: calls.append(kw)
+    )
+    bind = result.candidate.bind_torch
+    binding = bind(req, result.spec, tensors, softmax_scale=0.25, stream=17)
+    binding.launch()
+    binding.launch(softmax_scale=0.5, stream=19)
+    assert [(c["softmax_scale"], c["stream"]) for c in calls] == [(0.25, 17), (0.5, 19)]
+    for kw in ({"softcap": 1.0}, {"softmax_sclae": 0.5}, {"backend": "auto"}):
+        with pytest.raises(TypeError):
+            bind(req, result.spec, tensors, **kw)
+        with pytest.raises(TypeError):
+            binding.launch(**kw)
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("extra", ["sinks", "alibi_slopes", "qq_bias", "bias"])
+def test_strided_binding_rejects_unconsumed_tensors(strided_binding_case, extra):
+    req, result, tensors = strided_binding_case
+    with pytest.raises(ValueError, match="unsupported strided decode tensors"):
+        result.candidate.bind_torch(req, result.spec, {**tensors, extra: object()})
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"sliding_window": 17},
+        {"softcap": 1.0},
+        {"use_sinks": True},
+        {"use_alibi": True},
+        {"use_qq_bias": True},
+    ],
+)
+def test_strided_binding_rejects_problem_semantic_mismatch(
+    strided_binding_case, changes
+):
+    req, result, tensors = strided_binding_case
+    tensors["problem"] = replace(tensors["problem"], **changes)
+    with pytest.raises(ValueError):
+        result.candidate.bind_torch(req, result.spec, tensors)
+
+
+@pytest.mark.parametrize(
+    "component,changes",
+    [
+        ("kernel_spec", {"sliding_window": 17}),
+        ("kernel_spec", {"has_softcap": True}),
+        ("kernel_spec", {"head_size": 64}),
+        ("kernel_spec", {"num_seqs": 2}),
+        ("kernel_spec", {"kv_layout": "paged"}),
+        ("kernel_spec", {"use_sinks": True}),
+        ("reduce_spec", {"num_segments": 32}),
+        ("reduce_spec", {"dtype": "fp16"}),
+        ("reduce_spec", {"num_query_heads": 4}),
+    ],
+)
+def test_strided_runtime_rejects_incoherent_specs(
+    strided_binding_case, monkeypatch, component, changes
+):
+    from kernels.common import attention_unified as au
+
+    _, result, tensors = strided_binding_case
+    monkeypatch.setattr(au, "_resolve_attention_arch", lambda: "gfx942")
+    spec = replace(
+        result.spec, **{component: replace(getattr(result.spec, component), **changes)}
+    )
+    # Validate before inspecting device tensors or compiling/launching a kernel.
+    with pytest.raises(ValueError, match="disagrees"):
+        au.run_unified_attention_torch(
+            **tensors,
+            block_table=None,
+            softmax_scale=0.125,
+            softcap=0,
+            tuning_spec=spec,
+            kv_layout="strided",
+        )
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"k_scale": 2.0},
+        {"v_scale": 0.5},
+        {"out_scale": 0.5},
+        {"softcap": 1.0},
+    ],
+)
+def test_strided_runtime_rejects_ignored_scaling(
+    strided_binding_case, monkeypatch, overrides
+):
+    from kernels.common import attention_unified as au
+
+    _, result, tensors = strided_binding_case
+    monkeypatch.setattr(au, "_resolve_attention_arch", lambda: "gfx942")
+    with pytest.raises(ValueError, match="scaling|softcap"):
+        au.run_unified_attention_torch(
+            **tensors,
+            block_table=None,
+            softmax_scale=0.125,
+            tuning_spec=result.spec,
+            kv_layout="strided",
+            **{"softcap": 0, **overrides},
+        )

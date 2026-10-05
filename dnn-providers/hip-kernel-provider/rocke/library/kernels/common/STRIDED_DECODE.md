@@ -29,7 +29,7 @@ alignment and an optional sliding window. Empty sequences produce zero output.
 
 The registered `attention_strided_decode` candidate declines bias, sinks, FP8,
 top-left causal alignment, and multi-query prefill. Arbitrary D strides and
-overlapping or unaligned views are not supported. This change adds no LSE output.
+overlapping or unaligned views and K/V/output scaling are not supported. This change adds no LSE output.
 
 ## Usage and validation
 
@@ -56,7 +56,11 @@ run_unified_attention_torch(
 
 For registry consumers, set `AttentionRequest.kv_layout="strided"`; the
 [candidate](../../dispatch/attention/strided_decode.py) provides spec building
-and `bind_torch`. The low-level [layout adapter](attention_kv_cache.py) packs
+and `bind_torch`. Direct and dispatched launches share the same spec policy.
+The binding accepts only `softmax_scale` and `stream` keyword overrides; it
+rejects softcap, bias/sinks tensors, and unknown arguments. Explicit segment
+and reducer specs must agree with the runtime problem's shapes, dtype, window,
+and enabled features. The low-level [layout adapter](attention_kv_cache.py) packs
 independent K/V batch/head strides as i64 byte offsets and token strides/span
 as i32 bytes. Separate C builder entry points preserve installed paged spec
 structs; strided symbols carry `_stridedkv`.

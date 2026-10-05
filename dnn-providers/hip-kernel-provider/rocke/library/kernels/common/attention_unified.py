@@ -2992,23 +2992,29 @@ def _num_segments(problem: UnifiedAttentionProblem) -> int:
     return segments
 
 
-def _gfx942_3d_tile_size_override(problem: UnifiedAttentionProblem) -> Optional[int]:
-    arch = _resolve_attention_arch()
+def _gfx942_3d_tile_size_override(
+    problem: UnifiedAttentionProblem, *, arch: Optional[str] = None
+) -> Optional[int]:
+    arch = arch or _resolve_attention_arch()
     if not (arch == "gfx942" and problem.head_size >= 128 and problem.block_size >= 32):
         return None
     return problem.block_size // 2
 
 
-def _select_3d_waves_per_eu(problem: UnifiedAttentionProblem) -> Optional[int]:
+def _select_3d_waves_per_eu(
+    problem: UnifiedAttentionProblem, *, arch: Optional[str] = None
+) -> Optional[int]:
     if problem.waves_per_eu is not None:
         return problem.waves_per_eu
-    if _resolve_attention_arch() == "gfx1250":
+    if (arch or _resolve_attention_arch()) == "gfx1250":
         return 2
     return None
 
 
-def _enable_gfx942_3d_invariant_hoist(problem: UnifiedAttentionProblem) -> bool:
-    if _resolve_attention_arch() != "gfx942":
+def _enable_gfx942_3d_invariant_hoist(
+    problem: UnifiedAttentionProblem, *, arch: Optional[str] = None
+) -> bool:
+    if (arch or _resolve_attention_arch()) != "gfx942":
         return False
     env = __import__("os").environ.get("HIPDNN_GFX942_3D_HOIST", "").strip().lower()
     return env in ("1", "on", "enable", "enabled", "yes", "true")
@@ -3166,6 +3172,77 @@ def _tiled_3d_spec_from_problem(
     )
 
     return _impl(problem)
+
+
+def _strided_3d_specs_from_problem(problem: UnifiedAttentionProblem, *, arch: str):
+    """One spec policy for direct and dispatched non-paged decode."""
+    if arch not in ("gfx942", "gfx950"):
+        raise ValueError("strided KV decode targets gfx942/gfx950")
+    segment_type, reduce_type, *_ = _tiled_3d_impl(arch)
+    if problem.clamp_arch != arch:
+        problem = replace(problem, clamp_arch=arch)
+    waves = _select_3d_waves_per_eu(problem, arch=arch)
+    segment = segment_type(
+        head_size=problem.head_size,
+        block_size=problem.block_size,
+        num_query_heads=problem.num_query_heads,
+        num_kv_heads=problem.num_kv_heads,
+        dtype=problem.dtype,
+        use_sinks=problem.use_sinks,
+        sliding_window=problem.sliding_window,
+        has_softcap=problem.softcap > 0,
+        use_alibi=problem.use_alibi,
+        use_qq_bias=problem.use_qq_bias,
+        num_segments=_num_segments(problem),
+        num_seqs=problem.num_seqs,
+        waves_per_eu=waves,
+        tile_size_override=_gfx942_3d_tile_size_override(problem, arch=arch),
+        use_invariant_hoist=_enable_gfx942_3d_invariant_hoist(problem, arch=arch),
+        kv_layout="strided",
+    )
+    reduce = reduce_type(
+        head_size=problem.head_size,
+        num_query_heads=problem.num_query_heads,
+        num_kv_heads=problem.num_kv_heads,
+        dtype=problem.dtype,
+        num_segments=segment.num_segments,
+        waves_per_eu=waves,
+    )
+    return segment, reduce
+
+
+def _validate_strided_3d_spec(problem: UnifiedAttentionProblem, tuning_spec) -> None:
+    """Reject explicit specs whose baked semantics disagree with the launch."""
+    segment = tuning_spec.kernel_spec
+    reduce = getattr(tuning_spec, "reduce_spec", None)
+    if tuning_spec.path != "3d" or reduce is None:
+        raise ValueError("strided decode requires segment and reduce specs")
+    for name, expected in (
+        ("kv_layout", "strided"),
+        ("head_size", problem.head_size),
+        ("block_size", problem.block_size),
+        ("num_query_heads", problem.num_query_heads),
+        ("num_kv_heads", problem.num_kv_heads),
+        ("num_seqs", problem.num_seqs),
+        ("dtype", problem.dtype),
+        ("sliding_window", problem.sliding_window),
+        ("has_softcap", problem.softcap > 0),
+        ("use_sinks", False),
+        ("use_alibi", False),
+        ("use_qq_bias", False),
+        ("kv_storage_dtype", None),
+    ):
+        if getattr(segment, name, None) != expected:
+            raise ValueError(f"strided kernel_spec.{name} disagrees with problem")
+    for name in (
+        "head_size",
+        "num_query_heads",
+        "num_kv_heads",
+        "dtype",
+        "num_segments",
+    ):
+        if getattr(reduce, name) != getattr(segment, name):
+            raise ValueError(f"strided reduce_spec.{name} disagrees with segment")
 
 
 def _tiled_3d_cache_key(problem: UnifiedAttentionProblem) -> Tuple:
@@ -4020,26 +4097,22 @@ def _get_3d_pipeline(
                 build_unified_attention_reduce_tiled,
                 _,
             ) = _tiled_3d_impl(arch)
-            segment_spec = _tiled_3d_spec_from_problem(problem)
             if strided_kv:
-                segment_spec = replace(
-                    segment_spec,
-                    kv_layout="strided",
-                    use_wide_kv_load=False,
-                    use_i64_kv_addr=False,
+                segment_spec, reduce_spec = _strided_3d_specs_from_problem(
+                    problem, arch=arch
                 )
-            seg_kernel = build_unified_attention_3d_tiled(segment_spec, arch=arch)
-            red_kernel = build_unified_attention_reduce_tiled(
-                UnifiedAttentionReduceTiledSpec(
+            else:
+                segment_spec = _tiled_3d_spec_from_problem(problem)
+                reduce_spec = UnifiedAttentionReduceTiledSpec(
                     head_size=problem.head_size,
                     num_query_heads=problem.num_query_heads,
                     num_kv_heads=problem.num_kv_heads,
                     dtype=problem.dtype,
                     num_segments=num_segments,
                     waves_per_eu=_select_3d_waves_per_eu(problem),
-                ),
-                arch=arch,
-            )
+                )
+            seg_kernel = build_unified_attention_3d_tiled(segment_spec, arch=arch)
+            red_kernel = build_unified_attention_reduce_tiled(reduce_spec, arch=arch)
         seg_art = compile_kernel(seg_kernel, arch=arch, capture_ir_text=False)
         red_art = compile_kernel(red_kernel, arch=arch, capture_ir_text=False)
         _ATTN_3D_TILED_CACHE[cache_key] = (
@@ -4422,7 +4495,7 @@ def run_unified_attention_torch(
     [B,Hkv,capacity,D] to the existing split-KV pipeline on gfx942/gfx950.
     K/V may have independent BSHD/BHSD or padded outer strides; D must be
     contiguous and rows vector-aligned. Pass block_table=None, Q/O [B,Hq,D],
-    int32 KV lengths [B] in [0,capacity], and query offsets [0,1,...,B].
+    int32 KV lengths [B] in [0,problem.max_seqlen_k], and offsets [0,1,...,B].
     The adapter neither copies KV nor allocates a page table.
 
     Backend selection:
@@ -4481,11 +4554,15 @@ def run_unified_attention_torch(
             or qq_bias is not None
         ):
             raise ValueError("strided KV decode does not support fp8, sinks or bias")
-        if (
-            tuning_spec is not None
-            and getattr(tuning_spec.kernel_spec, "kv_layout", "paged") != "strided"
-        ):
-            raise ValueError("strided KV input requires a strided tuning spec")
+        if k_scale != 1.0 or v_scale != 1.0 or out_scale != 1.0:
+            raise ValueError("strided decode does not support K/V/output scaling")
+        if (softcap > 0) != (problem.softcap > 0):
+            raise ValueError("strided softcap enablement disagrees with problem")
+        if tuning_spec is not None:
+            _validate_strided_3d_spec(problem, tuning_spec)
+        arch = _resolve_attention_arch()
+        if problem.clamp_arch != arch:
+            problem = replace(problem, clamp_arch=arch)
         layout = StridedKvCacheLayout.from_tensors(k, v)
         batch, heads, capacity, dim = layout.key.shape
         if (batch, heads, dim) != (
@@ -4524,7 +4601,7 @@ def run_unified_attention_torch(
             or not cu_seqlens_q.is_contiguous()
         ):
             raise ValueError("query offsets must be a contiguous int32 [B+1] tensor")
-        # Caller-owned device metadata: lengths are in [0, capacity], and
+        # Caller-owned device metadata: lengths are in [0, max_seqlen_k], and
         # query offsets are [0, 1, ..., B]. No host read/synchronization here.
         ok, why = _explicit_path_supported(problem, tuning_spec, "3d")
         if not ok:

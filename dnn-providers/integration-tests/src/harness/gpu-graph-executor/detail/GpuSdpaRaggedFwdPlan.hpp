@@ -30,8 +30,8 @@ namespace hipdnn_integration_tests::gpu_graph_executor::detail
 {
 
 // Unpacked attributes and resolved parameters for a ragged SDPA node (RFC-0014 packed
-// [B,H,S,D] + ragged_offset). q/k/v/o each carry an int32 element-offset aux [B+1,1,1,1].
-// The optional LSE [B,H,Sq,1] is packed if it has its own ragged_offset aux, else dense.
+// [B,S,H,D] + ragged_offset). q/k/v/o each carry an int32 element-offset aux [B+1,1,1,1].
+// The optional LSE [B,Sq,H,1] is packed if it has its own ragged_offset aux, else dense.
 struct GpuSdpaRaggedFwdParams
 {
     GpuSdpaRaggedFwdParams(
@@ -108,7 +108,7 @@ struct GpuSdpaRaggedFwdParams
     int64_t rightBound;
     bool topLeftAlignment;
     std::optional<hipdnn_flatbuffers_sdk::data_objects::TensorAttributesT> lseTensor;
-    // Set only for a packed LSE. Absent means a dense [B,H,Sq,1] LSE.
+    // Set only for a packed LSE. Absent means a dense [B,Sq,H,1] LSE.
     std::optional<hipdnn_flatbuffers_sdk::data_objects::TensorAttributesT> raggedOffsetLseTensor;
     // Optional fp8 descales (float): scalar [1] or per-KV-head [B, H_kv, 1, 1].
     std::optional<hipdnn_flatbuffers_sdk::data_objects::TensorAttributesT> descaleQTensor;
@@ -379,7 +379,7 @@ public:
         }
 
         // LSE (stats tensor) must be FLOAT. With an INT32 ragged_offset aux it is packed,
-        // otherwise dense [B,H,Sq,1].
+        // otherwise dense [B,Sq,H,1].
         if(nodeAttributes->stats_tensor_uid().has_value())
         {
             CHECK_TENSOR_EXISTS(tensorMap, nodeAttributes->stats_tensor_uid().value());

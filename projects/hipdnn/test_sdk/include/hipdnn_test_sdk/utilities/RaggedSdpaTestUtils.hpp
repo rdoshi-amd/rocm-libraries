@@ -7,50 +7,42 @@
 #include <memory>
 #include <vector>
 
+#include <hipdnn_data_sdk/utilities/RaggedTensor.hpp>
 #include <hipdnn_data_sdk/utilities/Tensor.hpp>
 
 namespace hipdnn_test_sdk::utilities
 {
 
 // Geometry helpers for ragged SDPA tests (RFC-0014), shared by the CPU test_sdk suite and the
-// gpu-ref integration suite.
+// gpu-ref integration suite. Ragged tensors are [B, S, H, D] with the sequence at
+// BSHD_SEQ_AXIS (1), packed token by token. Ragged tests build every ragged shape, stride and
+// element index through these helpers.
 
-// SDPA dims are [B, H, S, D] with the sequence at axis 2. The packed BSHD layout lives only in the
-// strides, so use 2 here, not the SDK's BSHD_SEQ_AXIS = 1 (which assumes dims [B, S, H, D]).
-inline constexpr int SEQ_AXIS = 2;
-
-// Dims of a ragged SDPA tensor from its batch, sequence extent (S_max), heads and head dim.
-// Ragged tests build every ragged shape, stride and element index through these helpers, so the
-// axis order lives here only.
 inline std::vector<int64_t> raggedDims(int64_t batch, int64_t seq, int64_t heads, int64_t dim)
 {
-    return {batch, heads, seq, dim};
+    return {batch, seq, heads, dim};
 }
 
 // Logical index of element (b, s, h, d) in a tensor shaped by raggedDims.
 inline std::vector<int64_t> raggedIndex(int64_t b, int64_t s, int64_t h, int64_t d)
 {
-    return {b, h, s, d};
+    return {b, s, h, d};
 }
 
 inline int64_t raggedSeqExtent(const std::vector<int64_t>& dims)
 {
-    return dims[SEQ_AXIS];
+    return dims[hipdnn_data_sdk::utilities::BSHD_SEQ_AXIS];
 }
 
 inline int64_t raggedHeads(const std::vector<int64_t>& dims)
 {
-    return dims[1];
+    return dims[2];
 }
 
-// Strides of packed BSHD memory (token-major: token, then head, then dim) for raggedDims dims.
-// The seq stride is H * D.
+// Contiguous strides of a raggedDims tensor. The seq stride is H * D.
 inline std::vector<int64_t> raggedStrides(const std::vector<int64_t>& dims)
 {
-    const auto heads = raggedHeads(dims);
-    const auto seq = raggedSeqExtent(dims);
-    const auto dim = dims[3];
-    return {seq * heads * dim, dim, heads * dim, 1};
+    return {dims[1] * dims[2] * dims[3], dims[2] * dims[3], dims[3], 1};
 }
 
 // Exclusive prefix sum: cum[0] = 0, cum[b + 1] = cum[b] + lengths[b].

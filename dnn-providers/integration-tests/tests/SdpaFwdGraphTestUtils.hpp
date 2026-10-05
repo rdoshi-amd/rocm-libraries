@@ -98,10 +98,10 @@ inline flatbuffers::FlatBufferBuilder
 // Layout of the optional stats (LSE) output of a ragged SDPA graph.
 enum class RaggedStatsLayout
 {
-    // [B, H, Sq_max, 1], contiguous, no ragged_offset. The frontend produces this when stats
+    // [B, Sq_max, H, 1], contiguous, no ragged_offset. The frontend produces this when stats
     // strides are unset.
     DENSE,
-    // [B, H, Sq_max, 1] in BSHD order (seq stride = H) with its own ragged_offset.
+    // [B, Sq_max, H, 1], packed by token (seq stride = H) with its own ragged_offset.
     PACKED,
 };
 
@@ -131,7 +131,7 @@ struct RaggedSdpaFwdGraphOptions
     // Output dtype. UNSET means the input dtype. fp8 graphs use bf16 here.
     hipdnn_flatbuffers_sdk::data_objects::DataType oDataType
         = hipdnn_flatbuffers_sdk::data_objects::DataType::UNSET;
-    // FLOAT LSE output [B, H, Sq, 1].
+    // FLOAT LSE output [B, Sq, H, 1].
     std::optional<int64_t> statsUid;
     RaggedStatsLayout statsLayout = RaggedStatsLayout::DENSE;
     // INT32 ragged_offset uid for the stats tensor. Required for PACKED stats.
@@ -148,8 +148,8 @@ struct RaggedSdpaFwdGraphOptions
     std::optional<int64_t> raggedOffsetOUid;
 };
 
-// Builds a one-node ragged SDPA forward graph (RFC-0014: packed [B,H,S,D] plus ragged_offset).
-// Q/K/V/O use BSHD strides and each carries a ragged_offset uid, which routes the node to the
+// Builds a one-node ragged SDPA forward graph (RFC-0014: packed [B,S,H,D] plus ragged_offset).
+// Q/K/V/O are packed by token and each carries a ragged_offset uid, which routes the node to the
 // ragged reference. Each ragged_offset aux is INT32 [batch+1,1,1,1].
 inline flatbuffers::FlatBufferBuilder
     createRaggedSdpaFwdGraph(int64_t qUid,

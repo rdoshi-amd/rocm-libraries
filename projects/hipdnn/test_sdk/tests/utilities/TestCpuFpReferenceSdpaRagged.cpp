@@ -56,7 +56,7 @@ void fillPacked(std::vector<T>& buf, unsigned int seed)
     }
 }
 
-// Wraps a borrowed packed buffer as a ragged tensor ([B, H, S, D], seqAxis 2, BSHD strides).
+// Wraps a borrowed packed buffer as a ragged tensor ([B, S, H, D], BSHD_SEQ_AXIS).
 template <typename T>
 ShallowRaggedTensor<T> wrapRagged(T* buf,
                                   const std::vector<int64_t>& dims,
@@ -64,7 +64,7 @@ ShallowRaggedTensor<T> wrapRagged(T* buf,
                                   const std::vector<int64_t>& cum)
 {
     return ShallowRaggedTensor<T>(
-        buf, dims, raggedStrides(dims), SEQ_AXIS, makeRaggedOffsetAux(cum, seqStride));
+        buf, dims, raggedStrides(dims), BSHD_SEQ_AXIS, makeRaggedOffsetAux(cum, seqStride));
 }
 
 // Valid ragged tensor over a caller-owned buffer sized for the packed tokens. The negative tests
@@ -380,6 +380,81 @@ TEST(TestCpuFpReferenceSdpaRaggedFp32, RaggedExplicitAttnScale)
     checkRaggedVsDense({4, 6}, {4, 6}, 2, 2, 16, 16, -1, -1, true, /*attnScale=*/0.125f);
 }
 
+// Pins the RFC-0014 layout with literals rather than the raggedDims helpers: dims [B, S, H, D],
+// sequence at axis 1, contiguous strides, and element (token t, head h, dim d) stored at
+// t * H * D + h * D + d. Each batch is copied straight from the packed buffers into the dense
+// reference's [1, H, S, D] layout.
+TEST(TestCpuFpReferenceSdpaRaggedFp32, RfcLayoutLiteralShape)
+{
+    const std::vector<int64_t> seqLens = {3, 5};
+    const int64_t heads = 2;
+    const int64_t dim = 4;
+    const std::vector<int64_t> dims = {2, 5, 2, 4};
+    const std::vector<int64_t> strides = {40, 8, 4, 1};
+    const int64_t tokenWidth = heads * dim;
+    const auto cum = cumTokens(seqLens);
+    const auto packedCount = static_cast<size_t>(cum.back() * tokenWidth);
+
+    std::vector<float> qB(packedCount);
+    std::vector<float> kB(packedCount);
+    std::vector<float> vB(packedCount);
+    std::vector<float> oB(packedCount, 0.0f);
+    fillPacked(qB, 11);
+    fillPacked(kB, 22);
+    fillPacked(vB, 33);
+    const auto wrap = [&](std::vector<float>& buf) {
+        return ShallowRaggedTensor<float>(
+            buf.data(), dims, strides, /*seqAxis=*/1, makeRaggedOffsetAux(cum, tokenWidth));
+    };
+    auto q = wrap(qB);
+    auto k = wrap(kB);
+    auto v = wrap(vB);
+    auto o = wrap(oB);
+
+    CpuFpReferenceSdpaRagged::forward<float, float, float, float, float>(q, k, v, o);
+
+    const auto packedAt = [&](int64_t token, int64_t h, int64_t d) {
+        return static_cast<size_t>(token * tokenWidth + h * dim + d);
+    };
+    for(int64_t b = 0; b < 2; ++b)
+    {
+        const auto len = seqLens[static_cast<size_t>(b)];
+        const auto base = cum[static_cast<size_t>(b)];
+        Tensor<float> qd({1, heads, len, dim});
+        Tensor<float> kd({1, heads, len, dim});
+        Tensor<float> vd({1, heads, len, dim});
+        for(int64_t h = 0; h < heads; ++h)
+        {
+            for(int64_t s = 0; s < len; ++s)
+            {
+                for(int64_t d = 0; d < dim; ++d)
+                {
+                    qd(0, h, s, d) = qB[packedAt(base + s, h, d)];
+                    kd(0, h, s, d) = kB[packedAt(base + s, h, d)];
+                    vd(0, h, s, d) = vB[packedAt(base + s, h, d)];
+                }
+            }
+        }
+        qd.memory().markHostModified();
+        kd.memory().markHostModified();
+        vd.memory().markHostModified();
+        Tensor<float> oDense({1, heads, len, dim});
+        CpuFpReferenceSdpa::forward<float, float, float, float, float>(qd, kd, vd, oDense);
+
+        for(int64_t h = 0; h < heads; ++h)
+        {
+            for(int64_t s = 0; s < len; ++s)
+            {
+                for(int64_t d = 0; d < dim; ++d)
+                {
+                    EXPECT_NEAR(oB[packedAt(base + s, h, d)], oDense(0, h, s, d), 1e-4f)
+                        << "batch " << b << " token " << s << " head " << h << " dim " << d;
+                }
+            }
+        }
+    }
+}
+
 // --- fp8 (E4M3) + descale vs a dequantized dense reference ---
 
 TEST(TestCpuFpReferenceSdpaRaggedFp8, RaggedPerTensorDescale)
@@ -414,7 +489,7 @@ TEST(TestCpuFpReferenceSdpaRaggedFp8, RaggedGqaPerKvHeadDescaleQkv)
         {4, 6}, {5, 3}, 4, numHeadsKv, 128, descaleQ, descaleK, descaleV, -1, -1, true);
 }
 
-// --- Dense LSE ([B, H, Sq_max, 1], the frontend's default stats layout) ---
+// --- Dense LSE ([B, Sq_max, H, 1], the frontend's default stats layout) ---
 // A dense LSE must match the ragged LSE on valid rows and leave padding rows untouched. The GPU
 // reference follows the same contract.
 TEST(TestCpuFpReferenceSdpaRaggedFp32, DenseLseMatchesRaggedLse)
@@ -778,10 +853,10 @@ bool throwsOnEditedQTokens(const std::vector<int64_t>& qTokens)
     std::vector<float> oB(64, 0.0f);
     auto qAux = makeRaggedOffsetAux(valid, 16);
     auto oAux = makeRaggedOffsetAux(valid, 16);
-    ShallowRaggedTensor<float> q(qB.data(), dims, raggedStrides(dims), SEQ_AXIS, qAux);
+    ShallowRaggedTensor<float> q(qB.data(), dims, raggedStrides(dims), BSHD_SEQ_AXIS, qAux);
     auto k = wrapRagged(kB.data(), dims, 16, valid);
     auto v = wrapRagged(vB.data(), dims, 16, valid);
-    ShallowRaggedTensor<float> o(oB.data(), dims, raggedStrides(dims), SEQ_AXIS, oAux);
+    ShallowRaggedTensor<float> o(oB.data(), dims, raggedStrides(dims), BSHD_SEQ_AXIS, oAux);
     setTokenOffsets(*qAux, qTokens, 16);
     setTokenOffsets(*oAux, qTokens, 16);
     try

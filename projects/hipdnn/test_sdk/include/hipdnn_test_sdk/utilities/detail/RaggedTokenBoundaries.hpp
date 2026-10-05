@@ -15,7 +15,7 @@ namespace hipdnn_test_sdk::detail
 // offset[b] / seqStride. Tensors with different token widths share a packing but not element
 // offsets, so cross-tensor checks compare tokens.
 // Throws std::invalid_argument unless seqStride > 0, offset[0] == 0, each offset is a whole
-// number of tokens, offsets never decrease, and no batch is longer than sMax (dims()[2]).
+// number of tokens, offsets never decrease, and no batch is longer than sMax (dims()[1]).
 inline std::vector<int64_t> raggedTokenBoundaries(const std::vector<int64_t>& elementOffsets,
                                                   int64_t seqStride,
                                                   int64_t sMax,

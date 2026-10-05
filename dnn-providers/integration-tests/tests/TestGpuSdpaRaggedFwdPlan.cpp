@@ -95,7 +95,7 @@ using Fp32Builder = GpuSdpaRaggedFwdPlanBuilder<DataType::FLOAT,
                                                 DataType::FLOAT,
                                                 DataType::FLOAT>;
 
-// Wraps a borrowed packed host buffer as an RFC-0014 ragged tensor (BSHD, seq axis 2).
+// Wraps a borrowed packed host buffer as an RFC-0014 ragged tensor ([B, S, H, D], BSHD_SEQ_AXIS).
 ShallowRaggedTensor<float> wrapRagged(float* buf,
                                       const std::vector<int64_t>& dims,
                                       int64_t seqStride,
@@ -104,7 +104,7 @@ ShallowRaggedTensor<float> wrapRagged(float* buf,
     return ShallowRaggedTensor<float>(buf,
                                       dims,
                                       raggedStrides(dims),
-                                      SEQ_AXIS,
+                                      BSHD_SEQ_AXIS,
                                       makeRaggedOffsetAux(cumTokens(lengths), seqStride));
 }
 

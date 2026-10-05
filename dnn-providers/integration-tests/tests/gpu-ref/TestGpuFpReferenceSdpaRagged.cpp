@@ -1,7 +1,7 @@
 // Copyright © Advanced Micro Devices, Inc., or its affiliates.
 // SPDX-License-Identifier:  MIT
 
-// GPU-vs-CPU tests for the ragged SDPA forward GPU reference (RFC-0014: packed [B,H,S,D] plus
+// GPU-vs-CPU tests for the ragged SDPA forward GPU reference (RFC-0014: packed [B,S,H,D] plus
 // ragged_offset).
 //
 // The GPU reference takes device tensors and explicit ragged_offset aux. The CPU mirror reads the
@@ -83,7 +83,7 @@ Tensor<int32_t> makeRaggedOffset(const std::vector<int64_t>& cum, int64_t seqStr
     return off;
 }
 
-// View a borrowed packed host buffer as an RFC-0014 ragged tensor (BSHD, seq axis 2).
+// View a borrowed packed host buffer as an RFC-0014 ragged tensor ([B, S, H, D], BSHD_SEQ_AXIS).
 template <typename T>
 ShallowRaggedTensor<T> wrapRagged(T* buf,
                                   const std::vector<int64_t>& dims,
@@ -91,7 +91,7 @@ ShallowRaggedTensor<T> wrapRagged(T* buf,
                                   const std::vector<int64_t>& cum)
 {
     return ShallowRaggedTensor<T>(
-        buf, dims, raggedStrides(dims), SEQ_AXIS, makeRaggedOffsetAux(cum, seqStride));
+        buf, dims, raggedStrides(dims), BSHD_SEQ_AXIS, makeRaggedOffsetAux(cum, seqStride));
 }
 
 // Randomize only the packed prefix (first `count` elements) of a padded buffer.
@@ -278,6 +278,54 @@ TEST(TestGpuSdpaRaggedFwdBfp16, RaggedHeadDim192xV128GqaCausal)
     checkRagged<bfloat16>({3, 5}, {6, 8}, 4, 2, 2, 192, 128, -1, 0, /*topLeftAlignment=*/false);
 }
 
+// The layout of the hd192 ragged golden bundles (quick/SdpaFwd/bshd/bf16/hd192_*_ragged): literal
+// [B, S, H, D] dims with contiguous strides, D = 192 / Dv = 128, bottom-right causal. S_max is
+// 64 rather than 256 to keep the CPU mirror fast, and the lengths differ per batch.
+TEST(TestGpuSdpaRaggedFwdBfp16, RfcLayoutHd192BundleShape)
+{
+    SKIP_IF_NO_DEVICES();
+
+    const std::vector<int64_t> seqLens = {64, 40, 17};
+    const std::vector<int64_t> qkDims = {3, 64, 2, 192};
+    const std::vector<int64_t> qkStrides = {24576, 384, 192, 1};
+    const std::vector<int64_t> voDims = {3, 64, 2, 128};
+    const std::vector<int64_t> voStrides = {16384, 256, 128, 1};
+    const auto cum = cumTokens(seqLens);
+    const auto total = cum.back();
+
+    Tensor<bfloat16> q(qkDims, qkStrides);
+    Tensor<bfloat16> k(qkDims, qkStrides);
+    Tensor<bfloat16> v(voDims, voStrides);
+    Tensor<bfloat16> oGpu(voDims, voStrides);
+    fillPackedRandom(q, total * 384, -1.0f, 1.0f, SEED_Q);
+    fillPackedRandom(k, total * 384, -1.0f, 1.0f, SEED_K);
+    fillPackedRandom(v, total * 256, -1.0f, 1.0f, SEED_V);
+
+    std::vector<bfloat16> oCpuBack(static_cast<size_t>(total * 256), bfloat16(0.0f));
+    {
+        const auto wrap = [&](bfloat16* buf,
+                              const std::vector<int64_t>& dims,
+                              const std::vector<int64_t>& strides,
+                              int64_t tokenWidth) {
+            return ShallowRaggedTensor<bfloat16>(
+                buf, dims, strides, /*seqAxis=*/1, makeRaggedOffsetAux(cum, tokenWidth));
+        };
+        auto qR = wrap(q.memory().hostData(), qkDims, qkStrides, 384);
+        auto kR = wrap(k.memory().hostData(), qkDims, qkStrides, 384);
+        auto vR = wrap(v.memory().hostData(), voDims, voStrides, 256);
+        auto oR = wrap(oCpuBack.data(), voDims, voStrides, 256);
+        CpuFpReferenceSdpaRagged::forward<bfloat16, bfloat16, bfloat16, bfloat16, float>(
+            qR, kR, vR, oR, std::nullopt, -1, 0, /*topLeftAlignment=*/false);
+    }
+
+    auto offQk = makeRaggedOffset(cum, 384);
+    auto offVo = makeRaggedOffset(cum, 256);
+    GpuFpReferenceSdpaRagged::fpropRagged<bfloat16, bfloat16, bfloat16, bfloat16, float>(
+        q, k, v, oGpu, offQk, offQk, offVo, offVo, std::nullopt, -1, 0, false);
+
+    compareRaggedPacked(oGpu, oCpuBack, gpuRefFwdTolerance<bfloat16>());
+}
+
 // --- Ragged LSE output ---
 
 TEST(TestGpuSdpaRaggedFwdFp32, RaggedLseOutput)
@@ -320,7 +368,7 @@ TEST(TestGpuSdpaRaggedFwdFp32, RaggedLseOutput)
 
     auto offQ = makeRaggedOffset(cumQ, numHeads * headDim);
     auto offKv = makeRaggedOffset(cumKv, numHeads * headDim);
-    // Ragged LSE is [B,H,S,1] BSHD with seq stride H, so its offsets are cum * H.
+    // Ragged LSE is [B,S,H,1] packed by token with seq stride H, so its offsets are cum * H.
     auto offLse = makeRaggedOffset(cumQ, numHeads);
     GpuFpReferenceSdpaRagged::fpropRagged<float, float, float, float, float>(
         q, k, v, oGpu, offQ, offKv, offKv, offQ, std::nullopt, -1, -1, true, &lseGpu, &offLse);
@@ -340,8 +388,8 @@ namespace
 
 constexpr float LSE_SENTINEL = -99.0f;
 
-// Dense LSE, the frontend's default stats layout: contiguous [B, H, Sq_max, 1], so batch b
-// starts at b * H * Sq_max whatever the Q packing. Both LSE buffers start at a sentinel, so
+// Dense LSE, the frontend's default stats layout: contiguous [B, Sq_max, H, 1], so batch b
+// starts at b * Sq_max * H whatever the Q packing. Both LSE buffers start at a sentinel, so
 // padding rows must stay untouched and a misaddressed write shows up as a mismatch.
 // With zeroQk every score is 0, so a valid row's LSE is log(seqKv[b]).
 void checkRaggedDenseLse(const std::vector<int64_t>& seqQ,
@@ -422,17 +470,17 @@ void checkRaggedDenseLse(const std::vector<int64_t>& seqQ,
             {
                 const float gpu = lseGpu(raggedIndex(b, s, h, 0));
                 EXPECT_NEAR(gpu, lseCpu(raggedIndex(b, s, h, 0)), tolerance)
-                    << "dense LSE mismatch at [" << b << ", " << h << ", " << s << ", 0]";
+                    << "dense LSE mismatch at [" << b << ", " << s << ", " << h << ", 0]";
                 if(s >= seqQ[static_cast<size_t>(b)])
                 {
                     EXPECT_EQ(gpu, LSE_SENTINEL)
-                        << "padding row written at [" << b << ", " << h << ", " << s << ", 0]";
+                        << "padding row written at [" << b << ", " << s << ", " << h << ", 0]";
                 }
                 else if(zeroQk)
                 {
                     EXPECT_NEAR(
                         gpu, std::log(static_cast<float>(seqKv[static_cast<size_t>(b)])), tolerance)
-                        << "zero-score LSE must be log(seqKv) at [" << b << ", " << h << ", " << s
+                        << "zero-score LSE must be log(seqKv) at [" << b << ", " << s << ", " << h
                         << ", 0]";
                 }
             }

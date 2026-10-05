@@ -188,9 +188,15 @@ def main() -> int:
     # Quantise to the I/O dtype on the host, then decode back to fp32 so the
     # reference sees exactly the values the kernel reads -- otherwise the input
     # rounding would show up as "error" on top of the kernel's own.
-    Q = _to_storage((rng.standard_normal((B, Sq, Hq, D)) * 0.3).astype(np.float32), args.dtype)
-    K = _to_storage((rng.standard_normal((B, Sk, Hk, D)) * 0.3).astype(np.float32), args.dtype)
-    V = _to_storage((rng.standard_normal((B, Sk, Hk, D)) * 0.3).astype(np.float32), args.dtype)
+    Q = _to_storage(
+        (rng.standard_normal((B, Sq, Hq, D)) * 0.3).astype(np.float32), args.dtype
+    )
+    K = _to_storage(
+        (rng.standard_normal((B, Sk, Hk, D)) * 0.3).astype(np.float32), args.dtype
+    )
+    V = _to_storage(
+        (rng.standard_normal((B, Sk, Hk, D)) * 0.3).astype(np.float32), args.dtype
+    )
     Out = np.zeros((B, Sq, Hq, D), dtype=Q.dtype)
     Qf, Kf, Vf = (_from_storage(t, args.dtype) for t in (Q, K, V))
 

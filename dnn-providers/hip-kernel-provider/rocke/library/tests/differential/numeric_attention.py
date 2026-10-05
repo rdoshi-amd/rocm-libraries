@@ -168,11 +168,24 @@ WMMA_CONFIGS: List[AttnCfg] = [
     AttnCfg("wmma_mha_b2_h4_s64_d64_bf16", 2, 4, 4, 64, 64, 64, dtype="bf16"),
     AttnCfg(
         "wmma_causal_b2_h4_s64_d64_bf16",
-        2, 4, 4, 64, 64, 64, dtype="bf16", causal=True,
+        2,
+        4,
+        4,
+        64,
+        64,
+        64,
+        dtype="bf16",
+        causal=True,
     ),
     AttnCfg(
         "wmma_gqa_b1_h8kv2_s64_d128_bf16",
-        1, 8, 2, 64, 64, 128, dtype="bf16",
+        1,
+        8,
+        2,
+        64,
+        64,
+        128,
+        dtype="bf16",
     ),
 ]
 
@@ -466,10 +479,21 @@ def run_wmma_config(cfg: AttnCfg, arch: str = "gfx1151") -> NumericResult:
         rt.memcpy_h2d(v_dev.ptr(), as_u8_buffer(V), V.nbytes)
         rt.memset(o_dev.ptr(), 0, Out.nbytes)
         values = {
-            "Out": o_dev, "Q": q_dev, "K": k_dev, "V": v_dev,
-            "scale": scale_log2, "Sq": Sq, "Sk": Sk,
-            "sqt": Hq * D, "sqh": D, "skt": Hk * D, "skh": D,
-            "svt": Hk * D, "svh": D, "sot": Hq * D, "soh": D,
+            "Out": o_dev,
+            "Q": q_dev,
+            "K": k_dev,
+            "V": v_dev,
+            "scale": scale_log2,
+            "Sq": Sq,
+            "Sk": Sk,
+            "sqt": Hq * D,
+            "sqh": D,
+            "skt": Hk * D,
+            "skh": D,
+            "svt": Hk * D,
+            "svh": D,
+            "sot": Hq * D,
+            "soh": D,
         }
         launcher = KernelLauncher(
             hsaco=art.hsaco, kernel_name=art.kernel_name, signature=sig

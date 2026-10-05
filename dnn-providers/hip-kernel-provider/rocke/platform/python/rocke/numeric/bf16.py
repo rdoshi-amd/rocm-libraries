@@ -26,12 +26,25 @@ def f32_to_bf16(a):
     truncating to the high 16 bits, which is exactly RNE on the retained
     mantissa. Plain truncation would bias every value toward zero and show up
     downstream as kernel "error".
+
+    NaN is forced to a quiet NaN rather than carried through the bias. A NaN
+    whose payload lives only in the low 16 bits -- ``0x7F800001``, say -- would
+    otherwise have the bias carry into the exponent and emerge as ``0x7F80``,
+    i.e. +inf. Silently turning a NaN into an infinity on the way to the device
+    is exactly how a special-value masking bug gets hidden: the kernel would be
+    judged on an input the harness never meant to send. The sign bit is kept so
+    the sign of a NaN still survives the round trip.
     """
     import numpy as np
 
-    u = np.ascontiguousarray(a, dtype=np.float32).view(np.uint32)
+    f = np.ascontiguousarray(a, dtype=np.float32)
+    u = f.view(np.uint32)
     bias = np.uint32(0x7FFF) + ((u >> np.uint32(16)) & np.uint32(1))
-    return ((u + bias) >> np.uint32(16)).astype(np.uint16)
+    out = ((u + bias) >> np.uint32(16)).astype(np.uint16)
+    # Sign + all-ones exponent + the quiet bit, payload dropped (bf16 has only
+    # 7 mantissa bits, so no fp32 payload survives anyway).
+    quiet_nan = ((u >> np.uint32(16)).astype(np.uint16)) | np.uint16(0x0040)
+    return np.where(np.isnan(f), quiet_nan, out).astype(np.uint16)
 
 
 def bf16_to_f32(a):

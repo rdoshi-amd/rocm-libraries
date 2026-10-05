@@ -869,6 +869,12 @@ namespace TensileLite
             return m_int4EncodingA;
         }
 
+        /// True when A's nibbles are unsigned with an implicit zero-point of 8.
+        bool int4UnsignedA() const
+        {
+            return m_int4EncodingA != Int4Encoding::Signed;
+        }
+
         int scaleBlockSizeA() const
         {
             return m_scaleBlockSizeA;
@@ -877,6 +883,16 @@ namespace TensileLite
         bool scaleZeroPointA() const
         {
             return m_scaleZeroPointA;
+        }
+
+        rocisa::DataType scaleTypeA() const
+        {
+            return m_scaleAType;
+        }
+
+        TensorDescriptor const& scaleZeroATensor() const
+        {
+            return m_tensors[ContractionProblemGemm::TENSOR::SCALEZEROA];
         }
 
         void setUseScaleCD(bool useScaleCD)
@@ -1438,6 +1454,10 @@ namespace TensileLite
         TensorOps const& dOps() const
         {
             return m_dOps;
+        }
+        TensorDescriptor const& scaleATensor() const
+        {
+            return m_tensors[ContractionProblemGemm::TENSOR::SCALEA];
         }
         TensorDescriptor const& mxsa() const
         {

@@ -69,13 +69,17 @@ struct SdpaRaggedFwdArgs
     void* o;
     // Optional log-sum-exp output, float, [B, Sq, H, 1]. nullptr disables it.
     void* lse;
-    // Ragged LSE element offsets, length batch+1. nullptr means a dense LSE addressed by lseStr.
+    // Ragged LSE offsets, length batch+1. nullptr means a dense LSE addressed by lseStr.
     const int* raggedOffsetLse;
-    // Cumulative element offsets (RFC-0014 ragged_offset), int32, length batch+1.
+    // Cumulative offsets (RFC-0014 ragged_offset), int32, length batch+1. Element offset =
+    // offset * offsetMultiplier (1 for element tables, H*D for AITER's token tables).
     // Q's offsets also give o's token boundaries.
     const int* raggedOffsetQ;
     const int* raggedOffsetKv;
-    // Elements per token: H*D for Q, Hk*D for K. ragged_offset / seqStride = token boundary.
+    long long offsetMultiplierQ;
+    long long offsetMultiplierKv;
+    long long offsetMultiplierLse;
+    // Elements per token: H*D for Q, Hk*D for K. element offset / seqStride = token boundary.
     long long seqStrideQ;
     long long seqStrideKv;
     // Optional fp8 descale (nullptr = none), indexed through the batch/head strides below.

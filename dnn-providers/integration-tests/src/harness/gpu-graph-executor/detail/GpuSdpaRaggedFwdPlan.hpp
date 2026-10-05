@@ -30,7 +30,8 @@ namespace hipdnn_integration_tests::gpu_graph_executor::detail
 {
 
 // Unpacked attributes and resolved parameters for a ragged SDPA node (RFC-0014 packed
-// [B,S,H,D] + ragged_offset). q/k/v/o each carry an int32 element-offset aux [B+1,1,1,1].
+// [B,S,H,D] + ragged_offset). q/k/v/o each carry an int32 offset aux [B+1,1,1,1], scaled to
+// elements by the tensor's ragged_offset_multiplier.
 // The optional LSE [B,Sq,H,1] is packed if it has its own ragged_offset aux, else dense.
 struct GpuSdpaRaggedFwdParams
 {
@@ -203,6 +204,17 @@ public:
             attnScale = resolveScalarOperand(*_params.scaleTensor, variantPack, "SDPA scale");
         }
 
+        // Each tensor's ragged_offset_multiplier scales its stored offsets to elements.
+        hipdnn_gpu_ref::RaggedOffsetMultipliers multipliers;
+        multipliers.q = _params.qTensor.ragged_offset_multiplier;
+        multipliers.k = _params.kTensor.ragged_offset_multiplier;
+        multipliers.v = _params.vTensor.ragged_offset_multiplier;
+        multipliers.o = _params.oTensor.ragged_offset_multiplier;
+        if(_params.lseTensor.has_value())
+        {
+            multipliers.lse = _params.lseTensor->ragged_offset_multiplier;
+        }
+
         hipdnn_gpu_ref::GpuFpReferenceSdpaRagged::
             fpropRagged<QDataType, KDataType, VDataType, ODataType, ComputeDataType>(
                 qTensor,
@@ -222,7 +234,8 @@ public:
                 sdpaProbabilityMode<QDataType, KDataType, VDataType, ODataType>(),
                 descaleQ,
                 descaleK,
-                descaleV);
+                descaleV,
+                multipliers);
     }
 
 private:
@@ -230,8 +243,9 @@ private:
 };
 
 // Same unsupported-feature gates as the dense GpuSdpaFwdPlanBuilder, plus: q/k/v/o (and a packed
-// LSE) must each carry a ragged_offset aux and use the RFC-0014 [B, S, H, D] token-major layout,
-// and seq_len_q/kv must be absent (the padded variant is not supported).
+// LSE) must each carry a ragged_offset aux with a multiplier >= 1 and use the RFC-0014
+// [B, S, H, D] token-major layout, and seq_len_q/kv must be absent (the padded variant is not
+// supported).
 // GpuReferenceGraphExecutor::buildSignatureKey picks dense vs ragged.
 template <hipdnn_flatbuffers_sdk::data_objects::DataType QDataTypeEnum,
           hipdnn_flatbuffers_sdk::data_objects::DataType KDataTypeEnum,
@@ -267,8 +281,8 @@ public:
         CHECK_TENSOR_TYPE(tensorMap, nodeAttributes->v_tensor_uid(), VDataTypeEnum);
         CHECK_TENSOR_TYPE(tensorMap, nodeAttributes->o_tensor_uid(), ODataTypeEnum);
 
-        // Each primary needs an INT32 ragged_offset aux (without them this is a dense SDPA node)
-        // and the RFC-0014 [B, S, H, D] token-major layout.
+        // Each primary needs an INT32 ragged_offset aux (without them this is a dense SDPA node),
+        // a ragged_offset_multiplier >= 1 and the RFC-0014 [B, S, H, D] token-major layout.
         for(const auto primaryUid : {nodeAttributes->q_tensor_uid(),
                                      nodeAttributes->k_tensor_uid(),
                                      nodeAttributes->v_tensor_uid(),
@@ -283,7 +297,7 @@ public:
             CHECK_TENSOR_TYPE(tensorMap,
                               primary->ragged_offset_tensor_uid().value(),
                               hipdnn_flatbuffers_sdk::data_objects::DataType::INT32);
-            if(!isTokenMajor(*primary))
+            if(!isSupportedRaggedLayout(*primary))
             {
                 return false;
             }
@@ -401,7 +415,8 @@ public:
                 CHECK_TENSOR_TYPE(tensorMap,
                                   statsRaggedOffsetUid.value(),
                                   hipdnn_flatbuffers_sdk::data_objects::DataType::INT32);
-                if(!isTokenMajor(*tensorMap.at(nodeAttributes->stats_tensor_uid().value())))
+                if(!isSupportedRaggedLayout(
+                       *tensorMap.at(nodeAttributes->stats_tensor_uid().value())))
                 {
                     return false;
                 }
@@ -517,10 +532,14 @@ public:
     }
 
 private:
-    static bool isTokenMajor(const hipdnn_flatbuffers_sdk::data_objects::TensorAttributes& attr)
+    // RFC-0014 requires ragged_offset_multiplier >= 1 and a token-major [B, S, H, D] layout.
+    static bool
+        isSupportedRaggedLayout(const hipdnn_flatbuffers_sdk::data_objects::TensorAttributes& attr)
     {
         const auto unpacked = hipdnn_test_sdk::detail::unpackTensorAttributes(attr);
-        return hipdnn_test_sdk::detail::isTokenMajorRaggedLayout(unpacked.dims, unpacked.strides);
+        return unpacked.ragged_offset_multiplier >= 1
+               && hipdnn_test_sdk::detail::isTokenMajorRaggedLayout(unpacked.dims,
+                                                                    unpacked.strides);
     }
 };
 

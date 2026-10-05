@@ -146,6 +146,10 @@ struct RaggedSdpaFwdGraphOptions
     // only valid when per-token widths match (Hv*Dv == Hk*D, H*Dv == H*D).
     std::optional<int64_t> raggedOffsetVUid;
     std::optional<int64_t> raggedOffsetOUid;
+    // Token-unit offsets, AITER's form: each ragged tensor's ragged_offset_multiplier is its seq
+    // stride (strides[1] = H*D, or H for a packed LSE), so the Q table also serves O and the K
+    // table also serves V even when their widths differ. Default: element offsets (multiplier 1).
+    bool tokenOffsets = false;
 };
 
 // Builds a one-node ragged SDPA forward graph (RFC-0014: packed [B,S,H,D] plus ragged_offset).
@@ -207,6 +211,9 @@ inline flatbuffers::FlatBufferBuilder
     const auto kStrides = raggedStrides(kDims);
     const auto vStrides = raggedStrides(vDims);
     const auto oStrides = raggedStrides(oDims);
+    const auto multiplier = [&](const std::vector<int64_t>& strides) {
+        return options.tokenOffsets ? strides[1] : 1;
+    };
 
     const auto raggedOffsetVUid = options.raggedOffsetVUid.value_or(raggedOffsetKvUid);
     const auto raggedOffsetOUid = options.raggedOffsetOUid.value_or(raggedOffsetQUid);
@@ -222,7 +229,9 @@ inline flatbuffers::FlatBufferBuilder
                                                    TensorValue::NONE,
                                                    /*value=*/0,
                                                    /*is_runtime_pass_by_value=*/false,
-                                                   raggedOffsetQUid));
+                                                   raggedOffsetQUid,
+                                                   /*alignment=*/16,
+                                                   multiplier(qStrides)));
     tensors.push_back(CreateTensorAttributesDirect(builder,
                                                    kUid,
                                                    "K",
@@ -233,7 +242,9 @@ inline flatbuffers::FlatBufferBuilder
                                                    TensorValue::NONE,
                                                    /*value=*/0,
                                                    /*is_runtime_pass_by_value=*/false,
-                                                   raggedOffsetKvUid));
+                                                   raggedOffsetKvUid,
+                                                   /*alignment=*/16,
+                                                   multiplier(kStrides)));
     tensors.push_back(CreateTensorAttributesDirect(builder,
                                                    vUid,
                                                    "V",
@@ -244,7 +255,9 @@ inline flatbuffers::FlatBufferBuilder
                                                    TensorValue::NONE,
                                                    /*value=*/0,
                                                    /*is_runtime_pass_by_value=*/false,
-                                                   raggedOffsetVUid));
+                                                   raggedOffsetVUid,
+                                                   /*alignment=*/16,
+                                                   multiplier(vStrides)));
     tensors.push_back(CreateTensorAttributesDirect(builder,
                                                    oUid,
                                                    "O",
@@ -255,7 +268,9 @@ inline flatbuffers::FlatBufferBuilder
                                                    TensorValue::NONE,
                                                    /*value=*/0,
                                                    /*is_runtime_pass_by_value=*/false,
-                                                   raggedOffsetOUid));
+                                                   raggedOffsetOUid,
+                                                   /*alignment=*/16,
+                                                   multiplier(oStrides)));
 
     const std::vector<int64_t> offsetDims = {batch + 1, 1, 1, 1};
     const auto offsetStrides = generateStrides(offsetDims);
@@ -312,7 +327,9 @@ inline flatbuffers::FlatBufferBuilder
                                                            TensorValue::NONE,
                                                            /*value=*/0,
                                                            /*is_runtime_pass_by_value=*/false,
-                                                           options.raggedOffsetStatsUid.value()));
+                                                           options.raggedOffsetStatsUid.value(),
+                                                           /*alignment=*/16,
+                                                           multiplier(statsStrides)));
             tensors.push_back(CreateTensorAttributesDirect(builder,
                                                            options.raggedOffsetStatsUid.value(),
                                                            "RaggedOffsetStats",

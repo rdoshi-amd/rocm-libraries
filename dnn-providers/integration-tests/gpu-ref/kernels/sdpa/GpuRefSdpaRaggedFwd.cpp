@@ -6,9 +6,10 @@
 //
 // Tensors are [B, S, H, D], packed by token with no per-batch padding:
 // q=[B,Sq,H,D], k=[B,Skv,Hk,D], v=[B,Skv,Hv,Dv], o=[B,Sq,H,Dv].
-// raggedOffsetQ/raggedOffsetKv are cumulative element offsets. Dividing by the seq stride gives
-// token boundaries. One thread per output element (tokenGlobalQ, h, dv). Each thread finds its
-// batch and uses that batch's own seqQ/seqKv for the key loop and mask alignment.
+// raggedOffsetQ/raggedOffsetKv are cumulative offsets; times their multiplier they are element
+// offsets, and dividing by the seq stride gives token boundaries. One thread per output element
+// (tokenGlobalQ, h, dv). Each thread finds its batch and uses that batch's own seqQ/seqKv for
+// the key loop and mask alignment.
 // Numerics match GpuRefSdpaFwd.cpp.
 
 #include "GpuRefSdpaArgs.h"
@@ -62,9 +63,21 @@ struct BatchRange
     long long seqKv;
 };
 
-__device__ inline long long tokenAt(const int* offsets, long long i, long long seqStride)
+// Token boundary i of an offset table: element offset (stored * multiplier) / seq stride.
+__device__ inline long long
+    tokenAt(const int* offsets, long long i, long long multiplier, long long seqStride)
 {
-    return static_cast<long long>(offsets[i]) / seqStride;
+    return static_cast<long long>(offsets[i]) * multiplier / seqStride;
+}
+
+__device__ inline long long qTokenAt(const SdpaRaggedFwdArgs& args, long long i)
+{
+    return tokenAt(args.raggedOffsetQ, i, args.offsetMultiplierQ, args.seqStrideQ);
+}
+
+__device__ inline long long kvTokenAt(const SdpaRaggedFwdArgs& args, long long i)
+{
+    return tokenAt(args.raggedOffsetKv, i, args.offsetMultiplierKv, args.seqStrideKv);
 }
 
 // Batch that owns a global Q token. A linear scan is fine for a reference. Empty batches own
@@ -72,7 +85,7 @@ __device__ inline long long tokenAt(const int* offsets, long long i, long long s
 __device__ inline long long findBatch(const SdpaRaggedFwdArgs& args, long long tokenGlobalQ)
 {
     long long b = 0;
-    while(b + 1 < args.batch && tokenGlobalQ >= tokenAt(args.raggedOffsetQ, b + 1, args.seqStrideQ))
+    while(b + 1 < args.batch && tokenGlobalQ >= qTokenAt(args, b + 1))
     {
         ++b;
     }
@@ -81,13 +94,9 @@ __device__ inline long long findBatch(const SdpaRaggedFwdArgs& args, long long t
 
 __device__ inline BatchRange batchRange(const SdpaRaggedFwdArgs& args, long long b)
 {
-    const long long qBase = tokenAt(args.raggedOffsetQ, b, args.seqStrideQ);
-    const long long kvBase = tokenAt(args.raggedOffsetKv, b, args.seqStrideKv);
-    return {b,
-            qBase,
-            tokenAt(args.raggedOffsetQ, b + 1, args.seqStrideQ) - qBase,
-            kvBase,
-            tokenAt(args.raggedOffsetKv, b + 1, args.seqStrideKv) - kvBase};
+    const long long qBase = qTokenAt(args, b);
+    const long long kvBase = kvTokenAt(args, b);
+    return {b, qBase, qTokenAt(args, b + 1) - qBase, kvBase, kvTokenAt(args, b + 1) - kvBase};
 }
 
 // Element offset of key/value row skv (batch-relative) in the K and V buffers.
@@ -212,10 +221,12 @@ extern "C" __global__ void sdpaRaggedFwdRef(SdpaRaggedFwdArgs args)
     O_TYPE* tag = nullptr;
 
     // Only the dv == 0 thread writes LSE, so each (token, h) has one writer. A ragged LSE
-    // starts batch b at raggedOffsetLse[b], a dense one at b * lseStr.s[0].
-    const long long lseBatchBase = args.raggedOffsetLse != nullptr
-                                       ? static_cast<long long>(args.raggedOffsetLse[b])
-                                       : b * args.lseStr.s[0];
+    // starts batch b at element raggedOffsetLse[b] * offsetMultiplierLse, a dense one at
+    // b * lseStr.s[0].
+    const long long lseBatchBase
+        = args.raggedOffsetLse != nullptr
+              ? static_cast<long long>(args.raggedOffsetLse[b]) * args.offsetMultiplierLse
+              : b * args.lseStr.s[0];
     long long lseIdx = lseBatchBase + sq * args.lseStr.s[1] + h * args.lseStr.s[2];
 
     // Fully masked row, including seqKv == 0: write zero to match CpuFpReferenceSdpa and

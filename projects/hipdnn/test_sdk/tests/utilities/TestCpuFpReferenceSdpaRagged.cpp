@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <memory>
 #include <numeric>
 #include <optional>
 #include <stdexcept>
@@ -957,4 +958,68 @@ TEST(TestCpuFpReferenceSdpaRaggedFp32, TokenMajorLayoutCheck)
     EXPECT_FALSE(isTokenMajorRaggedLayout({2, 3, 5, 8}, {120, 8, 24, 1})); // [B, H, S, D]
     EXPECT_FALSE(isTokenMajorRaggedLayout({2, 5, 3, 8}, {120, 16, 8, 1})); // tokens overlap
     EXPECT_FALSE(isTokenMajorRaggedLayout({2, 5, 3}, {15, 3, 1})); // not rank 4
+}
+
+// AITER's cu_seqlens form: one token table shared by Q/O and one by K/V, each tensor scaling it
+// by its own seq stride through ragged_offset_multiplier. GQA and D != Dv make every width
+// different. The result must equal the element-offset run bit for bit.
+TEST(TestCpuFpReferenceSdpaRaggedFp32, TokenOffsetsMatchElementOffsets)
+{
+    const std::vector<int64_t> seqQ = {3, 0, 4};
+    const std::vector<int64_t> seqKv = {2, 5, 1};
+    const int64_t heads = 4;
+    const int64_t headsKv = 2;
+    const int64_t dim = 8;
+    const int64_t dimV = 4;
+    const auto batch = static_cast<int64_t>(seqQ.size());
+    const auto cumQ = cumTokens(seqQ);
+    const auto cumKv = cumTokens(seqKv);
+    const auto qDims = raggedDims(batch, maxOf(seqQ), heads, dim);
+    const auto kDims = raggedDims(batch, maxOf(seqKv), headsKv, dim);
+    const auto vDims = raggedDims(batch, maxOf(seqKv), headsKv, dimV);
+    const auto oDims = raggedDims(batch, maxOf(seqQ), heads, dimV);
+    const auto lseDims = raggedDims(batch, maxOf(seqQ), heads, 1);
+
+    std::vector<float> qB(static_cast<size_t>(cumQ.back() * heads * dim));
+    std::vector<float> kB(static_cast<size_t>(cumKv.back() * headsKv * dim));
+    std::vector<float> vB(static_cast<size_t>(cumKv.back() * headsKv * dimV));
+    fillPacked(qB, 11);
+    fillPacked(kB, 22);
+    fillPacked(vB, 33);
+
+    std::vector<float> oElem(static_cast<size_t>(cumQ.back() * heads * dimV), 0.0f);
+    std::vector<float> lseElem(static_cast<size_t>(cumQ.back() * heads), 0.0f);
+    {
+        auto q = wrapRagged(qB.data(), qDims, heads * dim, cumQ);
+        auto k = wrapRagged(kB.data(), kDims, headsKv * dim, cumKv);
+        auto v = wrapRagged(vB.data(), vDims, headsKv * dimV, cumKv);
+        auto o = wrapRagged(oElem.data(), oDims, heads * dimV, cumQ);
+        auto lse = wrapRagged(lseElem.data(), lseDims, heads, cumQ);
+        CpuFpReferenceSdpaRagged::forward<float, float, float, float, float>(
+            q, k, v, o, std::nullopt, -1, 0, false, &lse);
+    }
+
+    std::vector<float> oTok(oElem.size(), 0.0f);
+    std::vector<float> lseTok(lseElem.size(), 0.0f);
+    {
+        auto qoTable = makeRaggedOffsetAux(cumQ, 1);
+        auto kvTable = makeRaggedOffsetAux(cumKv, 1);
+        const auto wrap = [](float* buf,
+                             const std::vector<int64_t>& dims,
+                             const std::shared_ptr<ITensor>& table,
+                             int64_t multiplier) {
+            return ShallowRaggedTensor<float>(
+                buf, dims, raggedStrides(dims), BSHD_SEQ_AXIS, table, std::nullopt, multiplier);
+        };
+        auto q = wrap(qB.data(), qDims, qoTable, heads * dim);
+        auto k = wrap(kB.data(), kDims, kvTable, headsKv * dim);
+        auto v = wrap(vB.data(), vDims, kvTable, headsKv * dimV);
+        auto o = wrap(oTok.data(), oDims, qoTable, heads * dimV);
+        auto lse = wrap(lseTok.data(), lseDims, qoTable, heads);
+        CpuFpReferenceSdpaRagged::forward<float, float, float, float, float>(
+            q, k, v, o, std::nullopt, -1, 0, false, &lse);
+    }
+
+    EXPECT_EQ(oTok, oElem);
+    EXPECT_EQ(lseTok, lseElem);
 }

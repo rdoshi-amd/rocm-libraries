@@ -111,8 +111,10 @@ ShallowRaggedTensor<float> wrapRagged(float* buf,
 
 // Runs the fp32 plan with unequal Q/KV lengths and an LSE in statsLayout, and compares it with
 // the CPU ragged reference using the same layout. Both LSE buffers start at a sentinel, so a
-// misaddressed or padding row shows up as a mismatch.
-void checkPlanLseAgainstCpu(RaggedStatsLayout statsLayout)
+// misaddressed or padding row shows up as a mismatch. With tokenOffsets the graph's offset
+// tables hold tokens and each tensor's ragged_offset_multiplier is its seq stride (AITER's
+// form); the CPU side always uses element offsets.
+void checkPlanLseAgainstCpu(RaggedStatsLayout statsLayout, bool tokenOffsets = false)
 {
     const std::vector<int64_t> seqQ = {3, 5, 1};
     const std::vector<int64_t> seqKv = {4, 2, 6};
@@ -136,6 +138,7 @@ void checkPlanLseAgainstCpu(RaggedStatsLayout statsLayout)
     {
         options.raggedOffsetStatsUid = RAGGED_OFFSET_STATS_UID;
     }
+    options.tokenOffsets = tokenOffsets;
     auto graphBuilder = createRaggedSdpaFwdGraph(Q_UID,
                                                  K_UID,
                                                  V_UID,
@@ -161,9 +164,9 @@ void checkPlanLseAgainstCpu(RaggedStatsLayout statsLayout)
     q.fillWithRandomValues(-1.0f, 1.0f, /*seed=*/11);
     k.fillWithRandomValues(-1.0f, 1.0f, /*seed=*/22);
     v.fillWithRandomValues(-1.0f, 1.0f, /*seed=*/33);
-    auto offQ = makeRaggedOffset(seqQ, seqStride);
-    auto offKv = makeRaggedOffset(seqKv, seqStride);
-    auto offLse = makeRaggedOffset(seqQ, numHeads); // packed LSE seq stride is H
+    auto offQ = makeRaggedOffset(seqQ, tokenOffsets ? 1 : seqStride);
+    auto offKv = makeRaggedOffset(seqKv, tokenOffsets ? 1 : seqStride);
+    auto offLse = makeRaggedOffset(seqQ, tokenOffsets ? 1 : numHeads); // packed LSE stride is H
 
     constexpr float SENTINEL = -99.0f;
     const auto makeLse = [&]() {
@@ -826,7 +829,7 @@ TEST(TestGpuSdpaRaggedFwdPlanBuilder, IsNotApplicableForNonScalarHostDescale)
     }
 }
 
-// Dense frontend-default stats with unequal lengths: batch b's LSE rows start at b * H * Sq_max,
+// Dense frontend-default stats with unequal lengths: batch b's LSE rows start at b * Sq_max * H,
 // not at its first packed Q token.
 TEST(TestGpuSdpaRaggedFwdPlan, ExecuteDenseStatsUnequalLengthsMatchesCpu)
 {
@@ -839,6 +842,35 @@ TEST(TestGpuSdpaRaggedFwdPlan, ExecutePackedStatsUnequalLengthsMatchesCpu)
 {
     SKIP_IF_NO_DEVICES();
     checkPlanLseAgainstCpu(RaggedStatsLayout::PACKED);
+}
+
+// AITER's form: token offset tables with ragged_offset_multiplier = seq stride on every ragged
+// tensor, including the packed stats.
+TEST(TestGpuSdpaRaggedFwdPlan, ExecuteTokenOffsetsMatchesCpu)
+{
+    SKIP_IF_NO_DEVICES();
+    checkPlanLseAgainstCpu(RaggedStatsLayout::PACKED, /*tokenOffsets=*/true);
+}
+
+// RFC-0014 requires ragged_offset_multiplier >= 1; the plan declines anything else.
+TEST(TestGpuSdpaRaggedFwdPlanBuilder, IsNotApplicableForZeroOffsetMultiplier)
+{
+    auto graphBuilder = makeRaggedGraph();
+    auto graphT = std::unique_ptr<GraphT>(GetGraph(graphBuilder.GetBufferPointer())->UnPack());
+    for(auto& tensor : graphT->tensors)
+    {
+        if(tensor->uid == K_UID)
+        {
+            tensor->ragged_offset_multiplier = 0;
+        }
+    }
+    flatbuffers::FlatBufferBuilder rewritten;
+    rewritten.Finish(CreateGraph(rewritten, graphT.get()));
+    auto graphWrap = hipdnn_flatbuffers_sdk::flatbuffer_utilities::GraphWrapper(
+        rewritten.GetBufferPointer(), rewritten.GetSize());
+
+    const Bf16Builder bf16Builder;
+    EXPECT_FALSE(bf16Builder.isApplicable(graphWrap.getNode(0), graphWrap.getTensorMap()));
 }
 
 // V has its own ragged_offset (allowed by RFC-0014). V lengths that differ from K's must be

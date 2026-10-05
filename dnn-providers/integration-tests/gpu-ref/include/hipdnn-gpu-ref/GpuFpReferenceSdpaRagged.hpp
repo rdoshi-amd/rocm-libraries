@@ -19,14 +19,28 @@
 namespace hipdnn_gpu_ref
 {
 
+// RFC-0014 ragged_offset_multiplier of each ragged tensor: element offset = stored offset *
+// multiplier. 1 means the table holds element offsets. AITER's cu_seqlens are token offsets, so
+// they bind with multiplier = H*D (the tensor's seq stride), and one table can then serve Q/O
+// and another K/V.
+struct RaggedOffsetMultipliers
+{
+    int64_t q = 1;
+    int64_t k = 1;
+    int64_t v = 1;
+    int64_t o = 1;
+    int64_t lse = 1;
+};
+
 // GPU reference for ragged forward SDPA (RFC-0014), the ragged twin of GpuFpReferenceSdpa.
 // Tensors are rank-4 [B, S, H, D] with the sequence at axis 1, packed token by token with no
 // per-batch padding:
 //   q = [B, Sq,  H,  D ]   k = [B, Skv, Hk, D ]
 //   v = [B, Skv, Hv, Dv]   o = [B, Sq,  H,  Dv]
-// raggedOffsetQ/K/V/O are INT32 [B+1, 1, 1, 1] cumulative element offsets. Batch b starts at
-// offset[b] and has (offset[b+1] - offset[b]) / strides[1] tokens. O must match Q's token
-// boundaries and V must match K's, though element offsets differ when D != Dv.
+// raggedOffsetQ/K/V/O are INT32 [B+1, 1, 1, 1] cumulative offsets, scaled to elements by
+// `offsetMultipliers`. Batch b starts at element offset[b] and has
+// (offset[b+1] - offset[b]) / strides[1] tokens. O must match Q's token boundaries and V must
+// match K's.
 // The optional LSE is [B, Sq, H, 1], ragged if raggedOffsetLse is given, else dense.
 // Softmax numerics match the dense reference. Supports GQA/MQA and per-batch causal and
 // sliding window. No bias, alibi or dropout, since the ASM v3 path gates them off.
@@ -57,7 +71,8 @@ public:
                     SdpaSoftmaxProbabilityMode probabilityMode = SdpaSoftmaxProbabilityMode::FLOAT,
                     hipdnn_data_sdk::utilities::TensorBase<float>* descaleQ = nullptr,
                     hipdnn_data_sdk::utilities::TensorBase<float>* descaleK = nullptr,
-                    hipdnn_data_sdk::utilities::TensorBase<float>* descaleV = nullptr)
+                    hipdnn_data_sdk::utilities::TensorBase<float>* descaleV = nullptr,
+                    const RaggedOffsetMultipliers& offsetMultipliers = {})
     {
         // fp8 is input-only: the kernel can decode fp8 but not encode it (AITER writes bf16).
         static_assert(!std::is_same_v<ODataType, hipdnn_data_sdk::types::fp8_e4m3>,
@@ -87,6 +102,7 @@ public:
         // agree on every batch length.
         const std::string who = "GpuFpReferenceSdpaRagged";
         const auto tokenBoundaries = [&](hipdnn_data_sdk::utilities::TensorBase<int32_t>& offsets,
+                                         int64_t multiplier,
                                          const std::vector<int64_t>& dims,
                                          const std::vector<int64_t>& strides,
                                          const char* name) {
@@ -96,19 +112,35 @@ public:
                 throw std::invalid_argument(who + ": " + name
                                             + " ragged_offset must be contiguous");
             }
+            if(multiplier < 1)
+            {
+                throw std::invalid_argument(who + ": " + name
+                                            + " ragged_offset_multiplier must be >= 1 (got "
+                                            + std::to_string(multiplier) + ")");
+            }
+            auto elementOffsets = readRaggedOffsets(offsets.memory().deviceData(), batch + 1);
+            for(auto& offset : elementOffsets)
+            {
+                offset *= multiplier;
+            }
             return hipdnn_test_sdk::detail::raggedTokenBoundaries(
-                readRaggedOffsets(offsets.memory().deviceData(), batch + 1),
-                strides[1],
-                dims[1],
-                who,
-                name);
+                elementOffsets, strides[1], dims[1], who, name);
         };
-        const auto qTokens = tokenBoundaries(raggedOffsetQ, q.dims(), q.strides(), "Q");
-        const auto kTokens = tokenBoundaries(raggedOffsetK, k.dims(), k.strides(), "K");
+        const auto& mult = offsetMultipliers;
+        const auto qTokens = tokenBoundaries(raggedOffsetQ, mult.q, q.dims(), q.strides(), "Q");
+        const auto kTokens = tokenBoundaries(raggedOffsetK, mult.k, k.dims(), k.strides(), "K");
         hipdnn_test_sdk::detail::requireMatchingTokenBoundaries(
-            qTokens, "Q", tokenBoundaries(raggedOffsetO, o.dims(), o.strides(), "O"), "O", who);
+            qTokens,
+            "Q",
+            tokenBoundaries(raggedOffsetO, mult.o, o.dims(), o.strides(), "O"),
+            "O",
+            who);
         hipdnn_test_sdk::detail::requireMatchingTokenBoundaries(
-            kTokens, "K", tokenBoundaries(raggedOffsetV, v.dims(), v.strides(), "V"), "V", who);
+            kTokens,
+            "K",
+            tokenBoundaries(raggedOffsetV, mult.v, v.dims(), v.strides(), "V"),
+            "V",
+            who);
         const int64_t totalQ = qTokens.back();
 
         const float scale = attnScaleValue.has_value()
@@ -146,7 +178,7 @@ public:
                 hipdnn_test_sdk::detail::requireMatchingTokenBoundaries(
                     qTokens,
                     "Q",
-                    tokenBoundaries(*raggedOffsetLse, lseDims, lseStrides, "LSE"),
+                    tokenBoundaries(*raggedOffsetLse, mult.lse, lseDims, lseStrides, "LSE"),
                     "LSE",
                     who);
             }
@@ -177,6 +209,9 @@ public:
                             raggedOffsetLsePtr,
                             raggedOffsetQ.memory().deviceData(),
                             raggedOffsetK.memory().deviceData(),
+                            mult.q,
+                            mult.k,
+                            mult.lse,
                             seqStrideQ,
                             seqStrideKv,
                             dq.ptr,
@@ -323,6 +358,9 @@ private:
                                     const void* raggedOffsetLsePtr,
                                     const void* raggedOffsetQPtr,
                                     const void* raggedOffsetKvPtr,
+                                    int64_t offsetMultiplierQ,
+                                    int64_t offsetMultiplierKv,
+                                    int64_t offsetMultiplierLse,
                                     int64_t seqStrideQ,
                                     int64_t seqStrideKv,
                                     const void* descaleQPtr,

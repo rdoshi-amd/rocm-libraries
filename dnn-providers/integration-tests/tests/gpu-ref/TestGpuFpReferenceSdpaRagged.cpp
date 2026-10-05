@@ -23,6 +23,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <memory>
 #include <numeric>
 #include <optional>
 #include <random>
@@ -919,5 +920,155 @@ TEST(TestGpuSdpaRaggedFwdFp32, ThrowsOnHeadsBeforeSequenceLayout)
     auto off = makeRaggedOffset(cumTokens({4}), 16);
     EXPECT_THROW((GpuFpReferenceSdpaRagged::fpropRagged<float, float, float, float, float>(
                      q, k, v, o, off, off, off, off)),
+                 std::invalid_argument);
+}
+
+// --- Token offsets with ragged_offset_multiplier (AITER's cu_seqlens form) ---
+
+namespace
+{
+
+// AITER binds cu_seqlens_q to Q and O and cu_seqlens_k to K and V: one token table per pair,
+// each tensor scaling it by its own seq stride (H*D). GQA and D != Dv make every width
+// different, and the ragged LSE scales the same Q table by H. The CPU mirror reads the same
+// token tables through ShallowRaggedTensor's multiplier.
+void checkTokenOffsets(const std::vector<int64_t>& seqQ,
+                       const std::vector<int64_t>& seqKv,
+                       int64_t numHeads,
+                       int64_t numHeadsKv,
+                       int64_t headDim,
+                       int64_t headDimV)
+{
+    const auto batch = static_cast<int64_t>(seqQ.size());
+    const auto cumQ = cumTokens(seqQ);
+    const auto cumKv = cumTokens(seqKv);
+    const auto totalQ = cumQ.back();
+    const auto totalKv = cumKv.back();
+
+    const auto qDims = raggedDims(batch, maxOf(seqQ), numHeads, headDim);
+    const auto kDims = raggedDims(batch, maxOf(seqKv), numHeadsKv, headDim);
+    const auto vDims = raggedDims(batch, maxOf(seqKv), numHeadsKv, headDimV);
+    const auto oDims = raggedDims(batch, maxOf(seqQ), numHeads, headDimV);
+    const auto lseDims = raggedDims(batch, maxOf(seqQ), numHeads, 1);
+
+    Tensor<float> q(qDims, raggedStrides(qDims));
+    Tensor<float> k(kDims, raggedStrides(kDims));
+    Tensor<float> v(vDims, raggedStrides(vDims));
+    Tensor<float> oGpu(oDims, raggedStrides(oDims));
+    Tensor<float> lseGpu(lseDims, raggedStrides(lseDims));
+    fillPackedRandom(q, totalQ * numHeads * headDim, -1.0f, 1.0f, SEED_Q);
+    fillPackedRandom(k, totalKv * numHeadsKv * headDim, -1.0f, 1.0f, SEED_K);
+    fillPackedRandom(v, totalKv * numHeadsKv * headDimV, -1.0f, 1.0f, SEED_V);
+
+    RaggedOffsetMultipliers mult;
+    mult.q = numHeads * headDim;
+    mult.k = numHeadsKv * headDim;
+    mult.v = numHeadsKv * headDimV;
+    mult.o = numHeads * headDimV;
+    mult.lse = numHeads;
+
+    std::vector<float> oCpuBack(static_cast<size_t>(totalQ * mult.o), 0.0f);
+    std::vector<float> lseCpuBack(static_cast<size_t>(totalQ * mult.lse), 0.0f);
+    {
+        auto qoTable = makeRaggedOffsetAux(cumQ, 1);
+        auto kvTable = makeRaggedOffsetAux(cumKv, 1);
+        const auto wrap = [](float* buf,
+                             const std::vector<int64_t>& dims,
+                             const std::shared_ptr<ITensor>& table,
+                             int64_t multiplier) {
+            return ShallowRaggedTensor<float>(
+                buf, dims, raggedStrides(dims), BSHD_SEQ_AXIS, table, std::nullopt, multiplier);
+        };
+        auto qR = wrap(q.memory().hostData(), qDims, qoTable, mult.q);
+        auto kR = wrap(k.memory().hostData(), kDims, kvTable, mult.k);
+        auto vR = wrap(v.memory().hostData(), vDims, kvTable, mult.v);
+        auto oR = wrap(oCpuBack.data(), oDims, qoTable, mult.o);
+        auto lseR = wrap(lseCpuBack.data(), lseDims, qoTable, mult.lse);
+        CpuFpReferenceSdpaRagged::forward<float, float, float, float, float>(
+            qR, kR, vR, oR, std::nullopt, -1, 0, /*topLeftAlignment=*/false, &lseR);
+    }
+
+    auto qoTokens = makeRaggedOffset(cumQ, 1);
+    auto kvTokens = makeRaggedOffset(cumKv, 1);
+    GpuFpReferenceSdpaRagged::fpropRagged<float, float, float, float, float>(
+        q,
+        k,
+        v,
+        oGpu,
+        qoTokens,
+        kvTokens,
+        kvTokens,
+        qoTokens,
+        std::nullopt,
+        -1,
+        0,
+        /*topLeftAlignment=*/false,
+        &lseGpu,
+        &qoTokens,
+        SdpaSoftmaxProbabilityMode::FLOAT,
+        nullptr,
+        nullptr,
+        nullptr,
+        mult);
+
+    const float tolerance = gpuRefFwdTolerance<float>();
+    compareRaggedPacked(oGpu, oCpuBack, tolerance);
+    const auto* lg = lseGpu.memory().hostData();
+    for(size_t i = 0; i < lseCpuBack.size(); ++i)
+    {
+        EXPECT_NEAR(lg[i], lseCpuBack[i], tolerance) << "LSE mismatch at element " << i;
+    }
+}
+
+} // namespace
+
+TEST(TestGpuSdpaRaggedFwdFp32, TokenOffsetsHd192Gqa)
+{
+    SKIP_IF_NO_DEVICES();
+    checkTokenOffsets({5, 0, 9}, {7, 3, 6}, 4, 2, 192, 128);
+}
+
+// H*D = 16 and every batch 16 tokens long: read as element offsets, the token table {0, 16, 32}
+// is one token per batch and still passes every offset check, so ignoring the multiplier would
+// compute on the wrong rows without an error.
+TEST(TestGpuSdpaRaggedFwdFp32, TokenOffsetsTokenWidth16)
+{
+    SKIP_IF_NO_DEVICES();
+    checkTokenOffsets({16, 16}, {16, 16}, 1, 1, 16, 16);
+}
+
+TEST(TestGpuSdpaRaggedFwdFp32, ThrowsOnZeroOffsetMultiplier)
+{
+    SKIP_IF_NO_DEVICES();
+    const auto dims = raggedDims(1, 4, 2, 16);
+    Tensor<float> q(dims, raggedStrides(dims));
+    Tensor<float> k(dims, raggedStrides(dims));
+    Tensor<float> v(dims, raggedStrides(dims));
+    Tensor<float> o(dims, raggedStrides(dims));
+    auto tokens = makeRaggedOffset(cumTokens({4}), 1);
+    RaggedOffsetMultipliers mult;
+    mult.q = mult.o = 32;
+    mult.k = 0;
+    mult.v = 32;
+    EXPECT_THROW((GpuFpReferenceSdpaRagged::fpropRagged<float, float, float, float, float>(
+                     q,
+                     k,
+                     v,
+                     o,
+                     tokens,
+                     tokens,
+                     tokens,
+                     tokens,
+                     std::nullopt,
+                     -1,
+                     -1,
+                     true,
+                     nullptr,
+                     nullptr,
+                     SdpaSoftmaxProbabilityMode::FLOAT,
+                     nullptr,
+                     nullptr,
+                     nullptr,
+                     mult)),
                  std::invalid_argument);
 }

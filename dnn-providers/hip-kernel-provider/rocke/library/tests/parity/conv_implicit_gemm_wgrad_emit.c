@@ -29,6 +29,17 @@
  *  15  N8H56W56C64_K64Y3X3, t64x64x64, w2x2, a32x32x16, mem/default,      gfx950, split_k=4 two_stage fp16
  *  16  N8H56W56C64_K64Y3X3, t64x64x64, w2x2, a16x16x16, mem/default,      gfx942, split_k=4 two_stage fp16
  *  17  N8H56W56C64_K64Y3X3 pad1, t32x32x32, w1x1, a16x16x32, mem/default, gfx1250 (WMMA w32), lds_k_outer fp32 out
+ *  18  N8H56W56C64_K64Y3X3, a32x32x16, gfx950, streamk dp_sk linear sk16 fp16
+ *  19  N8H56W56C64_K64Y3X3, a32x32x16, gfx950, streamk dp_sk tree sk16 fp16
+ *  20  N8H56W56C64_K64Y3X3, a32x32x16, gfx950, streamk dp_sk atomic sk4 fp32 (DP + SK)
+ *  21  N8H56W56C64_K64Y3X3, a32x32x16, gfx950, streamk dp_sk workspace sk4 fp16
+ *  22  N8H56W56C64_K64Y3X3, a16x16x16, gfx942, streamk persistent linear sk4 fp16
+ *  23  N4H28W28C96_K120Y3X3G3 pad1, a32x32x16, gfx950, streamk dp_sk linear sk6 fp16
+ *  24  N4H28W28C64_K128Y3X3G2 pad1, a32x32x16, gfx950, streamk persistent tree sk5 bf16 dW
+ *  25  N4H28W28C64_K128Y3X3G2 pad1, a32x32x16, gfx950, streamk persistent atomic sk3 fp32
+ *  26  N8H56W56C64_K64Y3X3, a16x16x16, gfx942, streamk persistent workspace sk6 fp16
+ *  27  N8H56W56C64_K64Y3X3, a32x32x16, gfx950, streamk dp_sk linear sk9 fp16 (all DP)
+ *  28  N4H14W14C64_K96Y3X3G2 pad1, a32x32x16, gfx950, streamk dp_sk linear sk7 fp16, lds_k_outer
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -39,6 +50,42 @@
 #include "rocke/ir_serialize.h"
 #include "rocke/lower_llvm.h"
 #include "rocke/verify.h"
+
+/* Stream-K fields of configs 18-27 (Python _STREAMK_CFGS). */
+static int streamk_cfg(int idx, rocke_implicit_gemm_conv_wgrad_spec_t* spec, const char** arch)
+{
+    /* idx: dtype a/b, dtype d, atom edge, streamk, reduction, ctas, arch */
+    static const struct
+    {
+        const char *dt_ab, *dt_d;
+        int edge;
+        const char *mode, *reduction;
+        int ctas;
+        const char* arch;
+    } cfgs[10] = {
+        {"fp16", "fp16", 32, "dp_sk", "linear", 16, "gfx950"},
+        {"fp16", "fp16", 32, "dp_sk", "tree", 16, "gfx950"},
+        {"fp16", "fp32", 32, "dp_sk", "atomic", 4, "gfx950"},
+        {"fp16", "fp16", 32, "dp_sk", "workspace", 4, "gfx950"},
+        {"fp16", "fp16", 16, "persistent", "linear", 4, "gfx942"},
+        {"fp16", "fp16", 32, "dp_sk", "linear", 6, "gfx950"},
+        {"fp16", "bf16", 32, "persistent", "tree", 5, "gfx950"},
+        {"fp16", "fp32", 32, "persistent", "atomic", 3, "gfx950"},
+        {"fp16", "fp16", 16, "persistent", "workspace", 6, "gfx942"},
+        {"fp16", "fp16", 32, "dp_sk", "linear", 9, "gfx950"},
+    };
+    const int i = idx - 18;
+    spec->dtype_a = cfgs[i].dt_ab;
+    spec->dtype_b = cfgs[i].dt_ab;
+    spec->dtype_d = cfgs[i].dt_d;
+    spec->warp_tile_m = cfgs[i].edge;
+    spec->warp_tile_n = cfgs[i].edge;
+    spec->streamk = cfgs[i].mode;
+    spec->streamk_reduction = cfgs[i].reduction;
+    spec->streamk_ctas = cfgs[i].ctas;
+    *arch = cfgs[i].arch;
+    return 0;
+}
 
 /* Fill the config for index `idx`. Returns 0 on success, -1 if unknown.
  * On success sets *spec and *arch. */
@@ -212,6 +259,37 @@ static int make_cfg(int idx, rocke_implicit_gemm_conv_wgrad_spec_t* spec, const 
         spec->epilogue = "default";
         spec->lds_k_outer = true;
         *arch = "gfx1250";
+        return 0;
+    case 18:
+    case 19:
+    case 20:
+    case 21:
+    case 22:
+    case 26:
+    case 27:
+        spec->problem = rocke_conv_problem_default(8, 56, 56, 64, 64, 3, 3);
+        return streamk_cfg(idx, spec, arch);
+    case 23:
+        spec->problem = rocke_conv_problem_default(4, 28, 28, 96, 120, 3, 3);
+        spec->problem.pH = 1;
+        spec->problem.pW = 1;
+        spec->problem.groups = 3;
+        return streamk_cfg(idx, spec, arch);
+    case 24:
+    case 25:
+        spec->problem = rocke_conv_problem_default(4, 28, 28, 64, 128, 3, 3);
+        spec->problem.pH = 1;
+        spec->problem.pW = 1;
+        spec->problem.groups = 2;
+        return streamk_cfg(idx, spec, arch);
+    case 28:
+        spec->problem = rocke_conv_problem_default(4, 14, 14, 64, 96, 3, 3);
+        spec->problem.pH = 1;
+        spec->problem.pW = 1;
+        spec->problem.groups = 2;
+        streamk_cfg(23, spec, arch);
+        spec->streamk_ctas = 7;
+        spec->lds_k_outer = true;
         return 0;
     default:
         return -1;

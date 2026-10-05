@@ -28,6 +28,17 @@
 #   15 -- split-K=4, two_stage=True (workspace-store epilogue), fp16, gfx950
 #   16 -- split-K=4, two_stage=True (workspace-store epilogue), fp16, gfx942
 #   17 -- gfx1250 wave32 WMMA 16x16x32 K-outer (ds_load_tr16_b128 transpose reads)
+#   18 -- stream-K dp_sk, linear fixup, fp16, gfx950
+#   19 -- stream-K dp_sk, tree fixup, fp16, gfx950
+#   20 -- stream-K dp_sk, atomic reduction, fp32, DP + SK mix, gfx950
+#   21 -- stream-K dp_sk, workspace reduction, fp16, gfx950
+#   22 -- stream-K persistent, linear fixup, 16x16x16 atom, gfx942
+#   23 -- stream-K dp_sk, linear, groups=3 with a partial last M tile, gfx950
+#   24 -- stream-K persistent, tree, bf16 dW, groups=2, gfx950
+#   25 -- stream-K persistent, atomic, fp32, groups=2, gfx950
+#   26 -- stream-K persistent, workspace, fp16, gfx942
+#   27 -- stream-K dp_sk, linear, all-DP partition (tiles divide the pool), gfx950
+#   28 -- stream-K dp_sk, linear, K-outer LDS tile, groups=2, gfx950
 #   (async_dma omitted: C++ async load path does not yet honour the wgrad A-descriptor
 #    override, so it would produce different IR and break the byte-identity gate)
 #
@@ -35,8 +46,13 @@
 #   100 -- odd C with fp16 split-K (must raise ValueError)
 #   102 -- split_k > 1 on RDNA gfx1151 (must raise ValueError)
 #   103 -- two_stage=True with split_k=1 (must raise ValueError)
+#   104 -- streamk with split_k=4 (must raise ValueError)
+#   105 -- streamk on gfx1250 (must raise ValueError)
+#   106 -- streamk with the cshuffle epilogue (must raise ValueError)
+#   107 -- streamk with unroll_k (must raise ValueError)
+#   108 -- streamk atomic reduction into fp16 dW (must raise ValueError)
 # (These illustrate the validator contract. The C emitter defines only cases
-# 0-17, so run_diff.py stops at the shared END before reaching 100+; these
+# 0-28, so run_diff.py stops at the shared END before reaching 100+; these
 # configs are not exercised by the differential gate.)
 from kernels.common.conv_implicit_gemm_wgrad import (
     WgradConvSpec,
@@ -459,6 +475,24 @@ def _spec(idx: int):
             "gfx1250",
         )
 
+    if 18 <= idx <= 27:
+        return _streamk_spec(idx)
+    if idx == 28:
+        from dataclasses import replace
+
+        spec, arch = _streamk_spec(23)
+        return (
+            replace(
+                spec,
+                problem=ConvProblem(
+                    N=4, Hi=14, Wi=14, C=64, K=96, Y=3, X=3, pH=1, pW=1, groups=2
+                ),
+                streamk_ctas=7,
+                lds_k_outer=True,
+            ),
+            arch,
+        )
+
     # ----------------------------------------------------------------
     # Negative cases: these specs must be REJECTED by the validator.
     # The harness (run_emit) expects a ValueError / SystemExit when
@@ -526,7 +560,143 @@ def _spec(idx: int):
             ),
             "gfx950",
         )
+    if 104 <= idx <= 108:
+        from dataclasses import replace
+
+        from kernels.common._conv_implicit_gemm_common import ConvDataSpec
+
+        base, arch = _streamk_spec(18)
+        bad = {
+            104: (dict(split_k=4), arch),
+            105: (dict(), "gfx1250"),
+            106: (dict(epilogue="cshuffle"), arch),
+            107: (dict(unroll_k=True), arch),
+            108: (dict(streamk_reduction="atomic", data=ConvDataSpec()), arch),
+        }[idx]
+        return replace(base, **bad[0]), bad[1]
     raise SystemExit(f"unknown config index {idx}")
+
+
+# (problem kwargs, data dtypes (a/b, d), atom edge, streamk, reduction, ctas, arch)
+_STREAMK_CFGS = {
+    18: (
+        dict(N=8, Hi=56, Wi=56, C=64, K=64, Y=3, X=3),
+        ("fp16", "fp16"),
+        32,
+        "dp_sk",
+        "linear",
+        16,
+        "gfx950",
+    ),
+    19: (
+        dict(N=8, Hi=56, Wi=56, C=64, K=64, Y=3, X=3),
+        ("fp16", "fp16"),
+        32,
+        "dp_sk",
+        "tree",
+        16,
+        "gfx950",
+    ),
+    20: (
+        dict(N=8, Hi=56, Wi=56, C=64, K=64, Y=3, X=3),
+        ("fp16", "fp32"),
+        32,
+        "dp_sk",
+        "atomic",
+        4,
+        "gfx950",
+    ),
+    21: (
+        dict(N=8, Hi=56, Wi=56, C=64, K=64, Y=3, X=3),
+        ("fp16", "fp16"),
+        32,
+        "dp_sk",
+        "workspace",
+        4,
+        "gfx950",
+    ),
+    22: (
+        dict(N=8, Hi=56, Wi=56, C=64, K=64, Y=3, X=3),
+        ("fp16", "fp16"),
+        16,
+        "persistent",
+        "linear",
+        4,
+        "gfx942",
+    ),
+    23: (
+        dict(N=4, Hi=28, Wi=28, C=96, K=120, Y=3, X=3, pH=1, pW=1, groups=3),
+        ("fp16", "fp16"),
+        32,
+        "dp_sk",
+        "linear",
+        6,
+        "gfx950",
+    ),
+    24: (
+        dict(N=4, Hi=28, Wi=28, C=64, K=128, Y=3, X=3, pH=1, pW=1, groups=2),
+        ("fp16", "bf16"),
+        32,
+        "persistent",
+        "tree",
+        5,
+        "gfx950",
+    ),
+    25: (
+        dict(N=4, Hi=28, Wi=28, C=64, K=128, Y=3, X=3, pH=1, pW=1, groups=2),
+        ("fp16", "fp32"),
+        32,
+        "persistent",
+        "atomic",
+        3,
+        "gfx950",
+    ),
+    26: (
+        dict(N=8, Hi=56, Wi=56, C=64, K=64, Y=3, X=3),
+        ("fp16", "fp16"),
+        16,
+        "persistent",
+        "workspace",
+        6,
+        "gfx942",
+    ),
+    27: (
+        dict(N=8, Hi=56, Wi=56, C=64, K=64, Y=3, X=3),
+        ("fp16", "fp16"),
+        32,
+        "dp_sk",
+        "linear",
+        9,
+        "gfx950",
+    ),
+}
+
+
+def _streamk_spec(idx: int):
+    """Stream-K configs; mirrored field-for-field by the C emitter."""
+    from kernels.common._conv_implicit_gemm_common import ConvDataSpec
+
+    prob, (dt_ab, dt_d), edge, mode, reduction, ctas, arch = _STREAMK_CFGS[idx]
+    return (
+        WgradConvSpec(
+            problem=ConvProblem(**prob),
+            data=ConvDataSpec(dtype_a=dt_ab, dtype_b=dt_ab, dtype_d=dt_d),
+            tile_m=64,
+            tile_n=64,
+            tile_k=64,
+            warp_m=2,
+            warp_n=2,
+            warp_tile_m=edge,
+            warp_tile_n=edge,
+            warp_tile_k=16,
+            pipeline="mem",
+            epilogue="default",
+            streamk=mode,
+            streamk_reduction=reduction,
+            streamk_ctas=ctas,
+        ),
+        arch,
+    )
 
 
 def main() -> int:

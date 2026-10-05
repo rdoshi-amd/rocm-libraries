@@ -5,15 +5,23 @@ description: Runs the pre-landing checks for a CCCL-into-rocThrust sync once eve
 
 # CCCL → rocThrust Sync (finalize)
 
-Invoked once every checkbox in `todo.md` is ticked and every ported commit's
-changes are staged (`git add`), but nothing has been committed yet. This
-skill's job is to run the pre-landing checks and prep (version bump,
-CHANGELOG) so the staged state is ready to commit.
+Invoked once every checkbox in `todo.md` is ticked and every item has its
+own local commit on `$SYNC_BRANCH` (`rocthrust-cccl-sync-resolve` step 8).
+This skill's job is to run the pre-landing checks and prep (version bump,
+CHANGELOG) and commit that prep as the branch's last commit.
+
+"The sync diff" below means `git diff "$SYNC_BASE"..HEAD`: everything the
+item commits changed, relative to where the sync branch started.
 
 ## Step 1 — Readiness check
 
 - Confirm every line in `todo.md`'s commit list is `- [X]`, not `- [ ]`.
-- Confirm `git diff --cached --stat` is non-empty.
+- Confirm every ticked item has its commit: for each item SHA, `git log
+  --oneline "$SYNC_BASE"..HEAD --grep "port CCCL <sha11>"` returns exactly
+  one commit. A missing one means the item was ticked but never committed;
+  a duplicate means it was committed twice.
+- Confirm `git status --short -- projects/rocthrust/` is empty (no
+  leftover staged or unstaged work outside an item commit).
 - Confirm there is **no** git merge in progress (`git status` should not
   mention `MERGE_HEAD`) — there never should have been one at any point in
   this pipeline.
@@ -58,12 +66,12 @@ don't de-duplicate"). This step is the one-time end-of-sync equivalent for
 both counterpart types: a final summary sweep over the *whole* sync's final
 state, not a new detection mechanism.
 
-**CUDA -> HIP**: list every `system/cuda/**` file present in the final
-staged diff, and for each, its HIP counterpart's diff status relative to
+**CUDA -> HIP**: list every `system/cuda/**` file present in the sync
+diff, and for each, its HIP counterpart's diff status relative to
 `$SYNC_BASE`:
 
 ```bash
-git diff --cached --name-only -- projects/rocthrust/thrust/system/cuda/
+git diff --name-only "$SYNC_BASE"..HEAD -- projects/rocthrust/thrust/system/cuda/
 ```
 
 For each file listed, translate `system/cuda/` -> `system/hip/` (same
@@ -72,11 +80,11 @@ direct-path-then-basename-fallback logic as
 `git diff --stat "$SYNC_BASE" -- <hip-counterpart>`.
 
 **`testing/` -> `test/`**: list every top-level `testing/*.cu` file present
-in the final staged diff, and for each, its `test/test_<name>.cpp`
+in the sync diff, and for each, its `test/test_<name>.cpp`
 counterpart's diff status relative to `$SYNC_BASE`:
 
 ```bash
-git diff --cached --name-only -- projects/rocthrust/testing/ | grep -E '^projects/rocthrust/testing/[^/]+\.cu$'
+git diff --name-only "$SYNC_BASE"..HEAD -- projects/rocthrust/testing/ | grep -E '^projects/rocthrust/testing/[^/]+\.cu$'
 ```
 
 For each file listed, translate `testing/<name>.cu` -> `test/test_<name>.cpp`
@@ -101,11 +109,11 @@ registers a new test/example file in the sibling CMake list in the same
 commit; rocThrust needs the same pairing on the local side. Check:
 
 ```bash
-git diff --cached --name-status -- projects/rocthrust/testing/ projects/rocthrust/examples/ projects/rocthrust/test/
+git diff --name-status "$SYNC_BASE"..HEAD -- projects/rocthrust/testing/ projects/rocthrust/examples/ projects/rocthrust/test/
 ```
 
-For every newly-added (`A`) source file in that list, confirm the same
-staged diff also touches the relevant `CMakeLists.txt`
+For every newly-added (`A`) source file in that list, confirm the sync
+diff also touches the relevant `CMakeLists.txt`
 (`projects/rocthrust/testing/CMakeLists.txt`,
 `projects/rocthrust/test/CMakeLists.txt`, or
 `projects/rocthrust/examples/CMakeLists.txt`). PR #11296 is the concrete
@@ -128,7 +136,7 @@ generalize this into a blanket "bump every touched file's header" rule; it
 is `examples/`-specific until evidence says otherwise.
 
 ```bash
-git diff --cached --name-only -- projects/rocthrust/examples/
+git diff --name-only "$SYNC_BASE"..HEAD -- projects/rocthrust/examples/
 ```
 
 For each file listed, check its `// Copyright (c) <start>-<end> Advanced
@@ -168,7 +176,8 @@ Sources for the new entry:
   `gh release view <tag> --repo NVIDIA/cccl`
 - `todo.md`'s tick-notes — anything marked "N/A on AMD" or "skip" is a
   candidate for a `### Removed`/known-gap callout, not silence.
-- The staged diff itself (`git diff --cached --stat`).
+- The sync diff itself (`git diff --stat "$SYNC_BASE"..HEAD`) and the item
+  commit log (`git log --oneline "$SYNC_BASE"..HEAD`).
 
 Write in rocThrust's own voice — this is not a republication of upstream's
 release notes. State what changed for a rocThrust user, not what changed in
@@ -203,11 +212,18 @@ rocthrust-cccl-sync-investigate/scripts/cccl-version-delta.sh --repo "$ROCTHRUST
 ## Step 9 — Hand off for landing
 
 Every check above (readiness/lint, rename audit, counterpart sweep,
-CMake-wiring, copyright headers, version numbers, CHANGELOG) is done. Report
-to the human that `todo.md` is fully ticked, the staged diff (`git diff
---cached --stat`) is ready, and the sync is ready to commit. Creating the
-actual landing commit — and any build/test verification beforehand — is
-outside this skill's scope.
+CMake-wiring, copyright headers, version numbers, CHANGELOG) is done. Show
+the human the finalize changes (`git diff`) and, once they agree, stage them
+by name and commit them as the branch's last commit:
+`feat(rocthrust): finalize CCCL <TO_TAG> sync`, with a body listing what
+steps 4-8 changed. Don't push.
+
+Report `git log --oneline "$SYNC_BASE"..HEAD` (one commit per `todo.md`
+item, any `fix(rocthrust): fix port of ...` commits, then the finalize
+commit) and `git diff --stat "$SYNC_BASE"..HEAD`. Build/test verification,
+pushing, opening the PR, and choosing between landing the per-item history
+as-is or squashing it are outside this skill's scope.
 
 `todo.md` can be discarded or attached to the tracking ticket once the sync
-lands — it's uncommitted scratch state, not part of the landed history.
+lands — it's untracked scratch state and is never committed. The item
+commits carry its tick-notes.

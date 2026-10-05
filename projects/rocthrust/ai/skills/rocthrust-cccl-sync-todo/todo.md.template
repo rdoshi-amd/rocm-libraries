@@ -2,9 +2,9 @@
 
 We are in the middle of a manual-port sync of upstream CCCL/Thrust commits
 into rocThrust. There is no git merge in progress and never will be — this
-sync is a series of hand-ported commits, landed as a single commit at the
-end by `rocthrust-cccl-sync-finalize`. This file tracks which upstream
-commits still need to be ported.
+sync is a series of hand-ported commits, one local commit per item below,
+followed by a final commit from `rocthrust-cccl-sync-finalize`. This file
+tracks which upstream commits still need to be ported.
 
 ## Sync parameters
 
@@ -34,12 +34,12 @@ fix a bug the earlier commit itself introduced).
 
 - No `git merge` is in progress. There is no `MERGE_HEAD`, and no conflict
   markers will ever appear as part of this process.
-- Ticked (`- [X]`) items below mean the commit's changes are **staged**
-  (`git add`), not committed. Everything lands in a single commit at the end
-  of `rocthrust-cccl-sync-finalize`.
-- Because this state can persist across sessions with nothing enforcing it,
-  avoid `git reset --hard` on this branch, and consider a backup branch if
-  the sync spans many sessions.
+- Ticked (`- [X]`) items below are **committed** on the sync branch: one
+  local commit per item, including N/A items (empty commit), whose subject
+  contains `port CCCL <sha11>`. The tick-note records it as `Local commit:
+  <sha>`.
+- This file itself is untracked and is never committed. Nothing is pushed
+  until the human decides to. Avoid `git reset --hard` on this branch.
 
 ## Commits to port
 

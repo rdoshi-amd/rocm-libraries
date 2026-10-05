@@ -30,10 +30,11 @@ stages, each with their own skill:
   commits likely to be problematic for rocThrust. Produces a
   `cccl-investigation-<tag>.md` report that scopes and de-risks this driver.
 - **`rocthrust-cccl-sync-resolve`** — works through `todo.md` one commit at a
-  time, in order, porting each upstream commit by hand.
+  time, in order, porting each upstream commit by hand and committing it as
+  one local commit per item.
 - **`rocthrust-cccl-sync-finalize`** — once every item in `todo.md` is
   ticked, runs the pre-landing checks, bumps `thrust/version.h`, and updates
-  the CHANGELOG, leaving the sync staged and ready to commit.
+  the CHANGELOG, committing that as the branch's last commit.
 
 ## Conventions
 
@@ -47,8 +48,9 @@ stages, each with their own skill:
   pipeline. Do not look for `MERGE_HEAD` or conflict markers — they will
   never exist here.
 - Do **not** push to origin or create a PR at this stage.
-- `todo.md` is uncommitted scratch state, not part of the eventual landing
-  commit. It can be discarded or attached to a ticket once the sync lands.
+- `todo.md` is untracked scratch state and is never committed. It can be
+  discarded or attached to a ticket once the sync lands; the per-item
+  commits carry its tick-notes.
 
 ## Locating the repository
 

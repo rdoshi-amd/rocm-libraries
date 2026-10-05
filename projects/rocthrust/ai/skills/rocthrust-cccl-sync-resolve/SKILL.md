@@ -21,6 +21,10 @@ commits into `projects/rocthrust/` one at a time, in the exact order listed.
 - Only the **first unticked** (`- [ ]`) item in `todo.md`'s commit list may
   be worked next. Do not jump ahead to a later commit even if it looks
   simpler — later commits may assume earlier ones are already applied.
+- Every ticked item already has its local commit (step 8), and nothing is
+  staged or modified under `projects/rocthrust/` (`git status --short --
+  projects/rocthrust/`). Leftover changes mean an earlier item was never
+  committed or a later one was started early; ask the human which.
 
 If any of these don't hold, STOP and ask the human before proceeding.
 
@@ -31,7 +35,8 @@ If any of these don't hold, STOP and ask the human before proceeding.
    subject, `SCOPE`, any ⚠ flag) and wait for them to say go before
    running step 2 or looking at the commit at all. Do this at the start of
    every item, including straight after ticking the previous one; never
-   roll on into the next item on your own.
+   roll on into the next item on your own (committing the previous item in
+   step 8 doesn't count as the go).
 
 2. **Show the upstream commit**, scoped to the Thrust subtree and with
    destination paths already translated:
@@ -136,8 +141,9 @@ If any of these don't hold, STOP and ask the human before proceeding.
 5. **STOP and confirm the classification and porting approach with the
    human before editing anything.
 
-6. **Apply the change** to the translated local path(s) and `git add` them.
-   For adaptation cases, the change is hand-written to match the upstream
+6. **Apply the change** to the translated local path(s) and `git add` them
+   by name. Never use `git add -A`/`git add .`, and never stage `todo.md`
+   or the investigation report. For adaptation cases, the change is hand-written to match the upstream
    commit's intent using HIP/rocThrust idiom, not a mechanical patch apply.
    Don't compile, build, or go looking for toolchains/dependencies (e.g.
    libhipcxx) on your own: ask the human first, saying what you'd compile
@@ -157,13 +163,36 @@ If any of these don't hold, STOP and ask the human before proceeding.
      - N/A on AMD — CUDA-graph-only execution policy, no HIP equivalent exists
    ```
 
-8. **Do not commit.** Everything ported across every item in `todo.md`
-   lands in a single commit, created by `rocthrust-cccl-sync-finalize` once
-   every checkbox is ticked. This is a discipline this skill family imposes
-   on itself — nothing here stops you from committing early by mistake, so
-   be deliberate about it. Because staged-but-uncommitted state
-   can span many sessions, avoid `git reset --hard` on this branch, and
-   consider a backup branch if the sync is long-running.
+8. **Commit the item.** Every item gets exactly one local commit on
+   `$SYNC_BRANCH`, so the branch history maps 1:1 onto `todo.md`:
+   - Check `git diff --cached --name-only` lists only this item's files.
+   - N/A items with no file changes still get a commit
+     (`--allow-empty`). This way the reason lives in git history, not
+     only in `todo.md`, which is scratch state.
+   - Message: subject `feat(rocthrust): port CCCL <sha11> - <upstream
+     subject>`. Rewrite upstream's trailing `(#NNNN)` as
+     `(NVIDIA/cccl#NNNN)`, because a bare `#NNNN` links to the wrong
+     rocm-libraries PR. Body: the upstream commit URL
+     (`https://github.com/NVIDIA/cccl/commit/<sha>`), a blank line, then
+     the step 7 tick-note bullets verbatim.
+
+   ```bash
+   git commit [--allow-empty] -F - <<'EOF'
+   feat(rocthrust): port CCCL <sha11> - <subject> (NVIDIA/cccl#NNNN)
+
+   Upstream: https://github.com/NVIDIA/cccl/commit/<sha>
+
+   - <tick-note bullets>
+   EOF
+   ```
+
+   Then add `- Local commit: <local-sha>` to the item's tick-note in
+   `todo.md`.
+   - Don't push.
+   - Don't amend, rebase or squash earlier item commits unless the human
+     asks. A fix to an earlier item goes in a new commit (see "When a
+     build failure drives this skill").
+   - Avoid `git reset --hard` on this branch.
 
 ## Periodic self-check: `rocthrust-todo-lint.sh`
 
@@ -255,7 +284,11 @@ rulebook.
 ## When a build failure drives this skill
 
 If you were invoked because a build broke on a specific file, find which
-`todo.md` item introduced the change to that file, treat it as reopened
-(un-tick it, note the failure), and work it again from step 3 above. There
+`todo.md` item introduced the change to that file (`git log --
+<file>` on the sync branch points at the item commit), treat it as reopened
+(un-tick it, note the failure), and work it again from step 3 above. Commit
+the fix as a new commit, `fix(rocthrust): fix port of CCCL <sha11> - <what
+broke>`, rather than rewriting the original item commit, and add its SHA to
+the item's tick-note. There
 is no dedicated build-verification skill for rocThrust — build/test
 verification happens outside this skill family, whenever the human runs it.

@@ -28,12 +28,12 @@ them.
    upstream commit that needs porting. Does not port any code itself.
 3. **`rocthrust-cccl-sync-resolve`** — the workhorse. Works through
    `todo.md` one commit at a time, **strictly in order** (never skip ahead
-   or batch), porting each commit's Thrust changes by hand and ticking it
-   off. Everything ported stays staged (`git add`), never committed.
+   or batch), porting each commit's Thrust changes by hand, ticking it off
+   and committing it as one local commit per item (never pushed).
 4. **`rocthrust-cccl-sync-finalize`** — run once every `todo.md` item is
    ticked. Runs a readiness/lint gate, the CMake-wiring and copyright-header
-   checks, bumps `THRUST_VERSION`, and writes the CHANGELOG entry, leaving
-   the sync staged and ready to commit.
+   checks, bumps `THRUST_VERSION`, and writes the CHANGELOG entry,
+   committing that as the sync branch's last commit.
 
 ## Starting a new session
 
@@ -55,9 +55,11 @@ this directory.
 ## Key conventions to know before you start
 
 - **No git merge, ever.** rocThrust has no subtree-merge mechanism. There
-  is never a `MERGE_HEAD`, never conflict markers. Every commit is
-  hand-ported and staged; one single commit lands the whole sync at the end
-  (`rocthrust-cccl-sync-finalize`).
+  is never a `MERGE_HEAD`, never conflict markers. Every upstream commit is
+  hand-ported and committed locally as its own commit
+  (`feat(rocthrust): port CCCL <sha11> - <subject>`, empty for N/A items),
+  so the sync branch maps 1:1 onto `todo.md`. Nothing is pushed by the
+  skills.
 - **`todo.md` order is strict.** Only the first unticked item may be worked
   next — later commits may assume earlier ones already landed.
 - **All of upstream `thrust/`.** Every skill scopes to the whole upstream
@@ -79,8 +81,8 @@ this directory.
   mechanically enforces this and is a hard gate in `-finalize`'s readiness
   check.
 - **`todo.md` and any investigation/report `.md` files are scratch state**,
-  not part of the eventual landing commit — safe to discard once a sync
-  lands, or attach to a tracking ticket.
+  never committed — safe to discard once a sync lands, or attach to a
+  tracking ticket.
 
 ## Where things live
 

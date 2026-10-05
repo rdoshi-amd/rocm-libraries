@@ -329,7 +329,7 @@ namespace
             check(hipGetDevice(&device), "Get current device");
             jit::Solution solution;
             status = jit::getJitAlgo(
-                device, request, backend, std::numeric_limits<size_t>::max(), solution, info);
+                device, request, backend, std::numeric_limits<uint32_t>::max(), solution, info);
             if(status != HIPBLAS_STATUS_SUCCESS)
                 return status;
             return jit::getGemmAlgo(solution, selected, info);
@@ -351,7 +351,7 @@ namespace
                                                                p.d,
                                                                p.dLayout,
                                                                generation,
-                                                               std::numeric_limits<size_t>::max(),
+                                                               std::numeric_limits<uint32_t>::max(),
                                                                selected,
                                                                info);
         };

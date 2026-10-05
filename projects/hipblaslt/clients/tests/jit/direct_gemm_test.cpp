@@ -171,7 +171,7 @@ namespace
                                                      p.d,
                                                      p.dLayout,
                                                      options,
-                                                     std::numeric_limits<size_t>::max(),
+                                                     std::numeric_limits<uint32_t>::max(),
                                                      selected,
                                                      diagnostics);
         check(status, diagnostics.message.c_str());

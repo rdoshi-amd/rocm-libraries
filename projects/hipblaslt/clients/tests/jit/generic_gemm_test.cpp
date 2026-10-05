@@ -181,7 +181,7 @@ namespace
         check(hipGetDevice(&device), "Get current device");
         jit::Solution solution;
         checked(jit::getJitAlgo(
-            device, request, backend, std::numeric_limits<size_t>::max(), solution, diagnostics));
+            device, request, backend, std::numeric_limits<uint32_t>::max(), solution, diagnostics));
         hipblasLtMatmulHeuristicResult_t selected{};
         checked(jit::getGemmAlgo(solution, selected, diagnostics));
         if(selected.workspaceSize)

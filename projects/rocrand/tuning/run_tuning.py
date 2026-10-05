@@ -34,6 +34,7 @@ from glob import glob
 
 from tuner.base_tuner import TunerArgs
 
+
 @contextmanager
 def working_directory(path: Path):
     """Context manager for changing the current working directory."""
@@ -69,6 +70,7 @@ def get_available_algorithms() -> List[str]:
             for f in glob(f"{BASE_DIR}/tuner/tuning_*")
         ]
     )
+
 
 def filter_algorithms(available_algos: List[str], pattern: str) -> List[str]:
     """Filter algorithms based on regex pattern."""

@@ -26,6 +26,7 @@ import os
 
 BASE_DIR = f"{os.path.dirname(os.path.abspath(__file__))}/.."
 
+
 class Parser:
     @staticmethod
     def get_parser(

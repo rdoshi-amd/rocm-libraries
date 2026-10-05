@@ -27,6 +27,7 @@ sys.path.append(f"{os.path.dirname(__file__)}/../")
 
 from tuner.base_tuner import BaseTuner, TunerArgs
 
+
 class Tuner(BaseTuner):
     @classmethod
     def _get_default_args(cls) -> TunerArgs:
@@ -37,18 +38,18 @@ class Tuner(BaseTuner):
 
     def _get_restrictions(self):
         min_total_threads = 32768
+
         def validate(params):
             threads = params["block_size_x"]
             blocks = params["grid_size"]
 
             if threads * blocks < min_total_threads:
                 return False
-        
 
             return blocks <= 512 and threads == 256
 
         return validate
 
+
 if __name__ == "__main__":
     Tuner.cli()
-    

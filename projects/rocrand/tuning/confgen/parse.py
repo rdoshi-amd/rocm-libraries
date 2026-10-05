@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+
 def parse_lines(lines: list[str]):
 
     config = {}

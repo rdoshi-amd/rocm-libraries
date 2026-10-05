@@ -171,7 +171,7 @@ extern "C" float {{algo_name}}_wrapper(
 {
     // Flush is required for fancy primbench printing
     std::cout << std::flush;
-    
+
     {% block primbench_settings %}
     auto settings = primbench::settings();
     settings.json_out = "/dev/null";
@@ -184,7 +184,7 @@ extern "C" float {{algo_name}}_wrapper(
     {% block primbench_args %}
     char* args[] = { "benchmark-executable" /* primbench requires an executable name for exposing --help */ };
     {% endblock %}
-    
+
     {% block primbench_executor %}
     auto executor = primbench::executor(1, args, settings, primbench::flags::sync);
     {% endblock %}
@@ -207,7 +207,7 @@ extern "C" float {{algo_name}}_wrapper(
 
     {% block calculate_time %}
     std::vector<double> bps = executor.get_all_bytes_per_second();
-    
+
     double total = 0.0;
     for(double x : bps)
         total += (1000.0 * primbench::GiB) / x;

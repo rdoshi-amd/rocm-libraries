@@ -291,6 +291,8 @@ static const char* const* required_attrs(rocke_opcode_t o, int* n)
     static const char* mma_keys[] = {"op_id"};
     static const char* yield_keys[] = {"num"};
     static const char* asm_keys[] = {"template", "constraints"};
+    static const char* scope_order_keys[] = {"scope", "ordering"};
+    static const char* scope_keys[] = {"scope"};
     switch(o)
     {
     case ROCKE_OP_ARITH_CONSTANT:
@@ -309,6 +311,13 @@ static const char* const* required_attrs(rocke_opcode_t o, int* n)
     case ROCKE_OP_TILE_INLINE_ASM:
         *n = 2;
         return asm_keys;
+    case ROCKE_OP_MEMREF_FENCE:
+    case ROCKE_OP_MEMREF_GLOBAL_FLAG_STORE:
+        *n = 2;
+        return scope_order_keys;
+    case ROCKE_OP_MEMREF_GLOBAL_FLAG_WAIT_EQ:
+        *n = 1;
+        return scope_keys;
     default:
         *n = 0;
         return NULL;

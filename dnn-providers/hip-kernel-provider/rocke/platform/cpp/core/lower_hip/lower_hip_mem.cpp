@@ -697,6 +697,89 @@ static rocke_status_t _op_memref_global_atomic_add(rocke_h_lowerer_t* lw, const 
     return lw->status;
 }
 
+/* Python _HIP_ATOMIC_ORDER / _HIP_FENCE_SCOPE / _HIP_MEMORY_SCOPE. */
+static const char* hip_atomic_order(const char* o)
+{
+    if(!strcmp(o, "monotonic"))
+        return "__ATOMIC_RELAXED";
+    if(!strcmp(o, "acquire"))
+        return "__ATOMIC_ACQUIRE";
+    if(!strcmp(o, "release"))
+        return "__ATOMIC_RELEASE";
+    if(!strcmp(o, "acq_rel"))
+        return "__ATOMIC_ACQ_REL";
+    return "__ATOMIC_SEQ_CST";
+}
+
+static const char* hip_fence_scope(const char* s)
+{
+    return !strcmp(s, "system") ? "" : s;
+}
+
+static const char* hip_memory_scope(const char* s)
+{
+    if(!strcmp(s, "workgroup"))
+        return "__HIP_MEMORY_SCOPE_WORKGROUP";
+    if(!strcmp(s, "agent"))
+        return "__HIP_MEMORY_SCOPE_AGENT";
+    return "__HIP_MEMORY_SCOPE_SYSTEM";
+}
+
+/* Python _op_memref_fence */
+static rocke_status_t _op_memref_fence(rocke_h_lowerer_t* lw, const rocke_op_t* op)
+{
+    if(!rocke_h_live(lw))
+    {
+        return lw->status;
+    }
+    rocke_h_emitf(lw,
+                  "__builtin_amdgcn_fence(%s, \"%s\");",
+                  hip_atomic_order(mem_attr_str(op, "ordering", "acq_rel")),
+                  hip_fence_scope(mem_attr_str(op, "scope", "agent")));
+    return lw->status;
+}
+
+/* Python _op_memref_global_flag_store */
+static rocke_status_t _op_memref_global_flag_store(rocke_h_lowerer_t* lw, const rocke_op_t* op)
+{
+    if(!rocke_h_live(lw))
+    {
+        return lw->status;
+    }
+    if(op->num_operands < 3)
+    {
+        return rocke_h_fail(lw, ROCKE_ERR_VALUE, "memref.global_flag_store: too few operands");
+    }
+    rocke_h_emitf(lw,
+                  "__hip_atomic_store(&%s[%s], %s, %s, %s);",
+                  rocke_h_name(lw, op->operands[0]),
+                  rocke_h_name(lw, op->operands[1]),
+                  rocke_h_name(lw, op->operands[2]),
+                  hip_atomic_order(mem_attr_str(op, "ordering", "release")),
+                  hip_memory_scope(mem_attr_str(op, "scope", "agent")));
+    return lw->status;
+}
+
+/* Python _op_memref_global_flag_wait_eq */
+static rocke_status_t _op_memref_global_flag_wait_eq(rocke_h_lowerer_t* lw, const rocke_op_t* op)
+{
+    if(!rocke_h_live(lw))
+    {
+        return lw->status;
+    }
+    if(op->num_operands < 3)
+    {
+        return rocke_h_fail(lw, ROCKE_ERR_VALUE, "memref.global_flag_wait_eq: too few operands");
+    }
+    rocke_h_emitf(lw,
+                  "while (__hip_atomic_load(&%s[%s], __ATOMIC_ACQUIRE, %s) != %s) {}",
+                  rocke_h_name(lw, op->operands[0]),
+                  rocke_h_name(lw, op->operands[1]),
+                  hip_memory_scope(mem_attr_str(op, "scope", "agent")),
+                  rocke_h_name(lw, op->operands[2]));
+    return lw->status;
+}
+
 /* Python _op_memref_global_atomic_add_f32 */
 static rocke_status_t _op_memref_global_atomic_add_f32(rocke_h_lowerer_t* lw, const rocke_op_t* op)
 {
@@ -1517,6 +1600,9 @@ const rocke_h_handler_entry_t* rocke_h_handlers_mem(void)
            {ROCKE_OP_MEMREF_GLOBAL_ATOMIC_ADD_F32, _op_memref_global_atomic_add_f32},
            {ROCKE_OP_MEMREF_GLOBAL_ATOMIC_ADD_PK_BF16, _op_memref_global_atomic_add_pk_bf16},
            {ROCKE_OP_MEMREF_GLOBAL_ATOMIC_ADD_PK_F16, _op_memref_global_atomic_add_pk_f16},
+           {ROCKE_OP_MEMREF_FENCE, _op_memref_fence},
+           {ROCKE_OP_MEMREF_GLOBAL_FLAG_STORE, _op_memref_global_flag_store},
+           {ROCKE_OP_MEMREF_GLOBAL_FLAG_WAIT_EQ, _op_memref_global_flag_wait_eq},
            {ROCKE_OP_MEMREF_COOPERATIVE_GLOBAL_STORE, _op_memref_cooperative_global_store},
            /* global pointer arithmetic + buffer rsrc */
            {ROCKE_OP_TILE_GLOBAL_PTR_ADD, _op_tile_global_ptr_add},

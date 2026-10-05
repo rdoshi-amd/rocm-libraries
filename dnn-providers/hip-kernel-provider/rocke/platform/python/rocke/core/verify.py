@@ -120,6 +120,9 @@ _REQUIRED_ATTRS: Dict[str, List[str]] = {
     "tile.mma": ["op_id"],
     "scf.yield": ["num"],
     "tile.inline_asm": ["template", "constraints"],
+    "memref.fence": ["scope", "ordering"],
+    "memref.global_flag_store": ["scope", "ordering"],
+    "memref.global_flag_wait_eq": ["scope"],
 }
 
 

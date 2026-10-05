@@ -3285,6 +3285,80 @@ class TestNewTargetIntrinsics(unittest.TestCase):
         _assert_ir_assembles(self, ll, name)
         return ll
 
+    # ---- cross-workgroup fence / flag ops (stream-K fixup) ----
+    @staticmethod
+    def _flag_kernel(b):
+        from rocke.core.ir import I32, PtrType
+
+        return b.param("flags", PtrType(I32, "global"))
+
+    def test_fence_renders_scope_and_ordering(self):
+        ll = self._lower("fence", lambda b: b.fence(scope="agent", ordering="release"))
+        self.assertIn('  fence syncscope("agent") release', ll)
+
+    def test_fence_system_scope_has_no_syncscope_clause(self):
+        ll = self._lower(
+            "fencesys", lambda b: b.fence(scope="system", ordering="acquire")
+        )
+        self.assertIn("  fence acquire", ll)
+        self.assertNotIn("syncscope", ll)
+
+    def test_global_flag_store_is_scoped_atomic_store(self):
+        def build(b):
+            flags = self._flag_kernel(b)
+            b.global_flag_store(flags, b.const_i32(3), b.const_i32(1))
+
+        ll = self._lower("flagst", build)
+        self.assertRegex(
+            ll,
+            r"store atomic i32 1, ptr addrspace\(1\) %gep\.\d+ "
+            r'syncscope\("agent"\) release, align 4',
+        )
+
+    def test_global_flag_wait_eq_is_acquire_spin_loop(self):
+        def build(b):
+            flags = self._flag_kernel(b)
+            b.global_flag_wait_eq(flags, b.const_i32(2), b.const_i32(1))
+
+        ll = self._lower("flagwt", build)
+        self.assertRegex(
+            ll,
+            r"(?s)br label %(flag\.wait\.\d+)\n\1:\n"
+            r"  (%flag\.\d+) = load atomic i32, ptr addrspace\(1\) %gep\.\d+ "
+            r'syncscope\("agent"\) acquire, align 4\n'
+            r"  (%flag\.hit\.\d+) = icmp eq i32 \2, 1\n"
+            r"  br i1 \3, label %flag\.done\.\d+, label %\1\n",
+        )
+
+    def test_flag_ops_lower_to_hip_atomics(self):
+        from rocke.core.lower_hip import lower_kernel_to_hip
+
+        b = self._builder("flaghip")
+        flags = self._flag_kernel(b)
+        b.global_flag_store(flags, b.const_i32(0), b.const_i32(1))
+        b.fence(scope="agent", ordering="acquire")
+        b.global_flag_wait_eq(flags, b.const_i32(0), b.const_i32(1))
+        hip = lower_kernel_to_hip(b.kernel)
+        self.assertIn("__ATOMIC_RELEASE, __HIP_MEMORY_SCOPE_AGENT);", hip)
+        self.assertIn('__builtin_amdgcn_fence(__ATOMIC_ACQUIRE, "agent");', hip)
+        self.assertIn("while (__hip_atomic_load(", hip)
+
+    def test_flag_ops_reject_bad_scope_ordering_and_type(self):
+        b = self._builder("flagbad")
+        flags = self._flag_kernel(b)
+        with self.assertRaisesRegex(ValueError, "unknown fence scope"):
+            b.fence(scope="device")
+        with self.assertRaisesRegex(ValueError, "unknown fence ordering"):
+            b.fence(ordering="monotonic")
+        with self.assertRaisesRegex(ValueError, "expects an i32 value"):
+            b.global_flag_store(flags, b.const_i32(0), b.const_f32(1.0))
+        with self.assertRaisesRegex(ValueError, "unknown flag store ordering"):
+            b.global_flag_store(
+                flags, b.const_i32(0), b.const_i32(1), ordering="acquire"
+            )
+        with self.assertRaisesRegex(ValueError, "unknown flag scope"):
+            b.global_flag_wait_eq(flags, b.const_i32(0), b.const_i32(1), scope="gpu")
+
     # ---- ds_swizzle (raw offset + XOR-butterfly encoding) ----
     def test_ds_swizzle_passes_raw_offset_immediate(self):
         ll = self._lower("dssw", lambda b: b.ds_swizzle(b.const_i32(1), 0x041F))

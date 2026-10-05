@@ -263,6 +263,21 @@ def _encode_waitcnt_gfx11(vmcnt: int, expcnt: int, lgkmcnt: int) -> int:
 # Default arch for the HIP path. gfx950 is the historical CDNA target whose
 # emitted source is the byte-identical baseline; callers that don't pass an
 # arch (e.g. the in-tree coverage tests) keep getting exactly that output.
+# Fence / flag-op scope and ordering spellings for the HIP atomic builtins.
+_HIP_ATOMIC_ORDER = {
+    "monotonic": "__ATOMIC_RELAXED",
+    "acquire": "__ATOMIC_ACQUIRE",
+    "release": "__ATOMIC_RELEASE",
+    "acq_rel": "__ATOMIC_ACQ_REL",
+    "seq_cst": "__ATOMIC_SEQ_CST",
+}
+_HIP_FENCE_SCOPE = {"workgroup": "workgroup", "agent": "agent", "system": ""}
+_HIP_MEMORY_SCOPE = {
+    "workgroup": "__HIP_MEMORY_SCOPE_WORKGROUP",
+    "agent": "__HIP_MEMORY_SCOPE_AGENT",
+    "system": "__HIP_MEMORY_SCOPE_SYSTEM",
+}
+
 _DEFAULT_HIP_ARCH = "gfx950"
 
 
@@ -1708,6 +1723,30 @@ class _Lowerer:
         self._emit(
             f"{cpp_t} {_name(op.result)} = atomicAdd(&{_name(ptr)}[{_name(idx)}], "
             f"{_name(val)});"
+        )
+
+    def _op_memref_fence(self, op: Op) -> None:
+        """Lower ``memref.fence`` via ``__builtin_amdgcn_fence``."""
+        self._emit(
+            f"__builtin_amdgcn_fence({_HIP_ATOMIC_ORDER[op.attrs['ordering']]}, "
+            f"\"{_HIP_FENCE_SCOPE[op.attrs['scope']]}\");"
+        )
+
+    def _op_memref_global_flag_store(self, op: Op) -> None:
+        """Lower ``memref.global_flag_store`` via ``__hip_atomic_store``."""
+        ptr, idx, val = op.operands
+        self._emit(
+            f"__hip_atomic_store(&{_name(ptr)}[{_name(idx)}], {_name(val)}, "
+            f"{_HIP_ATOMIC_ORDER[op.attrs['ordering']]}, "
+            f"{_HIP_MEMORY_SCOPE[op.attrs['scope']]});"
+        )
+
+    def _op_memref_global_flag_wait_eq(self, op: Op) -> None:
+        """Lower ``memref.global_flag_wait_eq`` to an acquire-load spin loop."""
+        ptr, idx, expect = op.operands
+        self._emit(
+            f"while (__hip_atomic_load(&{_name(ptr)}[{_name(idx)}], __ATOMIC_ACQUIRE, "
+            f"{_HIP_MEMORY_SCOPE[op.attrs['scope']]}) != {_name(expect)}) {{}}"
         )
 
     def _op_memref_global_atomic_add_pk_bf16(self, op: Op) -> None:

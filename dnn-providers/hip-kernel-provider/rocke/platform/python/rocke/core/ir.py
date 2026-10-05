@@ -100,6 +100,10 @@ CACHE_GLOBAL = 1  # GLC set — skip L2; useful for one-shot loads.
 CACHE_STREAM = 2  # SLC set — streaming hint (don't evict useful lines).
 NON_TEMPORAL = 3  # GLC + SLC — bypass cache hierarchy entirely.
 
+# LLVM ``syncscope`` values accepted by the cross-workgroup fence / flag ops.
+# ``system`` renders as the empty (default) scope.
+_FENCE_SCOPES = ("workgroup", "agent", "system")
+
 
 # ----- target-neutral MMA metadata ---------------------------------------
 #
@@ -1422,6 +1426,80 @@ class IRBuilder:
             attrs={"elem_type": "f16", "vec": 2, "ordering": ordering},
             result_name_hint="atom_f16",
         ).result
+
+    # ----- cross-workgroup synchronisation (stream-K fixup) -----
+
+    def fence(self, *, scope: str = "agent", ordering: str = "acq_rel") -> None:
+        """Memory fence at ``scope`` (LLVM ``fence syncscope(...) <ordering>``).
+
+        A ``release`` fence orders every prior global store of the issuing
+        wave before any later flag store; an ``acquire`` fence orders a prior
+        flag load before every later global load. At ``agent`` scope on
+        multi-XCD CDNA parts the backend also writes back / invalidates the
+        per-XCD L2, which is what makes a producer's partial tile visible to
+        a consumer workgroup running on a different XCD.
+        """
+        if scope not in _FENCE_SCOPES:
+            raise ValueError(f"unknown fence scope {scope!r}")
+        if ordering not in ("acquire", "release", "acq_rel", "seq_cst"):
+            raise ValueError(f"unknown fence ordering {ordering!r}")
+        self._op("memref.fence", [], attrs={"scope": scope, "ordering": ordering})
+
+    def global_flag_store(
+        self,
+        ptr: Value,
+        idx: Value,
+        value: Value,
+        *,
+        scope: str = "agent",
+        ordering: str = "release",
+    ) -> None:
+        """Atomic i32 store of a cross-workgroup flag (``ptr[idx] = value``).
+
+        Lowers to ``store atomic i32 ... syncscope(scope) ordering``. Pair
+        with :meth:`global_flag_wait_eq` on the consumer side.
+        """
+        if value.type.name != "i32":
+            raise ValueError(
+                f"global_flag_store expects an i32 value, got {value.type.name}"
+            )
+        if scope not in _FENCE_SCOPES:
+            raise ValueError(f"unknown flag scope {scope!r}")
+        if ordering not in ("monotonic", "release", "seq_cst"):
+            raise ValueError(f"unknown flag store ordering {ordering!r}")
+        self._op(
+            "memref.global_flag_store",
+            [ptr, idx, value],
+            attrs={"scope": scope, "ordering": ordering},
+        )
+
+    def global_flag_wait_eq(
+        self,
+        ptr: Value,
+        idx: Value,
+        expect: Value,
+        *,
+        scope: str = "agent",
+    ) -> None:
+        """Spin until the i32 flag ``ptr[idx]`` equals ``expect``.
+
+        Lowers to a self-contained loop around an ``acquire`` atomic load at
+        ``scope``, so global loads issued after the wait observe every store
+        the producer released before setting the flag. The loop is the only
+        data-dependent trip count in the IR; it is a leaf op so structured
+        control flow stays ``scf.for`` / ``scf.if`` only.
+        """
+        if expect.type.name != "i32":
+            raise ValueError(
+                f"global_flag_wait_eq expects an i32 value, got {expect.type.name}"
+            )
+        if scope not in _FENCE_SCOPES:
+            raise ValueError(f"unknown flag scope {scope!r}")
+        self._op(
+            "memref.global_flag_wait_eq",
+            [ptr, idx, expect],
+            attrs={"scope": scope},
+        )
 
     def fp16_zero(self) -> Value:
         return self._op(

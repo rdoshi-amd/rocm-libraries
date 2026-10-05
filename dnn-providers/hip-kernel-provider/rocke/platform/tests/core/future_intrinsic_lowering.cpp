@@ -607,6 +607,57 @@ void case_s_wqm()
     EXPECT_IR(i64_ir, "call i64 @llvm.amdgcn.s.wqm.i64.i64(i64 15)");
 }
 
+/* ---- cross-workgroup fence / flag ops (stream-K fixup) ---- */
+void case_flag_ops()
+{
+    const std::string ir = lower_one("flagwt", [](rocke_ir_builder_t* b) {
+        rocke_value_t* f = global_ptr_param(b, "flags", rocke_i32());
+        rocke_b_global_flag_store(
+            b, f, rocke_b_const_i32(b, 3), rocke_b_const_i32(b, 1), NULL, NULL);
+        rocke_b_fence(b, "agent", "release");
+        rocke_b_global_flag_wait_eq(b, f, rocke_b_const_i32(b, 2), rocke_b_const_i32(b, 1), NULL);
+    });
+    EXPECT_IR(ir,
+              "  %gep.1 = getelementptr inbounds i32, ptr addrspace(1) %flags, i32 3\n"
+              "  store atomic i32 1, ptr addrspace(1) %gep.1 syncscope(\"agent\") release, "
+              "align 4\n"
+              "  fence syncscope(\"agent\") release\n"
+              "  %gep.2 = getelementptr inbounds i32, ptr addrspace(1) %flags, i32 2\n"
+              "  br label %flag.wait.1\n"
+              "flag.wait.1:\n"
+              "  %flag.3 = load atomic i32, ptr addrspace(1) %gep.2 syncscope(\"agent\") "
+              "acquire, align 4\n"
+              "  %flag.hit.4 = icmp eq i32 %flag.3, 1\n"
+              "  br i1 %flag.hit.4, label %flag.done.2, label %flag.wait.1\n"
+              "flag.done.2:\n");
+}
+
+void case_fence_system_scope()
+{
+    const std::string ir = lower_one(
+        "fencesys", [](rocke_ir_builder_t* b) { rocke_b_fence(b, "system", "acquire"); });
+    EXPECT_IR(ir, "  fence acquire\n");
+    EXPECT_NO_IR(ir, "syncscope");
+}
+
+void case_flag_ops_hip()
+{
+    const std::string hip = lower_one_hip(
+        "flaghip",
+        [](rocke_ir_builder_t* b) {
+            rocke_value_t* f = global_ptr_param(b, "flags", rocke_i32());
+            rocke_b_global_flag_store(
+                b, f, rocke_b_const_i32(b, 0), rocke_b_const_i32(b, 1), NULL, NULL);
+            rocke_b_fence(b, "agent", "acquire");
+            rocke_b_global_flag_wait_eq(
+                b, f, rocke_b_const_i32(b, 0), rocke_b_const_i32(b, 1), NULL);
+        },
+        "gfx950");
+    EXPECT_IR(hip, "__ATOMIC_RELEASE, __HIP_MEMORY_SCOPE_AGENT);");
+    EXPECT_IR(hip, "__builtin_amdgcn_fence(__ATOMIC_ACQUIRE, \"agent\");");
+    EXPECT_IR(hip, "while (__hip_atomic_load(");
+}
+
 /* ---- av.load / av.store (agent-scope 128-bit vector mem) ---- */
 void case_av_load_b128()
 {
@@ -1019,6 +1070,9 @@ const TestCase k_cases[] = {
     {"hip_zext_uses_unsigned_source_cast", case_hip_zext_uses_unsigned_source_cast},
     {"gfx1250_scaled_wmma", case_gfx1250_scaled_wmma},
     {"gfx1250_standalone_bridge", case_gfx1250_standalone_bridge},
+    {"flag_ops", case_flag_ops},
+    {"fence_system_scope", case_fence_system_scope},
+    {"flag_ops_hip", case_flag_ops_hip},
     {"opcode_names_are_aligned", case_opcode_names_are_aligned},
 };
 

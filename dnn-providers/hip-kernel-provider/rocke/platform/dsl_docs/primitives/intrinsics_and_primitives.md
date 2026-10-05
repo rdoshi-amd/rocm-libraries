@@ -249,6 +249,32 @@ b.global_atomic_add(Hist, eid, b.const_i32(1))
 local_off = b.global_atomic_add(Counter, eid, b.const_i32(1))
 ```
 
+### Cross-workgroup flags and fences
+
+Stream-K fixups hand a partial tile from one workgroup to another through
+global memory, guarded by a per-workgroup i32 flag. Three leaf ops cover
+the protocol:
+
+```text
+fence(*, scope="agent", ordering="acq_rel")
+global_flag_store(ptr, idx, value, *, scope="agent", ordering="release")
+global_flag_wait_eq(ptr, idx, expect, *, scope="agent")
+```
+
+`scope` is one of `workgroup`, `agent`, `system` (LLVM `syncscope`;
+`system` has no clause). The producer stores its partial tile, every wave
+issues `fence(ordering="release")`, the workgroup barriers, and then the
+flag is stored. The consumer calls `global_flag_wait_eq`, which lowers to a
+self-contained loop around an `acquire` atomic load, so its later global
+loads observe the released partial. At `agent` scope on multi-XCD CDNA
+parts the release writes back and the acquire invalidates the per-XCD L2.
+
+| IR op | LLVM | HIP |
+|---|---|---|
+| `memref.fence` | `fence syncscope("agent") release` | `__builtin_amdgcn_fence` |
+| `memref.global_flag_store` | `store atomic i32 ... release` | `__hip_atomic_store` |
+| `memref.global_flag_wait_eq` | `load atomic i32 ... acquire` spin | `while (__hip_atomic_load(...) != e)` |
+
 Block-level histogram + scan helpers in `helpers/scan.py` wrap the
 common patterns:
 

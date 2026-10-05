@@ -183,6 +183,85 @@ static void op_memref_global_store_typed(rocke_lower_t* L, const rocke_op_t* op)
                    (long long)align);
 }
 
+/* Python _llvm_syncscope: "system" is LLVM's default scope (no clause). */
+static const char* ll_syncscope(rocke_lower_t* L, const char* scope)
+{
+    if(strcmp(scope, "system") == 0)
+        return "";
+    return rocke_arena_printf(&L->arena, " syncscope(\"%s\")", scope);
+}
+
+/* Python _op_memref_fence. */
+static void op_memref_fence(rocke_lower_t* L, const rocke_op_t* op)
+{
+    rocke_ll_emitf(L,
+                   "  fence%s %s",
+                   ll_syncscope(L, ll_attr_str(op, "scope", "agent")),
+                   ll_attr_str(op, "ordering", "acq_rel"));
+}
+
+/* Python _op_memref_global_flag_store. */
+static void op_memref_global_flag_store(rocke_lower_t* L, const rocke_op_t* op)
+{
+    const rocke_value_t* ptr = op->operands[0];
+    const rocke_value_t* idx = op->operands[1];
+    const rocke_value_t* val = op->operands[2];
+    const char* gep = rocke_ll_fresh(L, "gep");
+    rocke_ll_emitf(L,
+                   "  %s = getelementptr inbounds i32, ptr addrspace(1) %s, i32 %s",
+                   gep,
+                   rocke_ll_operand(L, ptr),
+                   rocke_ll_operand(L, idx));
+    rocke_ll_emitf(L,
+                   "  store atomic i32 %s, ptr addrspace(1) %s%s %s, align 4",
+                   rocke_ll_operand(L, val),
+                   gep,
+                   ll_syncscope(L, ll_attr_str(op, "scope", "agent")),
+                   ll_attr_str(op, "ordering", "release"));
+}
+
+/* Python _op_memref_global_flag_wait_eq: a self-contained spin loop around an
+ * acquire atomic load; the fall-through block becomes current. */
+static void op_memref_global_flag_wait_eq(rocke_lower_t* L, const rocke_op_t* op)
+{
+    const rocke_value_t* ptr = op->operands[0];
+    const rocke_value_t* idx = op->operands[1];
+    const rocke_value_t* expect = op->operands[2];
+    const char* gep = rocke_ll_fresh(L, "gep");
+    rocke_ll_block_t* cur = rocke_ll_current(L);
+    rocke_ll_block_t* spin;
+    rocke_ll_block_t* done;
+    const char* val;
+    const char* hit;
+    rocke_ll_block_emitf(L,
+                         cur,
+                         "  %s = getelementptr inbounds i32, ptr addrspace(1) %s, i32 %s",
+                         gep,
+                         rocke_ll_operand(L, ptr),
+                         rocke_ll_operand(L, idx));
+    spin = rocke_ll_new_block(L, "flag.wait");
+    if(!cur || !spin)
+        return;
+    rocke_ll_block_emitf(L, cur, "  br label %%%s", spin->label);
+    cur->terminated = true;
+    val = rocke_ll_fresh(L, "flag");
+    hit = rocke_ll_fresh(L, "flag.hit");
+    rocke_ll_block_emitf(L,
+                         spin,
+                         "  %s = load atomic i32, ptr addrspace(1) %s%s acquire, align 4",
+                         val,
+                         gep,
+                         ll_syncscope(L, ll_attr_str(op, "scope", "agent")));
+    rocke_ll_block_emitf(
+        L, spin, "  %s = icmp eq i32 %s, %s", hit, val, rocke_ll_operand(L, expect));
+    done = rocke_ll_new_block(L, "flag.done");
+    if(!done)
+        return;
+    rocke_ll_block_emitf(
+        L, spin, "  br i1 %s, label %%%s, label %%%s", hit, done->label, spin->label);
+    spin->terminated = true;
+}
+
 static void op_memref_global_atomic_add(rocke_lower_t* L, const rocke_op_t* op)
 {
     const rocke_value_t* ptr = op->operands[0];
@@ -1635,6 +1714,9 @@ void rocke_ll_register_mem(void)
     rocke_ll_set_handler(ROCKE_OP_MEMREF_GLOBAL_STORE_TYPED, op_memref_global_store_typed);
     rocke_ll_set_handler(ROCKE_OP_MEMREF_GLOBAL_STORE_VN, op_memref_global_store_vN);
     rocke_ll_set_handler(ROCKE_OP_MEMREF_GLOBAL_ATOMIC_ADD, op_memref_global_atomic_add);
+    rocke_ll_set_handler(ROCKE_OP_MEMREF_FENCE, op_memref_fence);
+    rocke_ll_set_handler(ROCKE_OP_MEMREF_GLOBAL_FLAG_STORE, op_memref_global_flag_store);
+    rocke_ll_set_handler(ROCKE_OP_MEMREF_GLOBAL_FLAG_WAIT_EQ, op_memref_global_flag_wait_eq);
     rocke_ll_set_handler(ROCKE_OP_MEMREF_GLOBAL_ATOMIC_ADD_F32, op_memref_global_atomic_add_f32);
     rocke_ll_set_handler(ROCKE_OP_MEMREF_GLOBAL_ATOMIC_ADD_PK_BF16,
                          op_memref_global_atomic_add_pk_bf16);

@@ -147,7 +147,17 @@ If any of these don't hold, STOP and ask the human before proceeding.
    commit's intent using HIP/rocThrust idiom, not a mechanical patch apply.
    Don't compile, build, or go looking for toolchains/dependencies (e.g.
    libhipcxx) on your own: ask the human first, saying what you'd compile
-   and which configurations it would cover.
+   and which configurations it would cover. In the same question, ask
+   whether to also run the tests, naming which ones you'd run: the
+   `testing/` and `test/test_<name>` targets for the files this item
+   touched, not the whole suite. Look up their exact names with `ctest
+   -N` in the build directory, because names can carry a GPU-target
+   prefix, then select them with `ctest -R`. Tests need a
+   successful build and a GPU. If the human says yes, run only those
+   tests. If any fail, show the failures and stop; don't tick the item
+   or work around them yourself. Record both outcomes in the tick-note,
+   e.g. "Compiled (libhipcxx off); advance/distance tests in `testing/`
+   and `test/` passed" or "Not compiled, tests not run (human skipped)".
 
 7. **Tick the checkbox**, adding an indented rationale note:
 

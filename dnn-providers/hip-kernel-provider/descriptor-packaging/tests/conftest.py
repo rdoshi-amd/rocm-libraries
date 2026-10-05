@@ -1,8 +1,10 @@
+import json
 import os
 import shutil
 import struct
 import sys
 import types
+import uuid
 from pathlib import Path
 
 import pytest
@@ -231,6 +233,29 @@ def requires_msgpack():
         pytest.fail(
             "msgpack is not importable, but it ships as a rocm_kpack dependency"
         )
+
+
+def _restem_uuid_ids(folder, token):
+    """Give every UUID id under `folder` a distinct, deterministic value.
+
+    Stem substitution cannot reach UUID ids, so copied fixtures would collide.
+    uuid5 keeps repeat packs byte-identical.
+    """
+    ids = set()
+    for path in sorted(folder.rglob("*.json")):
+        did = json.loads(path.read_text(encoding="utf-8")).get("id")
+        try:
+            uuid.UUID(str(did))
+        except (ValueError, AttributeError, TypeError):
+            continue
+        ids.add(did)
+    for path in sorted(folder.rglob("*.json")):
+        text = path.read_text(encoding="utf-8")
+        for did in sorted(ids):
+            text = text.replace(
+                did, str(uuid.uuid5(uuid.NAMESPACE_URL, f"hkp-test/{token}/{did}"))
+            )
+        path.write_text(text, encoding="utf-8")
 
 
 def _note(owner, note_type, payload):

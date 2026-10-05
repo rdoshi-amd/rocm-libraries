@@ -847,6 +847,18 @@ namespace TensileLite
             UnsignedBias8 = 1,
         };
 
+        friend std::ostream& operator<<(std::ostream& stream, Int4Encoding encoding)
+        {
+            switch(encoding)
+            {
+            case Int4Encoding::Signed:
+                return stream << "Signed";
+            case Int4Encoding::UnsignedBias8:
+                return stream << "UnsignedBias8";
+            }
+            return stream << "Invalid(" << static_cast<int>(encoding) << ")";
+        }
+
         void setInt4EncodingA(Int4Encoding encoding)
         {
             m_int4EncodingA = encoding;

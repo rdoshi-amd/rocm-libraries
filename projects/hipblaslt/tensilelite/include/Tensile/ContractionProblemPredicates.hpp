@@ -3226,14 +3226,12 @@ namespace TensileLite
                     HasIndex = false,
                     HasValue = true
                 };
-                // Serialized as the ProblemType string ("Signed",
-                // "UnsignedBias8") so the logic files
-                // stay readable.
-                std::string value;
+                using Encoding = ContractionProblemGemm::Int4Encoding;
+                Encoding value = Encoding::Signed;
 
                 Int4EncodingA() = default;
-                Int4EncodingA(std::string value)
-                    : value(std::move(value))
+                explicit Int4EncodingA(Encoding value)
+                    : value(value)
                 {
                 }
 
@@ -3242,20 +3240,9 @@ namespace TensileLite
                     return "Int4EncodingA";
                 }
 
-                static std::string toString(ContractionProblemGemm::Int4Encoding e)
-                {
-                    switch(e)
-                    {
-                    case ContractionProblemGemm::Int4Encoding::UnsignedBias8:
-                        return "UnsignedBias8";
-                    default:
-                        return "Signed";
-                    }
-                }
-
                 virtual bool operator()(ContractionProblemGemm const& problem) const override
                 {
-                    return toString(problem.int4EncodingA()) == value;
+                    return problem.int4EncodingA() == value;
                 }
 
                 virtual bool debugEval(ContractionProblemGemm const& problem,
@@ -3264,7 +3251,7 @@ namespace TensileLite
                     return debugEvalCmp(problem,
                                         stream,
                                         "prob",
-                                        toString(problem.int4EncodingA()),
+                                        problem.int4EncodingA(),
                                         "==",
                                         "sol",
                                         value);

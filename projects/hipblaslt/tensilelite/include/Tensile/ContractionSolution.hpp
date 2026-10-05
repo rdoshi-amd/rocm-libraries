@@ -1361,7 +1361,8 @@ namespace TensileLite
             bool             scaleZeroPointA = false;
             // Mirrors ProblemType's "Int4EncodingA"; see
             // ContractionProblemGemm::Int4Encoding.
-            std::string      int4EncodingA   = "Signed";
+            ContractionProblemGemm::Int4Encoding int4EncodingA
+                = ContractionProblemGemm::Int4Encoding::Signed;
             int  mxBlockA                   = 0;
             int  mxBlockB                   = 0;
             rocisa::DataType mxTypeA        = rocisa::DataType::E8;

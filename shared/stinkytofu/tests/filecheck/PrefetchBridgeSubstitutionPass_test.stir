@@ -88,3 +88,91 @@ st.func @anchors_every_group_reaching_the_consumer() {
   v0 = "st.v_mov_b32"(v41) { issueCycles = 1, latencyCycles = 1 }
   "st.s_endpgm"() { issueCycles = 1, latencyCycles = 1 }
 }
+
+#--- A loop whose stage-1 overwrite is reached by two groups: the prologue's, straight
+#--- down, and the loop body's last group, which is laid out AFTER the consumer and only
+#--- reaches it around the back edge. The layout gap says nothing there, so the gap is
+#--- counted on the CFG path: 11 ds_loads after the body anchor to the back edge plus 11
+#--- from the loop header to the consumer. Both paths clear 11, so BOTH v[2:3] anchors are
+#--- rewritten and neither v[0:1] is.
+# CHECK-LABEL: @anchors_around_back_edge
+# CHECK: "st.global_prefetch_b8"(v[0:1], off)
+# CHECK: "st.flat_prefetch_b8"(v[2:3])
+# CHECK: "st.global_prefetch_b8"(v[0:1], off)
+# CHECK: "st.flat_prefetch_b8"(v[2:3])
+st.func @anchors_around_back_edge() {
+^entry:
+  "st.global_prefetch_b8"(v[0:1], off) { issueCycles = 1, latencyCycles = 1 }
+  "st.global_prefetch_b8"(v[2:3], off) { issueCycles = 1, latencyCycles = 1 }
+  Successors: ^label_loop
+^label_loop:
+  v20 = "st.ds_load_b32"(v40) { issueCycles = 1, latencyCycles = 1 }
+  v21 = "st.ds_load_b32"(v40) { issueCycles = 1, latencyCycles = 1 }
+  v22 = "st.ds_load_b32"(v40) { issueCycles = 1, latencyCycles = 1 }
+  v23 = "st.ds_load_b32"(v40) { issueCycles = 1, latencyCycles = 1 }
+  v24 = "st.ds_load_b32"(v40) { issueCycles = 1, latencyCycles = 1 }
+  v25 = "st.ds_load_b32"(v40) { issueCycles = 1, latencyCycles = 1 }
+  v26 = "st.ds_load_b32"(v40) { issueCycles = 1, latencyCycles = 1 }
+  v27 = "st.ds_load_b32"(v40) { issueCycles = 1, latencyCycles = 1 }
+  v28 = "st.ds_load_b32"(v40) { issueCycles = 1, latencyCycles = 1 }
+  v29 = "st.ds_load_b32"(v40) { issueCycles = 1, latencyCycles = 1 }
+  v30 = "st.ds_load_b32"(v40) { issueCycles = 1, latencyCycles = 1 }
+  v2 = "st.v_mov_b32"(v41) { issueCycles = 1, latencyCycles = 1 }
+  v31 = "st.ds_load_b32"(v40) { issueCycles = 1, latencyCycles = 1 }
+  "st.global_prefetch_b8"(v[0:1], off) { issueCycles = 1, latencyCycles = 1 }
+  "st.global_prefetch_b8"(v[2:3], off) { issueCycles = 1, latencyCycles = 1 }
+  v50 = "st.ds_load_b32"(v40) { issueCycles = 1, latencyCycles = 1 }
+  v51 = "st.ds_load_b32"(v40) { issueCycles = 1, latencyCycles = 1 }
+  v52 = "st.ds_load_b32"(v40) { issueCycles = 1, latencyCycles = 1 }
+  v53 = "st.ds_load_b32"(v40) { issueCycles = 1, latencyCycles = 1 }
+  v54 = "st.ds_load_b32"(v40) { issueCycles = 1, latencyCycles = 1 }
+  v55 = "st.ds_load_b32"(v40) { issueCycles = 1, latencyCycles = 1 }
+  v56 = "st.ds_load_b32"(v40) { issueCycles = 1, latencyCycles = 1 }
+  v57 = "st.ds_load_b32"(v40) { issueCycles = 1, latencyCycles = 1 }
+  v58 = "st.ds_load_b32"(v40) { issueCycles = 1, latencyCycles = 1 }
+  v59 = "st.ds_load_b32"(v40) { issueCycles = 1, latencyCycles = 1 }
+  v60 = "st.ds_load_b32"(v40) { issueCycles = 1, latencyCycles = 1 }
+  "st.s_cbranch_scc1"("label_loop", SCC0)
+  Successors: ^label_loop, ^exit
+^exit:
+  "st.s_endpgm"() { issueCycles = 1, latencyCycles = 1 }
+}
+
+#--- Same loop, but only 2 ds_loads follow the body anchor and 5 precede the consumer:
+#--- the back-edge path has 7 < 11. The prologue path alone would clear 11, but a join
+#--- cannot rely on an anchor only some paths carry, so nothing is rewritten.
+# CHECK-LABEL: @declines_short_back_edge
+# CHECK-NOT: flat_prefetch_b8
+st.func @declines_short_back_edge() {
+^entry:
+  "st.global_prefetch_b8"(v[0:1], off) { issueCycles = 1, latencyCycles = 1 }
+  "st.global_prefetch_b8"(v[2:3], off) { issueCycles = 1, latencyCycles = 1 }
+  v20 = "st.ds_load_b32"(v40) { issueCycles = 1, latencyCycles = 1 }
+  v21 = "st.ds_load_b32"(v40) { issueCycles = 1, latencyCycles = 1 }
+  v22 = "st.ds_load_b32"(v40) { issueCycles = 1, latencyCycles = 1 }
+  v23 = "st.ds_load_b32"(v40) { issueCycles = 1, latencyCycles = 1 }
+  v24 = "st.ds_load_b32"(v40) { issueCycles = 1, latencyCycles = 1 }
+  v25 = "st.ds_load_b32"(v40) { issueCycles = 1, latencyCycles = 1 }
+  v26 = "st.ds_load_b32"(v40) { issueCycles = 1, latencyCycles = 1 }
+  v27 = "st.ds_load_b32"(v40) { issueCycles = 1, latencyCycles = 1 }
+  v28 = "st.ds_load_b32"(v40) { issueCycles = 1, latencyCycles = 1 }
+  v29 = "st.ds_load_b32"(v40) { issueCycles = 1, latencyCycles = 1 }
+  v30 = "st.ds_load_b32"(v40) { issueCycles = 1, latencyCycles = 1 }
+  Successors: ^label_loop
+^label_loop:
+  v31 = "st.ds_load_b32"(v40) { issueCycles = 1, latencyCycles = 1 }
+  v32 = "st.ds_load_b32"(v40) { issueCycles = 1, latencyCycles = 1 }
+  v33 = "st.ds_load_b32"(v40) { issueCycles = 1, latencyCycles = 1 }
+  v34 = "st.ds_load_b32"(v40) { issueCycles = 1, latencyCycles = 1 }
+  v35 = "st.ds_load_b32"(v40) { issueCycles = 1, latencyCycles = 1 }
+  v2 = "st.v_mov_b32"(v41) { issueCycles = 1, latencyCycles = 1 }
+  v36 = "st.ds_load_b32"(v40) { issueCycles = 1, latencyCycles = 1 }
+  "st.global_prefetch_b8"(v[0:1], off) { issueCycles = 1, latencyCycles = 1 }
+  "st.global_prefetch_b8"(v[2:3], off) { issueCycles = 1, latencyCycles = 1 }
+  v50 = "st.ds_load_b32"(v40) { issueCycles = 1, latencyCycles = 1 }
+  v51 = "st.ds_load_b32"(v40) { issueCycles = 1, latencyCycles = 1 }
+  "st.s_cbranch_scc1"("label_loop", SCC0)
+  Successors: ^label_loop, ^exit
+^exit:
+  "st.s_endpgm"() { issueCycles = 1, latencyCycles = 1 }
+}

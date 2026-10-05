@@ -34,6 +34,7 @@ Full documentation for hipBLASLt is available at [rocm.docs.amd.com/projects/hip
 
 * Improved gfx950 GEMM performance by updating Origami solution libraries with work-stealing support and additional tuned TF32 and MX kernels.
 * Improved split-K GEMM performance with a K-first work-group reordering (K-Coherent) approach that increases L2 cache reuse across K-slices.
+* Improved gfx1100 FP16 and BF16 GEMM performance for TN and NN layouts by replacing GridBased solution libraries with Origami Prediction libraries.
 
 ### Resolved issues
 

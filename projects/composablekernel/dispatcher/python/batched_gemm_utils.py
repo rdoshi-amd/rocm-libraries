@@ -797,6 +797,11 @@ def expand_sweep(
     out: List[BatchedGemmKernelConfig] = []
     seen: set = set()
     for b in base_configs:
+        # Old-TE validate_dimension parity: the K tile must split evenly across
+        # wave_k x warp_tile_k. The shared gate checks only M/N, so an fp8/bf8
+        # 16x16x128 or 32x32x64 warp tile would otherwise pair with tile_k=64.
+        if b.tile_k % (b.wave_k * b.warp_tile_k):
+            continue
         # Old-TE IsSupportedArgument parity gate (issue #9684): drop the
         # odd-per-wave-repeat / 32-wide-warp-tile signature (e.g. tile=192 /
         # wave=2 / warp_tile=32 => repeat=3) that returns garbage. gemm_utils

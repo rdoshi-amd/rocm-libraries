@@ -501,6 +501,36 @@ class TestBatchedRepeatGate(unittest.TestCase):
         # this predicate treats it as "not this bug" (returns True).
         self.assertTrue(_repeat_ok(192, 192, 4, 4, 32, 32))
 
+    def test_k_tile_splits_across_the_warp_tile(self):
+        # Old-TE drops tile_k % (warp_k * warp_tile_k) != 0; the bridge must too,
+        # or fp8/bf8 32x32x64 / 16x16x128 warp tiles pair with a 32/64 K tile.
+        import tempfile
+
+        cfg = json.loads((_CONFIG_DIR / "default_ci_config.json").read_text())
+        sizes = {
+            "tile_m": [128],
+            "tile_n": [128],
+            "tile_k": [32, 64, 128],
+            "warp_tile_m": [16, 32],
+            "warp_tile_n": [16, 32],
+            "warp_tile_k": [16, 32, 64, 128],
+        }
+        for key, vals in sizes.items():
+            cfg["tile_config"][key] = {"values": vals}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "tile_cfg.json"
+            path.write_text(json.dumps(cfg))
+            for arch in ("gfx950", "gfx1250"):
+                for dtype in ("fp8", "bf8"):
+                    cfgs = expand_sweep(str(path), arch=arch, dtype=dtype)
+                    self.assertTrue(cfgs, (arch, dtype))
+                    bad = [
+                        (c.tile_k, c.wave_k, c.warp_tile_k)
+                        for c in cfgs
+                        if c.tile_k % (c.wave_k * c.warp_tile_k)
+                    ]
+                    self.assertEqual(bad, [], (arch, dtype))
+
 
 # --- gfx1250 (CDNA5, WMMA) enablement --------------------------------------
 # The batched-GEMM bridge historically allow-listed only CDNA (gfx90a/942/950,

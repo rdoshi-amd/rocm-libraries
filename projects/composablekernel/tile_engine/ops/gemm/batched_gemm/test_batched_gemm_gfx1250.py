@@ -87,8 +87,7 @@ def _kernels(config_path, gpu_target="gfx1250", dtype="fp16", layout="rcr"):
 
 def _warp_tiles(kernels):
     return {
-        (k["tile_config"]["warp_tile_m"], k["tile_config"]["warp_tile_n"], k["tile_config"]["warp_tile_k"])
-        for k in kernels
+        tuple(k["tile_config"][f"warp_tile_{d}"] for d in "mnk") for k in kernels
     }
 
 
@@ -463,7 +462,6 @@ class TestDtypeLayoutCoverage(unittest.TestCase):
         ):
             self.assertIn(line, code)
 
-
     def test_fp8_bf8_headers_accumulate_into_half(self):
         for dtype, a_type in (("fp8", "ck_tile::fp8_t"), ("bf8", "ck_tile::bf8_t")):
             with self.subTest(dtype=dtype), tempfile.TemporaryDirectory() as tmp:
@@ -472,6 +470,7 @@ class TestDtypeLayoutCoverage(unittest.TestCase):
                 _, code = b._generate_kernel_instance(k["tile_config"], k["trait_combo"])
                 self.assertIn(f"using ADataType = {a_type};", code)
                 self.assertIn("using CDataType = ck_tile::fp16_t;", code)
+
 
 class TestCMake(unittest.TestCase):
     def test_cmake_gfx1250_branch(self):

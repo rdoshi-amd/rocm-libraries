@@ -557,14 +557,16 @@ class TestGfx1250Enablement(unittest.TestCase):
         cfg_path = _CONFIG_DIR / "default_ci_config_gfx1250.json"
         self.assertTrue(cfg_path.is_file(), cfg_path)
         tc = json.loads(cfg_path.read_text())["tile_config"]
-        # WMMA warp tiles on gfx1250: 16x16x32 for fp16/bf16, 16x16x4 for fp32, 16x16x64 for fp8/bf8.
+        # WMMA warp tiles on gfx1250: 16x16x32 for fp16/bf16, 16x16x4 for fp32,
+        # 16x16x64 for fp8/bf8.
         self.assertEqual(tc["warp_tile_m"]["values"], [16])
         self.assertEqual(tc["warp_tile_n"]["values"], [16])
         self.assertEqual(tc["warp_tile_k"]["values"], [4, 32, 64])
 
     def test_gfx1250_sweep_keeps_only_the_dtype_wmma_tile(self):
         cfg_path = str(_CONFIG_DIR / "default_ci_config_gfx1250.json")
-        for dtype, wmma in (("fp16", 32), ("bf16", 32), ("fp32", 4)):
+        wmma_k = (("fp16", 32), ("bf16", 32), ("fp32", 4), ("fp8", 64), ("bf8", 64))
+        for dtype, wmma in wmma_k:
             configs = expand_sweep(cfg_path, arch="gfx1250", dtype=dtype)
             self.assertTrue(configs, dtype)
             tiles = {(c.warp_tile_m, c.warp_tile_n, c.warp_tile_k) for c in configs}

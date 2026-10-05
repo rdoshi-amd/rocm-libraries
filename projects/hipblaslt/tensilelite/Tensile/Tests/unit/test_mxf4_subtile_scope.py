@@ -34,7 +34,8 @@ FP32 = "float"
 FP16 = "half"
 
 
-def kern(dtA=FP4, dtB=FP4, dtD=BF16, subtile=True, mt0=256, mt1=256, plsin=True):
+def kern(dtA=FP4, dtB=FP4, dtD=BF16, subtile=True, mt0=256, mt1=256, plsin=True,
+         transA=True, transB=False):
     return {
         "UseSubtileImpl": subtile,
         "MacroTile0": mt0,
@@ -44,6 +45,8 @@ def kern(dtA=FP4, dtB=FP4, dtD=BF16, subtile=True, mt0=256, mt1=256, plsin=True)
             "DataTypeA": DataType(dtA),
             "DataTypeB": DataType(dtB),
             "DestDataType": DataType(dtD),
+            "TransposeA": transA,
+            "TransposeB": transB,
         },
     }
 
@@ -66,6 +69,26 @@ _SCOPE_CASES = [
 )
 def test_is_mxf4_subtile_path(kernel, expected):
     assert isMxf4SubtilePath(kernel) is expected
+
+
+@pytest.mark.parametrize(
+    "transA,transB,expected",
+    [
+        (True, False, True),    # TN, the layout everything here was measured on
+        (False, False, False),  # NN
+        (False, True, False),   # NT
+        (True, True, False),    # TT
+    ],
+    ids=["TN", "NN", "NT", "TT"],
+)
+def test_gate_is_restricted_to_tn(transA, transB, expected):
+    """The non-TN layouts reach the subtile path but not these optimizations.
+
+    They use a strided-K global-read pointer update, so the pre-loop SRD hold and
+    the fused store reason about a shape those kernels do not have. Opening the
+    gate to them miscompares rather than merely running slower.
+    """
+    assert isMxf4SubtilePath(kern(transA=transA, transB=transB)) is expected
 
 
 def test_use_subtile_impl_alone_does_not_open_the_gate():

@@ -105,7 +105,7 @@ def _emitGRLDSBufferSwap(tag, tile, ti, writer, kernel):
   raise NotImplementedError(f"emitGRLDSBufferSwap not implemented for {type(tag).__name__}")
 
 @singledispatch
-def _emitGRPtrUpdate(tag, tile, ti, writer, kernel):
+def _emitGRPtrUpdate(tag, tile, ti, writer, kernel, holdOnLastIter=False):
   raise NotImplementedError(f"emitGRPtrUpdate not implemented for {type(tag).__name__}")
 
 # Stubs for tags not yet implemented.
@@ -389,8 +389,15 @@ def _emitGRPtrUpdate_TLU0(tag, tile, ti, writer, kernel, holdOnLastIter=False):
 
 
 @_emitGRPtrUpdate.register(GRTag_TLU1)
-def _emitGRPtrUpdate_TLU1(tag, tile, ti, writer, kernel):
+def _emitGRPtrUpdate_TLU1(tag, tile, ti, writer, kernel, holdOnLastIter=False):
   """Advance the SRD base pointer by one DepthU K-window.
+
+  holdOnLastIter is accepted so this shares the dispatcher's signature, but it is
+  deliberately not honoured here. The hold is a TLU=0 (TN) optimization: it relies
+  on cluster 2 being able to harmlessly re-read cluster 1's K-block, which only
+  holds for the pre-loop shape the TN path builds. GRTag_TLU1 covers the NN/NT/TT
+  layouts, where applying it miscompares. Leaving the advance unconditional keeps
+  those kernels byte-identical to the unoptimized path.
 
   The free dim is unit-stride here and K is strided, so a DepthU window spans
   DepthU * bpe * strideK bytes.  depthUBytes is already DepthU * bpe, so it only

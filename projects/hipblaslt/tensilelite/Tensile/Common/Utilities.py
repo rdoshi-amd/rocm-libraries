@@ -103,12 +103,20 @@ def isMxf4SubtilePath(kernel) -> bool:
     this predicate so kernels outside MXF4-in/bf16-out are generated exactly as
     they are on develop.
 
+    Restricted to TN (TransposeA, not TransposeB), the layout every optimization
+    here was built and measured on. The pre-loop SRD hold, the staged fused store
+    and the block schedule all reason about the TN global-read shape; on the
+    NN/NT/TT layouts, which reach the subtile path through a separate strided-K
+    pointer update, that reasoning does not hold and the results miscompare.
+
     Tolerant of partially-built state: naming runs on dicts whose data types may
     still be raw values rather than DataType objects, and treats anything it
     cannot classify as "not MXF4", which is the conservative answer.
     """
     try:
-        return bool(kernel.get("UseSubtileImpl")) and plsinSubtileTypes(kernel)
+        pt = kernel["ProblemType"]
+        tn = bool(pt["TransposeA"]) and not bool(pt["TransposeB"])
+        return bool(kernel.get("UseSubtileImpl")) and tn and plsinSubtileTypes(kernel)
     except (KeyError, TypeError, AttributeError):
         return False
 

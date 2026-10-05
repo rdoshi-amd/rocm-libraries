@@ -8,6 +8,7 @@
 #include <vector>
 
 #include <hipdnn_flatbuffers_sdk/flatbuffer_utilities/GraphWrapper.hpp>
+#include <hipdnn_test_sdk/utilities/RaggedSdpaTestUtils.hpp>
 
 #include "SdpaFwdGraphTestUtils.hpp"
 #include "harness/gpu-graph-executor/GpuReferenceGraphExecutor.hpp"
@@ -29,7 +30,7 @@ constexpr int64_t RAGGED_OFFSET_Q_UID = 20;
 constexpr int64_t RAGGED_OFFSET_KV_UID = 21;
 
 // One ragged batch. Only dtypes and ragged_offset matter here, not the shape.
-const std::vector<int64_t> DIMS = {1, 2, 8, 16};
+const std::vector<int64_t> DIMS = hipdnn_test_sdk::utilities::raggedDims(1, 8, 2, 16);
 
 flatbuffers::FlatBufferBuilder makeRaggedGraph(DataType dataType)
 {

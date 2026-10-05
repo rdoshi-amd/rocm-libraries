@@ -91,7 +91,7 @@ ShallowRaggedTensor<T> wrapRagged(T* buf,
                                   const std::vector<int64_t>& cum)
 {
     return ShallowRaggedTensor<T>(
-        buf, dims, bshd(dims), SEQ_AXIS, makeRaggedOffsetAux(cum, seqStride));
+        buf, dims, raggedStrides(dims), SEQ_AXIS, makeRaggedOffsetAux(cum, seqStride));
 }
 
 // Randomize only the packed prefix (first `count` elements) of a padded buffer.
@@ -144,15 +144,15 @@ void checkRagged(const std::vector<int64_t>& seqQ,
     const auto cumQ = cumTokens(seqQ);
     const auto cumKv = cumTokens(seqKv);
 
-    const std::vector<int64_t> qDims = {batch, numHeads, sMaxQ, headDim};
-    const std::vector<int64_t> kDims = {batch, numHeadsK, sMaxKv, headDim};
-    const std::vector<int64_t> vDims = {batch, numHeadsV, sMaxKv, headDimV};
-    const std::vector<int64_t> oDims = {batch, numHeads, sMaxQ, headDimV};
+    const std::vector<int64_t> qDims = raggedDims(batch, sMaxQ, numHeads, headDim);
+    const std::vector<int64_t> kDims = raggedDims(batch, sMaxKv, numHeadsK, headDim);
+    const std::vector<int64_t> vDims = raggedDims(batch, sMaxKv, numHeadsV, headDimV);
+    const std::vector<int64_t> oDims = raggedDims(batch, sMaxQ, numHeads, headDimV);
 
-    Tensor<T> q(qDims, bshd(qDims));
-    Tensor<T> k(kDims, bshd(kDims));
-    Tensor<T> v(vDims, bshd(vDims));
-    Tensor<T> oGpu(oDims, bshd(oDims));
+    Tensor<T> q(qDims, raggedStrides(qDims));
+    Tensor<T> k(kDims, raggedStrides(kDims));
+    Tensor<T> v(vDims, raggedStrides(vDims));
+    Tensor<T> oGpu(oDims, raggedStrides(oDims));
     fillPackedRandom(q, totalQ * numHeads * headDim, -1.0f, 1.0f, SEED_Q);
     fillPackedRandom(k, totalKv * numHeadsK * headDim, -1.0f, 1.0f, SEED_K);
     fillPackedRandom(v, totalKv * numHeadsV * headDimV, -1.0f, 1.0f, SEED_V);
@@ -294,14 +294,14 @@ TEST(TestGpuSdpaRaggedFwdFp32, RaggedLseOutput)
     const auto cumQ = cumTokens(seqQ);
     const auto cumKv = cumTokens(seqKv);
 
-    const std::vector<int64_t> dims = {batch, numHeads, sMax, headDim};
-    const std::vector<int64_t> lseDims = {batch, numHeads, sMax, 1};
+    const std::vector<int64_t> dims = raggedDims(batch, sMax, numHeads, headDim);
+    const std::vector<int64_t> lseDims = raggedDims(batch, sMax, numHeads, 1);
 
-    Tensor<float> q(dims, bshd(dims));
-    Tensor<float> k(dims, bshd(dims));
-    Tensor<float> v(dims, bshd(dims));
-    Tensor<float> oGpu(dims, bshd(dims));
-    Tensor<float> lseGpu(lseDims, bshd(lseDims));
+    Tensor<float> q(dims, raggedStrides(dims));
+    Tensor<float> k(dims, raggedStrides(dims));
+    Tensor<float> v(dims, raggedStrides(dims));
+    Tensor<float> oGpu(dims, raggedStrides(dims));
+    Tensor<float> lseGpu(lseDims, raggedStrides(lseDims));
     fillPackedRandom(q, totalQ * numHeads * headDim, -1.0f, 1.0f, SEED_Q);
     fillPackedRandom(k, totalQ * numHeads * headDim, -1.0f, 1.0f, SEED_K);
     fillPackedRandom(v, totalQ * numHeads * headDim, -1.0f, 1.0f, SEED_V);
@@ -358,14 +358,14 @@ void checkRaggedDenseLse(const std::vector<int64_t>& seqQ,
     const auto cumQ = cumTokens(seqQ);
     const auto cumKv = cumTokens(seqKv);
 
-    const std::vector<int64_t> qDims = {batch, numHeads, sMaxQ, headDim};
-    const std::vector<int64_t> kvDims = {batch, numHeads, sMaxKv, headDim};
-    const std::vector<int64_t> lseDims = {batch, numHeads, sMaxQ, 1};
+    const std::vector<int64_t> qDims = raggedDims(batch, sMaxQ, numHeads, headDim);
+    const std::vector<int64_t> kvDims = raggedDims(batch, sMaxKv, numHeads, headDim);
+    const std::vector<int64_t> lseDims = raggedDims(batch, sMaxQ, numHeads, 1);
 
-    Tensor<float> q(qDims, bshd(qDims));
-    Tensor<float> k(kvDims, bshd(kvDims));
-    Tensor<float> v(kvDims, bshd(kvDims));
-    Tensor<float> oGpu(qDims, bshd(qDims));
+    Tensor<float> q(qDims, raggedStrides(qDims));
+    Tensor<float> k(kvDims, raggedStrides(kvDims));
+    Tensor<float> v(kvDims, raggedStrides(kvDims));
+    Tensor<float> oGpu(qDims, raggedStrides(qDims));
     if(zeroQk)
     {
         q.fillWithValue(0.0f);
@@ -420,8 +420,8 @@ void checkRaggedDenseLse(const std::vector<int64_t>& seqQ,
         {
             for(int64_t s = 0; s < sMaxQ; ++s)
             {
-                const float gpu = lseGpu(b, h, s, 0);
-                EXPECT_NEAR(gpu, lseCpu(b, h, s, 0), tolerance)
+                const float gpu = lseGpu(raggedIndex(b, s, h, 0));
+                EXPECT_NEAR(gpu, lseCpu(raggedIndex(b, s, h, 0)), tolerance)
                     << "dense LSE mismatch at [" << b << ", " << h << ", " << s << ", 0]";
                 if(s >= seqQ[static_cast<size_t>(b)])
                 {
@@ -467,12 +467,12 @@ TEST(TestGpuSdpaRaggedFwdFp32, AllQueriesEmpty)
 {
     SKIP_IF_NO_DEVICES();
     const int64_t headDim = 16;
-    const std::vector<int64_t> dims = {2, 1, 2, headDim};
-    const std::vector<int64_t> lseDims = {2, 1, 2, 1};
-    Tensor<float> q(dims, bshd(dims));
-    Tensor<float> k(dims, bshd(dims));
-    Tensor<float> v(dims, bshd(dims));
-    Tensor<float> o(dims, bshd(dims));
+    const std::vector<int64_t> dims = raggedDims(2, 2, 1, headDim);
+    const std::vector<int64_t> lseDims = raggedDims(2, 2, 1, 1);
+    Tensor<float> q(dims, raggedStrides(dims));
+    Tensor<float> k(dims, raggedStrides(dims));
+    Tensor<float> v(dims, raggedStrides(dims));
+    Tensor<float> o(dims, raggedStrides(dims));
     Tensor<float> lse(lseDims);
     q.fillWithValue(1.0f);
     k.fillWithValue(1.0f);
@@ -542,14 +542,14 @@ void checkRaggedFp8(const std::vector<int64_t>& seqQ,
     const auto cumQ = cumTokens(seqQ);
     const auto cumKv = cumTokens(seqKv);
 
-    const std::vector<int64_t> qDims = {batch, numHeads, sMaxQ, headDim};
-    const std::vector<int64_t> kvDims = {batch, numHeadsKv, sMaxKv, headDim};
-    const std::vector<int64_t> oDims = {batch, numHeads, sMaxQ, headDim};
+    const std::vector<int64_t> qDims = raggedDims(batch, sMaxQ, numHeads, headDim);
+    const std::vector<int64_t> kvDims = raggedDims(batch, sMaxKv, numHeadsKv, headDim);
+    const std::vector<int64_t> oDims = raggedDims(batch, sMaxQ, numHeads, headDim);
 
-    Tensor<fp8_e4m3> q(qDims, bshd(qDims));
-    Tensor<fp8_e4m3> k(kvDims, bshd(kvDims));
-    Tensor<fp8_e4m3> v(kvDims, bshd(kvDims));
-    Tensor<bfloat16> oGpu(oDims, bshd(oDims));
+    Tensor<fp8_e4m3> q(qDims, raggedStrides(qDims));
+    Tensor<fp8_e4m3> k(kvDims, raggedStrides(kvDims));
+    Tensor<fp8_e4m3> v(kvDims, raggedStrides(kvDims));
+    Tensor<bfloat16> oGpu(oDims, raggedStrides(oDims));
     fillPackedRandom(q, totalQ * numHeads * headDim, -1.0f, 1.0f, SEED_Q);
     fillPackedRandom(k, totalKv * numHeadsKv * headDim, -1.0f, 1.0f, SEED_K);
     fillPackedRandom(v, totalKv * numHeadsKv * headDim, -1.0f, 1.0f, SEED_V);
@@ -644,12 +644,12 @@ TEST(TestGpuSdpaRaggedFwdFp8, ThrowsOnPerQueryHeadQDescaleUnderGqa)
 {
     SKIP_IF_NO_DEVICES();
     // Q descale is per KV head, so under GQA a [B, H_q, 1, 1] Q descale must be rejected.
-    const std::vector<int64_t> qDims = {1, 4, 4, 128};
-    const std::vector<int64_t> kvDims = {1, 2, 4, 128};
-    Tensor<fp8_e4m3> q(qDims, bshd(qDims));
-    Tensor<fp8_e4m3> k(kvDims, bshd(kvDims));
-    Tensor<fp8_e4m3> v(kvDims, bshd(kvDims));
-    Tensor<bfloat16> o(qDims, bshd(qDims));
+    const std::vector<int64_t> qDims = raggedDims(1, 4, 4, 128);
+    const std::vector<int64_t> kvDims = raggedDims(1, 4, 2, 128);
+    Tensor<fp8_e4m3> q(qDims, raggedStrides(qDims));
+    Tensor<fp8_e4m3> k(kvDims, raggedStrides(kvDims));
+    Tensor<fp8_e4m3> v(kvDims, raggedStrides(kvDims));
+    Tensor<bfloat16> o(qDims, raggedStrides(qDims));
     const auto cum = cumTokens({4});
     auto offQ = makeRaggedOffset(cum, 4 * 128);
     auto offKv = makeRaggedOffset(cum, 2 * 128);
@@ -687,12 +687,12 @@ TEST(TestGpuSdpaRaggedFwdFp8, DecodesEveryFp8ValueExactly)
     SKIP_IF_NO_DEVICES();
     const int64_t headDim = 16;
     const int64_t headDimV = 256;
-    const std::vector<int64_t> qkDims = {1, 1, 1, headDim};
-    const std::vector<int64_t> voDims = {1, 1, 1, headDimV};
-    Tensor<fp8_e4m3> q(qkDims, bshd(qkDims));
-    Tensor<fp8_e4m3> k(qkDims, bshd(qkDims));
-    Tensor<fp8_e4m3> v(voDims, bshd(voDims));
-    Tensor<float> o(voDims, bshd(voDims));
+    const std::vector<int64_t> qkDims = raggedDims(1, 1, 1, headDim);
+    const std::vector<int64_t> voDims = raggedDims(1, 1, 1, headDimV);
+    Tensor<fp8_e4m3> q(qkDims, raggedStrides(qkDims));
+    Tensor<fp8_e4m3> k(qkDims, raggedStrides(qkDims));
+    Tensor<fp8_e4m3> v(voDims, raggedStrides(voDims));
+    Tensor<float> o(voDims, raggedStrides(voDims));
     q.fillWithValue(fp8_e4m3::from_bits(0));
     k.fillWithValue(fp8_e4m3::from_bits(0));
     auto* vp = v.memory().hostData();
@@ -738,13 +738,13 @@ bool throwsOnLengths(const std::vector<int64_t>& qLens,
                      const std::vector<int64_t>& lseLens = {})
 {
     const int64_t headDim = 16;
-    const std::vector<int64_t> dims = {2, 1, 2, headDim};
-    const std::vector<int64_t> lseDims = {2, 1, 2, 1};
-    Tensor<float> q(dims, bshd(dims));
-    Tensor<float> k(dims, bshd(dims));
-    Tensor<float> v(dims, bshd(dims));
-    Tensor<float> o(dims, bshd(dims));
-    Tensor<float> lse(lseDims, bshd(lseDims));
+    const std::vector<int64_t> dims = raggedDims(2, 2, 1, headDim);
+    const std::vector<int64_t> lseDims = raggedDims(2, 2, 1, 1);
+    Tensor<float> q(dims, raggedStrides(dims));
+    Tensor<float> k(dims, raggedStrides(dims));
+    Tensor<float> v(dims, raggedStrides(dims));
+    Tensor<float> o(dims, raggedStrides(dims));
+    Tensor<float> lse(lseDims, raggedStrides(lseDims));
     q.fillWithValue(0.0f);
     k.fillWithValue(0.0f);
     v.fillWithValue(1.0f);
@@ -801,12 +801,12 @@ namespace
 bool throwsOnQTokens(const std::vector<int64_t>& qTokens, int64_t lseSq = 0)
 {
     const int64_t headDim = 16;
-    const std::vector<int64_t> dims = {2, 1, 2, headDim};
-    Tensor<float> q(dims, bshd(dims));
-    Tensor<float> k(dims, bshd(dims));
-    Tensor<float> v(dims, bshd(dims));
-    Tensor<float> o(dims, bshd(dims));
-    Tensor<float> lse({2, 1, std::max<int64_t>(lseSq, 1), 1});
+    const std::vector<int64_t> dims = raggedDims(2, 2, 1, headDim);
+    Tensor<float> q(dims, raggedStrides(dims));
+    Tensor<float> k(dims, raggedStrides(dims));
+    Tensor<float> v(dims, raggedStrides(dims));
+    Tensor<float> o(dims, raggedStrides(dims));
+    Tensor<float> lse(raggedDims(2, std::max<int64_t>(lseSq, 1), 1, 1));
     q.fillWithValue(0.0f);
     k.fillWithValue(0.0f);
     v.fillWithValue(1.0f);

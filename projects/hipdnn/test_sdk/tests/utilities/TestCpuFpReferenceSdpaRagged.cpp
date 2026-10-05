@@ -64,7 +64,7 @@ ShallowRaggedTensor<T> wrapRagged(T* buf,
                                   const std::vector<int64_t>& cum)
 {
     return ShallowRaggedTensor<T>(
-        buf, dims, bshd(dims), SEQ_AXIS, makeRaggedOffsetAux(cum, seqStride));
+        buf, dims, raggedStrides(dims), SEQ_AXIS, makeRaggedOffsetAux(cum, seqStride));
 }
 
 // Valid ragged tensor over a caller-owned buffer sized for the packed tokens. The negative tests
@@ -73,7 +73,7 @@ ShallowRaggedTensor<float> makeValidRagged(std::vector<float>& backing,
                                            const std::vector<int64_t>& dims,
                                            const std::vector<int64_t>& seqLens)
 {
-    const int64_t seqStride = dims[1] * dims[3]; // H * D
+    const int64_t seqStride = raggedHeads(dims) * dims[3]; // H * D
     backing.assign(static_cast<size_t>(sum(seqLens) * seqStride), 0.0f);
     return wrapRagged(backing.data(), dims, seqStride, cumTokens(seqLens));
 }
@@ -113,7 +113,7 @@ float descaleValue(TensorBase<float>& descale, int64_t b, int64_t head)
 template <typename T>
 Tensor<float> extractDenseSlice(TensorBase<T>& ragged, int64_t b, int64_t seqLen)
 {
-    const auto heads = ragged.dims()[1];
+    const auto heads = raggedHeads(ragged.dims());
     const auto dim = ragged.dims()[3];
     Tensor<float> dense({1, heads, seqLen, dim});
     for(int64_t h = 0; h < heads; ++h)
@@ -123,7 +123,7 @@ Tensor<float> extractDenseSlice(TensorBase<T>& ragged, int64_t b, int64_t seqLen
             for(int64_t d = 0; d < dim; ++d)
             {
                 dense(0, h, s, d)
-                    = static_cast<float>(ragged.getHostValue(std::vector<int64_t>{b, h, s, d}));
+                    = static_cast<float>(ragged.getHostValue(raggedIndex(b, s, h, d)));
             }
         }
     }
@@ -141,7 +141,7 @@ Tensor<float> dequantDenseSlice(TensorBase<FP8>& ragged,
                                 TensorBase<float>& descale,
                                 int64_t headsPerDescaleHead)
 {
-    const auto heads = ragged.dims()[1];
+    const auto heads = raggedHeads(ragged.dims());
     const auto dim = ragged.dims()[3];
     Tensor<float> dense({1, heads, seqLen, dim});
     for(int64_t h = 0; h < heads; ++h)
@@ -152,8 +152,7 @@ Tensor<float> dequantDenseSlice(TensorBase<FP8>& ragged,
             for(int64_t d = 0; d < dim; ++d)
             {
                 dense(0, h, s, d)
-                    = static_cast<float>(ragged.getHostValue(std::vector<int64_t>{b, h, s, d}))
-                      * dsc;
+                    = static_cast<float>(ragged.getHostValue(raggedIndex(b, s, h, d))) * dsc;
             }
         }
     }
@@ -183,11 +182,11 @@ void checkRaggedVsDense(const std::vector<int64_t>& seqQ,
     const auto cumQ = cumTokens(seqQ);
     const auto cumKv = cumTokens(seqKv);
 
-    const std::vector<int64_t> qDims = {batch, numHeads, sMaxQ, headDim};
-    const std::vector<int64_t> kDims = {batch, numHeadsKv, sMaxKv, headDim};
-    const std::vector<int64_t> vDims = {batch, numHeadsKv, sMaxKv, headDimV};
-    const std::vector<int64_t> oDims = {batch, numHeads, sMaxQ, headDimV};
-    const std::vector<int64_t> lseDims = {batch, numHeads, sMaxQ, 1};
+    const std::vector<int64_t> qDims = raggedDims(batch, sMaxQ, numHeads, headDim);
+    const std::vector<int64_t> kDims = raggedDims(batch, sMaxKv, numHeadsKv, headDim);
+    const std::vector<int64_t> vDims = raggedDims(batch, sMaxKv, numHeadsKv, headDimV);
+    const std::vector<int64_t> oDims = raggedDims(batch, sMaxQ, numHeads, headDimV);
+    const std::vector<int64_t> lseDims = raggedDims(batch, sMaxQ, numHeads, 1);
 
     std::vector<float> qBack(static_cast<size_t>(totalQ * numHeads * headDim));
     std::vector<float> kBack(static_cast<size_t>(totalKv * numHeadsKv * headDim));
@@ -236,14 +235,12 @@ void checkRaggedVsDense(const std::vector<int64_t>& seqQ,
         {
             for(int64_t h = 0; h < numHeads; ++h)
             {
-                EXPECT_NEAR(
-                    lse.getHostValue(std::vector<int64_t>{b, h, s, 0}), lseDense(0, h, s, 0), 1e-4f)
+                EXPECT_NEAR(lse.getHostValue(raggedIndex(b, s, h, 0)), lseDense(0, h, s, 0), 1e-4f)
                     << "LSE mismatch batch " << b << " token " << s << " head " << h;
                 for(int64_t dv = 0; dv < headDimV; ++dv)
                 {
-                    EXPECT_NEAR(o.getHostValue(std::vector<int64_t>{b, h, s, dv}),
-                                oDense(0, h, s, dv),
-                                1e-4f)
+                    EXPECT_NEAR(
+                        o.getHostValue(raggedIndex(b, s, h, dv)), oDense(0, h, s, dv), 1e-4f)
                         << "output mismatch batch " << b << " token " << s << " head " << h
                         << " dv " << dv;
                 }
@@ -273,9 +270,9 @@ void checkRaggedFp8VsDense(const std::vector<int64_t>& seqQ,
     const auto cumQ = cumTokens(seqQ);
     const auto cumKv = cumTokens(seqKv);
 
-    const std::vector<int64_t> qDims = {batch, numHeads, sMaxQ, headDim};
-    const std::vector<int64_t> kvDims = {batch, numHeadsKv, sMaxKv, headDim};
-    const std::vector<int64_t> oDims = {batch, numHeads, sMaxQ, headDim};
+    const std::vector<int64_t> qDims = raggedDims(batch, sMaxQ, numHeads, headDim);
+    const std::vector<int64_t> kvDims = raggedDims(batch, sMaxKv, numHeadsKv, headDim);
+    const std::vector<int64_t> oDims = raggedDims(batch, sMaxQ, numHeads, headDim);
 
     std::vector<fp8_e4m3> qBack(static_cast<size_t>(totalQ * numHeads * headDim));
     std::vector<fp8_e4m3> kBack(static_cast<size_t>(totalKv * numHeadsKv * headDim));
@@ -328,10 +325,9 @@ void checkRaggedFp8VsDense(const std::vector<int64_t>& seqQ,
             {
                 for(int64_t dv = 0; dv < headDim; ++dv)
                 {
-                    EXPECT_NEAR(
-                        static_cast<float>(o.getHostValue(std::vector<int64_t>{b, h, s, dv})),
-                        static_cast<float>(oDense(0, h, s, dv)),
-                        2e-2f)
+                    EXPECT_NEAR(static_cast<float>(o.getHostValue(raggedIndex(b, s, h, dv))),
+                                static_cast<float>(oDense(0, h, s, dv)),
+                                2e-2f)
                         << "fp8 output mismatch batch " << b << " token " << s << " head " << h
                         << " dv " << dv;
                 }
@@ -435,9 +431,9 @@ TEST(TestCpuFpReferenceSdpaRaggedFp32, DenseLseMatchesRaggedLse)
     const auto cumQ = cumTokens(seqQ);
     const auto cumKv = cumTokens(seqKv);
 
-    const std::vector<int64_t> qDims = {batch, numHeads, sMaxQ, headDim};
-    const std::vector<int64_t> kvDims = {batch, numHeads, sMaxKv, headDim};
-    const std::vector<int64_t> lseDims = {batch, numHeads, sMaxQ, 1};
+    const std::vector<int64_t> qDims = raggedDims(batch, sMaxQ, numHeads, headDim);
+    const std::vector<int64_t> kvDims = raggedDims(batch, sMaxKv, numHeads, headDim);
+    const std::vector<int64_t> lseDims = raggedDims(batch, sMaxQ, numHeads, 1);
 
     std::vector<float> qBack(static_cast<size_t>(totalQ * numHeads * headDim));
     std::vector<float> kBack(static_cast<size_t>(totalKv * numHeads * headDim));
@@ -469,10 +465,10 @@ TEST(TestCpuFpReferenceSdpaRaggedFp32, DenseLseMatchesRaggedLse)
         {
             for(int64_t s = 0; s < sMaxQ; ++s)
             {
-                const float dense = lseDense(b, h, s, 0);
+                const float dense = lseDense.getHostValue(raggedIndex(b, s, h, 0));
                 if(s < seqQ[static_cast<size_t>(b)])
                 {
-                    EXPECT_EQ(dense, lseRagged.getHostValue(std::vector<int64_t>{b, h, s, 0}))
+                    EXPECT_EQ(dense, lseRagged.getHostValue(raggedIndex(b, s, h, 0)))
                         << "dense LSE mismatch batch " << b << " head " << h << " token " << s;
                 }
                 else
@@ -501,9 +497,9 @@ TEST(TestCpuFpReferenceSdpaRaggedFp32, ZeroLengthKvFullyMasked)
     const auto cumQ = cumTokens(seqQ);
     const auto cumKv = cumTokens(seqKv);
 
-    const std::vector<int64_t> qDims = {batch, numHeads, sMaxQ, headDim};
-    const std::vector<int64_t> kvDims = {batch, numHeads, sMaxKv, headDim};
-    const std::vector<int64_t> lseDims = {batch, numHeads, sMaxQ, 1};
+    const std::vector<int64_t> qDims = raggedDims(batch, sMaxQ, numHeads, headDim);
+    const std::vector<int64_t> kvDims = raggedDims(batch, sMaxKv, numHeads, headDim);
+    const std::vector<int64_t> lseDims = raggedDims(batch, sMaxQ, numHeads, 1);
 
     std::vector<float> qBack(static_cast<size_t>(totalQ * numHeads * headDim));
     std::vector<float> kBack(static_cast<size_t>(totalKv * numHeads * headDim));
@@ -528,13 +524,13 @@ TEST(TestCpuFpReferenceSdpaRaggedFp32, ZeroLengthKvFullyMasked)
     {
         for(int64_t h = 0; h < numHeads; ++h)
         {
-            const float lseVal = lse.getHostValue(std::vector<int64_t>{b, h, s, 0});
+            const float lseVal = lse.getHostValue(raggedIndex(b, s, h, 0));
             EXPECT_TRUE(std::isinf(lseVal) && lseVal < 0.0f)
                 << "expected -inf LSE at fully-masked batch " << b << " token " << s << " head "
                 << h;
             for(int64_t dv = 0; dv < headDim; ++dv)
             {
-                EXPECT_EQ(o.getHostValue(std::vector<int64_t>{b, h, s, dv}), 0.0f)
+                EXPECT_EQ(o.getHostValue(raggedIndex(b, s, h, dv)), 0.0f)
                     << "expected zero output at fully-masked batch " << b << " token " << s;
             }
         }
@@ -550,7 +546,7 @@ TEST(TestCpuFpReferenceSdpaRaggedFp32, ZeroLengthQBatch)
 TEST(TestCpuFpReferenceSdpaRaggedFp32, AllQueriesEmpty)
 {
     constexpr float SENTINEL = -99.0f;
-    const std::vector<int64_t> dims = {2, 1, 2, 16};
+    const std::vector<int64_t> dims = raggedDims(2, 2, 1, 16);
     std::vector<float> qB(32, 1.0f);
     std::vector<float> kB(48, 1.0f);
     std::vector<float> vB(48, 1.0f);
@@ -559,7 +555,7 @@ TEST(TestCpuFpReferenceSdpaRaggedFp32, AllQueriesEmpty)
     auto k = wrapRagged(kB.data(), dims, 16, {0, 2, 3});
     auto v = wrapRagged(vB.data(), dims, 16, {0, 2, 3});
     auto o = wrapRagged(oB.data(), dims, 16, {0, 0, 0});
-    Tensor<float> lse({2, 1, 2, 1});
+    Tensor<float> lse(raggedDims(2, 2, 1, 1));
     lse.fillWithValue(SENTINEL);
 
     EXPECT_NO_THROW((CpuFpReferenceSdpaRagged::forward<float, float, float, float, float>(
@@ -581,17 +577,17 @@ TEST(TestCpuFpReferenceSdpaRaggedFp32, AllQueriesEmpty)
 TEST(TestCpuFpReferenceSdpaRaggedFp32, ThrowsOnNonRaggedInput)
 {
     // Plain tensors have no raggedIterationInfo(), so they are rejected.
-    Tensor<float> q({1, 2, 4, 16});
-    Tensor<float> k({1, 2, 4, 16});
-    Tensor<float> v({1, 2, 4, 16});
-    Tensor<float> o({1, 2, 4, 16});
+    Tensor<float> q(raggedDims(1, 4, 2, 16));
+    Tensor<float> k(raggedDims(1, 4, 2, 16));
+    Tensor<float> v(raggedDims(1, 4, 2, 16));
+    Tensor<float> o(raggedDims(1, 4, 2, 16));
     EXPECT_THROW((CpuFpReferenceSdpaRagged::forward<float, float, float, float, float>(q, k, v, o)),
                  std::invalid_argument);
 }
 
 TEST(TestCpuFpReferenceSdpaRaggedFp32, ThrowsOnBadLseShape)
 {
-    const std::vector<int64_t> dims = {1, 2, 4, 16};
+    const std::vector<int64_t> dims = raggedDims(1, 4, 2, 16);
     const auto cum = cumTokens({4});
     std::vector<float> qB(static_cast<size_t>(2 * 4 * 16));
     std::vector<float> kB(qB.size());
@@ -602,7 +598,7 @@ TEST(TestCpuFpReferenceSdpaRaggedFp32, ThrowsOnBadLseShape)
     auto v = wrapRagged(vB.data(), dims, int64_t{2} * 16, cum);
     auto o = wrapRagged(oB.data(), dims, int64_t{2} * 16, cum);
 
-    Tensor<float> badLse({1, 2, 4, 2}); // last dim must be 1
+    Tensor<float> badLse(raggedDims(1, 4, 2, 2)); // last dim must be 1
     EXPECT_THROW((CpuFpReferenceSdpaRagged::forward<float, float, float, float, float>(
                      q, k, v, o, std::nullopt, -1, -1, true, &badLse)),
                  std::invalid_argument);
@@ -610,7 +606,7 @@ TEST(TestCpuFpReferenceSdpaRaggedFp32, ThrowsOnBadLseShape)
 
 TEST(TestCpuFpReferenceSdpaRaggedFp32, ThrowsOnBadDescaleShape)
 {
-    const std::vector<int64_t> dims = {1, 2, 4, 16};
+    const std::vector<int64_t> dims = raggedDims(1, 4, 2, 16);
     const auto cum = cumTokens({4});
     std::vector<float> qB(static_cast<size_t>(2 * 4 * 16));
     std::vector<float> kB(qB.size());
@@ -634,10 +630,10 @@ TEST(TestCpuFpReferenceSdpaRaggedFp32, ThrowsOnPerQueryHeadQDescaleUnderGqa)
     std::vector<float> kB;
     std::vector<float> vB;
     std::vector<float> oB;
-    auto q = makeValidRagged(qB, {1, 4, 4, 16}, {4});
-    auto k = makeValidRagged(kB, {1, 2, 4, 16}, {4});
-    auto v = makeValidRagged(vB, {1, 2, 4, 16}, {4});
-    auto o = makeValidRagged(oB, {1, 4, 4, 16}, {4});
+    auto q = makeValidRagged(qB, raggedDims(1, 4, 4, 16), {4});
+    auto k = makeValidRagged(kB, raggedDims(1, 4, 2, 16), {4});
+    auto v = makeValidRagged(vB, raggedDims(1, 4, 2, 16), {4});
+    auto o = makeValidRagged(oB, raggedDims(1, 4, 4, 16), {4});
 
     auto perQueryHead = makePerHeadDescale(1, 4, 0.5f);
     EXPECT_THROW((CpuFpReferenceSdpaRagged::forward<float, float, float, float, float>(
@@ -653,10 +649,10 @@ TEST(TestCpuFpReferenceSdpaRaggedFp32, ThrowsOnBatchMismatch)
     std::vector<float> kB;
     std::vector<float> vB;
     std::vector<float> oB;
-    auto q = makeValidRagged(qB, {1, 2, 4, 16}, {4});
-    auto k = makeValidRagged(kB, {2, 2, 4, 16}, {4, 4}); // batch 2 != q batch 1
-    auto v = makeValidRagged(vB, {1, 2, 4, 16}, {4});
-    auto o = makeValidRagged(oB, {1, 2, 4, 16}, {4});
+    auto q = makeValidRagged(qB, raggedDims(1, 4, 2, 16), {4});
+    auto k = makeValidRagged(kB, raggedDims(2, 4, 2, 16), {4, 4}); // batch 2 != q batch 1
+    auto v = makeValidRagged(vB, raggedDims(1, 4, 2, 16), {4});
+    auto o = makeValidRagged(oB, raggedDims(1, 4, 2, 16), {4});
     EXPECT_THROW((CpuFpReferenceSdpaRagged::forward<float, float, float, float, float>(q, k, v, o)),
                  std::invalid_argument);
 }
@@ -667,10 +663,10 @@ TEST(TestCpuFpReferenceSdpaRaggedFp32, ThrowsOnQkHeadDimMismatch)
     std::vector<float> kB;
     std::vector<float> vB;
     std::vector<float> oB;
-    auto q = makeValidRagged(qB, {1, 2, 4, 16}, {4});
-    auto k = makeValidRagged(kB, {1, 2, 4, 32}, {4}); // K head_dim 32 != Q head_dim 16
-    auto v = makeValidRagged(vB, {1, 2, 4, 16}, {4});
-    auto o = makeValidRagged(oB, {1, 2, 4, 16}, {4});
+    auto q = makeValidRagged(qB, raggedDims(1, 4, 2, 16), {4});
+    auto k = makeValidRagged(kB, raggedDims(1, 4, 2, 32), {4}); // K head_dim 32 != Q head_dim 16
+    auto v = makeValidRagged(vB, raggedDims(1, 4, 2, 16), {4});
+    auto o = makeValidRagged(oB, raggedDims(1, 4, 2, 16), {4});
     EXPECT_THROW((CpuFpReferenceSdpaRagged::forward<float, float, float, float, float>(q, k, v, o)),
                  std::invalid_argument);
 }
@@ -681,10 +677,10 @@ TEST(TestCpuFpReferenceSdpaRaggedFp32, ThrowsOnKvSeqExtentMismatch)
     std::vector<float> kB;
     std::vector<float> vB;
     std::vector<float> oB;
-    auto q = makeValidRagged(qB, {1, 2, 4, 16}, {4});
-    auto k = makeValidRagged(kB, {1, 2, 4, 16}, {4});
-    auto v = makeValidRagged(vB, {1, 2, 6, 16}, {6}); // V S_max 6 != K S_max 4
-    auto o = makeValidRagged(oB, {1, 2, 4, 16}, {4});
+    auto q = makeValidRagged(qB, raggedDims(1, 4, 2, 16), {4});
+    auto k = makeValidRagged(kB, raggedDims(1, 4, 2, 16), {4});
+    auto v = makeValidRagged(vB, raggedDims(1, 6, 2, 16), {6}); // V S_max 6 != K S_max 4
+    auto o = makeValidRagged(oB, raggedDims(1, 4, 2, 16), {4});
     EXPECT_THROW((CpuFpReferenceSdpaRagged::forward<float, float, float, float, float>(q, k, v, o)),
                  std::invalid_argument);
 }
@@ -699,10 +695,10 @@ TEST(TestCpuFpReferenceSdpaRaggedFp32, ThrowsOnKvSequenceLengthMismatch)
     std::vector<float> kB;
     std::vector<float> vB;
     std::vector<float> oB;
-    auto q = makeValidRagged(qB, {2, 1, 1, 1}, {1, 1});
-    auto k = makeValidRagged(kB, {2, 1, 2, 1}, {2, 1});
-    auto v = makeValidRagged(vB, {2, 1, 2, 1}, {1, 2});
-    auto o = makeValidRagged(oB, {2, 1, 1, 1}, {1, 1});
+    auto q = makeValidRagged(qB, raggedDims(2, 1, 1, 1), {1, 1});
+    auto k = makeValidRagged(kB, raggedDims(2, 2, 1, 1), {2, 1});
+    auto v = makeValidRagged(vB, raggedDims(2, 2, 1, 1), {1, 2});
+    auto o = makeValidRagged(oB, raggedDims(2, 1, 1, 1), {1, 1});
     vB[0] = 10.0f;
     vB[1] = 20.0f;
     vB[2] = 30.0f;
@@ -716,10 +712,10 @@ TEST(TestCpuFpReferenceSdpaRaggedFp32, ThrowsOnQoSequenceLengthMismatch)
     std::vector<float> kB;
     std::vector<float> vB;
     std::vector<float> oB;
-    auto q = makeValidRagged(qB, {2, 2, 2, 16}, {2, 1});
-    auto k = makeValidRagged(kB, {2, 2, 2, 16}, {2, 2});
-    auto v = makeValidRagged(vB, {2, 2, 2, 16}, {2, 2});
-    auto o = makeValidRagged(oB, {2, 2, 2, 16}, {1, 2}); // O lengths != Q lengths
+    auto q = makeValidRagged(qB, raggedDims(2, 2, 2, 16), {2, 1});
+    auto k = makeValidRagged(kB, raggedDims(2, 2, 2, 16), {2, 2});
+    auto v = makeValidRagged(vB, raggedDims(2, 2, 2, 16), {2, 2});
+    auto o = makeValidRagged(oB, raggedDims(2, 2, 2, 16), {1, 2}); // O lengths != Q lengths
     EXPECT_THROW((CpuFpReferenceSdpaRagged::forward<float, float, float, float, float>(q, k, v, o)),
                  std::invalid_argument);
 }
@@ -731,11 +727,11 @@ TEST(TestCpuFpReferenceSdpaRaggedFp32, ThrowsOnRaggedLseSequenceLengthMismatch)
     std::vector<float> vB;
     std::vector<float> oB;
     std::vector<float> lseB;
-    auto q = makeValidRagged(qB, {2, 1, 2, 16}, {2, 1});
-    auto k = makeValidRagged(kB, {2, 1, 2, 16}, {2, 2});
-    auto v = makeValidRagged(vB, {2, 1, 2, 16}, {2, 2});
-    auto o = makeValidRagged(oB, {2, 1, 2, 16}, {2, 1});
-    auto lse = makeValidRagged(lseB, {2, 1, 2, 1}, {1, 2}); // LSE lengths != Q lengths
+    auto q = makeValidRagged(qB, raggedDims(2, 2, 1, 16), {2, 1});
+    auto k = makeValidRagged(kB, raggedDims(2, 2, 1, 16), {2, 2});
+    auto v = makeValidRagged(vB, raggedDims(2, 2, 1, 16), {2, 2});
+    auto o = makeValidRagged(oB, raggedDims(2, 2, 1, 16), {2, 1});
+    auto lse = makeValidRagged(lseB, raggedDims(2, 2, 1, 1), {1, 2}); // LSE lengths != Q lengths
     EXPECT_THROW((CpuFpReferenceSdpaRagged::forward<float, float, float, float, float>(
                      q, k, v, o, std::nullopt, -1, -1, true, &lse)),
                  std::invalid_argument);
@@ -747,10 +743,10 @@ TEST(TestCpuFpReferenceSdpaRaggedFp32, ThrowsOnNonRaggedOutput)
     std::vector<float> qB;
     std::vector<float> kB;
     std::vector<float> vB;
-    auto q = makeValidRagged(qB, {1, 2, 4, 16}, {4});
-    auto k = makeValidRagged(kB, {1, 2, 4, 16}, {4});
-    auto v = makeValidRagged(vB, {1, 2, 4, 16}, {4});
-    Tensor<float> o({1, 2, 4, 16});
+    auto q = makeValidRagged(qB, raggedDims(1, 4, 2, 16), {4});
+    auto k = makeValidRagged(kB, raggedDims(1, 4, 2, 16), {4});
+    auto v = makeValidRagged(vB, raggedDims(1, 4, 2, 16), {4});
+    Tensor<float> o(raggedDims(1, 4, 2, 16));
     EXPECT_THROW((CpuFpReferenceSdpaRagged::forward<float, float, float, float, float>(q, k, v, o)),
                  std::invalid_argument);
 }
@@ -774,7 +770,7 @@ void setTokenOffsets(ITensor& aux, const std::vector<int64_t>& tokens, int64_t s
 // Returns whether forward() threw std::invalid_argument.
 bool throwsOnEditedQTokens(const std::vector<int64_t>& qTokens)
 {
-    const std::vector<int64_t> dims = {2, 1, 2, 16};
+    const std::vector<int64_t> dims = raggedDims(2, 2, 1, 16);
     const std::vector<int64_t> valid = {0, 2, 4};
     std::vector<float> qB(64, 0.0f);
     std::vector<float> kB(64, 0.0f);
@@ -782,10 +778,10 @@ bool throwsOnEditedQTokens(const std::vector<int64_t>& qTokens)
     std::vector<float> oB(64, 0.0f);
     auto qAux = makeRaggedOffsetAux(valid, 16);
     auto oAux = makeRaggedOffsetAux(valid, 16);
-    ShallowRaggedTensor<float> q(qB.data(), dims, bshd(dims), SEQ_AXIS, qAux);
+    ShallowRaggedTensor<float> q(qB.data(), dims, raggedStrides(dims), SEQ_AXIS, qAux);
     auto k = wrapRagged(kB.data(), dims, 16, valid);
     auto v = wrapRagged(vB.data(), dims, 16, valid);
-    ShallowRaggedTensor<float> o(oB.data(), dims, bshd(dims), SEQ_AXIS, oAux);
+    ShallowRaggedTensor<float> o(oB.data(), dims, raggedStrides(dims), SEQ_AXIS, oAux);
     setTokenOffsets(*qAux, qTokens, 16);
     setTokenOffsets(*oAux, qTokens, 16);
     try
@@ -815,11 +811,11 @@ TEST(TestCpuFpReferenceSdpaRaggedFp32, ThrowsOnLseShorterThanQ)
     std::vector<float> kB;
     std::vector<float> vB;
     std::vector<float> oB;
-    auto q = makeValidRagged(qB, {2, 1, 2, 16}, {2, 1});
-    auto k = makeValidRagged(kB, {2, 1, 2, 16}, {2, 2});
-    auto v = makeValidRagged(vB, {2, 1, 2, 16}, {2, 2});
-    auto o = makeValidRagged(oB, {2, 1, 2, 16}, {2, 1});
-    Tensor<float> lse({2, 1, 1, 1});
+    auto q = makeValidRagged(qB, raggedDims(2, 2, 1, 16), {2, 1});
+    auto k = makeValidRagged(kB, raggedDims(2, 2, 1, 16), {2, 2});
+    auto v = makeValidRagged(vB, raggedDims(2, 2, 1, 16), {2, 2});
+    auto o = makeValidRagged(oB, raggedDims(2, 2, 1, 16), {2, 1});
+    Tensor<float> lse(raggedDims(2, 1, 1, 1));
     EXPECT_THROW((CpuFpReferenceSdpaRagged::forward<float, float, float, float, float>(
                      q, k, v, o, std::nullopt, -1, -1, true, &lse)),
                  std::invalid_argument);
@@ -831,10 +827,10 @@ TEST(TestCpuFpReferenceSdpaRaggedFp32, ThrowsOnNonDivisibleHeads)
     std::vector<float> kB;
     std::vector<float> vB;
     std::vector<float> oB;
-    auto q = makeValidRagged(qB, {1, 4, 4, 16}, {4});
-    auto k = makeValidRagged(kB, {1, 3, 4, 16}, {4}); // 4 % 3 != 0
-    auto v = makeValidRagged(vB, {1, 3, 4, 16}, {4});
-    auto o = makeValidRagged(oB, {1, 4, 4, 16}, {4});
+    auto q = makeValidRagged(qB, raggedDims(1, 4, 4, 16), {4});
+    auto k = makeValidRagged(kB, raggedDims(1, 4, 3, 16), {4}); // 4 % 3 != 0
+    auto v = makeValidRagged(vB, raggedDims(1, 4, 3, 16), {4});
+    auto o = makeValidRagged(oB, raggedDims(1, 4, 4, 16), {4});
     EXPECT_THROW((CpuFpReferenceSdpaRagged::forward<float, float, float, float, float>(q, k, v, o)),
                  std::invalid_argument);
 }
@@ -845,10 +841,10 @@ TEST(TestCpuFpReferenceSdpaRaggedFp32, ThrowsOnBadOutputShape)
     std::vector<float> kB;
     std::vector<float> vB;
     std::vector<float> oB;
-    auto q = makeValidRagged(qB, {1, 2, 4, 16}, {4});
-    auto k = makeValidRagged(kB, {1, 2, 4, 16}, {4});
-    auto v = makeValidRagged(vB, {1, 2, 4, 16}, {4});
-    auto o = makeValidRagged(oB, {1, 2, 4, 32}, {4}); // O head_dim 32 != V head_dim 16
+    auto q = makeValidRagged(qB, raggedDims(1, 4, 2, 16), {4});
+    auto k = makeValidRagged(kB, raggedDims(1, 4, 2, 16), {4});
+    auto v = makeValidRagged(vB, raggedDims(1, 4, 2, 16), {4});
+    auto o = makeValidRagged(oB, raggedDims(1, 4, 2, 32), {4}); // O head_dim 32 != V head_dim 16
     EXPECT_THROW((CpuFpReferenceSdpaRagged::forward<float, float, float, float, float>(q, k, v, o)),
                  std::invalid_argument);
 }

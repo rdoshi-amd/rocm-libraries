@@ -11,6 +11,7 @@
 #include <hipdnn_data_sdk/utilities/ShapeUtilities.hpp>
 #include <hipdnn_flatbuffers_sdk/data_objects/graph_generated.h>
 #include <hipdnn_flatbuffers_sdk/data_objects/sdpa_attributes_generated.h>
+#include <hipdnn_test_sdk/utilities/RaggedSdpaTestUtils.hpp>
 
 namespace hipdnn_integration_tests::test_utils
 {
@@ -94,15 +95,6 @@ inline flatbuffers::FlatBufferBuilder
     return builder;
 }
 
-// Element strides for a packed [B, H, S, D] tensor stored in BSHD order: [S*H*D, D, H*D, 1].
-inline std::vector<int64_t> bshdStrides(const std::vector<int64_t>& dims)
-{
-    const auto h = dims[1];
-    const auto s = dims[2];
-    const auto d = dims[3];
-    return {s * h * d, d, h * d, 1};
-}
-
 // Layout of the optional stats (LSE) output of a ragged SDPA graph.
 enum class RaggedStatsLayout
 {
@@ -175,6 +167,10 @@ inline flatbuffers::FlatBufferBuilder
                              const RaggedSdpaFwdGraphOptions& options = {})
 {
     using namespace hipdnn_flatbuffers_sdk::data_objects;
+    using hipdnn_test_sdk::utilities::raggedDims;
+    using hipdnn_test_sdk::utilities::raggedHeads;
+    using hipdnn_test_sdk::utilities::raggedSeqExtent;
+    using hipdnn_test_sdk::utilities::raggedStrides;
 
     const DataType outputDataType
         = (options.oDataType == DataType::UNSET) ? dataType : options.oDataType;
@@ -207,10 +203,10 @@ inline flatbuffers::FlatBufferBuilder
 
     flatbuffers::FlatBufferBuilder builder;
 
-    const auto qStrides = bshdStrides(qDims);
-    const auto kStrides = bshdStrides(kDims);
-    const auto vStrides = bshdStrides(vDims);
-    const auto oStrides = bshdStrides(oDims);
+    const auto qStrides = raggedStrides(qDims);
+    const auto kStrides = raggedStrides(kDims);
+    const auto vStrides = raggedStrides(vDims);
+    const auto oStrides = raggedStrides(oDims);
 
     const auto raggedOffsetVUid = options.raggedOffsetVUid.value_or(raggedOffsetKvUid);
     const auto raggedOffsetOUid = options.raggedOffsetOUid.value_or(raggedOffsetQUid);
@@ -292,7 +288,7 @@ inline flatbuffers::FlatBufferBuilder
 
     if(options.statsUid.has_value())
     {
-        const std::vector<int64_t> statsDims = {qDims[0], qDims[1], qDims[2], 1};
+        const auto statsDims = raggedDims(qDims[0], raggedSeqExtent(qDims), raggedHeads(qDims), 1);
         if(options.statsLayout == RaggedStatsLayout::DENSE)
         {
             const auto statsStrides = generateStrides(statsDims);
@@ -305,7 +301,7 @@ inline flatbuffers::FlatBufferBuilder
         }
         else
         {
-            const auto statsStrides = bshdStrides(statsDims);
+            const auto statsStrides = raggedStrides(statsDims);
             tensors.push_back(CreateTensorAttributesDirect(builder,
                                                            options.statsUid.value(),
                                                            "Stats",

@@ -49,7 +49,7 @@ constexpr int64_t RAGGED_OFFSET_STATS_UID = 22;
 constexpr int64_t UNUSED_UID = 99;
 
 // One batch. The shape doesn't affect applicability.
-const std::vector<int64_t> DIMS = {1, 2, 8, 16};
+const std::vector<int64_t> DIMS = raggedDims(1, 8, 2, 16);
 
 using Bf16Builder = GpuSdpaRaggedFwdPlanBuilder<DataType::BFLOAT16,
                                                 DataType::BFLOAT16,
@@ -101,8 +101,11 @@ ShallowRaggedTensor<float> wrapRagged(float* buf,
                                       int64_t seqStride,
                                       const std::vector<int64_t>& lengths)
 {
-    return ShallowRaggedTensor<float>(
-        buf, dims, bshd(dims), SEQ_AXIS, makeRaggedOffsetAux(cumTokens(lengths), seqStride));
+    return ShallowRaggedTensor<float>(buf,
+                                      dims,
+                                      raggedStrides(dims),
+                                      SEQ_AXIS,
+                                      makeRaggedOffsetAux(cumTokens(lengths), seqStride));
 }
 
 // Runs the fp32 plan with unequal Q/KV lengths and an LSE in statsLayout, and compares it with
@@ -121,9 +124,9 @@ void checkPlanLseAgainstCpu(RaggedStatsLayout statsLayout)
     const int64_t seqStride = numHeads * headDim;
     const bool packedStats = statsLayout == RaggedStatsLayout::PACKED;
 
-    const std::vector<int64_t> qDims = {batch, numHeads, sMaxQ, headDim};
-    const std::vector<int64_t> kvDims = {batch, numHeads, sMaxKv, headDim};
-    const std::vector<int64_t> lseDims = {batch, numHeads, sMaxQ, 1};
+    const auto qDims = raggedDims(batch, sMaxQ, numHeads, headDim);
+    const auto kvDims = raggedDims(batch, sMaxKv, numHeads, headDim);
+    const auto lseDims = raggedDims(batch, sMaxQ, numHeads, 1);
 
     RaggedSdpaFwdGraphOptions options;
     options.statsUid = STATS_UID;
@@ -151,9 +154,9 @@ void checkPlanLseAgainstCpu(RaggedStatsLayout statsLayout)
     ASSERT_TRUE(fp32Builder.isApplicable(graphWrap.getNode(0), graphWrap.getTensorMap()));
     auto plan = fp32Builder.buildNodePlan(graphWrap, graphWrap.getNode(0));
 
-    Tensor<float> q(qDims, bshd(qDims));
-    Tensor<float> k(kvDims, bshd(kvDims));
-    Tensor<float> v(kvDims, bshd(kvDims));
+    Tensor<float> q(qDims, raggedStrides(qDims));
+    Tensor<float> k(kvDims, raggedStrides(kvDims));
+    Tensor<float> v(kvDims, raggedStrides(kvDims));
     q.fillWithRandomValues(-1.0f, 1.0f, /*seed=*/11);
     k.fillWithRandomValues(-1.0f, 1.0f, /*seed=*/22);
     v.fillWithRandomValues(-1.0f, 1.0f, /*seed=*/33);
@@ -164,14 +167,14 @@ void checkPlanLseAgainstCpu(RaggedStatsLayout statsLayout)
     constexpr float SENTINEL = -99.0f;
     const auto makeLse = [&]() {
         Tensor<float> lse
-            = packedStats ? Tensor<float>(lseDims, bshd(lseDims)) : Tensor<float>(lseDims);
+            = packedStats ? Tensor<float>(lseDims, raggedStrides(lseDims)) : Tensor<float>(lseDims);
         lse.fillWithValue(SENTINEL);
         return lse;
     };
     auto lsePlan = makeLse();
     auto lseCpu = makeLse();
-    Tensor<float> oPlan(qDims, bshd(qDims));
-    Tensor<float> oCpu(qDims, bshd(qDims));
+    Tensor<float> oPlan(qDims, raggedStrides(qDims));
+    Tensor<float> oCpu(qDims, raggedStrides(qDims));
 
     std::unordered_map<int64_t, void*> variantPack{
         {Q_UID, q.memory().deviceData()},
@@ -359,8 +362,8 @@ TEST(TestGpuSdpaRaggedFwdPlan, ExecuteMatchesDirectFpropRaggedBf16)
     const int64_t numHeads = 2;
     const int64_t seqLen = 4; // equal per batch -> no padding
     const int64_t headDim = 16;
-    const std::vector<int64_t> qkvDims = {batch, numHeads, seqLen, headDim};
-    const std::vector<int64_t> lseDims = {batch, numHeads, seqLen, 1};
+    const auto qkvDims = raggedDims(batch, seqLen, numHeads, headDim);
+    const auto lseDims = raggedDims(batch, seqLen, numHeads, 1);
     const int64_t seqStride = numHeads * headDim;
 
     RaggedSdpaFwdGraphOptions options;
@@ -383,16 +386,16 @@ TEST(TestGpuSdpaRaggedFwdPlan, ExecuteMatchesDirectFpropRaggedBf16)
     const Bf16Builder bf16Builder;
     auto plan = bf16Builder.buildNodePlan(graphWrap, graphWrap.getNode(0));
 
-    Tensor<bfloat16> q(qkvDims, bshd(qkvDims));
-    Tensor<bfloat16> k(qkvDims, bshd(qkvDims));
-    Tensor<bfloat16> v(qkvDims, bshd(qkvDims));
+    Tensor<bfloat16> q(qkvDims, raggedStrides(qkvDims));
+    Tensor<bfloat16> k(qkvDims, raggedStrides(qkvDims));
+    Tensor<bfloat16> v(qkvDims, raggedStrides(qkvDims));
     q.fillWithRandomValues(bfloat16(-1.0f), bfloat16(1.0f), /*seed=*/11);
     k.fillWithRandomValues(bfloat16(-1.0f), bfloat16(1.0f), /*seed=*/22);
     v.fillWithRandomValues(bfloat16(-1.0f), bfloat16(1.0f), /*seed=*/33);
     auto offQ = makeRaggedOffset({seqLen, seqLen}, seqStride);
     auto offKv = makeRaggedOffset({seqLen, seqLen}, seqStride);
 
-    Tensor<bfloat16> oPlan(qkvDims, bshd(qkvDims));
+    Tensor<bfloat16> oPlan(qkvDims, raggedStrides(qkvDims));
     Tensor<float> lsePlan(lseDims); // dense, matching the graph's stats strides
     lsePlan.fillWithValue(-987.0f); // sentinel: an unwritten LSE would retain this
 
@@ -410,7 +413,7 @@ TEST(TestGpuSdpaRaggedFwdPlan, ExecuteMatchesDirectFpropRaggedBf16)
     lsePlan.markDeviceModified();
 
     // Direct reference with the same probability mode the plan selects for all-bf16.
-    Tensor<bfloat16> oDirect(qkvDims, bshd(qkvDims));
+    Tensor<bfloat16> oDirect(qkvDims, raggedStrides(qkvDims));
     Tensor<float> lseDirect(lseDims);
     GpuFpReferenceSdpaRagged::fpropRagged<bfloat16, bfloat16, bfloat16, bfloat16, float>(
         q,
@@ -453,7 +456,7 @@ TEST(TestGpuSdpaRaggedFwdPlan, ExecuteFp8MatchesDirectFpropRagged)
     const int64_t numHeads = 2;
     const int64_t seqLen = 4; // equal per batch -> no padding
     const int64_t headDim = 128;
-    const std::vector<int64_t> qkvDims = {batch, numHeads, seqLen, headDim};
+    const auto qkvDims = raggedDims(batch, seqLen, numHeads, headDim);
     const int64_t seqStride = numHeads * headDim;
 
     RaggedSdpaFwdGraphOptions options;
@@ -484,9 +487,9 @@ TEST(TestGpuSdpaRaggedFwdPlan, ExecuteFp8MatchesDirectFpropRagged)
     ASSERT_TRUE(fp8Builder.isApplicable(graphWrap.getNode(0), graphWrap.getTensorMap()));
     auto plan = fp8Builder.buildNodePlan(graphWrap, graphWrap.getNode(0));
 
-    Tensor<fp8_e4m3> q(qkvDims, bshd(qkvDims));
-    Tensor<fp8_e4m3> k(qkvDims, bshd(qkvDims));
-    Tensor<fp8_e4m3> v(qkvDims, bshd(qkvDims));
+    Tensor<fp8_e4m3> q(qkvDims, raggedStrides(qkvDims));
+    Tensor<fp8_e4m3> k(qkvDims, raggedStrides(qkvDims));
+    Tensor<fp8_e4m3> v(qkvDims, raggedStrides(qkvDims));
     q.fillWithRandomValues(fp8_e4m3(-1.0f), fp8_e4m3(1.0f), /*seed=*/11);
     k.fillWithRandomValues(fp8_e4m3(-1.0f), fp8_e4m3(1.0f), /*seed=*/22);
     v.fillWithRandomValues(fp8_e4m3(-1.0f), fp8_e4m3(1.0f), /*seed=*/33);
@@ -503,7 +506,7 @@ TEST(TestGpuSdpaRaggedFwdPlan, ExecuteFp8MatchesDirectFpropRagged)
     descaleK.memory().markHostModified();
     descaleV.memory().markHostModified();
 
-    Tensor<bfloat16> oPlan(qkvDims, bshd(qkvDims));
+    Tensor<bfloat16> oPlan(qkvDims, raggedStrides(qkvDims));
     const std::unordered_map<int64_t, void*> variantPack{
         {Q_UID, q.memory().deviceData()},
         {K_UID, k.memory().deviceData()},
@@ -518,7 +521,7 @@ TEST(TestGpuSdpaRaggedFwdPlan, ExecuteFp8MatchesDirectFpropRagged)
     plan->execute(variantPack);
     oPlan.markDeviceModified();
 
-    Tensor<bfloat16> oDirect(qkvDims, bshd(qkvDims));
+    Tensor<bfloat16> oDirect(qkvDims, raggedStrides(qkvDims));
     GpuFpReferenceSdpaRagged::fpropRagged<fp8_e4m3, fp8_e4m3, fp8_e4m3, bfloat16, float>(
         q,
         k,
@@ -577,7 +580,7 @@ void checkFp8DescaleStorage(const DescaleCase& qCase,
     const int64_t numHeads = 2;
     const int64_t seqLen = 4; // equal per batch -> no padding
     const int64_t headDim = 128;
-    const std::vector<int64_t> qkvDims = {batch, numHeads, seqLen, headDim};
+    const auto qkvDims = raggedDims(batch, seqLen, numHeads, headDim);
     const int64_t seqStride = numHeads * headDim;
 
     const auto descaleDims = [&](const DescaleCase& c) {
@@ -617,9 +620,9 @@ void checkFp8DescaleStorage(const DescaleCase& qCase,
     ASSERT_TRUE(fp8Builder.isApplicable(graphWrap.getNode(0), graphWrap.getTensorMap()));
     auto plan = fp8Builder.buildNodePlan(graphWrap, graphWrap.getNode(0));
 
-    Tensor<fp8_e4m3> q(qkvDims, bshd(qkvDims));
-    Tensor<fp8_e4m3> k(qkvDims, bshd(qkvDims));
-    Tensor<fp8_e4m3> v(qkvDims, bshd(qkvDims));
+    Tensor<fp8_e4m3> q(qkvDims, raggedStrides(qkvDims));
+    Tensor<fp8_e4m3> k(qkvDims, raggedStrides(qkvDims));
+    Tensor<fp8_e4m3> v(qkvDims, raggedStrides(qkvDims));
     q.fillWithRandomValues(fp8_e4m3(-1.0f), fp8_e4m3(1.0f), /*seed=*/11);
     k.fillWithRandomValues(fp8_e4m3(-1.0f), fp8_e4m3(1.0f), /*seed=*/22);
     v.fillWithRandomValues(fp8_e4m3(-1.0f), fp8_e4m3(1.0f), /*seed=*/33);
@@ -640,7 +643,7 @@ void checkFp8DescaleStorage(const DescaleCase& qCase,
     float hostK = kCase.values.front();
     float hostV = vCase.values.front();
 
-    Tensor<bfloat16> oPlan(qkvDims, bshd(qkvDims));
+    Tensor<bfloat16> oPlan(qkvDims, raggedStrides(qkvDims));
     std::unordered_map<int64_t, void*> variantPack{
         {Q_UID, q.memory().deviceData()},
         {K_UID, k.memory().deviceData()},
@@ -665,7 +668,7 @@ void checkFp8DescaleStorage(const DescaleCase& qCase,
     plan->execute(variantPack);
     oPlan.markDeviceModified();
 
-    Tensor<bfloat16> oDirect(qkvDims, bshd(qkvDims));
+    Tensor<bfloat16> oDirect(qkvDims, raggedStrides(qkvDims));
     GpuFpReferenceSdpaRagged::fpropRagged<fp8_e4m3, fp8_e4m3, fp8_e4m3, bfloat16, float>(
         q,
         k,
@@ -735,7 +738,7 @@ TEST(TestGpuSdpaRaggedFwdPlanBuilder, IsNotApplicableForNonScalarHostDescale)
         options.descaleK = FloatOperandSpec{31};
         options.descaleV = FloatOperandSpec{32};
         options.oDataType = DataType::BFLOAT16;
-        const std::vector<int64_t> dims = {2, 2, 4, 128};
+        const auto dims = raggedDims(2, 4, 2, 128);
         auto graphBuilder = createRaggedSdpaFwdGraph(Q_UID,
                                                      K_UID,
                                                      V_UID,
@@ -781,7 +784,7 @@ TEST(TestGpuSdpaRaggedFwdPlan, ExecuteRejectsKvSequenceLengthMismatch)
     const int64_t numHeads = 2;
     const int64_t headDim = 16;
     const int64_t seqStride = numHeads * headDim;
-    const std::vector<int64_t> dims = {2, numHeads, 2, headDim};
+    const auto dims = raggedDims(2, 2, numHeads, headDim);
 
     RaggedSdpaFwdGraphOptions options;
     options.raggedOffsetVUid = RAGGED_OFFSET_V_UID;
@@ -804,10 +807,10 @@ TEST(TestGpuSdpaRaggedFwdPlan, ExecuteRejectsKvSequenceLengthMismatch)
     ASSERT_TRUE(fp32Builder.isApplicable(graphWrap.getNode(0), graphWrap.getTensorMap()));
     auto plan = fp32Builder.buildNodePlan(graphWrap, graphWrap.getNode(0));
 
-    Tensor<float> q(dims, bshd(dims));
-    Tensor<float> k(dims, bshd(dims));
-    Tensor<float> v(dims, bshd(dims));
-    Tensor<float> o(dims, bshd(dims));
+    Tensor<float> q(dims, raggedStrides(dims));
+    Tensor<float> k(dims, raggedStrides(dims));
+    Tensor<float> v(dims, raggedStrides(dims));
+    Tensor<float> o(dims, raggedStrides(dims));
     q.fillWithValue(0.0f);
     k.fillWithValue(0.0f);
     v.fillWithValue(1.0f);
@@ -883,7 +886,7 @@ TEST_P(TestGpuSdpaRaggedFwdPlanScale, ExecuteHonorsNonDefaultScale)
     const int64_t headDim = 16;
     const int64_t seqStride = numHeads * headDim;
     const int64_t totalQ = 8;
-    const std::vector<int64_t> dims = {batch, numHeads, 5, headDim};
+    const auto dims = raggedDims(batch, 5, numHeads, headDim);
     const auto source = GetParam();
 
     RaggedSdpaFwdGraphOptions options;
@@ -921,9 +924,9 @@ TEST_P(TestGpuSdpaRaggedFwdPlanScale, ExecuteHonorsNonDefaultScale)
     ASSERT_TRUE(fp32Builder.isApplicable(graphWrap.getNode(0), graphWrap.getTensorMap()));
     auto plan = fp32Builder.buildNodePlan(graphWrap, graphWrap.getNode(0));
 
-    Tensor<float> q(dims, bshd(dims));
-    Tensor<float> k(dims, bshd(dims));
-    Tensor<float> v(dims, bshd(dims));
+    Tensor<float> q(dims, raggedStrides(dims));
+    Tensor<float> k(dims, raggedStrides(dims));
+    Tensor<float> v(dims, raggedStrides(dims));
     q.fillWithRandomValues(-2.0f, 2.0f, /*seed=*/11);
     k.fillWithRandomValues(-2.0f, 2.0f, /*seed=*/22);
     v.fillWithRandomValues(-1.0f, 1.0f, /*seed=*/33);
@@ -934,7 +937,7 @@ TEST_P(TestGpuSdpaRaggedFwdPlanScale, ExecuteHonorsNonDefaultScale)
     scaleDevice.fillWithValue(SCALE);
     float scaleHost = SCALE;
 
-    Tensor<float> oPlan(dims, bshd(dims));
+    Tensor<float> oPlan(dims, raggedStrides(dims));
     std::unordered_map<int64_t, void*> variantPack{
         {Q_UID, q.memory().deviceData()},
         {K_UID, k.memory().deviceData()},
@@ -955,7 +958,7 @@ TEST_P(TestGpuSdpaRaggedFwdPlanScale, ExecuteHonorsNonDefaultScale)
     oPlan.markDeviceModified();
 
     const auto runDirect = [&](std::optional<float> scale) {
-        Tensor<float> o(dims, bshd(dims));
+        Tensor<float> o(dims, raggedStrides(dims));
         GpuFpReferenceSdpaRagged::fpropRagged<float, float, float, float, float>(
             q, k, v, o, offQ, offKv, offKv, offQ, scale);
         return o;

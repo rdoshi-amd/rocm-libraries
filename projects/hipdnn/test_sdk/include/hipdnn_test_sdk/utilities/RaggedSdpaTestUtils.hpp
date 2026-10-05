@@ -19,10 +19,38 @@ namespace hipdnn_test_sdk::utilities
 // strides, so use 2 here, not the SDK's BSHD_SEQ_AXIS = 1 (which assumes dims [B, S, H, D]).
 inline constexpr int SEQ_AXIS = 2;
 
-// Strides for packed BSHD memory under [B, H, S, D] dims. The seq stride is H * D.
-inline std::vector<int64_t> bshd(const std::vector<int64_t>& dims)
+// Dims of a ragged SDPA tensor from its batch, sequence extent (S_max), heads and head dim.
+// Ragged tests build every ragged shape, stride and element index through these helpers, so the
+// axis order lives here only.
+inline std::vector<int64_t> raggedDims(int64_t batch, int64_t seq, int64_t heads, int64_t dim)
 {
-    return {dims[1] * dims[2] * dims[3], dims[3], dims[1] * dims[3], 1};
+    return {batch, heads, seq, dim};
+}
+
+// Logical index of element (b, s, h, d) in a tensor shaped by raggedDims.
+inline std::vector<int64_t> raggedIndex(int64_t b, int64_t s, int64_t h, int64_t d)
+{
+    return {b, h, s, d};
+}
+
+inline int64_t raggedSeqExtent(const std::vector<int64_t>& dims)
+{
+    return dims[SEQ_AXIS];
+}
+
+inline int64_t raggedHeads(const std::vector<int64_t>& dims)
+{
+    return dims[1];
+}
+
+// Strides of packed BSHD memory (token-major: token, then head, then dim) for raggedDims dims.
+// The seq stride is H * D.
+inline std::vector<int64_t> raggedStrides(const std::vector<int64_t>& dims)
+{
+    const auto heads = raggedHeads(dims);
+    const auto seq = raggedSeqExtent(dims);
+    const auto dim = dims[3];
+    return {seq * heads * dim, dim, heads * dim, 1};
 }
 
 // Exclusive prefix sum: cum[0] = 0, cum[b + 1] = cum[b] + lengths[b].

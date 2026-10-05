@@ -82,11 +82,19 @@ def test_api_layout_int_or_name_is_discriminator(fmt):
     assert len(preds) == 1 and preds[0].value == expected
 
 
+def test_auto_on_problemtype_maps_to_noswizzle_discriminator():
+    """Auto is host-layout 0 (NoSwizzle); still an API matching key."""
+    pt = _pt(MXScaleFormat="Auto")
+    assert pt.mxScaleFormat == 0
+    assert pt._mxScaleFormatApiDiscriminator is True
+    preds = _mx_preds(pt)
+    assert len(preds) == 1 and preds[0].value == 0
+
+
 @pytest.mark.parametrize("fmt", ["InMemorySwizzle", 2])
 def test_in_memory_swizzle_on_problemtype_is_not_a_matching_key(fmt):
     """Even if YAML wrongly put IMS on ProblemType, never bake host==2."""
     assert _mx_preds(_pt(MXScaleFormat=fmt)) == []
-
 
 def test_solution_ims_must_not_poison_predicates_before_build():
     """Ordering contract for Solution.FromOriginalState.

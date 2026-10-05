@@ -34,6 +34,7 @@
 #include "ProgramOptions.hpp"
 
 #include <cstddef>
+#include <string>
 
 namespace TensileLite
 {
@@ -41,6 +42,20 @@ namespace TensileLite
     {
 
         std::vector<int> resolveHybridAssignmentPolicies(po::variables_map const& args);
+
+        // gfx950 NoSwizzle (mxScaleFormat 0) → Compact; HostPreSwizzle → Gfx950.
+        // Non-gfx950 keeps Gfx1250 dimk (historical padScaleTensorFreeDim=false).
+        inline ContractionProblemGemm::MXScaleTensorPad
+            selectMXScaleTensorPad(std::string const& archName, int mxScaleFormat)
+        {
+            if(archName.find("gfx950") != std::string::npos)
+            {
+                return (mxScaleFormat == 0)
+                           ? ContractionProblemGemm::MXScaleTensorPad::Compact
+                           : ContractionProblemGemm::MXScaleTensorPad::Gfx950;
+            }
+            return ContractionProblemGemm::MXScaleTensorPad::Gfx1250;
+        }
 
         class ClientProblemFactory
         {

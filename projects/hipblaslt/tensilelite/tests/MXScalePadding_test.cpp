@@ -3,10 +3,13 @@
 
 #include <gtest/gtest.h>
 
+#include "ClientProblemFactory.hpp"
+
 #include <Tensile/ContractionProblem.hpp>
 #include <Tensile/Utils.hpp>
 
 using namespace TensileLite;
+using TensileLite::Client::selectMXScaleTensorPad;
 
 // ============================================================================
 // MX Scale Padding Tests
@@ -188,4 +191,29 @@ TEST(MXScalePadding, Gfx1250DimKNotCompact)
     // ceil(32/32)=1, dimk=4 → RoundUpToMultiple(1, 4)=4
     EXPECT_EQ(sa[0], 4u);
     EXPECT_EQ(sa[1], 64u); // free dim unpadded under Gfx1250
+}
+
+// ClientProblemFactory arch+format → pad mode (constructor selection helper).
+TEST(MXScalePadding, SelectPadGfx950NoSwizzleIsCompact)
+{
+    EXPECT_EQ(selectMXScaleTensorPad("gfx950", /*mxScaleFormat=*/0),
+              ContractionProblemGemm::MXScaleTensorPad::Compact);
+    EXPECT_EQ(selectMXScaleTensorPad("gfx950:sramecc+:xnack-", 0),
+              ContractionProblemGemm::MXScaleTensorPad::Compact);
+}
+
+TEST(MXScalePadding, SelectPadGfx950HostPreSwizzleIsGfx950)
+{
+    EXPECT_EQ(selectMXScaleTensorPad("gfx950", /*mxScaleFormat=*/1),
+              ContractionProblemGemm::MXScaleTensorPad::Gfx950);
+}
+
+TEST(MXScalePadding, SelectPadNonGfx950IsGfx1250)
+{
+    EXPECT_EQ(selectMXScaleTensorPad("gfx1250", /*mxScaleFormat=*/0),
+              ContractionProblemGemm::MXScaleTensorPad::Gfx1250);
+    EXPECT_EQ(selectMXScaleTensorPad("gfx1250", /*mxScaleFormat=*/1),
+              ContractionProblemGemm::MXScaleTensorPad::Gfx1250);
+    EXPECT_EQ(selectMXScaleTensorPad("gfx942", 0),
+              ContractionProblemGemm::MXScaleTensorPad::Gfx1250);
 }

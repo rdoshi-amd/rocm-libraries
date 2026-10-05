@@ -128,16 +128,8 @@ namespace TensileLite
                 hipDeviceProp_t prop;
                 int deviceIdx = args.count("device-idx") ? args["device-idx"].as<int>() : 0;
                 HIP_CHECK_EXC(hipGetDeviceProperties(&prop, deviceIdx));
-                std::string archName(prop.gcnArchName);
-                // gfx950 NoSwizzle → Compact; HostPreSwizzle → Gfx950 pad.
-                // Non-gfx950 keeps Gfx1250 dimk (historical padScaleTensorFreeDim=false).
-                if(archName.find("gfx950") != std::string::npos)
-                {
-                    m_mxScaleTensorPad
-                        = (m_mxScaleFormat == 0)
-                              ? ContractionProblemGemm::MXScaleTensorPad::Compact
-                              : ContractionProblemGemm::MXScaleTensorPad::Gfx950;
-                }
+                m_mxScaleTensorPad
+                    = selectMXScaleTensorPad(std::string(prop.gcnArchName), m_mxScaleFormat);
             }
 
             std::vector<bool> isComplex;

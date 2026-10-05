@@ -1,0 +1,65 @@
+# CCCL → hipCUB Sync: <CURRENT_TAG> → <TO_TAG> — TODO
+
+We are in the middle of a manual-port sync of upstream CCCL/CUB commits
+into hipCUB. There is no git merge in progress and never will be — this
+sync is a series of hand-ported commits, one local commit per item below,
+audited at the end by `hipcub-cccl-sync-finalize`. This file tracks which
+upstream commits still need to be ported.
+
+## Sync parameters
+
+- **JIRA ticket**: <JIRA_TICKET> (if any — no fixed project exists for
+  hipCUB syncs)
+- **Repo**: `ROCm/rocm-libraries` — hipCUB lives at `projects/hipcub/`
+- **Sync base branch** (`$SYNC_BASE`): <SYNC_BASE>
+- **Confirmed current tag** (`$CURRENT_TAG`): <CURRENT_TAG>
+- **Target tag** (`$TO_TAG`): <TO_TAG>
+- **Sync branch** (`$SYNC_BRANCH`, currently checked out): <SYNC_BRANCH>
+- **Investigation report**: <INVESTIGATION_REPORT_PATH_OR_NONE>
+- **Path reminder**: hipCUB is a wrapper, not a copy. An upstream public
+  header `cub/cub/<dir>/<name>.cuh` corresponds to up to three hipCUB
+  headers under `projects/hipcub/hipcub/include/hipcub/`:
+  `<dir>/<name>.hpp` (platform forwarder), `backend/rocprim/<dir>/<name>.hpp`
+  (implemented on rocPRIM) and `backend/cub/<dir>/<name>.hpp` (wraps CUB;
+  block/warp and many thread/iterator headers have no file here because
+  `backend/cub/hipcub.hpp` re-exports them). Upstream
+  `cub/cub/{device/dispatch,agent,detail}/` have no hipCUB copy.
+  Tests: `cub/test/catch2_test_<x>.cu` → `projects/hipcub/test/hipcub/test_hipcub_<x>.cpp`
+  (Google Test). Benchmarks: `cub/benchmarks/bench/<algo>/` →
+  `projects/hipcub/benchmark/benchmark_device_<algo>.cpp`. Examples:
+  `cub/examples/<sub>/` → `projects/hipcub/examples/<sub>/`.
+
+## ⚠ Ordering rule
+
+Commits below are listed **strictly oldest-first**. Only the first unticked
+(`- [ ]`) item may be worked next. Do not skip ahead, reorder, or batch
+multiple commits together — a later commit may assume an earlier one is
+already applied (it may reference symbols the earlier commit introduces, or
+fix a bug the earlier commit itself introduced).
+
+## State of the sync
+
+- No `git merge` is in progress. There is no `MERGE_HEAD`, and no conflict
+  markers will ever appear as part of this process.
+- Ticked (`- [X]`) items below are **committed** on the sync branch: one
+  local commit per item, including N/A items (empty commit), whose subject
+  contains `port CCCL <sha11>`. The tick-note records it as `Local commit:
+  <sha>`.
+- This file itself is untracked and is never committed. Nothing is pushed
+  until the human decides to. Avoid `git reset --hard` on this branch.
+- `CCCL_MINIMUM_VERSION` (`cmake/Dependencies.cmake`),
+  `HIPCUB_CCCL_VERSION_*` (`CMakeLists.txt`) and `CHANGELOG.md` are not
+  touched by any item; the human bumps them separately.
+
+## Commits to port
+
+<!-- One line per upstream commit, oldest-first, never reordered:
+     - [ ] <sha> <subject> [SCOPE: HEADER,INTERNAL,TEST] [BASELINE: =] [⚠ touches <sensitive-files.md pattern>]
+     SCOPE is a comma-joined subset of HEADER/INTERNAL/TEST/EXAMPLE/BENCH/
+     CMAKE/OTHER from hipcub-commit-list.sh. HEADER commits need a backend
+     parity decision; INTERNAL-only commits are N/A unless they need a
+     rocPRIM follow-up — see hipcub-cccl-sync-resolve/SKILL.md.
+     [BASELINE: =] / [BASELINE: ~] appear only when the script marks the
+     commit as already in $CURRENT_TAG via a backport (patch-identical, or
+     same PR number cited). Verify it's present at $CURRENT_TAG; such
+     items are likely N/A. Omit the marker when BASELINE is '-'. -->

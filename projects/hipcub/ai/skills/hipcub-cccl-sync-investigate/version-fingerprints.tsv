@@ -1,0 +1,18 @@
+# version-fingerprints.tsv — Signal C for cccl-version-delta.sh (DRAFT)
+#
+# Curated, growing list of "we know for a fact hipCUB already contains this
+# specific upstream change" fingerprints. Each row maps a fixed-string code
+# pattern to the CCCL tag it was introduced in. cccl-version-delta.sh greps
+# hipCUB's tree at --base for each pattern (no network/remote needed) and
+# reports the highest tag whose fingerprint is already present. That is
+# Signal C, a local-only check for or against Signal D
+# (HIPCUB_CCCL_VERSION_*) and Signal A (CCCL_MINIMUM_VERSION).
+#
+# Empty so far: no fingerprint has been verified for hipCUB yet. Add a row
+# whenever a sync finds hipCUB's tree already contains an upstream change
+# from a tag newer than what Signals A/D report. Pick a pattern from the
+# hipCUB side (usually backend/rocprim/), since backend/cub/ only forwards
+# to whatever CCCL it is built against.
+#
+# Format: tab-separated, comments start with '#', blank lines ignored.
+# TAG	HIPCUB_PATH	PATTERN	NOTE

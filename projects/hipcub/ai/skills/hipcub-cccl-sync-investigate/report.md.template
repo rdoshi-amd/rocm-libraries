@@ -1,0 +1,110 @@
+# CCCL → hipCUB Sync Investigation: <CURRENT_TAG> → <TO_TAG>
+
+What changes in hipCUB when syncing CCCL/CUB <CURRENT_TAG> → <TO_TAG>, and
+what work that implies. No code has been ported yet.
+
+## Summary
+
+- **JIRA ticket**: <JIRA_TICKET>
+- **Base branch**: `<SYNC_BASE>`
+- **Baseline**: `<CURRENT_TAG>` (confirmed by the human)<; one sentence ONLY
+  if the version signals disagreed and that matters for the port — otherwise
+  nothing>
+- **Target**: `<TO_TAG>` — tags covered: `<PENDING_TAGS>`
+- **Upstream commits to port**: <N_COMMITS> (<N_FILES> files changed under
+  `cub/`)<; "<N_BASELINE> of them are already in the baseline via
+  backports" when the baseline tag is not an ancestor of the target>
+- **Maintenance-branch drift**: <none | one sentence: what was excluded and why>
+
+<3–5 sentences: the headline changes, the main work areas (rocPRIM
+backend, CUB backend wrappers, tests, benchmarks), the rocPRIM follow-ups
+expected, and the expected difficulty/risk. This is the paragraph most
+readers will stop at.>
+
+---
+
+## 1. New features
+
+<!-- One `###` per tag that has features; skip tags with none (say so in one
+     line). Inside a tag, one `####` per category, in this order, omitting
+     empty ones: New API, Behavior changes, Deprecations, Removals, Fixes,
+     Performance/tuning, NVIDIA-only. Never use a bold line as a stand-in
+     for a heading. -->
+
+<one line: which tags carry features and which are fix-only>
+
+### <TAG>
+
+#### New API
+- **<feature>** ([PR #<n>](https://github.com/NVIDIA/cccl/pull/<n>)) — <what
+  it is, one sentence>. **To do:** <rocPRIM backend: ...; CUB backend: ...;
+  rocPRIM follow-up: ... — one sentence>.
+
+#### Deprecations
+- **<feature>** ([PR #<n>](https://github.com/NVIDIA/cccl/pull/<n>)) — <...>.
+  **To do:** <...>.
+
+---
+
+## 2. New CMake options / feature macros
+
+| Option / macro | Default | Introduced in | Defined/read in | Notes / hipCUB disposition |
+|----------------|---------|----------------|------------------|----------------------------|
+| `<CCCL_OPTION_OR_MACRO>` | <default> | <tag> | `<file>` | <mirror as `HIPCUB_*` / needs rocPRIM support / N/A on AMD> |
+
+---
+
+## 3. Test / benchmark coverage gaps
+
+<!-- hipCUB keeps test/hipcub/ and benchmark/ at parity with upstream,
+     implementing upstream Catch2 tests with Google Test and nvbench
+     benchmarks with hipCUB's own benchmark harness. That's policy, not an
+     open question — don't re-ask it here. -->
+
+### Tests
+
+<!-- One row per §1 feature or fix that needs new or extended tests. -->
+
+| Feature / fix | Upstream test | hipCUB `test/hipcub/` today | Action needed |
+|---------------|---------------|-----------------------------|---------------|
+| <feature or fix> | `<cub/test/catch2_test_*.cu>` | <exists / missing — `test_hipcub_<x>.cpp`> | <extend / new file + `add_hipcub_test`> |
+
+### Benchmarks
+
+- New upstream benchmarks: <`bench/<algo>/<file>.cu` — hipCUB missing
+  `benchmark_device_<algo>.cpp` → add and register | none>
+- Deleted upstream benchmarks: <path — hipCUB still has it | none>
+- Modified: <one line: how many, and what kind of change>
+
+---
+
+## 4. Potentially problematic commits
+
+<!-- Commits touching sensitive-files.md areas, renaming/moving public
+     headers, changing public API/ABI, adding CUDA intrinsics / inline PTX,
+     or changing an algorithm so that rocPRIM would need to follow. -->
+
+| Commit | Subject | Why risky | What to do |
+|--------|---------|-----------|------------|
+| [`<sha>`](https://github.com/NVIDIA/cccl/commit/<sha>) | <subject> | <one line> | <one line> |
+
+### Public header renames / moves (build-break risk)
+- `cub/cub/<old>.cuh` → `cub/cub/<new>.cuh` — `backend/cub/` includes
+  `<cub/<old>.cuh>` in `<file>`; needs updating.
+
+### Public API / ABI changes
+- <e.g. a removed `cub::` API both backends still expose; a new
+  `cuda::std` requirement>
+
+### rocPRIM follow-ups
+- <algorithm or primitive change hipCUB can't express without a rocPRIM
+  change — one line each, with the upstream commit | none>
+
+---
+
+## Handoff
+
+- **Next step**: `hipcub-cccl-sync-todo` for `<CURRENT_TAG>..<TO_TAG>`,
+  then `hipcub-cccl-sync-resolve` and `hipcub-cccl-sync-finalize`.
+- **Open questions**: <decisions still needed from the human, one line each;
+  "none" if there are none>

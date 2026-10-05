@@ -380,12 +380,14 @@ std::optional<IntegrationBundleVerificationHarness::ResolvedReference>
     {
         const ReferenceExecutorType type = chain.candidates[chain.next++];
         const std::string label = refLabel(type);
+        // Still null in the catch below if creating the executor is what threw.
+        IReferenceGraphExecutor* executor = nullptr;
         try
         {
-            IReferenceGraphExecutor& executor = _deps.referenceExecutors->get(type);
-            if(executor.isApplicable(_bundle->graphBuffer.data(), _bundle->graphBuffer.size()))
+            executor = &_deps.referenceExecutors->get(type);
+            if(executor->isApplicable(_bundle->graphBuffer.data(), _bundle->graphBuffer.size()))
             {
-                return ResolvedReference{type, &executor};
+                return ResolvedReference{type, executor};
             }
             chain.tried.push_back(label + " (not applicable)");
             chain.endedInError = false;
@@ -397,10 +399,18 @@ std::optional<IntegrationBundleVerificationHarness::ResolvedReference>
         }
         catch(const std::exception& e)
         {
-            recordRefError(label + " errored checking applicability: " + e.what());
+            const std::string what
+                = executor != nullptr ? "errored checking applicability" : "could not be created";
+            std::string detail = what;
+            detail.append(": ").append(e.what());
+            std::string reason = label;
+            reason.append(" ").append(detail);
+            recordRefError(reason);
             chain.refErrored = true;
             chain.endedInError = true;
-            chain.tried.push_back(label + " (errored checking applicability: " + e.what() + ")");
+            std::string tried = label;
+            tried.append(" (").append(detail).append(")");
+            chain.tried.push_back(std::move(tried));
         }
     }
     return std::nullopt;

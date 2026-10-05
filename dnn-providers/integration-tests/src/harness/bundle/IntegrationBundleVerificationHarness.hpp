@@ -73,8 +73,9 @@ struct ClaimPhase
 /// resolved before the engine runs, but the engine still answers first: a decline is
 /// a SKIP whatever the oracles said. An engine that ran with nothing left to verify it
 /// SKIPs, or FAILs under policy.failOnNoOracle. A chain whose last oracle errored
-/// rather than declined is a FAIL either way. Inputs are read-only (shared); outputs are separate allocations
-/// per executor.
+/// rather than declined is a FAIL either way.
+///
+/// Inputs are read-only (shared); outputs are separate allocations per executor.
 ///
 /// **This class has no virtual members.** Everything that needs a GPU, a handle, a
 /// loaded engine plugin, or process-wide state lives behind one of the four
@@ -397,7 +398,7 @@ private:
     struct ResolvedReference
     {
         ReferenceExecutorType type;
-        IReferenceGraphExecutor* executor;
+        IReferenceGraphExecutor* executor = nullptr;
     };
 
     /// The oracles a non-golden mode may use, in fallback order, and what became of

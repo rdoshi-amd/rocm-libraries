@@ -766,6 +766,32 @@ TEST_F(TestVerificationModePathsFixture, AutoApplicabilityErrorFallsThroughToCpu
     EXPECT_EQ(refErrors.size(), 1U);
 }
 
+// The GPU reference cannot even be created. The report must say so, not blame an
+// isApplicable() that was never called, and the chain still falls through to CPU.
+TEST_F(TestVerificationModePathsFixture, AutoReferenceCreationErrorFallsThroughToCpu)
+{
+    using ::testing::_;
+    useMatchingEngine();
+    useMatchingReference();
+    ON_CALL(_mocks.referenceExecutors, get(ReferenceExecutorType::GPU))
+        .WillByDefault(::testing::Throw(std::runtime_error("stub: GPU ref unavailable")));
+
+    std::vector<std::string> refErrors;
+    testing_support::captureReferenceErrors(_mocks.reporter, refErrors);
+
+    ::testing::TestPartResultArray results;
+    runCapturing(loadBundle("auto_create_error_cpu", /*includeGoldenOutput=*/false),
+                 VerificationMode::AUTO,
+                 &results);
+
+    EXPECT_FALSE(testing_support::anyFailed(results));
+    EXPECT_FALSE(testing_support::anySkipped(results));
+    ASSERT_EQ(refErrors.size(), 1U);
+    EXPECT_THAT(refErrors.front(), ::testing::HasSubstr("GPU reference could not be created"));
+    EXPECT_THAT(refErrors.front(), ::testing::HasSubstr("stub: GPU ref unavailable"));
+    EXPECT_THAT(refErrors.front(), ::testing::Not(::testing::HasSubstr("checking applicability")));
+}
+
 // Explicit modes have a one-entry chain and follow the same rules.
 
 TEST_F(TestVerificationModePathsFixture, DeviceModeNotApplicableRunsNoReferenceAndSkips)

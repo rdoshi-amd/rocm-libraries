@@ -387,9 +387,10 @@ private:
     /// than completing each kernel's metadata again on every graph.
     void validateAndIndexPacks()
     {
-        // Two kernels may share a tuple when no single device can see both -- that is
-        // exactly the per-arch shard layout. Uniqueness is therefore per overlapping-arch
-        // group, not per engine: the tuple is the catalog key, and a catalog is built for
+        // Two kernels may share a tuple when no single device can see both at the same arch
+        // tier -- the per-arch shard layout, and an explicit or generic kernel beside a
+        // less specific one, which buildCatalog shadows per device. Uniqueness is therefore
+        // per competing-arch group, not per engine: the tuple is the catalog key, and a catalog is built for
         // one device. Keyed by the tuple (an ordered map, so it already orders) rather
         // than scanned, which would be quadratic.
         std::map<MetadataValues, std::vector<std::vector<std::string>>> archesClaimingTuple;
@@ -443,14 +444,14 @@ private:
                     = archesClaimingTuple.try_emplace(key).first->second;
                 for(const auto& claimed : claimants)
                 {
-                    if(archOverlaps(claimed, kernelArch))
+                    if(archesCompete(claimed, kernelArch))
                     {
                         throw std::invalid_argument(
                             "kernel '" + toString(kernel.id)
                             + "' duplicates the metadata tuple of another kernel under schema '"
                             + _schema.name
                             + "' on an arch both reach; the tuple is the catalog key "
-                            + "and must be unique per device");
+                            + "and must be unique per device at the same arch tier");
                     }
                 }
                 claimants.push_back(kernelArch);
@@ -672,10 +673,88 @@ private:
                                                      << " kernel(s) after kernel-scoped matching");
         }
 
+        shadowByArchTier(catalog, context);
+
         HIPDNN_PLUGIN_LOG_INFO("ingestor: catalog for device "
                                << context.deviceId << " holds " << catalog.entries.size()
                                << " kernel(s) from " << _packs.size() << " pack(s)");
         return catalog;
+    }
+
+    /// Among admitted entries sharing a metadata tuple, keeps only those whose arch list
+    /// ranks best for the device (EXPLICIT over GENERIC over UNRESTRICTED), preserving
+    /// order. Runs after matcher admission, so a kernel a matcher declined never hides a
+    /// lower-tier one. Uniqueness at construction guarantees at most one entry per tuple
+    /// per tier on any device.
+    static void shadowByArchTier(Catalog& catalog, const MatchContext& context)
+    {
+        auto& entries = catalog.entries;
+        if(entries.size() < 2)
+        {
+            return;
+        }
+
+        struct ByMetadata
+        {
+            bool operator()(const MetadataValues* lhs, const MetadataValues* rhs) const
+            {
+                return *lhs < *rhs;
+            }
+        };
+        struct Best
+        {
+            int tier;
+            const KernelDefinition* winner;
+        };
+        const auto tierOf = [&context](const KernelDefinition& definition) {
+            return static_cast<int>(archTier(definition.arch, context.deviceProperties.gcnArchName)
+                                        .value_or(ArchTier::UNRESTRICTED));
+        };
+
+        std::map<const MetadataValues*, Best, ByMetadata> bestByTuple;
+        for(const auto& entry : entries)
+        {
+            const int tier = tierOf(entry);
+            const auto [it, inserted]
+                = bestByTuple.try_emplace(&entry.metadata, Best{tier, &entry});
+            if(!inserted && tier < it->second.tier)
+            {
+                it->second = Best{tier, &entry};
+            }
+        }
+        if(bestByTuple.size() == entries.size())
+        {
+            return;
+        }
+
+        // Decide and log before moving anything: the map and winners point into entries.
+        std::vector<bool> keep(entries.size(), true);
+        for(size_t i = 0; i < entries.size(); ++i)
+        {
+            const auto& best = bestByTuple.at(&entries[i].metadata);
+            if(tierOf(entries[i]) != best.tier)
+            {
+                keep[i] = false;
+                HIPDNN_PLUGIN_LOG_INFO("ingestor: kernel " << toString(entries[i].kernelId)
+                                                           << " is shadowed by kernel "
+                                                           << toString(best.winner->kernelId)
+                                                           << " at a better arch tier on device "
+                                                           << context.deviceProperties.gcnArchName);
+            }
+        }
+        size_t out = 0;
+        for(size_t i = 0; i < entries.size(); ++i)
+        {
+            if(keep[i])
+            {
+                if(out != i)
+                {
+                    entries[out] = std::move(entries[i]);
+                }
+                ++out;
+            }
+        }
+        entries.erase(entries.begin() + static_cast<std::ptrdiff_t>(out), entries.end());
     }
 
     bool graphLevelMatchersPass(const KernelDescriptorPack& pack,

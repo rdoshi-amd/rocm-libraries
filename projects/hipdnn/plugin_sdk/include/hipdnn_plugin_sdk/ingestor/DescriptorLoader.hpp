@@ -30,6 +30,7 @@
 #include <hipdnn_data_sdk/utilities/VersionUtils.hpp>
 #include <hipdnn_flatbuffers_sdk/utilities/Uuid.hpp>
 #include <hipdnn_plugin_sdk/BehaviorNote.h>
+#include <hipdnn_plugin_sdk/GpuGenericTargets.hpp>
 #include <hipdnn_plugin_sdk/PluginException.hpp>
 #include <hipdnn_plugin_sdk/PluginLogging.hpp>
 #include <hipdnn_plugin_sdk/ingestor/Descriptors.hpp>
@@ -712,6 +713,16 @@ inline std::vector<std::string> requireArchList(const nlohmann::json& object,
         }
     }
     requireNoDuplicates(values, "arch entry", where);
+    for(const auto& value : values)
+    {
+        if(isGenericShapedArchName(value) && findGenericTarget(value) == nullptr)
+        {
+            HIPDNN_PLUGIN_LOG_WARN("ingestor: arch entry '"
+                                   << value << "' in " << where
+                                   << " is a generic target name absent from the generic target "
+                                      "table; it matches no device");
+        }
+    }
     return values;
 }
 

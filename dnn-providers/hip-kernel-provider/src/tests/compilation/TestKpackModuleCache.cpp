@@ -5,6 +5,7 @@
 
 #include <filesystem>
 #include <string>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -154,6 +155,59 @@ TEST(TestKpackModuleCacheLoad, ReportsAnArchTheArchiveDoesNotHold)
         EXPECT_NE(message.find(ARCHIVE_ARCH), std::string::npos)
             << "the message must name the arches the archive provides: " << message;
     }
+}
+
+TEST(TestKpackModuleCacheSelectArch, PrefersTheExactDeviceArchOverAGenericKey)
+{
+    // The generic key sorts first, so a first-match-wins over mixed keys would pick it.
+    const std::vector<std::string> keys{"gfx11-generic", "gfx1151"};
+
+    const auto* selected = KpackModuleCache::selectArch(keys, "gfx1151");
+
+    ASSERT_NE(selected, nullptr);
+    EXPECT_EQ(*selected, "gfx1151");
+    EXPECT_EQ(selected, &keys[1]);
+}
+
+TEST(TestKpackModuleCacheSelectArch, FallsBackToAGenericKeyContainingTheDevice)
+{
+    const std::vector<std::string> keys{"gfx942", "gfx12-generic", "gfx11-generic"};
+
+    const auto* selected = KpackModuleCache::selectArch(keys, "gfx1100");
+
+    ASSERT_NE(selected, nullptr);
+    EXPECT_EQ(*selected, "gfx11-generic");
+}
+
+TEST(TestKpackModuleCacheSelectArch, RefusesAGenericKeyThatDoesNotContainTheDevice)
+{
+    // gfx1250 is not a gfx12-generic member and gfx1170 is not a gfx11-generic member,
+    // however close their names are to the generic's family.
+    EXPECT_EQ(KpackModuleCache::selectArch({"gfx12-generic"}, "gfx1250"), nullptr);
+    EXPECT_EQ(KpackModuleCache::selectArch({"gfx11-generic"}, "gfx1170"), nullptr);
+    EXPECT_EQ(KpackModuleCache::selectArch({"gfx11-generic", "gfx12-generic"}, "gfx942"), nullptr);
+    EXPECT_EQ(KpackModuleCache::selectArch({}, "gfx1100"), nullptr);
+}
+
+TEST(TestKpackModuleCacheSelectArch, IgnoresFeatureDecorationOnTheDevice)
+{
+    const std::vector<std::string> generic{"gfx9-4-generic", "gfx11-generic"};
+    const auto* viaGeneric = KpackModuleCache::selectArch(generic, "gfx1151:xnack-");
+    ASSERT_NE(viaGeneric, nullptr);
+    EXPECT_EQ(*viaGeneric, "gfx11-generic");
+
+    const std::vector<std::string> exact{"gfx11-generic", "gfx942"};
+    const auto* viaExact = KpackModuleCache::selectArch(exact, "gfx942:sramecc+:xnack-");
+    ASSERT_NE(viaExact, nullptr);
+    EXPECT_EQ(*viaExact, "gfx942");
+}
+
+TEST(TestKpackModuleCacheSelectArch, NeverMatchesAnUnknownGenericShapedKey)
+{
+    // Shape never implies membership: a table-absent name admits no device, not even
+    // the one it spells.
+    EXPECT_EQ(KpackModuleCache::selectArch({"gfx99-generic"}, "gfx99-generic"), nullptr);
+    EXPECT_EQ(KpackModuleCache::selectArch({"gfx99-generic"}, "gfx1100"), nullptr);
 }
 
 TEST(TestKpackModuleCacheLoad, ASecondOrdinalDoesNotAnswerFromTheFirstOrdinalsEntry)

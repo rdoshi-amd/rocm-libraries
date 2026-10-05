@@ -59,8 +59,8 @@ Run from `platform/`, repo venv, `PYTHONPATH=python`:
 PYTHONPATH=python <repo-root>/.venv/bin/python <script.py>
 ```
 Import viz from the PACKAGE, not submodules (matplotlib is lazy). Modules under `rocke.helpers.tiling`:
-- `mma.mma_operation.TileMma((M,N,K), target=, atom_override=)` — atom + canonical `a_layout`/`b_layout`/
-  `c_layout`, `atom_shape`, `traits`.
+- `mma.mma_operation.TileMma((M,N,K), target=, atom_override=)` — atom + style-faithful `a_layout`/`b_layout`/
+  `c_layout` (canonical unless `style=` is set), `atom_shape`, `traits`.
 - `register_mapper.RegisterMapper(enc)` — `matrix_coordinates`, `inverse_map`, `num_lanes`, `num_vector_items`.
 - `transforms` — `as_forward_map`, `classify_transform`, `describe_edge`, `reorder_between`,
   `derive_c_distribution`, + the diagnostics (see §Diagnostics).
@@ -223,8 +223,10 @@ cooperative map; `classify_epilogue(...)` → the branch. Worked example:
 ## Tool catalog (load-bearing knobs; full list in `visualization_api_surface.md`)
 
 - **`MmaTee`** — `from_mma(mma, **overrides)` (canonical refs + dtypes from the atom) OR explicit args. ✗
-  `from_mma` with no `a_enc`/`b_enc` renders CANONICAL — for interleaved you MUST pass explicit `a_enc`/`b_enc`
-  and VERIFY `!= mma.a_layout` + sound. Interleaved hallmarks: lane owns a contiguous rectangular patch,
+  `from_mma` with no `a_enc`/`b_enc` renders CANONICAL (it sources canonical from the `canonical_layouts` helper,
+  NOT `mma.a_layout`) — for interleaved you MUST pass explicit `a_enc`/`b_enc` and VERIFY the encoding is
+  `!= canonical_layouts(mma.traits, mma.subtiles)` + sound (`mma.a_layout` is the CONFIGURED style now, NOT a
+  canonical reference). Interleaved hallmarks: lane owns a contiguous rectangular patch,
   register order ≠ canonical, the transpose is `reorder` not `cross_lane` (`interleave_idx<1,KPT,DPT·KPT>`) AND
   passes soundness + §2b. Conventions wired: A left wing, B top wing (transposed), C body = POSITION grid with
   (M,N) label (`text_map`). `tee.render(out_dir, name=) -> path`; `tee.c_mapping() -> {(lane,reg)->(m,n)}`. Key

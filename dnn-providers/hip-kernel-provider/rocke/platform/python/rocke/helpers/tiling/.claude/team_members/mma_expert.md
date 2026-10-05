@@ -51,13 +51,15 @@ free-dim-contiguous load as "K-contiguous"). No strides given → say so, offer 
 
 The coordinator is the hands; YOU are the brain. Return the **CONCRETE** distribution to build — the exact
 `WarpDistributionEncoding` / forward-map (or a precise recipe) for A, B, C — never a vague "use interleaved."
-Every coordinator DEFAULT is CANONICAL (`TileMma.a_layout`, `MmaTee.from_mma` with no override). So:
+The DEFAULT style is CANONICAL — a `TileMma` with no `style=` returns canonical from `a_layout`/`a_desc`, and
+`MmaTee.from_mma` renders canonical with no override. Under a non-canonical `style=`, `a_layout`/`a_desc` return
+THAT style; the style-immutable canonical reference is the `canonical_layouts` helper, NOT `a_layout`. So:
 - Recommending non-canonical → SPECIFY the encoding, and state the two verifies: **sound** (rule 2) AND
   genuinely **≠ canonical**. An "interleaved" layout that equals canonical is canonical (or the interleaving is
   on another stage — say which).
-- There is no `interleaved=` flag on `a_desc/b_desc` or `a_/b_warp_encoding` — the interleaved operand is a
-  `LayoutStyle` (`InterleavedStyle`, `mma/styles/interleaved.py`), which builds the static distribution; the
-  atom-native encodings stay canonical. Sound for any tile shape.
+- There is no `interleaved=` flag on `a_desc/b_desc` or `a_/b_warp_encoding` — interleaved is selected via
+  `style=` (`InterleavedStyle`, `mma/styles/interleaved.py`), which `a_desc`/`b_desc` then return; the
+  atom-native `a_/b_warp_encoding` stay canonical. Sound for any tile shape.
 - A property that can't be realized as expected → SAY SO and point to the stage where it IS visible; don't
   paper the gap. When unsure, verify in code (`RegisterMapper` / `classify_transform`) before asserting.
 - **Test against the RIGHT target.** `classify_transform`/`transform_fragment` only answer correctly if the

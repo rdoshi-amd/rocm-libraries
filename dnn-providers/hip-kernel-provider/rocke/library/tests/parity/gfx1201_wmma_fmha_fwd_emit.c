@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: MIT
  *
  * tests/parity/gfx1201_wmma_fmha_fwd_emit.c -- C-side emitter for the gfx1201
- * (RDNA4 / Navi 48) WMMA FMHA forward parity harness. Same 6 sampled
+ * (RDNA4 / Navi 48) WMMA FMHA forward parity harness. Same 8 sampled
  * WmmaFmhaFwdSpec configs as the gfx1151 harness, but built and lowered at
  * arch=gfx1201 (flavor AUTO) so the RDNA4 split-K WMMA attention path
  * (wmma_gfx12_f32_16x16x16_f16 atom, <8 x half> fragments) is byte-compared
@@ -67,6 +67,22 @@ static int make_spec(int idx, rocke_wmma_fmha_fwd_spec_t* spec)
         spec->mask_mode = ROCKE_FMHA_MASK_NONE;
         spec->v_lds_stage = true;
         break;
+    case 6: /* H64, HQ4, HK0 (MHA), NONE, bf16, v_lds=False */
+        spec->head_size = 64;
+        spec->num_query_heads = 4;
+        spec->num_kv_heads = 0;
+        spec->dtype = "bf16";
+        spec->mask_mode = ROCKE_FMHA_MASK_NONE;
+        spec->v_lds_stage = false;
+        break;
+    case 7: /* H128, HQ8, HK2 (GQA), CAUSAL, bf16, v_lds=False */
+        spec->head_size = 128;
+        spec->num_query_heads = 8;
+        spec->num_kv_heads = 2;
+        spec->dtype = "bf16";
+        spec->mask_mode = ROCKE_FMHA_MASK_CAUSAL;
+        spec->v_lds_stage = false;
+        break;
     default:
         return -1;
     }
@@ -77,7 +93,7 @@ int main(int argc, char** argv)
 {
     if(argc < 2)
     {
-        fprintf(stderr, "usage: %s <config_index 0..5>\n", argv[0]);
+        fprintf(stderr, "usage: %s <config_index 0..7>\n", argv[0]);
         return 2;
     }
     int idx = atoi(argv[1]);

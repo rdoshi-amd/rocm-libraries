@@ -98,9 +98,9 @@ class TestBf16HostCodec(unittest.TestCase):
         np = self.np
         # Exact halfway cases on the retained-mantissa boundary: one rounds
         # down to even, one rounds up to even.
-        u = np.array(
-            [0x3F800000 | 0x8000, 0x3F800000 | 0x18000], dtype=np.uint32
-        ).view(np.float32)
+        u = np.array([0x3F800000 | 0x8000, 0x3F800000 | 0x18000], dtype=np.uint32).view(
+            np.float32
+        )
         got = self.enc(u)
         self.assertEqual((int(got[0]), int(got[1])), (0x3F80, 0x3F82))
 

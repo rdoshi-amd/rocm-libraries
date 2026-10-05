@@ -557,9 +557,8 @@ rocke_status_t rocke_wmma_fmha_fwd_signature(const rocke_wmma_fmha_fwd_spec_t* s
         items[k].name = pr->name;
         if(i < 4)
         {
-            items[k].type = (strcmp(wmma_dtype_inner(spec), "bf16") == 0)
-                                ? "ptr<bf16, global>"
-                                : "ptr<f16, global>";
+            items[k].type = (strcmp(wmma_dtype_inner(spec), "bf16") == 0) ? "ptr<bf16, global>"
+                                                                          : "ptr<f16, global>";
         }
         else if(i == 4)
         {

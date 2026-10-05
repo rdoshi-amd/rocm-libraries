@@ -121,14 +121,14 @@ class TestStreamKSpecSurface(unittest.TestCase):
             spec = _spec(streamk_ctas=-1, streamk_reduction=red)
             self.assertEqual(wgrad_streamk_default_ctas(spec, "gfx950"), 256)
             self.assertEqual(wgrad_streamk_default_ctas(spec, "gfx942"), 304)
-        # workspace/atomic never wait: sized to 16 waves per CU (4-wave CTAs).
+        # workspace/atomic never wait: four CTAs per CU.
         for red, dd in (("workspace", "fp16"), ("atomic", "fp32")):
             spec = _spec(streamk_ctas=-1, streamk_reduction=red, dtype_d=dd)
             self.assertEqual(wgrad_streamk_default_ctas(spec, "gfx950"), 1024)
             self.assertEqual(wgrad_streamk_default_ctas(spec, "gfx942"), 1216)
-        # An 8-wave CTA halves the CTA count for the same occupancy target.
+        # Counted in CTAs, not waves: an 8-wave CTA gets the same pool.
         wide = _spec(streamk_ctas=-1, streamk_reduction="workspace", warp_m=4)
-        self.assertEqual(wgrad_streamk_default_ctas(wide, "gfx950"), 512)
+        self.assertEqual(wgrad_streamk_default_ctas(wide, "gfx950"), 1024)
 
     def test_builder_resolves_auto_pool_into_the_name(self):
         k = build_implicit_gemm_conv_wgrad(_spec(streamk_ctas=-1), arch="gfx950")

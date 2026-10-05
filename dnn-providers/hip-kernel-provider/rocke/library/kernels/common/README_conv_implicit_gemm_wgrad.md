@@ -305,11 +305,12 @@ exact for any `wg_M`, avoiding CK's `GemmM % MPerBlock` caveat.
 `streamk_ctas=-1` resolves per reduction (`wgrad_streamk_default_ctas`):
 
 * `workspace` / `atomic` never wait on another CTA, so their pool is sized for
-  throughput: `num_cus * WGRAD_TARGET_WAVES_PER_CU / waves_per_cta`, the same
-  occupancy target the split-K heuristic sizes its grid for (4 CTAs per CU for
-  a 4-wave CTA). One CTA per CU leaves a single workgroup per CU with nothing
-  to hide memory latency behind, which is what made a CU-sized pool lose to
-  split-K on most shapes.
+  throughput: four CTAs per CU (`_STREAMK_CTAS_PER_CU`). Each resident CTA
+  streams its own K range, so this counts independent reduction streams per CU,
+  and is counted in CTAs rather than waves: a wider CTA adds no streams. One
+  CTA per CU leaves a single stream per CU with nothing to hide memory latency
+  behind, which is what made a CU-sized pool lose to split-K on most shapes;
+  past four the CTAs mostly contend for the same caches.
 * `linear` / `tree` stay at one CTA per CU. A CTA there waits on CTAs with
   higher indices, so the whole pool must be resident at once; and these fixups
   get slower with a larger pool anyway, because the tile owner folds every

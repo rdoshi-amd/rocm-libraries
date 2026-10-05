@@ -1106,31 +1106,34 @@ def wgrad_streamk_available(spec: "WgradConvSpec") -> Tuple[bool, str]:
     return True, "ok"
 
 
+# CTAs per CU in the default pool of the stream-K reductions that never wait.
+# Each resident CTA streams its own K range, so this is the number of
+# independent reduction streams a CU keeps in flight to hide memory latency.
+# Counted in CTAs rather than waves: a wider CTA does not add streams. One per
+# CU leaves a single stream per CU; past four the CTAs mostly contend for the
+# same caches.
+_STREAMK_CTAS_PER_CU = 4
+
+
 def wgrad_streamk_default_ctas(spec: "WgradConvSpec", arch: str) -> int:
     """Default stream-K CTA pool for ``spec`` on ``arch`` (``streamk_ctas=-1``).
 
     The reductions that never wait on another CTA (``workspace``, ``atomic``)
-    are sized for throughput: enough CTAs to reach the same waves-per-CU target
-    the split-K heuristic sizes its grid for, i.e. ``num_cus *
-    WGRAD_TARGET_WAVES_PER_CU / waves_per_cta``. One CTA per CU leaves a single
-    workgroup per CU with nothing to hide memory latency behind.
+    are sized for throughput: ``_STREAMK_CTAS_PER_CU`` CTAs per CU. Nothing
+    there requires the pool to be resident at once, so a CTA that does not fit
+    only runs later.
 
     ``linear`` and ``tree`` wait on later CTAs, so every CTA in the pool must be
     resident at once or a waiting CTA can block the one it waits on. One CTA
     per CU is always resident, and those fixups get slower, not faster, with
     more contributors per tile (the owner folds every partial).
     """
-    from rocke.helpers.split_k import (
-        _ARCH_NUM_CUS,
-        _DEFAULT_NUM_CUS,
-        WGRAD_TARGET_WAVES_PER_CU,
-    )
+    from rocke.helpers.split_k import _ARCH_NUM_CUS, _DEFAULT_NUM_CUS
 
     num_cus = _ARCH_NUM_CUS.get(arch, _DEFAULT_NUM_CUS)
     if spec.streamk_reduction in ("linear", "tree"):
         return num_cus
-    waves_per_cta = max(1, spec.block_size // spec.wave_size)
-    return num_cus * max(1, WGRAD_TARGET_WAVES_PER_CU // waves_per_cta)
+    return num_cus * _STREAMK_CTAS_PER_CU
 
 
 def wgrad_streamk_partition(spec: "WgradConvSpec", *, arch: str = "gfx950"):

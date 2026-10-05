@@ -492,7 +492,7 @@ class TestStreamKSelection(unittest.TestCase):
             r.spec.to_wgrad_spec(_problem(r.request)), arch="gfx950"
         )
         # streamk_reduction defaults to the workspace reduction, whose pool is
-        # sized to the occupancy target: 256 CUs x (16 waves / 4 per CTA).
+        # sized at four CTAs per CU: 256 CUs x 4.
         self.assertIn("_sk1024_skrworkspace", k.name)
 
     def test_gfx1250_turns_streamk_away(self):

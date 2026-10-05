@@ -534,6 +534,16 @@ rocke_status_t rocke_wmma_fmha_fwd_signature(const rocke_wmma_fmha_fwd_spec_t* s
         return ROCKE_ERR_VALUE;
     }
 
+    /* Reject an unknown dtype rather than letting wmma_dtype_inner() fold it to
+     * "f16". This is a public entry point, so normalising here would hand the
+     * caller a valid-looking fp16 ABI for a spec it believes is something else.
+     * The build and kernel-name paths already return ROCKE_ERR_VALUE here, and
+     * Python raises in __post_init__; this was the one way in that did not. */
+    if(wmma_dtype_tag(spec) == NULL)
+    {
+        return ROCKE_ERR_VALUE;
+    }
+
     st = rocke_ir_builder_init(&b, "rocke_wmma_fmha_fwd_sig_probe");
     if(st != ROCKE_OK)
     {

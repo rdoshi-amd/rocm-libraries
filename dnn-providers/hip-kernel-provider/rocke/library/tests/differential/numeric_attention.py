@@ -553,6 +553,30 @@ def _check_gpu() -> Optional[str]:
     return None
 
 
+# The families this harness owns. run_checks.py forwards its --op to --only for
+# every operator in the repo, most of which live in other harnesses, so "this
+# scope selected nothing" has two very different meanings -- see _scope_is_ours.
+_OWNED_FAMILIES = ("attention", "wmma_fmha_fwd")
+
+
+def _scope_is_ours(only: str) -> bool:
+    """Could this ``--only`` scope ever select a case here?
+
+    Mirrors ``want()``'s substring matching exactly: a scope is ours if any of
+    its terms could match one of our family names or case names. Anything else
+    names an operator owned by a different harness (``fmha_bwd``, say), and the
+    right answer for that is to stand aside, not to fail.
+    """
+    subs = [s for s in only.split(",") if s]
+    if not subs:
+        return True
+    names = [c.name for c in (*ATTN_CONFIGS, *WMMA_CONFIGS)]
+    return any(
+        any(s in fam for fam in _OWNED_FAMILIES) or any(s in n for n in names)
+        for s in subs
+    )
+
+
 def run_all(arch: str = "gfx950", only: str = "") -> List[NumericResult]:
     results: List[NumericResult] = []
     subs = [s for s in only.split(",") if s]
@@ -647,6 +671,19 @@ def main(argv: Optional[List[str]] = None) -> int:
     # scope that matches no case (or one whose every case is REJECTED on this
     # arch) exits 0 and reads as a green numeric stage -- the failure mode is
     # indistinguishable from "verified" in CI, which is the worst kind.
+    #
+    # But only for scopes this harness owns. run_checks.py forwards --op to
+    # --only for every operator in the repo, so a scope naming someone else's
+    # family (fmha_bwd, its own documented example) is not a failed check -- it
+    # is a check that belongs elsewhere. Failing there would make an unrelated
+    # operator's numeric stage permanently red.
+    if npass + nfail == 0 and args.only and not _scope_is_ours(args.only):
+        print(
+            f"no case for --only {args.only!r} in this harness "
+            f"(owns: {', '.join(_OWNED_FAMILIES)}); nothing to do."
+        )
+        return 0
+
     if npass + nfail == 0:
         scope = f"--only {args.only!r}" if args.only else "the full set"
         names = sorted(c.name for c in (*ATTN_CONFIGS, *WMMA_CONFIGS))

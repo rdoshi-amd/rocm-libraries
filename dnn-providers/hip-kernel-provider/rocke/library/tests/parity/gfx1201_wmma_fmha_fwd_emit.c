@@ -2,11 +2,13 @@
  * SPDX-License-Identifier: MIT
  *
  * tests/parity/gfx1201_wmma_fmha_fwd_emit.c -- C-side emitter for the gfx1201
- * (RDNA4 / Navi 48) WMMA FMHA forward parity harness. Same 8 sampled
+ * (RDNA4) WMMA FMHA forward parity harness. Same 8 sampled
  * WmmaFmhaFwdSpec configs as the gfx1151 harness, but built and lowered at
- * arch=gfx1201 (flavor AUTO) so the RDNA4 split-K WMMA attention path
- * (wmma_gfx12_f32_16x16x16_f16 atom, <8 x half> fragments) is byte-compared
- * against the Python emitter gfx1201_wmma_fmha_fwd_emit.py.
+ * arch=gfx1201 (flavor AUTO) so the RDNA4 split-K WMMA attention path is
+ * byte-compared against the Python emitter gfx1201_wmma_fmha_fwd_emit.py.
+ * Configs 0-5 cover the fp16 atom (wmma_gfx12_f32_16x16x16_f16, <8 x half>
+ * fragments); configs 6-7 cover the bf16 atom
+ * (wmma_gfx12_f32_16x16x16_bf16, <8 x i16> fragments).
  */
 #include <stdio.h>
 #include <stdlib.h>

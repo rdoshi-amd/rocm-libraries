@@ -41,8 +41,12 @@ def f32_to_bf16(a):
     u = f.view(np.uint32)
     bias = np.uint32(0x7FFF) + ((u >> np.uint32(16)) & np.uint32(1))
     out = ((u + bias) >> np.uint32(16)).astype(np.uint16)
-    # Sign + all-ones exponent + the quiet bit, payload dropped (bf16 has only
-    # 7 mantissa bits, so no fp32 payload survives anyway).
+    # Take the high 16 bits as-is and force the quiet bit on. That keeps sign,
+    # exponent, and whatever payload already lives in the retained 7 mantissa
+    # bits (0x7FD30000 -> 0x7FD3); only a payload confined to the discarded low
+    # 16 bits has nothing to keep and lands on the canonical 0x7FC0. No
+    # rounding happens here, which is the whole point -- rounding is what turned
+    # the NaN into an infinity.
     quiet_nan = ((u >> np.uint32(16)).astype(np.uint16)) | np.uint16(0x0040)
     return np.where(np.isnan(f), quiet_nan, out).astype(np.uint16)
 

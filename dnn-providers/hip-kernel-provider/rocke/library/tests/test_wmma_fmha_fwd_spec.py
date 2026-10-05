@@ -28,7 +28,7 @@ class TestWmmaFmhaFwdSpec(unittest.TestCase):
 
 
 class TestWmmaFmhaFwdSpecDtype(unittest.TestCase):
-    """fp16 and bf16 I/O with fp32 accumulate (hipDNN attention Tier-0 #1)."""
+    """The dtype knob: fp16 and bf16 I/O, fp32 accumulate on both."""
 
     def test_fp16_default_and_alias(self):
         for dt in ("fp16", "f16"):

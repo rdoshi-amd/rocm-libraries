@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: MIT
  *
  * tests/parity/gfx1151_wmma_fmha_fwd_emit.c -- C-side emitter for the gfx1151
- * (RDNA3.5 / Strix Halo) WMMA FMHA forward parity harness. Selects one of 8
+ * (RDNA3.5) WMMA FMHA forward parity harness. Selects one of 8
  * sampled WmmaFmhaFwdSpec configs by argv[1] (0..7), builds it exactly as the
  * Python emitter gfx1151_wmma_fmha_fwd_emit.py does, and lowers to LLVM .ll
  * text at arch=gfx1151 (flavor AUTO) so the two outputs can be byte-compared.

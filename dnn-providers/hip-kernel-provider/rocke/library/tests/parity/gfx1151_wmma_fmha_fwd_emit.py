@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MIT
 #
 # tests/parity/gfx1151_wmma_fmha_fwd_emit.py -- Python reference emitter for the
-# gfx1151 (RDNA3.5 / Strix Halo) WMMA FMHA forward instance parity harness.
+# gfx1151 (RDNA3.5) WMMA FMHA forward instance parity harness.
 # Selects one of 8 sampled WmmaFmhaFwdSpec configs by argv[1] (0..7), builds it
 # via build_wmma_fmha_fwd(arch='gfx1151') and prints
 # lower_kernel_to_llvm(kernel, arch='gfx1151') to stdout so it can be

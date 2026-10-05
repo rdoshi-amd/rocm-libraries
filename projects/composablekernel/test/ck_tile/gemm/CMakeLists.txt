@@ -153,10 +153,7 @@ if(GPU_TARGETS MATCHES "gfx94|gfx95|gfx90a|gfx11|gfx12")
             target_compile_options(test_ck_tile_gemm_pipeline_tdm_wmma PRIVATE ${EXAMPLE_GEMM_COMPILE_OPTIONS})
             add_gtest_executable(test_ck_tile_gemm_pipeline_tdm_subtile_wmma test_gemm_pipeline_comp_tdm_wmma_subtile.cpp)
             target_compile_options(test_ck_tile_gemm_pipeline_tdm_subtile_wmma PRIVATE ${EXAMPLE_GEMM_COMPILE_OPTIONS})
-            # "_wmma" drops gfx9 only; keep just the gfx125 targets (TDM hardware).
-            get_target_property(_tdm_subtile_archs test_ck_tile_gemm_pipeline_tdm_subtile_wmma HIP_ARCHITECTURES)
-            list(FILTER _tdm_subtile_archs INCLUDE REGEX "^gfx125")
-            set_property(TARGET test_ck_tile_gemm_pipeline_tdm_subtile_wmma PROPERTY HIP_ARCHITECTURES ${_tdm_subtile_archs})
+            ck_tile_restrict_archs(test_ck_tile_gemm_pipeline_tdm_subtile_wmma "^gfx125")
             list(APPEND CK_TILE_GEMM_TEST_TARGETS test_ck_tile_gemm_pipeline_tdm_subtile_wmma)
             add_gtest_executable(test_ck_tile_gemm_pipeline_comp_async_wmma test_gemm_pipeline_comp_async_wmma.cpp)
             target_compile_options(test_ck_tile_gemm_pipeline_comp_async_wmma PRIVATE ${EXAMPLE_GEMM_COMPILE_COMPUTE_ASYNC_OPTIONS})
@@ -164,11 +161,15 @@ if(GPU_TARGETS MATCHES "gfx94|gfx95|gfx90a|gfx11|gfx12")
             add_gtest_executable(test_ck_tile_gemm_pipeline_comp_async_v2_wmma test_gemm_pipeline_comp_async_v2_wmma.cpp)
             target_compile_options(test_ck_tile_gemm_pipeline_comp_async_v2_wmma PRIVATE ${EXAMPLE_GEMM_COMPILE_COMPUTE_ASYNC_OPTIONS})
             target_compile_options(test_ck_tile_gemm_pipeline_comp_async_v2_wmma PRIVATE ${EXAMPLE_GEMM_COMPILE_OPTIONS})
-
-            list(APPEND CK_TILE_GEMM_TEST_TARGETS
+            set(CK_TILE_GEMM_ASYNC_WMMA_TARGETS
                 test_ck_tile_gemm_pipeline_comp_async_wmma
                 test_ck_tile_gemm_pipeline_comp_async_v2_wmma
             )
+            foreach(test_target ${CK_TILE_GEMM_ASYNC_WMMA_TARGETS})
+                # The async global-to-LDS loads only exist on gfx125 among the WMMA targets.
+                ck_tile_restrict_archs(${test_target} "^gfx125")
+            endforeach()
+            list(APPEND CK_TILE_GEMM_TEST_TARGETS ${CK_TILE_GEMM_ASYNC_WMMA_TARGETS})
         endif()
     endif()
 

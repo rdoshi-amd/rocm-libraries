@@ -112,6 +112,13 @@ _ACTIVATION_ARG_INDEX = {
 # readCustomKernelConfig call.
 _PASSTHROUGH_KEYS = {"ProblemType", "InternalSupportParams", "KernelLanguage", "CustomKernelName"}
 
+def w4a16DecodeMaxN(kernelName):
+    """Return the decode column limit encoded by the W4A16 kernel name."""
+    if not kernelName.startswith(("Custom_W4A16_Decode_", "RuntimeGroup_Decode_")):
+        return None
+    return 4 if "_N4_" in kernelName else 1
+
+
 def isCustomKernelConfig(config):
     # CustomKernel may be absent, None, or the -1 placeholder for an unset parameter,
     # so check that it is a populated dict before reaching into it.
@@ -367,7 +374,7 @@ def _buildCustomKernelFromMetadata(kernelName, fullYaml, kernelConfig):
         )
 
     metadataArgs = kernelMeta[".args"]
-    isW4A16Decode = kernelName.startswith(("Custom_W4A16_Decode_", "RuntimeGroup_Decode_"))
+    isW4A16Decode = w4a16DecodeMaxN(kernelName) is not None
     if isW4A16Decode:
         # HIP omits argument names; these decode kernels use the universal ABI.
         names = ["Gemm info", "kernel info0", "kernel info1", "numWG",

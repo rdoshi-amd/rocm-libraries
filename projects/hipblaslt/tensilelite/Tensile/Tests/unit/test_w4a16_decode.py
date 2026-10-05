@@ -27,17 +27,13 @@ def runtime_name(suffix):
 def test_decode_selection_bounds(suffix):
     name = runtime_name(suffix)
     config = readCustomKernelConfig(name, DIRECTORY)
-    equal = ProblemPredicate.FromOriginalKeyPair(("AssertSizeEqual", config["AssertSizeEqual"]))
-    positive_k = ProblemPredicate.FromOriginalKeyPair(
-        ("AssertSizeGreaterThan", config["AssertSizeGreaterThan"]))
-    assert state(equal) == {
-        "type": "And",
-        "value": [
-            {"type": "SizeEqual", "index": 1, "value": 1},
-            {"type": "SizeEqual", "index": 2, "value": 1},
-        ],
-    }
-    assert state(positive_k) == {"type": "SizeGreaterThan", "index": 3, "value": 0}
+    predicates = [state(p) for p in ProblemPredicate.W4A16DecodePredicates(
+        {"CustomKernelName": name})]
+    assert predicates == [
+        {"type": "SizeEqual", "index": 2, "value": 1},
+        {"type": "SizeGreaterThan", "index": 3, "value": 0},
+        {"type": "SizeEqual", "index": 1, "value": 1},
+    ]
     assert config["AssertSummationElementMultiple"] == 256
     support = config["InternalSupportParams"]
     assert not support["SupportUserGSU"]
@@ -321,17 +317,16 @@ def test_small_n_decode_bounds_and_abi(suffix):
     original_name = runtime_name(suffix).replace("_UnsignedBias8", "_Symmetric_UnsignedBias8")
     name = original_name.replace("_UnsignedBias8", "_N4_UnsignedBias8")
     config = readCustomKernelConfig(name, DIRECTORY)
-    assert config["AssertSizeEqual"] == {2: 1}
-    assert config["AssertSizeGreaterThan"] == {1: 0, 3: 0}
-    assert config["AssertSizeLessThan"] == {1: 5}
     from Tensile.CustomKernels import getCustomKernelConfig
 
-    # The filtered custom config must retain the bound for serialization.
     filtered = getCustomKernelConfig(name, config["InternalSupportParams"], DIRECTORY)
-    assert filtered["AssertSizeLessThan"] == {1: 5}
-    predicate = ProblemPredicate.FromOriginalKeyPair(
-        ("AssertSizeLessThan", config["AssertSizeLessThan"]))
-    assert state(predicate) == {"type": "SizeLessThan", "index": 1, "value": 5}
+    predicates = [state(p) for p in ProblemPredicate.W4A16DecodePredicates(filtered)]
+    assert predicates == [
+        {"type": "SizeEqual", "index": 2, "value": 1},
+        {"type": "SizeGreaterThan", "index": 3, "value": 0},
+        {"type": "SizeGreaterThan", "index": 1, "value": 0},
+        {"type": "SizeLessThan", "index": 1, "value": 5},
+    ]
     original = _readEmbeddedYaml(original_name, DIRECTORY)["amdhsa.kernels"][0]
     small_n = _readEmbeddedYaml(name, DIRECTORY)["amdhsa.kernels"][0]
     assert small_n[".kernarg_segment_size"] == original[".kernarg_segment_size"]
@@ -376,4 +371,18 @@ def test_wide_decode_launch_geometry():
     metadata = _readEmbeddedYaml(name, DIRECTORY)["amdhsa.kernels"][0]
     assert config["WorkGroup"] == [16, 1, 32]
     assert metadata[".max_flat_workgroup_size"] == 512
-    assert config["AssertSizeEqual"] == {1: 1, 2: 1}
+    assert {"type": "SizeEqual", "index": 1, "value": 1} in [
+        state(p) for p in ProblemPredicate.W4A16DecodePredicates({"CustomKernelName": name})]
+
+
+@pytest.mark.parametrize("name", [RUNTIME_GENERAL, "unrelated_kernel", ""])
+def test_decode_bounds_do_not_apply_to_other_kernels(name):
+    assert ProblemPredicate.W4A16DecodePredicates({"CustomKernelName": name}) == []
+
+
+def test_decode_kernels_do_not_use_generic_size_assertions():
+    from Tensile.Common.ValidParameters import validParameters
+    keys = {"AssertSizeEqual", "AssertSizeGreaterThan", "AssertSizeLessThan"}
+    assert not keys.intersection(validParameters)
+    for source in DIRECTORY.glob("RuntimeGroup_Decode_*.s"):
+        assert not keys.intersection(readCustomKernelConfig(source.stem, DIRECTORY))

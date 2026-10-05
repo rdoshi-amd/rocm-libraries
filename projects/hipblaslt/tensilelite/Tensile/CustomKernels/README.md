@@ -191,6 +191,8 @@ use `(q - 8) * scale` without reading a zero-point buffer. Add both `--symmetric
 and `--max-n 4` to generate the separate kernels selected for N=2,3,4. Their
 neighboring workgroups process different columns of the same weight rows to
 reuse weights in cache.
+W4A16-specific predicate construction limits `_N4_` decode variants to N=1..4
+and other decode variants to N=1; all require batch=1 and positive K.
 
 For unsigned symmetric N=1 at M/K=3584/3584, 3584/18944 and 4608/3584,
 Equality selects a 512-thread kernel with 16 rows per workgroup. Two-dword

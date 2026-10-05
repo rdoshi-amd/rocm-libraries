@@ -38,8 +38,6 @@ CONFIG = {
     "GlobalSplitU": 1,
     "WorkGroupMapping": 1,
     "AssertSummationElementMultiple": 256,
-    "AssertSizeEqual": {1: 1, 2: 1},
-    "AssertSizeGreaterThan": {3: 0},
 }
 
 
@@ -109,10 +107,6 @@ def main():
     assert text.count("\n---\n") == 1
     config = dict(CONFIG)
     config["WorkGroup"] = [args.threads // 32, 1, 32]
-    if args.max_n > 1:
-        config["AssertSizeEqual"] = {2: 1}
-        config["AssertSizeGreaterThan"] = {1: 0, 3: 0}
-        config["AssertSizeLessThan"] = {1: args.max_n + 1}
     metadata = yaml.safe_dump({"custom.config": config}, sort_keys=False)
     text = text.replace("\n---\n", "\n---\n" + metadata)
     header = (

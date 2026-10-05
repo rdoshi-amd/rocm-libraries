@@ -267,9 +267,6 @@ class DataType:
             'isComplex': False,
         },
         {
-            # Signed 4-bit integer, two per byte (low nibble first). Only ever a
-            # DataTypeA/B (in-memory) type: the kernel dequantizes it to
-            # MacDataType before the LDS write, so it never reaches the MAC.
             'enum': DataTypeEnum.Int4,
             'char': 'I4',
             'nameAbbrev': 'i4',

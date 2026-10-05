@@ -1248,13 +1248,6 @@ custom.config:
   GlobalSplitU: 1
   WorkGroupMapping: 1
   AssertSummationElementMultiple: 256
-  AssertSizeEqual:
-    2: 1
-  AssertSizeGreaterThan:
-    1: 0
-    3: 0
-  AssertSizeLessThan:
-    1: 5
 amdhsa.kernels:
   - .args:
       - .offset:         0

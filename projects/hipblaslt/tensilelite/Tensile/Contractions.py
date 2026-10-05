@@ -27,6 +27,7 @@ from .ExecutionPolicy import isPersistent, isStreamK, isPersistentDataParallel, 
 from typing import Dict
 
 from .Activation import ActivationType
+from .CustomKernels import w4a16DecodeMaxN
 from . import Hardware
 from . import Properties
 from .Common import state, state_key_ordering, IsaInfo
@@ -463,20 +464,6 @@ class ProblemType:
                 predicates.append(ProblemPredicate("DataTypeMXSB", value=self.mxTypeB))
         return predicates
 
-def extractDimPredicate(cls, key, value, predicateName):
-    """
-    Extract dimension-indexed predicates from an assertion dictionary.
-    """
-    predicates = []
-    for pos,val in value.items():
-        if val != -1:
-            predicates.append(cls(predicateName, index=pos, value=val))
-    if len(predicates) == 1:
-        return predicates[0]
-    elif len(predicates) > 1:
-        return cls.And(predicates)
-
-
 class TaskPredicate(Properties.Predicate):
     @classmethod
     def FromOriginalKeyPair(cls, pair):
@@ -513,13 +500,6 @@ class ProblemPredicate(Properties.Predicate):
         if key == "AssertAILessThanEqual":
             return cls("AILessThanEqual", value=value) if value > 0 else None
 
-        if key == "AssertSizeEqual":
-            return extractDimPredicate(cls, key, value, "SizeEqual")
-        if key == "AssertSizeGreaterThan":
-            return extractDimPredicate(cls, key, value, "SizeGreaterThan")
-        if key == "AssertSizeLessThan":
-            return extractDimPredicate(cls, key, value, "SizeLessThan")
-
         if key.endswith('Multiple'):
             if value == 1:
                 return None
@@ -542,8 +522,24 @@ class ProblemPredicate(Properties.Predicate):
             raise RuntimeError("Unknown assertion key: {}".format(key))
 
     @classmethod
+    def W4A16DecodePredicates(cls, state):
+        custom = state.get("CustomKernel")
+        name = custom.get("name", "") if isinstance(custom, dict) else ""
+        maxN = w4a16DecodeMaxN(name or state.get("CustomKernelName", ""))
+        if maxN is None:
+            return []
+        predicates = [cls("SizeEqual", index=2, value=1),
+                      cls("SizeGreaterThan", index=3, value=0)]
+        if maxN == 1:
+            predicates.append(cls("SizeEqual", index=1, value=1))
+        else:
+            predicates.extend([cls("SizeGreaterThan", index=1, value=0),
+                               cls("SizeLessThan", index=1, value=maxN + 1)])
+        return predicates
+
+    @classmethod
     def CompoundPredicates(cls, state, problemType):
-        rv = []
+        rv = cls.W4A16DecodePredicates(state)
 
         if "BatchSizeEqual" in state:
             rv += [cls('BatchSizeEqual', index=0, value=state["BatchSizeEqual"])]

@@ -38,6 +38,7 @@ add_executable(hipdnn_plugin_sdk_tests
     $<$<BOOL:${HIPDNN_ENABLE_KERNEL_INGESTOR}>:ingestor/TestMatchContext.cpp>
     $<$<BOOL:${HIPDNN_ENABLE_KERNEL_INGESTOR}>:ingestor/TestDescriptors.cpp>
     $<$<BOOL:${HIPDNN_ENABLE_KERNEL_INGESTOR}>:ingestor/TestArchGate.cpp>
+    $<$<BOOL:${HIPDNN_ENABLE_KERNEL_INGESTOR}>:ingestor/TestGpuGenericTargets.cpp>
     $<$<BOOL:${HIPDNN_ENABLE_KERNEL_INGESTOR}>:ingestor/TestKernelDefinition.cpp>
     $<$<BOOL:${HIPDNN_ENABLE_KERNEL_INGESTOR}>:ingestor/TestKernelIngestorStateManager.cpp>
     $<$<BOOL:${HIPDNN_ENABLE_KERNEL_INGESTOR}>:ingestor/TestGenericPlan.cpp>
@@ -48,6 +49,15 @@ add_executable(hipdnn_plugin_sdk_tests
     $<$<BOOL:${HIPDNN_ENABLE_KERNEL_INGESTOR}>:ingestor/TestDeviceKey.cpp>
     $<$<BOOL:${HIPDNN_ENABLE_KERNEL_INGESTOR}>:ingestor/TestWinnerCache.cpp>
     $<$<BOOL:${HIPDNN_ENABLE_KERNEL_INGESTOR}>:TestKernelIngestorConcurrency.cpp>
+)
+
+# The generic target table and the golden tier vectors are read from the source tree, so
+# the C++ test compares the generated header against the very document it came from.
+target_compile_definitions(
+    hipdnn_plugin_sdk_tests
+    PRIVATE
+        "HIPDNN_GPU_GENERIC_TARGETS_JSON_PATH=\"${HIPDNN_GPU_GENERIC_TARGETS_JSON_SOURCE}\""
+        "HIPDNN_ARCH_TIER_VECTORS_JSON_PATH=\"${CMAKE_CURRENT_SOURCE_DIR}/data/arch_tier_vectors.json\""
 )
 
 target_compile_options(hipdnn_plugin_sdk_tests PRIVATE ${HIPDNN_WARNING_COMPILE_OPTIONS} ${HIPDNN_NO_RTTI_OPTIONS})
@@ -78,6 +88,60 @@ endif()
 
 clang_tidy_check(hipdnn_plugin_sdk_tests)
 add_hipdnn_test(hipdnn_plugin_sdk_tests ${CMAKE_CURRENT_BINARY_DIR})
+
+# Table provenance (F-1): the validator must accept the real table, and reject each invalid
+# fixture with the text naming that fixture's defect. Negatives match their FATAL_ERROR
+# text with PASS_REGULAR_EXPRESSION, never WILL_FAIL: a validator that crashes, or cannot
+# find its input, fails for an unrelated reason and would otherwise pass. CMake wraps long
+# messages at spaces, so every space in the expected text matches any whitespace run.
+set(_generic_targets_check "${CMAKE_CURRENT_SOURCE_DIR}/cmake/CheckGpuGenericTargets.cmake")
+
+add_test(
+    NAME hipdnn_gpu_generic_targets_provenance
+    COMMAND ${CMAKE_COMMAND} -DGENERIC_TARGETS_JSON=${HIPDNN_GPU_GENERIC_TARGETS_JSON_SOURCE} -P
+            ${_generic_targets_check}
+)
+set_tests_properties(
+    hipdnn_gpu_generic_targets_provenance PROPERTIES PASS_REGULAR_EXPRESSION
+                                                     "gpu_generic_targets: valid"
+)
+_apply_hipdnn_test_category_labels(hipdnn_gpu_generic_targets_provenance)
+
+# Registers ctest hipdnn_gpu_generic_targets_rejects_<case>, which must fail with
+# <expected_text> (spaces match any whitespace run) for data/generic_targets_invalid/<case>.json.
+function(_hipdnn_add_generic_targets_rejection_test case expected_text)
+    string(REPLACE " " "[ \n]+" expected_regex "${expected_text}")
+    set(test_name hipdnn_gpu_generic_targets_rejects_${case})
+    add_test(
+        NAME ${test_name}
+        COMMAND
+            ${CMAKE_COMMAND}
+            -DGENERIC_TARGETS_JSON=${CMAKE_CURRENT_SOURCE_DIR}/data/generic_targets_invalid/${case}.json
+            -P ${_generic_targets_check}
+    )
+    set_tests_properties(${test_name} PROPERTIES PASS_REGULAR_EXPRESSION "${expected_regex}")
+    _apply_hipdnn_test_category_labels(${test_name})
+endfunction()
+
+_hipdnn_add_generic_targets_rejection_test(missing_source "missing required object 'source'")
+_hipdnn_add_generic_targets_rejection_test(missing_comment "missing required key '.comment'")
+_hipdnn_add_generic_targets_rejection_test(missing_permalink "missing required key 'source.permalink'")
+_hipdnn_add_generic_targets_rejection_test(short_revision "'source.revision' must be a 40-digit")
+_hipdnn_add_generic_targets_rejection_test(
+    permalink_without_revision "'source.permalink' must contain 'source.revision'"
+)
+_hipdnn_add_generic_targets_rejection_test(bad_retrieved_on "'source.retrievedOn' must be YYYY-MM-DD")
+_hipdnn_add_generic_targets_rejection_test(missing_license "missing required key 'source.license'")
+_hipdnn_add_generic_targets_rejection_test(missing_statement "missing required key 'source.statement'")
+_hipdnn_add_generic_targets_rejection_test(empty_generics "'generics' must be non-empty")
+_hipdnn_add_generic_targets_rejection_test(
+    empty_members "generics.gfx12-generic must list at least one member"
+)
+_hipdnn_add_generic_targets_rejection_test(
+    duplicate_member "member 'gfx1200' is listed twice in gfx12-generic"
+)
+_hipdnn_add_generic_targets_rejection_test(bad_generic_name "generic name 'gfx12generic' does not match")
+_hipdnn_add_generic_targets_rejection_test(bad_member "member 'gfx12zz' of gfx12-generic does not match")
 
 # Cross-process coverage: one process writes a winner record, a SECOND process reads it
 # back. Two ctest invocations of the same binary, sequenced with

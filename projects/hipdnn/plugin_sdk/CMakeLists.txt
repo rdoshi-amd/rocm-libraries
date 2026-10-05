@@ -1,5 +1,6 @@
 # Copyright © Advanced Micro Devices, Inc., or its affiliates.
 # SPDX-License-Identifier:  MIT
+# cmake-lint: disable=E1120
 
 include(CMakePackageConfigHelpers)
 
@@ -20,6 +21,55 @@ add_library(hipdnn_plugin_sdk INTERFACE)
 hipdnn_generate_version_header(hipdnn_plugin_sdk)
 
 target_link_libraries(hipdnn_plugin_sdk INTERFACE hipdnn_flatbuffers_sdk hipdnn_data_sdk)
+
+# Generic GPU target table: one JSON document is the source of truth. It is validated here,
+# turned into a constexpr C++ table at configure time, installed beside the Config for
+# the packer, and read directly by Python tools. Never keep a second copy.
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/ValidateGpuGenericTargets.cmake")
+set(HIPDNN_GPU_GENERIC_TARGETS_JSON_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/data/gpu_generic_targets.json")
+hipdnn_validate_gpu_generic_targets("${HIPDNN_GPU_GENERIC_TARGETS_JSON_SOURCE}")
+set_property(
+    DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${HIPDNN_GPU_GENERIC_TARGETS_JSON_SOURCE}"
+)
+
+file(READ "${HIPDNN_GPU_GENERIC_TARGETS_JSON_SOURCE}" _generic_targets_json)
+string(JSON _generic_count LENGTH "${_generic_targets_json}" generics)
+set(HIPDNN_GENERIC_TARGET_MEMBER_ARRAYS "")
+set(HIPDNN_GENERIC_TARGET_ROWS "")
+set(HIPDNN_GENERIC_TARGET_ROW_COUNT ${_generic_count})
+math(EXPR _last_generic "${_generic_count} - 1")
+foreach(_g RANGE 0 ${_last_generic})
+    string(JSON _generic MEMBER "${_generic_targets_json}" generics ${_g})
+    string(TOUPPER "${_generic}" _array_name)
+    string(REPLACE "-" "_" _array_name "${_array_name}")
+    string(JSON _member_count LENGTH "${_generic_targets_json}" generics "${_generic}")
+    math(EXPR _last_member "${_member_count} - 1")
+    set(_member_literals "")
+    foreach(_m RANGE 0 ${_last_member})
+        string(JSON _member GET "${_generic_targets_json}" generics "${_generic}" ${_m})
+        string(APPEND _member_literals "    \"${_member}\",\n")
+    endforeach()
+    string(APPEND HIPDNN_GENERIC_TARGET_MEMBER_ARRAYS
+           "inline constexpr std::string_view ${_array_name}_MEMBERS[] = {\n${_member_literals}};\n\n")
+    string(APPEND HIPDNN_GENERIC_TARGET_ROWS
+           "    {\"${_generic}\", ${_array_name}_MEMBERS, ${_member_count}},\n")
+endforeach()
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/GpuGenericTargetsTable.hpp.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/include/hipdnn_plugin_sdk/GpuGenericTargetsTable.hpp" @ONLY
+)
+
+# Build-tree copy next to the build-tree Config; the installed copy sits beside the
+# installed Config, so one CMAKE_CURRENT_LIST_DIR expression serves both.
+set(_generic_targets_build_copy
+    "${CMAKE_BINARY_DIR}/${CMAKE_INSTALL_LIBDIR}/cmake/hipdnn_plugin_sdk/gpu_generic_targets.json"
+)
+configure_file("${HIPDNN_GPU_GENERIC_TARGETS_JSON_SOURCE}" "${_generic_targets_build_copy}" COPYONLY)
+# CACHE INTERNAL so sibling subdirectories (the hip-kernel-provider) see it; directory
+# scope would not reach them.
+set(HIPDNN_PLUGIN_SDK_GPU_GENERIC_TARGETS_JSON "${_generic_targets_build_copy}"
+    CACHE INTERNAL "Path to the generic GPU target table JSON shipped with the plugin SDK"
+)
 
 # The ingestor headers are wholly inside `#ifdef HIPDNN_ENABLE_KERNEL_INGESTOR`, and they
 # are installed whenever it is set. Carrying the definition on the exported target is what
@@ -87,6 +137,19 @@ install(
 # Install generated version header
 install(
     FILES "${CMAKE_CURRENT_BINARY_DIR}/include/hipdnn_plugin_sdk/version.h"
+    DESTINATION ${HIP_DNN_PLUGIN_SDK_INSTALL_INCLUDE_DIR}/hipdnn_plugin_sdk
+    COMPONENT Development
+)
+
+# Install the generic target table and its generated C++ form
+install(
+    FILES "${HIPDNN_GPU_GENERIC_TARGETS_JSON_SOURCE}"
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/hipdnn_plugin_sdk
+    COMPONENT Development
+)
+
+install(
+    FILES "${CMAKE_CURRENT_BINARY_DIR}/include/hipdnn_plugin_sdk/GpuGenericTargetsTable.hpp"
     DESTINATION ${HIP_DNN_PLUGIN_SDK_INSTALL_INCLUDE_DIR}/hipdnn_plugin_sdk
     COMPONENT Development
 )

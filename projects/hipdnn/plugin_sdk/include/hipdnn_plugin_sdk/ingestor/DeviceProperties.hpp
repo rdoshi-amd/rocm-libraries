@@ -6,11 +6,14 @@
 #ifdef HIPDNN_ENABLE_KERNEL_INGESTOR
 
 #include <algorithm>
+#include <cstddef>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
 
 #include <hipdnn_plugin_sdk/ArchMatch.hpp>
+#include <hipdnn_plugin_sdk/GpuGenericTargets.hpp>
 
 namespace hipdnn_plugin_sdk::ingestor
 {
@@ -27,39 +30,121 @@ struct DeviceProperties
     int multiProcessorCount = 0; ///< Compute units; 0 if unresolved.
 };
 
-/// Does @p arch (a KDP's supported-target list; empty admits everything) admit
-/// @p deviceArch? Entries are base ids and the device carries its features, so this is
-/// the PREFIX match, not SUBSTRING or equality: `gfx942` admits a device reporting
-/// `gfx942:sramecc+:xnack-` and never admits `gfx950`.
-inline bool archSupports(const std::vector<std::string>& arch, std::string_view deviceArch)
+/// How @p arch (a KDP's supported-target list) ranks for @p deviceArch: the best tier of
+/// any entry, or nullopt when no entry admits the device. An empty list is UNRESTRICTED.
+/// The device carries its features and entries are base ids, so an explicit entry is the
+/// PREFIX match, not SUBSTRING or equality: `gfx942` is EXPLICIT for a device reporting
+/// `gfx942:sramecc+:xnack-` and never matches `gfx950`. A generic entry is GENERIC when the
+/// table lists the device's base id as a member.
+inline std::optional<ArchTier> archTier(const std::vector<std::string>& arch,
+                                        std::string_view deviceArch)
 {
-    return arch.empty()
-           || std::any_of(arch.begin(), arch.end(), [deviceArch](const std::string& candidate) {
-                  return archMatches(deviceArch, candidate, ArchMatchMode::PREFIX);
-              });
+    if(arch.empty())
+    {
+        return ArchTier::UNRESTRICTED;
+    }
+    const auto baseDeviceId = stripArchFeatures(deviceArch);
+    std::optional<ArchTier> best;
+    for(const auto& entry : arch)
+    {
+        std::optional<ArchTier> tier;
+        if(!isGenericShapedArchName(entry) && archMatches(deviceArch, entry, ArchMatchMode::PREFIX))
+        {
+            tier = ArchTier::EXPLICIT;
+        }
+        else
+        {
+            tier = archEntryTier(entry, baseDeviceId);
+        }
+        if(tier && (!best || static_cast<int>(*tier) < static_cast<int>(*best)))
+        {
+            best = tier;
+        }
+    }
+    return best;
 }
 
-/// Can one device satisfy both @p a and @p b? Empty means "every arch", so it overlaps
-/// everything. Both sides are authored base ids, so an entry matches only its twin.
+/// Does @p arch (a KDP's supported-target list; empty admits everything) admit
+/// @p deviceArch, by any tier?
+inline bool archSupports(const std::vector<std::string>& arch, std::string_view deviceArch)
+{
+    return archTier(arch, deviceArch).has_value();
+}
+
+namespace detail
+{
+
+/// Does the single list entry @p entry admit the device id @p device? An explicit entry is
+/// the PREFIX match; a generic admits its members; an unknown generic admits nothing.
+inline bool entryAdmits(std::string_view entry, std::string_view device)
+{
+    if(isGenericShapedArchName(entry))
+    {
+        return genericTargetContains(entry, stripArchFeatures(device));
+    }
+    return archMatches(device, entry, ArchMatchMode::PREFIX);
+}
+
+inline bool listAdmits(const std::vector<std::string>& list, std::string_view device)
+{
+    return std::any_of(list.begin(), list.end(), [device](const std::string& entry) {
+        return entryAdmits(entry, device);
+    });
+}
+
+/// Calls @p visit with every device id in @p entry's expansion (a generic's members, an
+/// explicit entry itself, nothing for an unknown generic) until it returns true.
+template <typename Visit>
+inline bool anyExpandedMember(std::string_view entry, Visit&& visit)
+{
+    if(!isGenericShapedArchName(entry))
+    {
+        return visit(entry);
+    }
+    const auto* row = findGenericTarget(entry);
+    if(row == nullptr)
+    {
+        return false;
+    }
+    for(std::size_t i = 0; i < row->memberCount; ++i)
+    {
+        if(visit(row->members[i]))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Does some device in the expansion of @p from get admitted by @p into?
+inline bool anyExpandedMemberAdmittedBy(const std::vector<std::string>& from,
+                                        const std::vector<std::string>& into)
+{
+    return std::any_of(from.begin(), from.end(), [&into](const std::string& entry) {
+        return anyExpandedMember(
+            entry, [&into](std::string_view device) { return listAdmits(into, device); });
+    });
+}
+
+} // namespace detail
+
+/// Can one device satisfy both @p a and @p b? Compared over expanded member sets: a
+/// generic stands for its table members. Empty means "every arch", so it overlaps
+/// everything; an unknown generic expands to nothing and overlaps nothing.
 inline bool archOverlaps(const std::vector<std::string>& a, const std::vector<std::string>& b)
 {
     if(a.empty() || b.empty())
     {
         return true;
     }
-    return std::any_of(a.begin(), a.end(), [&b](const std::string& lhs) {
-        return std::any_of(b.begin(), b.end(), [&lhs](const std::string& rhs) {
-            return archMatches(lhs, rhs, ArchMatchMode::PREFIX)
-                   || archMatches(rhs, lhs, ArchMatchMode::PREFIX);
-        });
-    });
+    return detail::anyExpandedMemberAdmittedBy(a, b) || detail::anyExpandedMemberAdmittedBy(b, a);
 }
 
 /// Is every device @p inner admits also admitted by @p outer? The asymmetric counterpart
 /// to archOverlaps, for asking whether a kernel stays within the pack that binds it.
-/// Empty @p outer admits every device, so it covers anything; empty @p inner declares no
-/// restriction of its own and is covered by anything. Otherwise every @p inner entry
-/// must appear in @p outer: `[gfx942]` is covered by `[gfx942, gfx950]`, not the reverse.
+/// Compared over expanded member sets. Empty @p outer admits every device, so it covers
+/// anything; empty @p inner declares no restriction of its own and is covered by anything;
+/// an unknown generic in @p inner expands to nothing and is covered vacuously.
 inline bool archCovers(const std::vector<std::string>& outer, const std::vector<std::string>& inner)
 {
     if(outer.empty())
@@ -67,10 +152,33 @@ inline bool archCovers(const std::vector<std::string>& outer, const std::vector<
         return true;
     }
     return std::all_of(inner.begin(), inner.end(), [&outer](const std::string& entry) {
-        return std::any_of(outer.begin(), outer.end(), [&entry](const std::string& candidate) {
-            return archMatches(entry, candidate, ArchMatchMode::PREFIX);
+        return !detail::anyExpandedMember(entry, [&outer](std::string_view device) {
+            return !detail::listAdmits(outer, device);
         });
     });
+}
+
+/// Do @p a and @p b tie? True when some candidate device is matched by both at the same
+/// tier, where the candidates are every explicit id in either list and every member of
+/// every table generic in either list. Two empty lists compete (both unrestricted on
+/// every device). Lists whose best tiers always differ per device do not: the better
+/// tier shadows the other, so they may coexist.
+inline bool archesCompete(const std::vector<std::string>& a, const std::vector<std::string>& b)
+{
+    if(a.empty() && b.empty())
+    {
+        return true;
+    }
+    const auto tiesOn = [&a, &b](std::string_view device) {
+        const auto tierA = archTier(a, device);
+        return tierA && tierA == archTier(b, device);
+    };
+    const auto anyTie = [&tiesOn](const std::vector<std::string>& list) {
+        return std::any_of(list.begin(), list.end(), [&tiesOn](const std::string& entry) {
+            return detail::anyExpandedMember(entry, tiesOn);
+        });
+    };
+    return anyTie(a) || anyTie(b);
 }
 
 } // namespace hipdnn_plugin_sdk::ingestor

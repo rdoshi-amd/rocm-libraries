@@ -752,10 +752,11 @@ def validate_lds_capacity(
 
 
 # Op-opt-in warp-tile rows the shared table above does not cover: it has no
-# gfx1250 entry and no fp32 key, so validate_gemm_warp_tile_combination accepts
-# any warp tile there. Ops that generate those signatures filter through
-# op_warp_tile_allowed() from their own _validate_tile_config; nothing else
-# consults these rows. Both mirror the dispatcher arch_specs.json rows.
+# gfx1250 entry, only an fp16 row for gfx1201 and no fp32 key, so
+# validate_gemm_warp_tile_combination accepts any warp tile there. Ops that
+# generate those signatures set GemmKernelBuilder.USE_OP_WARP_TILE_ROWS and
+# filter through op_warp_tile_allowed(); nothing else consults these rows. Every
+# row equals the dispatcher arch_specs.json row of that (arch, dtype).
 GFX1250_WARP_TILES = {
     "fp16": ([16, 16, 32],),
     "bf16": ([16, 16, 32],),
@@ -765,26 +766,36 @@ GFX1250_WARP_TILES = {
     "int8": ([16, 16, 64],),
 }
 GFX9_FP32_WARP_TILES = ([16, 16, 4], [16, 16, 8], [16, 16, 16], [32, 32, 4], [32, 32, 8])
+# A (arch, dtype) with no row is left to the shared table (gfx1201 fp16 is
+# covered there), except fp32 and gfx1250, which the shared table lacks.
+OP_ARCH_WARP_TILES = {
+    "gfx908": {"fp32": GFX9_FP32_WARP_TILES},
+    "gfx90a": {"fp32": GFX9_FP32_WARP_TILES},
+    "gfx942": {"fp32": GFX9_FP32_WARP_TILES},
+    "gfx950": {"fp32": GFX9_FP32_WARP_TILES},
+    "gfx1201": {dtype: ([16, 16, 16],) for dtype in ("bf16", "fp8", "bf8")},
+    "gfx1250": GFX1250_WARP_TILES,
+}
 
 
 def op_warp_tile_allowed(gpu_target, datatype, warp_tile):
-    """False if ``warp_tile`` [m, n, k] is missing from the op-opt-in rows above.
+    """False if ``warp_tile`` [m, n, k] is missing from the OP_ARCH_WARP_TILES row
+    of ``datatype`` on any target, or if a target has no such row and is gfx1250
+    or ``datatype`` is fp32 (e.g. gfx1201 has no fp32 WMMA).
 
-    Covers only the gaps of the shared table: gfx1250, and fp32, which has MFMA
-    rows on gfx9 only, so no fp32 tile is allowed on any other arch (e.g.
-    gfx1201). ``gpu_target`` may be a ';'-separated list (CMake builds one kernel
-    for all of them); these rows are then checked against every target. Every
-    other (arch, dtype) returns True and is left to the shared checks.
+    ``gpu_target`` may be a ';'-separated list (CMake builds one kernel for all
+    of them); the rows are then checked against every target. Any other
+    (arch, dtype) returns True and is left to the shared checks.
     """
     warp_tile = list(warp_tile)
     for target in str(gpu_target).split(";"):
         arch = _base_gfx_arch(target.strip())
-        if arch == "gfx1250":
-            if warp_tile not in GFX1250_WARP_TILES.get(datatype, ()):
+        row = OP_ARCH_WARP_TILES.get(arch, {})
+        if datatype in row:
+            if warp_tile not in row[datatype]:
                 return False
-        elif datatype == "fp32":
-            if not arch.startswith("gfx9") or warp_tile not in GFX9_FP32_WARP_TILES:
-                return False
+        elif datatype == "fp32" or arch == "gfx1250":
+            return False
     return True
 
 

@@ -16,8 +16,11 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 _GEMM_DIR = os.path.dirname(_HERE)
 sys.path.insert(0, _HERE)
 sys.path.insert(0, _GEMM_DIR)
+_CK_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(_GEMM_DIR)))
+sys.path.append(os.path.join(_CK_ROOT, "dispatcher", "codegen"))
 
 import gemm_validation_utils as vu  # noqa: E402
+from arch_specs_generated import WARP_TILE_SUPPORTED_COMBINATIONS  # noqa: E402
 from batched_gemm_instance_builder import (  # noqa: E402
     BATCHED_GEMM_PRESHUFFLE_ERROR,
     BATCHED_GEMM_UNSUPPORTED_PIPELINES,
@@ -343,8 +346,36 @@ class TestDtypeLayoutCoverage(unittest.TestCase):
         )
         self.assertTrue(vu.op_warp_tile_allowed("gfx942;gfx950", "fp32", [32, 32, 8]))
         self.assertTrue(vu.op_warp_tile_allowed("gfx942;gfx1201", "fp16", [16, 16, 16]))
+        # gfx1201 WMMA has only 16x16x16 for bf16/fp8/bf8.
+        self.assertTrue(vu.op_warp_tile_allowed("gfx1201", "bf16", [16, 16, 16]))
+        self.assertFalse(vu.op_warp_tile_allowed("gfx1201", "fp8", [16, 32, 8]))
+        self.assertFalse(vu.op_warp_tile_allowed("gfx942;gfx1201", "bf16", [32, 32, 8]))
         # Other (arch, dtype) pairs are left to the shared table.
         self.assertTrue(vu.op_warp_tile_allowed("gfx942", "fp16", [16, 16, 4]))
+
+    def test_op_rows_match_dispatcher_arch_specs(self):
+        for arch, rows in vu.OP_ARCH_WARP_TILES.items():
+            spec = WARP_TILE_SUPPORTED_COMBINATIONS[arch]
+            for dtype, tiles in rows.items():
+                (key,) = [k for k in spec if k.startswith(f"{dtype}_{dtype}_")]
+                self.assertEqual(
+                    sorted(map(list, tiles)), sorted(spec[key]), (arch, dtype)
+                )
+
+    def test_gfx1201_keeps_only_16x16x16(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            # 2x4 waves: gfx1201 has no 2x2 warp layout.
+            path = _write_tile_config(
+                tmp,
+                warp_n=[4],
+                warp_tile_m=[16, 32],
+                warp_tile_n=[16, 32],
+                warp_tile_k=[8, 16, 32],
+            )
+            for dtype in ("fp16", "bf16", "fp8", "bf8"):
+                with self.subTest(dtype=dtype):
+                    tiles = _warp_tiles(_kernels(path, "gfx1201", dtype))
+                    self.assertEqual(tiles, {(16, 16, 16)})
 
     def test_gfx1250_every_dtype_layout_keeps_its_wmma_tile(self):
         for dtype, wmma in (("fp16", 32), ("bf16", 32), ("fp32", 4), ("fp8", 64), ("bf8", 64)):

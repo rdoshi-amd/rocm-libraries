@@ -113,6 +113,23 @@ class TestStreamKSpecSurface(unittest.TestCase):
         self.assertTrue(_spec().kernel_name().endswith("_sk6"))
         self.assertIn("_skauto", _spec(streamk_ctas=-1).kernel_name())
 
+    def test_auto_pool_depends_on_the_reduction(self):
+        from kernels.common.conv_implicit_gemm_wgrad import wgrad_streamk_default_ctas
+
+        # linear/tree wait on later CTAs: one per CU, always resident.
+        for red in ("linear", "tree"):
+            spec = _spec(streamk_ctas=-1, streamk_reduction=red)
+            self.assertEqual(wgrad_streamk_default_ctas(spec, "gfx950"), 256)
+            self.assertEqual(wgrad_streamk_default_ctas(spec, "gfx942"), 304)
+        # workspace/atomic never wait: sized to 16 waves per CU (4-wave CTAs).
+        for red, dd in (("workspace", "fp16"), ("atomic", "fp32")):
+            spec = _spec(streamk_ctas=-1, streamk_reduction=red, dtype_d=dd)
+            self.assertEqual(wgrad_streamk_default_ctas(spec, "gfx950"), 1024)
+            self.assertEqual(wgrad_streamk_default_ctas(spec, "gfx942"), 1216)
+        # An 8-wave CTA halves the CTA count for the same occupancy target.
+        wide = _spec(streamk_ctas=-1, streamk_reduction="workspace", warp_m=4)
+        self.assertEqual(wgrad_streamk_default_ctas(wide, "gfx950"), 512)
+
     def test_builder_resolves_auto_pool_into_the_name(self):
         k = build_implicit_gemm_conv_wgrad(_spec(streamk_ctas=-1), arch="gfx950")
         self.assertTrue(k.name.endswith("_sk256"), k.name)

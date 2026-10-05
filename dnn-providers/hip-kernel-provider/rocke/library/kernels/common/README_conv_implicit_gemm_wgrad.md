@@ -302,14 +302,29 @@ into GEMM-M instead of riding `block_id_z`: `m_tiles = ceil(wg_M/tile_m) *
 groups`, decoded group-fastest. Defining the tile count per group makes the fold
 exact for any `wg_M`, avoiding CK's `GemmM % MPerBlock` caveat.
 
-`streamk_ctas=-1` resolves to one CTA per CU of the target. The pool must not
-exceed what the device can hold at once: a stream-K CTA waits on CTAs with
-higher indices, so one that is not resident would deadlock it.
+`streamk_ctas=-1` resolves per reduction (`wgrad_streamk_default_ctas`):
 
-Reachable from dispatch: `ConvGroupedRequest(streamk=..., streamk_reduction=...)`,
-which pins `split_k=1` and the direct epilogue and routes `_wgrad_grid` through
-the instance's own `wgrad_streamk_grid`, so the spec and the launch grid cannot
-disagree about the pool.
+* `workspace` / `atomic` never wait on another CTA, so their pool is sized for
+  throughput: `num_cus * WGRAD_TARGET_WAVES_PER_CU / waves_per_cta`, the same
+  occupancy target the split-K heuristic sizes its grid for (4 CTAs per CU for
+  a 4-wave CTA). One CTA per CU leaves a single workgroup per CU with nothing
+  to hide memory latency behind, which is what made a CU-sized pool lose to
+  split-K on most shapes.
+* `linear` / `tree` stay at one CTA per CU. A CTA there waits on CTAs with
+  higher indices, so the whole pool must be resident at once; and these fixups
+  get slower with a larger pool anyway, because the tile owner folds every
+  additional contributor.
+
+Reachable from dispatch: `ConvGroupedRequest.streamk` defaults to `"auto"`,
+which selects stream-K (with the `workspace` reduction) for few output tiles on
+a long reduction -- at most `_WGRAD_STREAMK_MAX_TILES` tiles of at least
+`_WGRAD_STREAMK_MIN_ITERS_PER_TILE` K iterations each -- and the grid-per-tile
+split-K kernel otherwise. Elsewhere split-K's equal slices already balance the
+grid and stream-K's per-tile fixup is pure overhead. `"off"` never selects it;
+`"dp_sk"` / `"persistent"` force it. A stream-K choice pins `split_k=1` and the
+direct epilogue and routes `_wgrad_grid` through the instance's own
+`wgrad_streamk_grid`, so the spec and the launch grid cannot disagree about the
+pool.
 
 ## Next steps
 

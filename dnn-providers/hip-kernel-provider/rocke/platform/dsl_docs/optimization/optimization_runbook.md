@@ -1993,7 +1993,8 @@ Per-arch facts belong in the arch references — see §21.
 | Grouped GEMM persistent | `instances/grouped_gemm.py` | per-group launches | v2 persistent variant is a documented follow-up |
 | `streamk` | `WgradConvSpec` | `"off"` | `"dp_sk"` launches one CTA per data-parallel tile plus `streamk_ctas` stream-K CTAs; `"persistent"` launches only the pool and round-robins the data-parallel tiles. Both balance MAC iterations across CTAs instead of tiles, so a shape with few tiles and a long `wg_K` still fills the device. Mutually exclusive with `split_k` |
 | `streamk_reduction` | `WgradConvSpec` | `"linear"` | How CTAs sharing a tile combine partials. `"linear"`: the owner waits on each later contributor in turn and stores once. `"tree"`: pairwise fan-in, `ceil(log2)` rounds. Both are deterministic and need no dW pre-zeroing. `"atomic"`: f32 atomics into dW (fp32 only). `"workspace"`: f32 scratch atomics plus the Stage 2 reduce kernel |
-| `streamk_ctas` | `WgradConvSpec` | `-1` | The CTA pool the stream-K remainder is spread over (CK `max_active_wgs`). `-1` resolves to one CTA per CU of the target. A pool larger than the device can hold at once would let a waiting CTA block one it waits on |
+| `streamk_ctas` | `WgradConvSpec` | `-1` | The CTA pool the stream-K remainder is spread over (CK `max_active_wgs`). `-1` resolves per reduction: `workspace`/`atomic` (no waiting) get `num_cus * WGRAD_TARGET_WAVES_PER_CU / waves_per_cta`; `linear`/`tree` get one CTA per CU, because a pool larger than the device can hold at once would let a waiting CTA block one it waits on |
+| `streamk` (dispatch) | `ConvGroupedRequest` | `"auto"` | Picks stream-K + `workspace` when the candidate's tiling yields at most `_WGRAD_STREAMK_MAX_TILES` output tiles of at least `_WGRAD_STREAMK_MIN_ITERS_PER_TILE` K iterations; split-K otherwise. `"off"` disables, `"dp_sk"`/`"persistent"` force |
 
 #### 12.1.J Quantization
 

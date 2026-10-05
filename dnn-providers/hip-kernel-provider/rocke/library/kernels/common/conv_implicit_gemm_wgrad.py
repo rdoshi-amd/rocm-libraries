@@ -502,9 +502,10 @@ class WgradConvSpec:
     # zeroed before each launch.
     streamk_reduction: str = "linear"
     # The CTA pool the stream-K remainder is spread over (CK max_active_wgs).
-    # -1 = one per CU of the target, resolved by the builder. Every stream-K
-    # CTA must be resident alongside the CTAs it waits on, so an explicit value
-    # must not exceed what the device can hold at once.
+    # -1 = auto, resolved by the builder via wgrad_streamk_default_ctas: sized
+    # to the occupancy target for the reductions that never wait, one per CU
+    # for linear/tree. Those two wait on later CTAs, so with them an explicit
+    # value must not exceed what the device can hold at once.
     streamk_ctas: int = -1
 
     @property
@@ -1105,15 +1106,31 @@ def wgrad_streamk_available(spec: "WgradConvSpec") -> Tuple[bool, str]:
     return True, "ok"
 
 
-def wgrad_streamk_default_ctas(arch: str) -> int:
-    """Default stream-K CTA pool: one CTA per CU of ``arch``.
+def wgrad_streamk_default_ctas(spec: "WgradConvSpec", arch: str) -> int:
+    """Default stream-K CTA pool for ``spec`` on ``arch`` (``streamk_ctas=-1``).
 
-    One resident workgroup per CU is always available, which is what keeps a
-    stream-K CTA that waits on a later one from deadlocking.
+    The reductions that never wait on another CTA (``workspace``, ``atomic``)
+    are sized for throughput: enough CTAs to reach the same waves-per-CU target
+    the split-K heuristic sizes its grid for, i.e. ``num_cus *
+    WGRAD_TARGET_WAVES_PER_CU / waves_per_cta``. One CTA per CU leaves a single
+    workgroup per CU with nothing to hide memory latency behind.
+
+    ``linear`` and ``tree`` wait on later CTAs, so every CTA in the pool must be
+    resident at once or a waiting CTA can block the one it waits on. One CTA
+    per CU is always resident, and those fixups get slower, not faster, with
+    more contributors per tile (the owner folds every partial).
     """
-    from rocke.helpers.split_k import _ARCH_NUM_CUS, _DEFAULT_NUM_CUS
+    from rocke.helpers.split_k import (
+        _ARCH_NUM_CUS,
+        _DEFAULT_NUM_CUS,
+        WGRAD_TARGET_WAVES_PER_CU,
+    )
 
-    return _ARCH_NUM_CUS.get(arch, _DEFAULT_NUM_CUS)
+    num_cus = _ARCH_NUM_CUS.get(arch, _DEFAULT_NUM_CUS)
+    if spec.streamk_reduction in ("linear", "tree"):
+        return num_cus
+    waves_per_cta = max(1, spec.block_size // spec.wave_size)
+    return num_cus * max(1, WGRAD_TARGET_WAVES_PER_CU // waves_per_cta)
 
 
 def wgrad_streamk_partition(spec: "WgradConvSpec", *, arch: str = "gfx950"):
@@ -1129,7 +1146,9 @@ def wgrad_streamk_partition(spec: "WgradConvSpec", *, arch: str = "gfx950"):
         raise ValueError("wgrad_streamk_partition requires streamk != 'off'")
     p = spec.problem
     ctas = (
-        spec.streamk_ctas if spec.streamk_ctas > 0 else wgrad_streamk_default_ctas(arch)
+        spec.streamk_ctas
+        if spec.streamk_ctas > 0
+        else wgrad_streamk_default_ctas(spec, arch)
     )
     return streamk_iter_partition(
         m_tiles=-(-_wg_M(p) // spec.tile_m) * p.groups,
@@ -1680,7 +1699,7 @@ def build_implicit_gemm_conv_wgrad(
     # Resolve streamk_ctas=-1 (auto) the same way, so the kernel name and the
     # partition both carry the concrete pool size.
     if spec.streamk != "off" and spec.streamk_ctas == -1:
-        spec = dc_replace(spec, streamk_ctas=wgrad_streamk_default_ctas(arch))
+        spec = dc_replace(spec, streamk_ctas=wgrad_streamk_default_ctas(spec, arch))
 
     spec.validate()
     ok, why = is_valid_wgrad_spec(spec, arch=arch)

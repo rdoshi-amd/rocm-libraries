@@ -270,10 +270,21 @@ class TestConvWgradStreamKNumerics(unittest.TestCase):
                         _check(self, spec)
 
     def test_default_pool(self):
-        # streamk_ctas=-1 resolves to one CTA per CU of the device.
-        problem, _ = _problems()["dp_plus_sk"]
-        spec = _spec(problem, mode="dp_sk", reduction="linear", dtype_d="fp16", ctas=-1)
-        _check(self, spec)
+        # streamk_ctas=-1: one CTA per CU for linear/tree, the occupancy-sized
+        # pool (several CTAs per CU) for the reductions that never wait.
+        for name in ("dp_plus_sk", "multi_partner"):
+            problem, _ = _problems()[name]
+            for mode in ("dp_sk", "persistent"):
+                for reduction, dtype_d in _REDUCTIONS:
+                    spec = _spec(
+                        problem,
+                        mode=mode,
+                        reduction=reduction,
+                        dtype_d=dtype_d,
+                        ctas=-1,
+                    )
+                    with self.subTest(shape=name, mode=mode, reduction=reduction):
+                        _check(self, spec)
 
 
 @unittest.skipUnless(not _SKIP_REASON, _SKIP_REASON or "no GPU")

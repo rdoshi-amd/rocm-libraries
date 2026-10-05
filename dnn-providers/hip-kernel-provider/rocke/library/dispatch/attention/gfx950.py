@@ -29,11 +29,10 @@ from rocke.dispatch.core import (
 from .common import (
     ATTENTION_ABI_VERSION,
     UNIFIED_BLOCK_SIZES,
-    AttentionMaskType,
     AttentionRequest,
     AttentionSpec,
     FAMILY,
-    _parse_attention_mask_type,
+    _attention_band,
     _problem,
     _request_errors,
     _resolve_dense_waves_per_eu,
@@ -156,13 +155,8 @@ def _auto_variant(req: AttentionRequest) -> Gfx950DenseVariant:
     bm = int(geometry["block_m"])
     bn = int(geometry["block_n"])
     sq, sk = int(req.seqlen_q), int(req.seqlen_k)
-    mask_type = _parse_attention_mask_type(req.mask_type)
-    moving_bottom_right = (
-        mask_type == AttentionMaskType.BOTTOM_RIGHT_CAUSAL and sq != sk
-    )
-    ragged = _ragged_self_attention(
-        sq, sk, bm, bn, moving_bottom_right=moving_bottom_right
-    )
+    _causal, _right, moving_bottom_right = _dense_band(req)
+    ragged = _is_ragged(sq, sk, bm, bn)
     nqb = (sq + bm - 1) // bm
     work = nqb * int(req.nhead_q) * int(req.batch)
     np = int(req.dense_num_persistent)
@@ -215,30 +209,58 @@ def select_dense_variant(req: AttentionRequest) -> Gfx950DenseVariant:
     return matching[0]
 
 
-def _ragged_self_attention(
-    sq: int,
-    sk: int,
-    block_m: int,
-    block_n: int,
-    *,
-    moving_bottom_right: bool = False,
-) -> bool:
-    return (sq == sk or moving_bottom_right) and (
-        sq % block_m != 0 or sk % block_n != 0
-    )
+_DENSE_BR_BAND_ERROR = (
+    "dense: a window or lookahead with bottom-right alignment and "
+    "seqlen_q != seqlen_k is not implemented"
+)
+
+
+def _is_ragged(sq: int, sk: int, block_m: int, block_n: int) -> bool:
+    """Lengths that are not tile multiples run the on-chip-padded ragged body (any
+    mask: the padded keys / query rows are handled by the key-pad mask and the
+    guarded store, not by the diagonal)."""
+    return sq % block_m != 0 or sk % block_n != 0
+
+
+def _dense_band(req: AttentionRequest) -> Tuple[bool, int, bool]:
+    """``(causal, right_bound, moving_bottom_right)`` the dense body computes for
+    ``req``. Raises ``ValueError`` for a band dense cannot serve.
+
+    ``causal`` False is the unbounded right side; ``right_bound`` is the lookahead
+    (0 = plain causal). The dense body anchors its window / lookahead on the
+    top-left diagonal; only the plain causal mask has a compile-time shifted
+    (bottom-right) variant, so a window or lookahead at bottom-right alignment with
+    ``seqlen_q != seqlen_k`` is rejected here instead of being computed top-left.
+    """
+    top_left, right = _attention_band(req)
+    sq, sk = int(req.seqlen_q), int(req.seqlen_k)
+    window = int(req.sliding_window)
+    causal = right >= 0
+    right_bound = max(right, 0)
+    if top_left or sq == sk:
+        return causal, right_bound, False  # the diagonals coincide, or top-left
+    # Bottom-right alignment with seqlen_q != seqlen_k.
+    if not causal:
+        if window > 0:
+            raise ValueError(_DENSE_BR_BAND_ERROR)
+        return False, 0, False  # full attention: alignment is moot
+    if window > 0 or right_bound > 0:
+        raise ValueError(_DENSE_BR_BAND_ERROR)
+    return True, 0, True  # plain causal, compile-time shifted diagonal
 
 
 def _wide_dma_eligible(req: AttentionRequest, spec) -> bool:
-    mask_type = _parse_attention_mask_type(req.mask_type)
-    moving_bottom_right = mask_type == AttentionMaskType.BOTTOM_RIGHT_CAUSAL and int(
-        req.seqlen_q
-    ) != int(req.seqlen_k)
+    try:
+        causal, right_bound, moving_bottom_right = _dense_band(req)
+    except ValueError:
+        return False
     return (
         bool(spec.persistent)
         and int(req.hdim_q) == 128
         and int(req.hdim_v) == 128
         and req.dtype.lower() in ("fp16", "bf16")
-        and mask_type != AttentionMaskType.NO_MASK
+        and causal
+        and right_bound == 0
         and int(req.sliding_window) == 0
         and not bool(req.use_sinks)
         and not spec.ragged
@@ -291,16 +313,8 @@ def _dense_spec(req: OperatorRequest, variant: Gfx950DenseVariant | None = None)
     bm = int(geometry["block_m"])
     bn = int(geometry["block_n"])
     decode = req.dense_persist_decode.strip().lower()
-    mask_type = _parse_attention_mask_type(req.mask_type)
-    causal = mask_type != AttentionMaskType.NO_MASK
-    moving_bottom_right = (
-        mask_type == AttentionMaskType.BOTTOM_RIGHT_CAUSAL and sq != sk
-    )
-    # Cross-length ragged attention is valid only when bottom-right supplies the
-    # shifted diagonal. Equal-length bottom-right is ordinary causal attention.
-    ragged = _ragged_self_attention(
-        sq, sk, bm, bn, moving_bottom_right=moving_bottom_right
-    )
+    causal, right_bound, moving_bottom_right = _dense_band(req)
+    ragged = _is_ragged(sq, sk, bm, bn)
     return Gfx950AttentionDenseSpec(
         batch=int(req.batch),
         seqlen_q=sq,
@@ -322,6 +336,7 @@ def _dense_spec(req: OperatorRequest, variant: Gfx950DenseVariant | None = None)
         use_sinks=use_sinks,
         wide_lds_dma=variant.wide_lds_dma,
         causal_bottom_right=moving_bottom_right,
+        right_bound=right_bound,
     )
 
 
@@ -455,7 +470,7 @@ def _make_gfx950_attention_dense_candidate(
             dtypes=("bf16", "fp16"),
             # Only frozen grid variants implement a moving bottom-right diagonal.
             supports_features=frozenset(
-                {"causal", "sliding_window", "sinks"}
+                {"causal", "sliding_window", "band", "sinks"}
                 | ({"causal_bottom_right"} if not variant.persistent else set())
             ),
         ),
@@ -527,6 +542,9 @@ def _make_gfx950_d256_candidate() -> KernelCandidate:
             num_kv_heads=problem.num_kv_heads,
             name="rocke_attention_gfx950_d256",
             tiled_overrides=tuple(sorted(_d256_gfx950_spec_overrides().items())),
+            causal_top_left=problem.causal_top_left,
+            right_bound=problem.right_bound,
+            sliding_window=problem.sliding_window,
         )
 
     candidate = KernelCandidate(

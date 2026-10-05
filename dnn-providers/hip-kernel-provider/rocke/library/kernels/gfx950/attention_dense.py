@@ -61,10 +61,18 @@ Head-size / seqlen coverage:
     tiles ON-CHIP: OOB query rows load as 0 via a bounds-checked buffer load
     (register pad), OOB keys load as 0 into LDS (LDS pad), the grid/work-item
     count is ceil'd to cover the partial last query block, and the partial O rows
-    are dropped by a guarded store. Causal needs no key mask (padded ktok >=
-    seqlen_kv > every real query, so causal drops them); non-causal adds a
-    ktok<seqlen_kv key mask. Self-attention only. The aligned path is emitted
-    byte-identically when ``ragged=False`` (no TFLOPS impact).
+    are dropped by a guarded store. Causal at ``seqlen_q <= seqlen_kv`` needs no key
+    mask (padded ktok >= seqlen_kv > every real query, so causal drops them); every
+    other mask (non-causal, ``seqlen_q > seqlen_kv``, a right bound that reaches past
+    ``seqlen_kv``) adds a ktok<seqlen_kv key mask. Any ``seqlen_q`` / ``seqlen_kv`` pair
+    is valid, so full attention between different lengths (cross-attention) works. The
+    aligned path is emitted byte-identically when ``ragged=False`` (no TFLOPS impact).
+
+The mask is the cuDNN band ``(left = sliding_window, right = right_bound)`` on the
+  top-left diagonal: key ``k`` is visible to query ``q`` iff ``q - k < left`` (when set)
+  and ``k <= q + right`` (``causal=False``: unbounded; ``causal=True``: ``right_bound``,
+  0 by default). A row whose band holds no key (``seqlen_q > seqlen_kv + window``)
+  outputs zeros. Bottom-right alignment (``causal_bottom_right``) is plain causal only.
 
 Experimental/negative levers from the sweep (step-2 8-cluster, K-staging, per-nsub
 staging, score truncation, PV V-prefetch) are intentionally NOT carried over — see
@@ -72,7 +80,7 @@ the experiment's ``plan.md`` for their measured results.
 """
 
 from contextlib import nullcontext as _nullcontext
-from dataclasses import dataclass, fields as _dataclass_fields
+from dataclasses import dataclass, field, fields as _dataclass_fields
 from types import MappingProxyType
 from typing import Optional, Tuple
 
@@ -117,6 +125,22 @@ class Gfx950AttentionDenseSpec(_AttentionDenseSpecBase):
 
     lds_v_row_pad: int = _DEFAULT_GFX950_LAYOUT["lds_v_row_pad"]
     wide_lds_dma: bool = False
+    # Keys the query may see AHEAD of its diagonal: key ``k`` is visible to the query
+    # at diagonal position ``d`` iff ``k <= d + right_bound``. Only meaningful with
+    # ``causal=True`` (0 = plain causal, the default; R > 0 = lookahead). ``causal=False``
+    # is the unbounded right side. ``sliding_window`` still bounds ``d - k``, so
+    # ``(sliding_window, right_bound)`` is the cuDNN ``(left, right)`` band on the
+    # top-left diagonal. Not combinable with ``causal_bottom_right``.
+    right_bound: int = field(default=0, kw_only=True)
+
+    def _supports_noncausal_window(self) -> bool:
+        return True
+
+    def _supports_noncausal_cross_length_ragged(self) -> bool:
+        return True
+
+    def _band_name_parts(self) -> tuple[str, ...]:
+        return (f"rb{self.right_bound}",) if self.right_bound > 0 else ()
 
     def supported_persist_decodes(self) -> frozenset[str]:
         return super().supported_persist_decodes() | {
@@ -131,6 +155,22 @@ class Gfx950AttentionDenseSpec(_AttentionDenseSpecBase):
                 "lds_v_row_pad must be a non-negative multiple of 8 bf16 "
                 f"elements (16 bytes), got {self.lds_v_row_pad}"
             )
+        if self.right_bound < 0:
+            raise ValueError(
+                f"right_bound must be >= 0 (causal=False is the unbounded side), "
+                f"got {self.right_bound}"
+            )
+        if self.right_bound > 0:
+            if not self.causal:
+                raise ValueError("right_bound > 0 requires causal=True")
+            if self.causal_bottom_right:
+                raise ValueError(
+                    "right_bound > 0 is not supported with causal_bottom_right"
+                )
+            if self.paged or self.varlen:
+                raise ValueError("right_bound > 0 is not supported with paged / varlen")
+        if self.paged and not self.causal:
+            raise ValueError("paged attention is causal-only")
         if self.causal_bottom_right:
             # The non-persistent contiguous builder is the only gfx950 path
             # that implements the compile-time shifted diagonal.
@@ -169,7 +209,7 @@ class Gfx950AttentionDenseSpec(_AttentionDenseSpecBase):
             gqa = self.num_queries_per_kv
             nqb = (self.seqlen_q + self.block_m - 1) // self.block_m
             expected_np = nqb * self.num_kv_heads * self.batch
-            if not self.persistent or not self.causal:
+            if not self.persistent or not self.causal or self.right_bound:
                 raise ValueError("gqa_pair requires persistent causal attention")
             if self.ragged or self.varlen or self.paged:
                 raise ValueError(
@@ -186,7 +226,7 @@ class Gfx950AttentionDenseSpec(_AttentionDenseSpecBase):
             gqa = self.num_queries_per_kv
             nqb = (self.seqlen_q + self.block_m - 1) // self.block_m
             expected_np = nqb * self.num_kv_heads * self.batch * gqa // 2
-            if not self.persistent or not self.causal:
+            if not self.persistent or not self.causal or self.right_bound:
                 raise ValueError("gqa_pair_2phase requires persistent causal attention")
             if self.ragged or self.varlen or self.paged:
                 raise ValueError(
@@ -213,6 +253,7 @@ class Gfx950AttentionDenseSpec(_AttentionDenseSpecBase):
             and not self.varlen
             and not self.paged
             and self.sliding_window == 0
+            and self.right_bound == 0
         )
         if aligned_causal and nqb % 2 == 0 and gqa % 2 == 0:
             pair_np = nqb * self.num_kv_heads * self.batch
@@ -370,7 +411,11 @@ def build_attention_dense(
     # Compile-time bottom-right diagonal shift. The persistent builder returns
     # above and deliberately remains unchanged.
     DIAG_OFF = (Skv - Sq) if spec.causal_bottom_right else 0
-    DIAG_TILES = DIAG_OFF // BN
+    RIGHT = spec.right_bound  # keys visible ahead of the diagonal (causal only)
+    DIAG_TILES = (DIAG_OFF + RIGHT) // BN
+    # A row whose band holds no key (top-left, Sq > Skv + W - 1, with a window) must
+    # output zeros. Emitted only then, so every other kernel's IR is unchanged.
+    EMPTY_ROWS = W > 0 and not spec.varlen and Sq > Skv + W - 1
     varlen = spec.varlen
     RAGGED = spec.ragged
     LAZY_RESCALE = spec.lazy_rescale
@@ -738,7 +783,7 @@ def build_attention_dense(
         ktok>q-W) masks in-place on the QK-output layout. W is compile-time so
         the lower threshold folds to an immediate. No relayout (reuses the same
         lane->ktok/query_tok maps as causal)."""
-        if not causal:
+        if not causal and not lower:
             return
         tile_key0 = b.mul(tile_idx, b.const_i32(BN))
         query_tok = b.add(q_tok0, _mfma_32x32_c_col(b, lane, 0))
@@ -746,13 +791,15 @@ def build_attention_dense(
             query_tok = b.add(query_tok, b.const_i32(DIAG_OFF))
         # lower bound key: q - W + 1  (keep iff ktok > q - W)
         win_lo = b.sub(query_tok, b.const_i32(W)) if lower else None
+        # upper bound key: q + RIGHT (the window anchor above stays unshifted)
+        up_tok = b.add(query_tok, b.const_i32(RIGHT)) if RIGHT else query_tok
         for nsub in range(N_SUB):
             sub_base = b.add(tile_key0, b.const_i32(nsub * 32))
             for i in range(16):
                 ktok = b.add(sub_base, _mfma_32x32_c_row(b, lane, i))
-                if upper:
+                if upper and causal:
                     s_reg[nsub][i] = b.select(
-                        b.cmp_le(ktok, query_tok), s_reg[nsub][i], neg_inf
+                        b.cmp_le(ktok, up_tok), s_reg[nsub][i], neg_inf
                     )
                 if lower:
                     s_reg[nsub][i] = b.select(
@@ -761,9 +808,10 @@ def build_attention_dense(
 
     def do_kbound_mask(s_reg, tile_idx):
         """ragged non-causal: force scores of padded keys (ktok >= seqlen_kv, the
-        OOB rows of the partial last KV tile) to -inf. Causal doesn't need this
-        (padded ktok >= seqlen_kv > every real query, so causal already drops
-        them). seqlen_kv is compile-time -> the bound folds to an immediate."""
+        OOB rows of the partial last KV tile) to -inf. Causal only needs this
+        when seqlen_q > seqlen_kv (top-left): otherwise padded ktok >= seqlen_kv
+        > every real query position, so causal already drops them. seqlen_kv
+        is compile-time -> the bound folds to an immediate."""
         tile_key0 = b.mul(tile_idx, b.const_i32(BN))
         for nsub in range(N_SUB):
             sub_base = b.add(tile_key0, b.const_i32(nsub * 32))
@@ -772,6 +820,14 @@ def build_attention_dense(
                 s_reg[nsub][i] = b.select(
                     b.cmp_lt(ktok, b.const_i32(Skv)), s_reg[nsub][i], neg_inf
                 )
+
+    def _m_exp(m):
+        """Max used inside exp2. A row with no visible key has ``m == -inf`` and
+        ``exp2(-inf - -inf)`` is NaN, so anchor such rows at 0 (p == 0, state ``m``
+        stays -inf until a real key arrives). Identity when no row can be empty."""
+        if not EMPTY_ROWS:
+            return m
+        return b.select(b.fcmp("ogt", m, neg_inf), m, b.const_f32(0.0))
 
     def softmax_max(s_reg, m_i):
         local_max = neg_inf
@@ -791,7 +847,7 @@ def build_attention_dense(
         else:
             skip = None
             m_new = b.fmax(m_i, tile_max)
-        alpha = _exp2(b.fsub(m_i, m_new))
+        alpha = _exp2(b.fsub(m_i, _m_exp(m_new)))
         return m_new, alpha, skip
 
     def relayout_p(p):
@@ -895,7 +951,7 @@ def build_attention_dense(
         # divides it, so the qb term can stay outside the ceil.
         n_upper = b.add(
             b.mul(qb, b.const_i32(n_per)),
-            b.const_i32((spec.block_m - 1 + DIAG_OFF) // BN + 1),
+            b.const_i32((spec.block_m - 1 + DIAG_OFF + RIGHT) // BN + 1),
         )
         n_upper = b.select(b.cmp_lt(n_upper, n_ktiles_val), n_upper, n_ktiles_val)
     else:
@@ -905,7 +961,7 @@ def build_attention_dense(
     # is [start_tile, n_upper); tiles < start_tile are fully outside the window
     # (all -inf) so they are never visited (the KV-loop prune). W==0 keeps
     # start_tile=0 -> full causal, byte-identical to the always-on path.
-    if causal and W > 0:
+    if W > 0:
         _diag0 = b.mul(qb, b.const_i32(n_per))
         _lo_raw = b.sub(_diag0, b.const_i32(Wt))
         start_tile = b.select(
@@ -923,10 +979,10 @@ def build_attention_dense(
     b.s_barrier_bare()
     # ragged non-causal needs the key-pad mask (ktok<seqlen_kv) on any tile that
     # can hold padded keys; causal drops them for free (see do_kbound_mask).
-    RAG_KBOUND = RAGGED and (not causal) and (Skv % BN != 0)
+    RAG_KBOUND = RAGGED and (Skv % BN != 0) and ((not causal) or Sq + RIGHT > Skv)
     s0 = do_qk(start_buf)
-    if causal and W > 0:
-        do_mask(s0, start_tile, lower=True, upper=True)
+    if W > 0:
+        do_mask(s0, start_tile, lower=True, upper=causal)
     else:
         do_mask(s0, start_tile)
     if RAG_KBOUND:
@@ -943,8 +999,9 @@ def build_attention_dense(
 
     m0, alpha0, _skip0 = softmax_max(s0, m_init)
     # tile-0 softmax exp + relayout only; PV lags by one tile (fused into the loop).
+    m0_exp = _m_exp(m0)
     p0_vals = [
-        [_exp2(b.fsub(s0[nsub][i], m0)) for i in range(16)] for nsub in range(N_SUB)
+        [_exp2(b.fsub(s0[nsub][i], m0_exp)) for i in range(16)] for nsub in range(N_SUB)
     ]
     l0_local = b.const_f32(0.0)
     for nsub in range(N_SUB):
@@ -987,7 +1044,7 @@ def build_attention_dense(
         m_new, alpha, skip = softmax_max(s, m_i)
         b.sched_barrier(0)  # depth-1 fence: m_new region-live-in
         b.s_setprio(1)  # PV-only s_setprio (paired with PF ~+3.5%)
-        o_acc, p_vals, l_tile = pv_fused_exp(o_acc, p_prev, vbuf_prev, s, m_new)
+        o_acc, p_vals, l_tile = pv_fused_exp(o_acc, p_prev, vbuf_prev, s, _m_exp(m_new))
         b.s_setprio(0)
         if LAZY_RESCALE:
             _rs_ctr[0] += 1
@@ -1011,7 +1068,32 @@ def build_attention_dense(
         load_tile(pbuf, b.add(j, b.const_i32(1)))
         b.scf_yield(m_new, l_new, *o_acc, *p_packs)
 
-    if causal and W > 0:
+    if W > 0 and not causal:
+        # Non-causal window (left-only band): no upper bound, so only the window-edge
+        # tiles need a mask.
+        #   L: [start+1, mid_lo)  window-edge tiles (lower-bound masked)
+        #   M: [mid_lo, n_upper)  interior (mask-free: the lower bound holds for every
+        #                         row, and there is no upper bound)
+        diag_start = b.mul(qb, b.const_i32(n_per))
+        a = b.add(start_tile, b.const_i32(1))
+        left_end = b.add(diag_start, b.const_i32(n_per - Wt))
+
+        def _clamp_nc(x, lo, hi):
+            x = b.select(b.cmp_lt(x, lo), lo, x)  # max(x, lo)
+            x = b.select(b.cmp_lt(x, hi), x, hi)  # min(x, hi)
+            return x
+
+        mid_lo = _clamp_nc(left_end, a, n_upper)
+        phL = b.scf_for_iter(a, mid_lo, b.const_i32(1), iter_args, iv_name="swl")
+        with phL as (j, carry):
+            emit_loop_body(j, carry, mask_lower=True)
+        mid_args = [
+            (name + "_m", val) for (name, _), val in zip(iter_args, phL.results)
+        ]
+        loop = b.scf_for_iter(mid_lo, n_upper, b.const_i32(1), mid_args, iv_name="swm")
+        with loop as (j, carry):
+            emit_loop_body(j, carry)
+    elif causal and W > 0:
         # Sliding-window three-phase band loop (prologue already did start_tile):
         #   L: [start+1, mid_lo)  window-edge tiles (masked)
         #   M: [mid_lo, mid_hi)   interior (mask-free: both bounds hold for all rows)
@@ -1021,6 +1103,9 @@ def build_attention_dense(
         diag_start = b.mul(qb, b.const_i32(n_per))
         a = b.add(start_tile, b.const_i32(1))
         left_end = b.add(diag_start, b.const_i32(n_per - Wt))  # start of mask-free M
+        if DIAG_TILES:
+            # Lookahead: tiles up to ``(q0 + RIGHT)`` are below every row's upper bound.
+            diag_start = b.add(diag_start, b.const_i32(DIAG_TILES))
 
         def _clamp(x, lo, hi):
             x = b.select(b.cmp_lt(x, lo), lo, x)  # max(x, lo)
@@ -1055,7 +1140,7 @@ def build_attention_dense(
             b.const_i32(1), body_upper, b.const_i32(1), iter_args, iv_name="nb"
         )
         with body as (j, carry):
-            emit_loop_body(j, carry)
+            emit_loop_body(j, carry, mask_kbound=RAG_KBOUND)
         tail_args = [
             (name + "_t", val) for (name, _), val in zip(iter_args, body.results)
         ]
@@ -1064,7 +1149,7 @@ def build_attention_dense(
         )
         loop = b.scf_for_iter(tail_lo, n_upper, b.const_i32(1), tail_args, iv_name="nt")
         with loop as (j, carry):
-            emit_loop_body(j, carry, mask_upper=True)
+            emit_loop_body(j, carry, mask_upper=True, mask_kbound=RAG_KBOUND)
     else:
         loop = b.scf_for_iter(
             b.const_i32(1), n_upper, b.const_i32(1), iter_args, iv_name="nkt"
@@ -1085,6 +1170,9 @@ def build_attention_dense(
 
     # Epilogue: O = (P@V) / l, vectorized bf16 store.
     rcp_l = b.rcp(l_i)
+    if EMPTY_ROWS:
+        # l == 0 only for a row with no visible key: store zeros, not 0 * inf.
+        rcp_l = b.select(b.fcmp("ogt", l_i, b.const_f32(0.0)), rcp_l, b.const_f32(0.0))
     if varlen:
         o_base = b.add(
             b.mul(q_seq0, b.const_i32(stride_q_tok)), b.mul(hq, b.const_i32(D))
@@ -1170,6 +1258,9 @@ def _build_attention_dense_persistent(spec: AttentionDenseSpec) -> KernelDef:
     W = NQB * Hq * B  # total work items
     SW = spec.sliding_window  # sliding-window length (0 = disabled)
     SWt = SW // BN  # window length in KV tiles
+    RIGHT = spec.right_bound  # keys visible ahead of the diagonal (causal only)
+    # See the default builder: rows with no visible key output zeros.
+    EMPTY_ROWS = SW > 0 and not spec.varlen and Sq > Skv + SW - 1
     LAZY_RESCALE = spec.lazy_rescale
     use_sinks = spec.use_sinks
     WIDE_DMA = spec.wide_lds_dma
@@ -1605,18 +1696,19 @@ def _build_attention_dense_persistent(spec: AttentionDenseSpec) -> KernelDef:
             return s_reg
 
         def do_mask(s_reg, tile_idx, lower=False, upper=True):
-            if not causal:
+            if not causal and not lower:
                 return
             tile_key0 = b.mul(tile_idx, b.const_i32(BN))
             query_tok = b.add(q_tok0, _mfma_32x32_c_col(b, lane, 0))
             win_lo = b.sub(query_tok, b.const_i32(SW)) if lower else None
+            up_tok = b.add(query_tok, b.const_i32(RIGHT)) if RIGHT else query_tok
             for nsub in range(N_SUB):
                 sub_base = b.add(tile_key0, b.const_i32(nsub * 32))
                 for i in range(16):
                     ktok = b.add(sub_base, _mfma_32x32_c_row(b, lane, i))
-                    if upper:
+                    if upper and causal:
                         s_reg[nsub][i] = b.select(
-                            b.cmp_le(ktok, query_tok), s_reg[nsub][i], neg_inf
+                            b.cmp_le(ktok, up_tok), s_reg[nsub][i], neg_inf
                         )
                     if lower:
                         s_reg[nsub][i] = b.select(
@@ -1625,7 +1717,8 @@ def _build_attention_dense_persistent(spec: AttentionDenseSpec) -> KernelDef:
 
         def do_kbound_mask(s_reg, tile_idx):
             """ragged non-causal: -inf the padded keys (ktok >= seqlen_kv) of the
-            partial last KV tile. Causal drops them for free."""
+            partial last KV tile. Causal drops them for free unless
+            seqlen_q > seqlen_kv (top-left)."""
             tile_key0 = b.mul(tile_idx, b.const_i32(BN))
             for nsub in range(N_SUB):
                 sub_base = b.add(tile_key0, b.const_i32(nsub * 32))
@@ -1635,7 +1728,14 @@ def _build_attention_dense_persistent(spec: AttentionDenseSpec) -> KernelDef:
                         b.cmp_lt(ktok, b.const_i32(Skv)), s_reg[nsub][i], neg_inf
                     )
 
-        RAG_KBOUND = RAGGED and (not causal) and (Skv % BN != 0)
+        RAG_KBOUND = RAGGED and (Skv % BN != 0) and ((not causal) or Sq + RIGHT > Skv)
+
+        def _m_exp(m):
+            """Max used inside exp2 (see the default builder): anchors a row with no
+            visible key at 0 so ``exp2(-inf - -inf)`` is never NaN."""
+            if not EMPTY_ROWS:
+                return m
+            return b.select(b.fcmp("ogt", m, neg_inf), m, b.const_f32(0.0))
 
         def softmax_max(s_reg, m_i):
             local_max = neg_inf
@@ -1657,13 +1757,14 @@ def _build_attention_dense_persistent(spec: AttentionDenseSpec) -> KernelDef:
             else:
                 skip = None
                 m_new = b.fmax(m_i, tile_max)
-            alpha = _exp2(b.fsub(m_i, m_new))
+            alpha = _exp2(b.fsub(m_i, _m_exp(m_new)))
             return m_new, alpha, skip
 
         def softmax_stats(s_reg, m_i, l_i=None):
             m_new, alpha, _skip = softmax_max(s_reg, m_i)
+            m_exp = _m_exp(m_new)
             p = [
-                [_exp2(b.fsub(s_reg[nsub][i], m_new)) for i in range(16)]
+                [_exp2(b.fsub(s_reg[nsub][i], m_exp)) for i in range(16)]
                 for nsub in range(N_SUB)
             ]
             l_local = b.const_f32(0.0)
@@ -1861,7 +1962,9 @@ def _build_attention_dense_persistent(spec: AttentionDenseSpec) -> KernelDef:
             # PV-only s_setprio: the PV MFMA cluster wins issue slots; paired with
             # PF this converts to ~+3.5% (Sq=8192 causal, ~852 -> ~877 TFLOPS).
             b.s_setprio(1)
-            o_acc, p_vals, l_tile = pv_fused_exp(o_acc, p_prev, vbuf_prev, s, m_new)
+            o_acc, p_vals, l_tile = pv_fused_exp(
+                o_acc, p_prev, vbuf_prev, s, _m_exp(m_new)
+            )
             b.s_setprio(0)
             if LAZY_RESCALE:
                 # Skip the O/l rescale via a wave-uniform 0/1-trip loop when the
@@ -1890,7 +1993,10 @@ def _build_attention_dense_persistent(spec: AttentionDenseSpec) -> KernelDef:
             b.scf_yield(m_new, l_new, *o_acc, *p_packs)
 
         if causal:
-            n_upper = b.add(b.mul(qb, b.const_i32(n_per)), b.const_i32(n_per))
+            n_upper = b.add(
+                b.mul(qb, b.const_i32(n_per)),
+                b.const_i32((BLOCK_M - 1 + RIGHT) // BN + 1),
+            )
             n_upper = b.select(
                 b.cmp_lt(n_upper, b.const_i32(n_ktiles)),
                 n_upper,
@@ -1900,7 +2006,7 @@ def _build_attention_dense_persistent(spec: AttentionDenseSpec) -> KernelDef:
             n_upper = b.const_i32(n_ktiles)
 
         # Sliding-window start tile (see default builder). SW==0 -> start_tile=0.
-        if causal and SW > 0:
+        if SW > 0:
             _diag0 = b.mul(qb, b.const_i32(n_per))
             _lo_raw = b.sub(_diag0, b.const_i32(SWt))
             start_tile = b.select(
@@ -1916,8 +2022,8 @@ def _build_attention_dense_persistent(spec: AttentionDenseSpec) -> KernelDef:
         b.s_waitcnt(vmcnt=0)
         b.s_barrier_bare()
         s0 = do_qk(start_buf)
-        if causal and SW > 0:
-            do_mask(s0, start_tile, lower=True, upper=True)
+        if SW > 0:
+            do_mask(s0, start_tile, lower=True, upper=causal)
         else:
             do_mask(s0, start_tile)
         if RAG_KBOUND:
@@ -1942,11 +2048,37 @@ def _build_attention_dense_persistent(spec: AttentionDenseSpec) -> KernelDef:
             + [(f"pk{kk}", pk0[kk]) for kk in range(KK_STEPS)]
         )
 
-        if causal and SW > 0:
+        if SW > 0 and not causal:
+            # Non-causal window (left-only band): only the window-edge tiles need a
+            # mask; see the default builder.
+            diag_start = b.mul(qb, b.const_i32(n_per))
+            a = b.add(start_tile, b.const_i32(1))
+            left_end = b.add(diag_start, b.const_i32(n_per - SWt))
+
+            def _clamp_nc(x, lo, hi):
+                x = b.select(b.cmp_lt(x, lo), lo, x)
+                x = b.select(b.cmp_lt(x, hi), x, hi)
+                return x
+
+            mid_lo = _clamp_nc(left_end, a, n_upper)
+            phL = b.scf_for_iter(a, mid_lo, b.const_i32(1), iter_args, iv_name="swl")
+            with phL as (j, carry):
+                emit_loop_body(j, carry, mask_lower=True)
+            mid_args = [
+                (name + "_m", val) for (name, _), val in zip(iter_args, phL.results)
+            ]
+            loop = b.scf_for_iter(
+                mid_lo, n_upper, b.const_i32(1), mid_args, iv_name="swm"
+            )
+            with loop as (j, carry):
+                emit_loop_body(j, carry)
+        elif causal and SW > 0:
             # Sliding-window three-phase band loop (prologue did start_tile).
             diag_start = b.mul(qb, b.const_i32(n_per))
             a = b.add(start_tile, b.const_i32(1))
             left_end = b.add(diag_start, b.const_i32(n_per - SWt))
+            if RIGHT // BN:
+                diag_start = b.add(diag_start, b.const_i32(RIGHT // BN))
 
             def _clamp(x, lo, hi):
                 x = b.select(b.cmp_lt(x, lo), lo, x)
@@ -1977,12 +2109,14 @@ def _build_attention_dense_persistent(spec: AttentionDenseSpec) -> KernelDef:
                 emit_loop_body(j, carry, mask_lower=True, mask_upper=True)
         elif causal:
             diag_start = b.mul(qb, b.const_i32(n_per))
+            if RIGHT // BN:
+                diag_start = b.add(diag_start, b.const_i32(RIGHT // BN))
             body_upper = b.select(b.cmp_lt(diag_start, n_upper), diag_start, n_upper)
             body = b.scf_for_iter(
                 b.const_i32(1), body_upper, b.const_i32(1), iter_args, iv_name="nb"
             )
             with body as (j, carry):
-                emit_loop_body(j, carry)
+                emit_loop_body(j, carry, mask_kbound=RAG_KBOUND)
             tail_args = [
                 (name + "_t", val) for (name, _), val in zip(iter_args, body.results)
             ]
@@ -1993,7 +2127,7 @@ def _build_attention_dense_persistent(spec: AttentionDenseSpec) -> KernelDef:
                 tail_lo, n_upper, b.const_i32(1), tail_args, iv_name="nt"
             )
             with loop as (j, carry):
-                emit_loop_body(j, carry, mask_upper=True)
+                emit_loop_body(j, carry, mask_upper=True, mask_kbound=RAG_KBOUND)
         else:
             loop = b.scf_for_iter(
                 b.const_i32(1), n_upper, b.const_i32(1), iter_args, iv_name="nkt"
@@ -2016,6 +2150,10 @@ def _build_attention_dense_persistent(spec: AttentionDenseSpec) -> KernelDef:
         # the KV loop (keeps the loop-carried live set minimal -> 0 spill). Must
         # mirror the work-item decode used at the top of the loop.
         rcp_l = b.rcp(l_i)
+        if EMPTY_ROWS:
+            rcp_l = b.select(
+                b.fcmp("ogt", l_i, b.const_f32(0.0)), rcp_l, b.const_f32(0.0)
+            )
         if spec.resolved_persist_decode == "gqa_pair_2phase":
             cta_e = b.mod(wi, b.const_i32(NP))
             hql_e = b.mod(cta_e, b.const_i32(gqa))

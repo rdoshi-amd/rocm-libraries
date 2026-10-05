@@ -116,10 +116,12 @@ static void
         return;
     }
 
-    // For bfloat16, we use float as the source type as we generate random floats
-    // and then convert them to bfloat16
-    using SrcType
-        = std::conditional_t<std::is_same_v<T, hipdnn_data_sdk::types::bfloat16>, float, T>;
+    // For bfloat16 and half, we use float as the source type as we generate random
+    // floats and then convert them to the target type
+    using SrcType = std::conditional_t<std::is_same_v<T, hipdnn_data_sdk::types::bfloat16>
+                                           || std::is_same_v<T, hipdnn_data_sdk::types::half>,
+                                       float,
+                                       T>;
 
     const std::vector<std::string> defines{
         std::string("-DTARGET_TYPE=") + HipRtcTypeName<T>::VALUE,
@@ -176,28 +178,22 @@ static void
                     "hipModuleLaunchKernel failed");
 }
 
-// One rocRAND generator per thread, created on first use. Creating a generator
-// allocates its state on the device, and a fill runs once per input tensor of every
-// test case, so building a fresh one each time costs more than generating the values
-// for all but the largest tensors. The seed is set again on every fill, which restarts
-// the sequence, so reuse does not change what a given seed produces.
+// Fills `tensor` on the device using `generator`, which the caller owns. Creating a
+// generator allocates its state on the device, so a caller that fills many tensors
+// builds one and passes it to each fill. Not thread-safe: a generator belongs to one
+// thread at a time. The seed is set again on every fill, which restarts the sequence,
+// so reuse does not change what a given seed produces.
 //
-// Destroyed at thread exit, which for the main thread is before the HIP and rocRAND
-// libraries unload.
-inline const detail::RocRandGenerator& threadRocRandGenerator()
-{
-    thread_local const detail::RocRandGenerator s_generator(ROCRAND_RNG_PSEUDO_DEFAULT);
-    return s_generator;
-}
-
 // `synchronize` false leaves the fill in flight on the device, for a caller that fills
 // several tensors and waits once afterwards. Nothing may read the tensor on another
-// stream, or on the host, until a hipDeviceSynchronize() has returned.
+// stream, or on the host, until a hipDeviceSynchronize() has returned, and `generator`
+// must outlive that wait.
 template <class T>
 static void gpuFillWithRandomValues(hipdnn_data_sdk::utilities::TensorBase<T>& tensor,
                                     T minValue,
                                     T maxValue,
                                     unsigned int seed,
+                                    const detail::RocRandGenerator& generator,
                                     bool synchronize)
 {
     tensor.memory().markDeviceModified();
@@ -209,17 +205,21 @@ static void gpuFillWithRandomValues(hipdnn_data_sdk::utilities::TensorBase<T>& t
     const auto count = tensor.elementSpace();
     auto* dstPtr = tensor.memory().deviceData();
 
-    const auto& gen = threadRocRandGenerator();
-
-    detail::throwOnRocRandError(rocrand_set_seed(gen.generator, seed), "rocrand_set_seed");
+    detail::throwOnRocRandError(rocrand_set_seed(generator.generator, seed), "rocrand_set_seed");
 
     // Launch the appropriate rocrand_generate_uniform function based on the data type
-    if constexpr(std::is_same_v<T, hipdnn_data_sdk::types::bfloat16>)
+    if constexpr(std::is_same_v<T, hipdnn_data_sdk::types::bfloat16>
+                 || std::is_same_v<T, hipdnn_data_sdk::types::half>)
     {
+        // Drawn as full-precision floats and converted by the scaling kernel.
+        // rocrand_generate_uniform_half would give a 16-bit uniform in (0, 1], which
+        // after scaling to [-1, 1] has about 1000 distinct positive values and lands
+        // exactly on zero about once per 2700 elements; the host fill has neither.
         const detail::HipDeviceBuffer<float> scratch(count);
 
-        detail::throwOnRocRandError(rocrand_generate_uniform(gen.generator, scratch.data, count),
-                                    "rocrand_generate_uniform");
+        detail::throwOnRocRandError(
+            rocrand_generate_uniform(generator.generator, scratch.data, count),
+            "rocrand_generate_uniform");
 
         launchScaleUniform<T>(scratch.data, dstPtr, count, minValue, maxValue);
 
@@ -229,23 +229,11 @@ static void gpuFillWithRandomValues(hipdnn_data_sdk::utilities::TensorBase<T>& t
     }
     else if constexpr(std::is_same_v<T, double>)
     {
-        detail::throwOnRocRandError(
-            rocrand_generate_uniform_double(gen.generator, static_cast<double*>(dstPtr), count),
-            "rocrand_generate_uniform_double");
+        detail::throwOnRocRandError(rocrand_generate_uniform_double(
+                                        generator.generator, static_cast<double*>(dstPtr), count),
+                                    "rocrand_generate_uniform_double");
 
         if(minValue != 0.0 || maxValue != 1.0)
-        {
-            launchScaleUniform<T>(dstPtr, dstPtr, count, minValue, maxValue);
-        }
-    }
-    else if constexpr(std::is_same_v<T, hipdnn_data_sdk::types::half>)
-    {
-        detail::throwOnRocRandError(
-            rocrand_generate_uniform_half(gen.generator, static_cast<__half*>(dstPtr), count),
-            "rocrand_generate_uniform_half");
-
-        if(minValue != static_cast<hipdnn_data_sdk::types::half>(0.0f)
-           || maxValue != static_cast<hipdnn_data_sdk::types::half>(1.0f))
         {
             launchScaleUniform<T>(dstPtr, dstPtr, count, minValue, maxValue);
         }
@@ -255,7 +243,7 @@ static void gpuFillWithRandomValues(hipdnn_data_sdk::utilities::TensorBase<T>& t
         static_assert(std::is_same_v<T, float>, "Unsupported type for gpuFillWithRandomValues");
 
         detail::throwOnRocRandError(
-            rocrand_generate_uniform(gen.generator, static_cast<float*>(dstPtr), count),
+            rocrand_generate_uniform(generator.generator, static_cast<float*>(dstPtr), count),
             "rocrand_generate_uniform");
 
         if(minValue != 0.0f || maxValue != 1.0f)
@@ -269,23 +257,31 @@ static void gpuFillWithRandomValues(hipdnn_data_sdk::utilities::TensorBase<T>& t
         throwOnHipError(hipDeviceSynchronize(), "hipDeviceSynchronize failed");
     }
 }
+
+// One fill with a generator of its own, finished before it returns.
+template <class T>
+static void gpuFillWithRandomValues(hipdnn_data_sdk::utilities::TensorBase<T>& tensor,
+                                    T minValue,
+                                    T maxValue,
+                                    unsigned int seed)
+{
+    const detail::RocRandGenerator generator(ROCRAND_RNG_PSEUDO_DEFAULT);
+    gpuFillWithRandomValues(tensor, minValue, maxValue, seed, generator, /*synchronize=*/true);
+}
 #endif // USE_ROCRAND
 
 // Fills `tensor` with uniform random values in [minValue, maxValue]: on the device
 // with rocRAND when it is available, on the host otherwise. With rocRAND the data
 // lives on the device afterwards and is migrated to the host by the first non-const
 // host access; a const access cannot migrate and throws.
-//
-// `synchronize` is only honoured on the rocRAND path; see gpuFillWithRandomValues().
 template <class T>
 static void fillWithRandomValues(hipdnn_data_sdk::utilities::TensorBase<T>& tensor,
                                  T minValue,
                                  T maxValue,
-                                 unsigned int seed = std::random_device{}(),
-                                 [[maybe_unused]] bool synchronize = true)
+                                 unsigned int seed = std::random_device{}())
 {
 #if defined(USE_ROCRAND)
-    gpuFillWithRandomValues(tensor, minValue, maxValue, seed, synchronize);
+    gpuFillWithRandomValues(tensor, minValue, maxValue, seed);
 #else
     tensor.fillWithRandomValues(minValue, maxValue, seed);
 #endif

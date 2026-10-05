@@ -155,31 +155,44 @@ OutputTensors allocateSentinelOutputs(
 {
     OutputTensors outputs;
     bool deviceFillPending = false;
-    for(const int64_t uid : outputTensorUids)
-    {
-        const auto& attributes = *tensorAttributes.at(uid);
-        outputs[uid] = hipdnn_test_sdk::detail::createTensorFromAttribute(attributes);
 
-        if(onDevice && fillSentinelOnDevice(*outputs[uid], attributes.data_type()))
+    try
+    {
+        for(const int64_t uid : outputTensorUids)
         {
-            deviceFillPending = true;
+            const auto& attributes = *tensorAttributes.at(uid);
+            outputs[uid] = hipdnn_test_sdk::detail::createTensorFromAttribute(attributes);
+
+            if(onDevice && fillSentinelOnDevice(*outputs[uid], attributes.data_type()))
+            {
+                deviceFillPending = true;
+            }
+            else
+            {
+                outputs[uid]->fillWithSentinelValue();
+            }
         }
-        else
+
+        // One wait for every device write, so nothing that runs on another stream starts
+        // on a half-written buffer.
+        if(deviceFillPending)
         {
-            outputs[uid]->fillWithSentinelValue();
+            const hipError_t status = hipDeviceSynchronize();
+            if(status != hipSuccess)
+            {
+                throw std::runtime_error(std::string("device sentinel fill failed: ")
+                                         + hipGetErrorString(status));
+            }
         }
     }
-
-    // One wait for every device write, so nothing that runs on another stream starts on
-    // a half-written buffer.
-    if(deviceFillPending)
+    catch(const std::exception& e)
     {
-        const hipError_t status = hipDeviceSynchronize();
-        if(status != hipSuccess)
+        if(!onDevice)
         {
-            throw std::runtime_error(std::string("device sentinel fill failed: ")
-                                     + hipGetErrorString(status));
+            throw;
         }
+        throw DeviceOutputError(std::string("could not prepare output buffers on the device: ")
+                                + e.what());
     }
     return outputs;
 }

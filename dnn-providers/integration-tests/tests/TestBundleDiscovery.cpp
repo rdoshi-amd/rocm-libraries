@@ -1184,6 +1184,86 @@ TEST_F(TestBundleDiscoveryFixture, ClassifyBundleSetsLocatorForSweepCase)
     EXPECT_TRUE(loaded.claimLocator.isSweep());
 }
 
+// selectBundlesToLoad() is the registration-time filter step. Its counters are the
+// denominators the support-claim summary divides by, so a drift here reattributes every
+// gap line to the wrong cause without failing anything else. Three flat bundles:
+// case_a is selected by the filter and has a claim, case_b is excluded and has a
+// claim, case_c is excluded and has none.
+TEST_F(TestBundleDiscoveryFixture, SelectBundlesToLoadCountsExcludedClaimsWhenObserving)
+{
+    for(const auto* suite : {"case_a", "case_b", "case_c"})
+    {
+        createMinimalBundle(_tempDir / suite, "graph");
+    }
+    const auto discovered = discoverBundles(_tempDir);
+    ASSERT_EQ(discovered.size(), 3u);
+    for(const auto& bundle : discovered)
+    {
+        if(bundle.suiteName != "case_c")
+        {
+            std::ofstream(supportJsonPath(bundle.diagnosticPath())) << "{}";
+        }
+    }
+
+    BundleRegistrationStats stats;
+    SupportClaimCoverage coverage;
+    const auto selected = detail::selectBundlesToLoad(
+        discovered, "case_a.*", /*writing=*/false, /*observing=*/true, stats, coverage);
+
+    ASSERT_EQ(selected.size(), 1u);
+    EXPECT_EQ(selected.front().suiteName, "case_a");
+    EXPECT_EQ(stats.discovered, 3u);
+    EXPECT_EQ(stats.excludedByFilter, 2u);
+    // Only the two excluded bundles are counted here: the selected one is counted as it
+    // loads.
+    EXPECT_EQ(coverage.graphsFound, 2u);
+    EXPECT_EQ(coverage.graphsWithClaims, 1u);
+}
+
+// Without a named engine nothing is checkable, so the summary must not be handed
+// denominators for claims no run was going to check.
+TEST_F(TestBundleDiscoveryFixture, SelectBundlesToLoadLeavesCoverageAloneWhenNotObserving)
+{
+    createMinimalBundle(_tempDir / "case_a", "graph");
+    createMinimalBundle(_tempDir / "case_b", "graph");
+    const auto discovered = discoverBundles(_tempDir);
+    ASSERT_EQ(discovered.size(), 2u);
+    for(const auto& bundle : discovered)
+    {
+        std::ofstream(supportJsonPath(bundle.diagnosticPath())) << "{}";
+    }
+
+    BundleRegistrationStats stats;
+    SupportClaimCoverage coverage;
+    const auto selected = detail::selectBundlesToLoad(
+        discovered, "case_a.*", /*writing=*/false, /*observing=*/false, stats, coverage);
+
+    EXPECT_EQ(selected.size(), 1u);
+    EXPECT_EQ(stats.excludedByFilter, 1u);
+    EXPECT_EQ(coverage.graphsFound, 0u);
+    EXPECT_EQ(coverage.graphsWithClaims, 0u);
+}
+
+// --write-support-claims needs every graph loaded: graphsFound is the denominator for
+// the graphs the observer did not see, so a filter that dropped any would shrink it.
+TEST_F(TestBundleDiscoveryFixture, SelectBundlesToLoadKeepsEveryBundleWhenWriting)
+{
+    createMinimalBundle(_tempDir / "case_a", "graph");
+    createMinimalBundle(_tempDir / "case_b", "graph");
+    const auto discovered = discoverBundles(_tempDir);
+    ASSERT_EQ(discovered.size(), 2u);
+
+    BundleRegistrationStats stats;
+    SupportClaimCoverage coverage;
+    const auto selected = detail::selectBundlesToLoad(
+        discovered, "case_a.*", /*writing=*/true, /*observing=*/false, stats, coverage);
+
+    EXPECT_EQ(selected.size(), 2u);
+    EXPECT_EQ(stats.discovered, 2u);
+    EXPECT_EQ(stats.excludedByFilter, 0u);
+    EXPECT_EQ(coverage.graphsFound, 0u);
+}
+
 // Reuses the baked-value-plus-runtime-pass-by-value corruption from
 // LoadTemplateSweepCaseWithBakedValueAndRuntimePassByValueIsError: that test
 // confirms loadIntegrationTestBundle() throws RuntimePassByValueInvariantError

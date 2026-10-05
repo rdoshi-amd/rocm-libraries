@@ -404,6 +404,10 @@ VerificationOutcome
     case RefStatus::CAPABILITY_MISS:
         return unverifiable(refLabel(type) + " cannot run this op: " + result.message,
                             VerificationDepth::EXECUTED);
+    case RefStatus::HARNESS_ERROR:
+        return VerificationOutcome::failed(VerificationDepth::EXECUTED,
+                                           FailureOrigin::HARNESS,
+                                           refLabel(type) + " was not run: " + result.message);
     case RefStatus::RUNTIME_ERROR:
         recordRefError(refLabel(type) + " errored: " + result.message);
         return VerificationOutcome::failed(VerificationDepth::EXECUTED,
@@ -441,6 +445,14 @@ VerificationOutcome IntegrationBundleVerificationHarness::runAutoMode(GraphSessi
         {
             return compareOutputs(engine.outputs, refOutputs, gpu.site, Verifier::GPU_REFERENCE);
         }
+        // Not the reference's fault, so it neither falls through to the CPU nor goes
+        // in the reference-error report.
+        if(gpu.status == RefStatus::HARNESS_ERROR)
+        {
+            return VerificationOutcome::failed(VerificationDepth::EXECUTED,
+                                               FailureOrigin::HARNESS,
+                                               "GPU reference was not run: " + gpu.message);
+        }
         if(gpu.status == RefStatus::RUNTIME_ERROR)
         {
             gpuRefErrored = true;
@@ -465,6 +477,10 @@ VerificationOutcome IntegrationBundleVerificationHarness::runAutoMode(GraphSessi
                                 "cannot run this op): "
                                     + cpu.message,
                 VerificationDepth::EXECUTED);
+        case RefStatus::HARNESS_ERROR:
+            return VerificationOutcome::failed(VerificationDepth::EXECUTED,
+                                               FailureOrigin::HARNESS,
+                                               "CPU reference was not run: " + cpu.message);
         case RefStatus::RUNTIME_ERROR:
             recordRefError("CPU reference errored (auto mode, last resort): " + cpu.message);
             return VerificationOutcome::failed(VerificationDepth::EXECUTED,
@@ -544,12 +560,15 @@ std::optional<VerificationOutcome> IntegrationBundleVerificationHarness::fillBun
 
     // Sub-byte graphs fill twice, once unpacked and once packed, and the two sets must
     // hold the same values. rocRAND does not fill sub-byte types and its stream differs
-    // from the host's, so keeping both on the host is what keeps them identical.
-    const auto placement
-        = _deps.policy.useDevice() && !anySubByte ? FillPlacement::DEVICE : FillPlacement::HOST;
+    // from the host's, so a graph with any sub-byte tensor is filled on the host
+    // throughout. That is a deliberately conservative choice, not a correctness
+    // requirement: a large non-sub-byte operand would get the same device values in
+    // both sets, so relaxing it would only buy back speed on the large MX shapes.
+    DeviceInputFiller* const device
+        = _deps.policy.useDevice() && !anySubByte ? _deps.deviceFiller.get() : nullptr;
 
     auto fillResult = hipdnn_integration_tests::fillInputs(
-        wrapper.getGraph(), inputs, leafInputUids, _inputFillRecipes, placement);
+        wrapper.getGraph(), inputs, leafInputUids, _inputFillRecipes, device);
     if(!fillResult.filled)
     {
         return unverifiable(fillResult.reason);
@@ -565,7 +584,7 @@ std::optional<VerificationOutcome> IntegrationBundleVerificationHarness::fillBun
         }
 
         auto packedFill = hipdnn_integration_tests::fillInputs(
-            wrapper.getGraph(), packed, leafInputUids, _inputFillRecipes, placement);
+            wrapper.getGraph(), packed, leafInputUids, _inputFillRecipes, device);
         if(!packedFill.filled)
         {
             return unverifiable(packedFill.reason);
@@ -675,6 +694,10 @@ IntegrationBundleVerificationHarness::RefRunResult
     catch(const ReferenceCapabilityError& e)
     {
         return {RefStatus::CAPABILITY_MISS, e.what()};
+    }
+    catch(const detail::DeviceOutputError& e)
+    {
+        return {RefStatus::HARNESS_ERROR, e.what()};
     }
     catch(const std::exception& e)
     {

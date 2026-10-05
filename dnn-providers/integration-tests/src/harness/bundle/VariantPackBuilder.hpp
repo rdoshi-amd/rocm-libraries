@@ -4,6 +4,7 @@
 #pragma once
 
 #include <cstdint>
+#include <stdexcept>
 #include <unordered_map>
 #include <vector>
 
@@ -15,6 +16,15 @@
 
 namespace hipdnn_integration_tests::bundle::detail
 {
+
+/// The device could not be made to hold the output buffers: an allocation, a memset or
+/// the wait for it failed. That is a fault in the harness or the device, not in any
+/// executor, so a caller that runs a reference must not blame the reference for it.
+class DeviceOutputError : public std::runtime_error
+{
+public:
+    using std::runtime_error::runtime_error;
+};
 
 /// Assembles the uid -> buffer map an executor is handed for one bundle.
 ///
@@ -41,7 +51,8 @@ VariantPack buildVariantPack(
 /// `onDevice` says the buffers will be handed to an executor as device pointers. Their
 /// sentinel is then written straight into device memory where the element type allows
 /// it, rather than filled on the host and uploaded; the rest are filled on the host as
-/// before. False never touches the device.
+/// before. False never touches the device. A device failure while `onDevice` throws
+/// DeviceOutputError.
 ///
 /// Shared for the same reason buildVariantPack() is: both harnesses allocate the
 /// same buffers from the same attributes, and two copies of that would drift.

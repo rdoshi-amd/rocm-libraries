@@ -474,11 +474,12 @@ TEST(TestFillTensorWithRandomValues, TensorSizeNotMultipleOfBlockSize)
     EXPECT_NEAR(variance, 4.083333, 1.0e-01);
 }
 
-// The generator is reused across fills, so a fill must not depend on what the one
-// before it drew: setting the seed again has to restart the sequence.
-TEST(TestFillTensorWithRandomValues, ReseedingTheReusedGeneratorRestartsTheSequence)
+#if defined(USE_ROCRAND)
+// A caller that fills many tensors passes one generator to every fill, so a fill must
+// not depend on what the one before it drew: setting the seed again has to restart the
+// sequence.
+TEST(TestFillTensorWithRandomValues, ReseedingASharedGeneratorRestartsTheSequence)
 {
-    SKIP_IF_NO_ROCRAND();
     SKIP_IF_NO_DEVICES();
 
     constexpr size_t TENSOR_SIZE = 4099;
@@ -486,9 +487,13 @@ TEST(TestFillTensorWithRandomValues, ReseedingTheReusedGeneratorRestartsTheSeque
     Tensor<float> other({1, 1, 1, TENSOR_SIZE});
     Tensor<float> again({1, 1, 1, TENSOR_SIZE});
 
-    gpu_fp_reference_tensor::fillWithRandomValues(first, 0.0f, 100.0f, 42);
-    gpu_fp_reference_tensor::fillWithRandomValues(other, 0.0f, 100.0f, 7);
-    gpu_fp_reference_tensor::fillWithRandomValues(again, 0.0f, 100.0f, 42);
+    const hipdnn_gpu_ref::common::detail::RocRandGenerator generator(ROCRAND_RNG_PSEUDO_DEFAULT);
+    gpu_fp_reference_tensor::gpuFillWithRandomValues(
+        first, 0.0f, 100.0f, 42, generator, /*synchronize=*/true);
+    gpu_fp_reference_tensor::gpuFillWithRandomValues(
+        other, 0.0f, 100.0f, 7, generator, /*synchronize=*/true);
+    gpu_fp_reference_tensor::gpuFillWithRandomValues(
+        again, 0.0f, 100.0f, 42, generator, /*synchronize=*/true);
 
     const auto bytes = first.elementSpace() * first.elementSize();
     EXPECT_EQ(std::memcmp(first.rawHostData(), again.rawHostData(), bytes), 0);
@@ -499,19 +504,21 @@ TEST(TestFillTensorWithRandomValues, ReseedingTheReusedGeneratorRestartsTheSeque
 // flight and correct by then, not just the last one.
 TEST(TestFillTensorWithRandomValues, DeferredSynchronizationFillsEveryTensor)
 {
-    SKIP_IF_NO_ROCRAND();
     SKIP_IF_NO_DEVICES();
 
     constexpr size_t TENSOR_SIZE = 1 << 20;
     Tensor<float> low({1, 1, 1, TENSOR_SIZE});
     Tensor<HalfType> high({1, 1, 1, TENSOR_SIZE});
 
-    gpu_fp_reference_tensor::fillWithRandomValues(low, 1.0f, 2.0f, 1, /*synchronize=*/false);
-    gpu_fp_reference_tensor::fillWithRandomValues<HalfType>(high,
-                                                            static_cast<HalfType>(3.0f),
-                                                            static_cast<HalfType>(4.0f),
-                                                            2,
-                                                            /*synchronize=*/false);
+    const hipdnn_gpu_ref::common::detail::RocRandGenerator generator(ROCRAND_RNG_PSEUDO_DEFAULT);
+    gpu_fp_reference_tensor::gpuFillWithRandomValues(
+        low, 1.0f, 2.0f, 1, generator, /*synchronize=*/false);
+    gpu_fp_reference_tensor::gpuFillWithRandomValues<HalfType>(high,
+                                                               static_cast<HalfType>(3.0f),
+                                                               static_cast<HalfType>(4.0f),
+                                                               2,
+                                                               generator,
+                                                               /*synchronize=*/false);
     ASSERT_EQ(hipDeviceSynchronize(), hipSuccess);
 
     const auto* lowData = static_cast<const float*>(low.rawHostData());
@@ -529,3 +536,4 @@ TEST(TestFillTensorWithRandomValues, DeferredSynchronizationFillsEveryTensor)
         ASSERT_LE(value, 4.0f) << "index " << i;
     }
 }
+#endif // USE_ROCRAND

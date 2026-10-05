@@ -9,6 +9,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -206,26 +207,29 @@ inline LoadOutcome classifyBundle(const DiscoveredBundle& disc, SweepManifestCac
 // the discovered name as-is: with a single runner there is no second runner to
 // disambiguate against, so no runner suffix is appended.
 inline void registerBundles(const std::vector<LoadedBundle>& bundles,
-                            const std::optional<LoadedEngine>& engineUnderTest)
+                            const std::optional<LoadedEngine>& engineUnderTest,
+                            const std::shared_ptr<DeviceInputFiller>& deviceFiller)
 {
     for(const auto& bundle : bundles)
     {
-        ::testing::RegisterTest(bundle.suiteName.c_str(),
-                                bundle.testName.c_str(),
-                                nullptr,
-                                nullptr,
-                                __FILE__,
-                                __LINE__,
-                                [loaded = bundle.bundle,
-                                 path = bundle.jsonPath,
-                                 locator = bundle.claimLocator,
-                                 engineUnderTest]() -> ::testing::Test* {
-                                    auto* test = new IntegrationBundleVerificationHarness(
-                                        productionDependencies(TensorPlacement::DEVICE),
-                                        engineUnderTest);
-                                    test->setBundle(loaded, path, locator);
-                                    return test;
-                                });
+        ::testing::RegisterTest(
+            bundle.suiteName.c_str(),
+            bundle.testName.c_str(),
+            nullptr,
+            nullptr,
+            __FILE__,
+            __LINE__,
+            [loaded = bundle.bundle,
+             path = bundle.jsonPath,
+             locator = bundle.claimLocator,
+             engineUnderTest,
+             filler = std::weak_ptr<DeviceInputFiller>(deviceFiller)]() -> ::testing::Test* {
+                auto* test = new IntegrationBundleVerificationHarness(
+                    productionDependencies(TensorPlacement::DEVICE, filler.lock()),
+                    engineUnderTest);
+                test->setBundle(loaded, path, locator);
+                return test;
+            });
     }
 }
 
@@ -403,11 +407,73 @@ inline std::optional<std::vector<LoadedBundle>>
     return bundles;
 }
 
+// Narrows the discovered bundles to the ones `filter` selects, and accounts for the rest,
+// before any of them is loaded.
+//
+// GTest applies --gtest_filter only inside RUN_ALL_TESTS(), after every bundle would
+// have been parsed, expanded and had its tensors read. Dropping what the filter is
+// about to drop first makes a run's cost follow what it selects instead of the size of
+// the bundle tree.
+//
+// `writing` (--write-support-claims) keeps every bundle: authoring needs every graph
+// loaded, because `graphsFound` is the denominator for the graphs it did not observe.
+//
+// `observing` (an engine is named and claims are not being written) also counts the
+// excluded bundles into `coverage`. The coverage ladder counts every claim-bearing
+// graph on disk and attributes the gap to the filter (`not_selected`), so an excluded
+// bundle is counted by sidecar presence only, which is what the load would have counted
+// too. A bundle that would have failed to load is counted here and was not before; such
+// a bundle is already a red test whenever a run does select it.
+//
+// These counters are the denominators the summary divides by, so a miscount here does
+// not merely misreport -- it reattributes every gap line to the wrong cause. The
+// counters are parameters so a test can check them.
+inline std::vector<DiscoveredBundle> selectBundlesToLoad(std::vector<DiscoveredBundle> discovered,
+                                                         std::string_view filter,
+                                                         bool writing,
+                                                         bool observing,
+                                                         BundleRegistrationStats& stats,
+                                                         SupportClaimCoverage& coverage)
+{
+    stats.discovered = discovered.size();
+    stats.excludedByFilter = 0;
+
+    if(writing)
+    {
+        return discovered;
+    }
+
+    auto split = splitByGTestFilter(std::move(discovered), filter);
+    stats.excludedByFilter = split.excluded.size();
+
+    if(!split.excluded.empty())
+    {
+        std::cerr << "--gtest_filter excluded " << split.excluded.size() << " of "
+                  << stats.discovered << " discovered bundle test(s) before loading\n";
+    }
+
+    if(observing)
+    {
+        for(const auto& bundle : split.excluded)
+        {
+            coverage.graphsFound++;
+            if(std::filesystem::exists(claimLocatorFor(bundle).sidecarPath))
+            {
+                coverage.graphsWithClaims++;
+            }
+        }
+    }
+
+    return std::move(split.selected);
+}
+
 } // namespace detail
 
 /// Registers the engine-verification suite: one test per bundle, driven against
-/// the engine named by --test-engine.
-inline void registerBundleTests()
+/// the engine named by --test-engine. `deviceFiller` generates large inputs on the
+/// device; the registered tests hold it weakly, so its owner decides when it dies, and a
+/// test that outlives it fills on the host.
+inline void registerBundleTests(const std::shared_ptr<DeviceInputFiller>& deviceFiller)
 {
     // A named engine is what makes a claim checkable, so a run without --test-engine
     // has nothing to count; seeding the coverage counters anyway would print a summary
@@ -429,47 +495,12 @@ inline void registerBundleTests()
         return;
     }
 
-    auto& stats = bundleRegistrationStats();
-    stats.discovered = discovered->bundles.size();
-
-    // GTest applies --gtest_filter only inside RUN_ALL_TESTS(), after every bundle
-    // below would have been parsed, expanded and had its tensors read. Drop what the
-    // filter is about to drop first, so a run's cost follows what it selects instead
-    // of the size of the bundle tree.
-    //
-    // Not in authoring mode: --write-support-claims needs every graph loaded, because
-    // `graphsFound` is the denominator for the graphs it did not observe.
-    std::vector<DiscoveredBundle> excluded;
-    if(!writing)
-    {
-        auto split = splitByGTestFilter(std::move(discovered->bundles), GTEST_FLAG_GET(filter));
-        discovered->bundles = std::move(split.selected);
-        excluded = std::move(split.excluded);
-    }
-    stats.excludedByFilter = excluded.size();
-
-    if(!excluded.empty())
-    {
-        std::cerr << "--gtest_filter excluded " << excluded.size() << " of " << stats.discovered
-                  << " discovered bundle test(s) before loading\n";
-    }
-
-    // The coverage ladder counts every claim-bearing graph on disk and attributes the
-    // gap to the filter (`not_selected`), so excluded bundles are still counted -- by
-    // sidecar presence only, which is what the load would have counted too. A bundle
-    // that would have failed to load is counted here and was not before; such a bundle
-    // is already a red test whenever a run does select it.
-    if(observing)
-    {
-        for(const auto& bundle : excluded)
-        {
-            supportClaimCoverage().graphsFound++;
-            if(std::filesystem::exists(detail::claimLocatorFor(bundle).sidecarPath))
-            {
-                supportClaimCoverage().graphsWithClaims++;
-            }
-        }
-    }
+    discovered->bundles = detail::selectBundlesToLoad(std::move(discovered->bundles),
+                                                      GTEST_FLAG_GET(filter),
+                                                      writing,
+                                                      observing,
+                                                      bundleRegistrationStats(),
+                                                      supportClaimCoverage());
 
     if(discovered->bundles.empty())
     {
@@ -487,7 +518,7 @@ inline void registerBundleTests()
         return;
     }
 
-    detail::registerBundles(*bundles, engineUnderTest);
+    detail::registerBundles(*bundles, engineUnderTest, deviceFiller);
 
     HIPDNN_PLUGIN_LOG_INFO("Registered " << bundles->size() << " bundle test(s)");
 }

@@ -495,7 +495,12 @@ int main(int argc, char** argv) noexcept
                 std::move(engineNamesById));
         }
 
-        hipdnn_integration_tests::bundle::registerBundleTests();
+        // Owns the rocRAND generator used to fill large inputs on the device. Created
+        // here so it is destroyed when this scope ends, while HIP and rocRAND are still
+        // loaded, and not with the registered tests, which GTest keeps until static
+        // destruction. The tests hold it weakly.
+        const auto deviceFiller = std::make_shared<hipdnn_integration_tests::DeviceInputFiller>();
+        hipdnn_integration_tests::bundle::registerBundleTests(deviceFiller);
 
         const int result = RUN_ALL_TESTS();
 

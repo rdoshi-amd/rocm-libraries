@@ -449,10 +449,9 @@ protected:
             }
         }
 
-        // HOST: these tests read the tensors on the host through const accessors, which
-        // cannot migrate device-generated data.
-        auto fillResult
-            = fillInputs(fb, bundle.tensors, leafInputUids, _inputFillRecipes, FillPlacement::HOST);
+        // No device filler: these tests read the tensors on the host through const
+        // accessors, which cannot migrate device-generated data.
+        auto fillResult = fillInputs(fb, bundle.tensors, leafInputUids, _inputFillRecipes, nullptr);
         if(!fillResult.filled)
         {
             return fillResult;

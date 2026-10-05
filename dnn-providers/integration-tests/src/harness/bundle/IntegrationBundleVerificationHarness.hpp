@@ -351,6 +351,9 @@ private:
         RAN,
         CAPABILITY_MISS,
         RUNTIME_ERROR,
+        /// The harness could not prepare the reference's outputs on the device. Says
+        /// nothing about the reference, so it is never retried on another one.
+        HARNESS_ERROR,
     };
     struct RefRunResult
     {

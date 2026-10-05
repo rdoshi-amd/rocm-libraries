@@ -83,6 +83,8 @@ class PipelineOp:
     c_canon: Any = None
     atom_shape: tuple[int, ...] | None = None
     atom_count: int = 0  # number of `tile.mma` the TileMma call explodes into
+    a_free_atoms: int = 1  # free-dim atom counts (m_sub / n_sub) -- for the per-atom K-match soundness gate
+    b_free_atoms: int = 1
     note: str = ""
     produces: int | None = None       # id() of the SSA Value this op yields (transform / mma output)
     consumes: tuple[int, ...] = ()     # id()s of the SSA Values this op reads (operands / transform src)
@@ -198,14 +200,18 @@ class _Recorder:
         m_sub, n_sub, k_sub = mma.subtiles           # public surface (front-door TileMma or a raw plan)
         atom_count = m_sub * n_sub * k_sub
         # a_enc/b_enc = the CONSUMED operand encodings (the fragments the kernel feeds in -- for CRC these
-        # are its OWN interleaved distributions, NOT TileMma's broken interleaved output). a_canon/b_canon =
-        # the CANONICAL machine refs (mma.a_layout -- atom-canonical by construction, the trusted tee path).
+        # are its OWN interleaved distributions, NOT TileMma's broken interleaved output). a_canon/b_canon/
+        # c_canon = the CANONICAL machine refs from the `canonical_layouts` helper (atom-canonical by
+        # construction, style-immutable -- the trusted tee path; NOT the public `*_layout` accessor).
+        from .mma.warp_encoding import canonical_layouts
+        a_canon, b_canon, c_canon = canonical_layouts(mma.traits, mma.subtiles)
         self.pipeline.nodes.append(PipelineOp(
             kind="mma", seq=self._next(),
             a_enc=a_fragment.tile_desc.layout, b_enc=b_fragment.tile_desc.layout,
             c_enc=accumulator.tile_desc.layout,
-            a_canon=mma.a_layout, b_canon=mma.b_layout, c_canon=mma.c_layout,
-            atom_shape=tuple(mma.atom_shape), atom_count=atom_count, note="TileMma",
+            a_canon=a_canon, b_canon=b_canon, c_canon=c_canon,
+            atom_shape=tuple(mma.atom_shape), atom_count=atom_count,
+            a_free_atoms=m_sub, b_free_atoms=n_sub, note="TileMma",
             produces=produces, consumes=tuple(consumes),
         ))
         if self.pipeline.arch is None:                         # the recording's SoT for arch/wave-size

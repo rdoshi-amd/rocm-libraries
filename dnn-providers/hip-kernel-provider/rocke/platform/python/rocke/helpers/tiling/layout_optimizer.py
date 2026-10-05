@@ -35,8 +35,8 @@ valid path comes down to LDS-vs-cross-lane, :func:`recommend` returns BOTH as co
 TESTING (`/bank-conflict` + a wall-time sweep) -- neither falls out on these numbers alone. Deterministic
 edges (relabel / reorder / identity) that beat both are trustworthy winners and DO decide outright.
 
-Validity is rocKE's own gates: :func:`operand_soundness` (per-operand sound MMA operand), optionally the
-pairwise :func:`diagnose_k_match` (``A.K-dist == B.K-dist`` -- pass ``k_partner``), and the tier from
+Validity is rocKE's own gates: :func:`mma_operand_layout_sound` (per-operand sound MMA operand), optionally
+the pairwise :func:`mma_pair_k_aligned` (``A.K-dist == B.K-dist`` -- pass ``k_partner``), and the tier from
 :func:`classify_transform`. No reference tables, no hand formulas -- read off the actual layouts, so it is
 correct for any context (atom / wave / #atoms / tile shape / dtype).
 """
@@ -46,8 +46,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .layouts.tile_distribution import make_tile_desc
-from .transforms import (as_forward_map, classify_transform, describe_edge, diagnose_k_match,
-                         name_permutation, operand_soundness)
+from .transforms import (as_forward_map, classify_transform, describe_edge, mma_pair_k_aligned,
+                         name_permutation, mma_operand_layout_sound)
 
 __all__ = ["Edge", "Assessment", "evaluate_transform", "optimize_layout", "enumerate_stripings", "recommend"]
 
@@ -149,16 +149,16 @@ def evaluate_transform(source, target, *, canon=None, k_partner=None, dtype_bits
 
     ``source``/``target`` are ``WarpDistributionEncoding`` or forward maps. Validity gates (all optional, all
     rocKE's own solvers):
-    - ``canon`` -- the atom's canonical operand ref -> **per-operand** soundness (:func:`operand_soundness`).
+    - ``canon`` -- the atom's canonical operand ref -> **per-operand** soundness (:func:`mma_operand_layout_sound`).
     - ``k_partner`` -- the OTHER operand's target layout -> the **pairwise** ``A.K-dist == B.K-dist`` half of
-      the sound MAC (:func:`diagnose_k_match`). Without it, that half is the caller's responsibility.
+      the sound MAC (:func:`mma_pair_k_aligned`). Without it, that half is the caller's responsibility.
     Cost knobs: ``through_lds`` allows an LDS reposition (pass ``lds_conflict_cost=(store_bc, read_bc)`` for its
     true cost; unset = flagged lower bound). With NO ``canon`` and NO ``k_partner`` the result is
     transform-cost-ONLY and does not imply a valid MMA.
     """
     src, tgt = as_forward_map(source), as_forward_map(target)
-    sound = operand_soundness(tgt, canon).severity if canon is not None else "n/a"
-    k_match = diagnose_k_match(tgt, k_partner).severity if k_partner is not None else "n/a"
+    sound = mma_operand_layout_sound(tgt, canon).severity if canon is not None else "n/a"
+    k_match = mma_pair_k_aligned(tgt, k_partner).severity if k_partner is not None else "n/a"
     works = (canon is None or sound == "ok") and (k_partner is None or k_match == "ok")
     valid_note = f"sound={sound}, K-match={k_match}"
 

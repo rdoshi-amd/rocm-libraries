@@ -14,8 +14,13 @@ from __future__ import annotations
 
 from ..fragments import Fragment, TileDesc, fragment_length
 from ..register_mapper import RegisterMapper
-from ..transforms import operand_soundness, validate_operands
+from ..transforms import (
+    mma_accumulator_flow_consistent,
+    mma_operand_layout_sound,
+    mma_pair_k_aligned,
+)
 from .plan import TileMmaPlan
+from .warp_encoding import canonical_layouts
 
 
 def _assert_atom_contiguous(
@@ -59,6 +64,54 @@ def _assert_atom_contiguous(
                         f"layout is not sliceable. Reorder to atom-major (SOA) before the MMA "
                         f"(TileDesc.reorder_registers)."
                     )
+
+
+def _validate_mma_issue(a_fragment, b_fragment, accumulator, plan: TileMmaPlan) -> None:
+    """The one validation run before the driver issues an MMA, kept as a single call so the issue point
+    can never check a subset and silently let a bad operand or accumulator through. On the PASSED
+    fragments, in order:
+
+    - ``mma_operand_layout_sound`` on A and B -- each a well-formed MMA operand (one M/N per output row,
+      well-formed K). Run FIRST and short-circuited, because the accumulator check below flows the operands
+      through the machine and is undefined on an unsound operand.
+    - ``mma_pair_k_aligned`` -- A and B agree on which K sits in each paired slot, compared per atom (the
+      free-dim atom counts come from ``plan.subtiles``).
+    - ``mma_accumulator_flow_consistent`` -- the passed accumulator C carries the exact labels the machine
+      produces from these operands, so the store writes the right coordinates. The absence of this check is
+      what let a mislabeled C store to the wrong place.
+    - ``_assert_atom_contiguous`` on A and B -- each atom's registers form the contiguous block the driver
+      slices. C needs no equivalent: the accumulator check above is exact down to register order.
+
+    The canonical reference comes from the ``canonical_layouts`` helper. A ``warning`` is rejected like an
+    error: the driver issues no reorder, so a reorder-fixable K-misorder must not go out. Operand dtype
+    agreement and backend-op resolution are separate issue-time checks the driver runs directly.
+    """
+    m_sub, n_sub, k_sub = plan.subtiles
+    a_canon, b_canon, c_canon = canonical_layouts(plan.traits, plan.subtiles)
+    a_lay = a_fragment.tile_desc.layout
+    b_lay = b_fragment.tile_desc.layout
+
+    for role, lay, canon in (("A", a_lay, a_canon), ("B", b_lay, b_canon)):
+        d = mma_operand_layout_sound(lay, canon, role=role)
+        if d.severity != "ok":
+            raise ValueError(f"MMA {role} operand not sound for {plan.op_id!r} -- {d.message}")
+
+    d = mma_pair_k_aligned(a_lay, b_lay, a_free_atoms=m_sub, b_free_atoms=n_sub)
+    if d.severity != "ok":
+        raise ValueError(f"MMA operands not K-aligned for {plan.op_id!r} -- {d.message}")
+
+    d = mma_accumulator_flow_consistent(
+        accumulator.tile_desc.layout, a_lay, b_lay,
+        a_canon=a_canon, b_canon=b_canon, c_canon=c_canon,
+    )
+    if d.severity != "ok":
+        raise ValueError(f"MMA accumulator (C) not consistent for {plan.op_id!r} -- {d.message}")
+
+    atom_k = plan.atom_shape[2]
+    _assert_atom_contiguous(a_fragment.tile_desc, atom_k=atom_k, free_sub=m_sub, k_sub=k_sub,
+                            role="A", op_id=plan.op_id)
+    _assert_atom_contiguous(b_fragment.tile_desc, atom_k=atom_k, free_sub=n_sub, k_sub=k_sub,
+                            role="B", op_id=plan.op_id)
 
 
 class TileMmaDriver:
@@ -111,7 +164,8 @@ class TileMmaDriver:
         """Walk the M x N x K atom grid for the wave tile (in ``tiling.order``), issuing one
         ``b.mma`` per atom and accumulating each C subtile. The fragments are
         subtile-contiguous (from the wave layouts), so every atom is a register slice.
-        Validates operand dtypes AND K-alignment first."""
+        Checks operand dtypes, then runs the single validation (:func:`_validate_mma_issue` -- operand
+        soundness, pairwise K-match, accumulator consistency, atom contiguity) before issuing."""
         plan = self._plan
         for name, fragment in (("A", a_fragment), ("B", b_fragment), ("C", accumulator)):
             want = plan._ir_type({"A": plan._a_dtype, "B": plan._b_dtype,
@@ -122,49 +176,15 @@ class TileMmaDriver:
                     f"fragment={fragment.dtype.name!r}, expected {want.name!r}"
                 )
 
-        # MMA safety (pairwise half of the sound MAC; correctness SOT: docs/mma_is_machinery.md): the
-        # hardware pairs A-slot-s with B-slot-s and sums over K, so A and B must share the same positional
-        # K-distribution (M/N register order is free -- you choose the constant; K order need not be
-        # canonical). Per-operand soundness (M/N fixed per output) holds by construction here (fragments
-        # are atom register-reorders). A mismatched pair is rejected with a fix hint.
-        # Validate K PER ATOM: the driver pairs (mi,ki)*(nj,ki), so A's m_sub M-atoms and B's n_sub
-        # N-atoms each only need their atom-K to match -- comparing the whole (multi-atom) fragments
-        # would falsely reject rectangular wave tiles where m_sub != n_sub (register counts differ).
-        ok, why = validate_operands(
-            a_fragment.tile_desc.layout, b_fragment.tile_desc.layout,
-            a_free_atoms=plan._m_subtiles, b_free_atoms=plan._n_subtiles,
-        )
-        if not ok:
-            raise ValueError(f"MMA operands not K-aligned for {plan.op_id!r} -- {why}")
-
-        # Per-operand soundness (the OTHER half of the sound MAC). The driver is stateless -- it cannot
-        # tell a derived fragment from a custom one -- so it checks BOTH operands unconditionally against
-        # the canonical machine (plan.a_layout/b_layout). A DERIVED fragment passes trivially (its layout
-        # IS the canonical); a CUSTOM fragment that is K-aligned yet per-operand-unsound (a wandering M/N)
-        # is caught here instead of miscompiling silently. Correctness SOT: docs/mma_is_machinery.md.
-        for role, frag_layout, canon in (("A", a_fragment.tile_desc.layout, plan.a_layout),
-                                         ("B", b_fragment.tile_desc.layout, plan.b_layout)):
-            d = operand_soundness(frag_layout, canon, role=role)
-            if d.severity != "ok":
-                raise ValueError(f"MMA {role} operand not sound for {plan.op_id!r} -- {d.message}")
+        # One validation call before issuing (operand soundness, pairwise K-match, accumulator
+        # consistency, atom contiguity), with atom counts from plan.subtiles and the canonical reference
+        # from the canonical_layouts helper. Kept as ONE call so the issue point can't check a subset -- a
+        # missing accumulator check is exactly what let a mislabeled C through before. dtype agreement
+        # (above) and emit_op resolution (below) are the other issue-time checks.
+        _validate_mma_issue(a_fragment, b_fragment, accumulator, plan)
 
         op = plan.emit_op()
         m_sub, n_sub, k_sub = plan._m_subtiles, plan._n_subtiles, plan._k_subtiles
-
-        # ATOM-CONTIGUITY (SOA) GUARD: the slicing below assumes each atom's registers are a contiguous
-        # block ([i*atom_len : +atom_len]). `operand_soundness` polices LABELS, not register CONTIGUITY,
-        # so a style/custom fragment that is K-sound yet AOS-packed would be mis-sliced. Fail-fast here
-        # instead of miscompiling silently (correctness SOT: docs/mma_is_machinery.md). Derived and
-        # interleaved-style operands (both SOA) pass; an AOS/scattered custom layout is rejected.
-        atom_k = plan.atom_shape[2]
-        _assert_atom_contiguous(
-            a_fragment.tile_desc, atom_k=atom_k, free_sub=m_sub, k_sub=k_sub,
-            role="A", op_id=plan.op_id,
-        )
-        _assert_atom_contiguous(
-            b_fragment.tile_desc, atom_k=atom_k, free_sub=n_sub, k_sub=k_sub,
-            role="B", op_id=plan.op_id,
-        )
 
         # Single C subtile: accumulate in-register over K (byte-identical to the atom path).
         if m_sub == 1 and n_sub == 1:

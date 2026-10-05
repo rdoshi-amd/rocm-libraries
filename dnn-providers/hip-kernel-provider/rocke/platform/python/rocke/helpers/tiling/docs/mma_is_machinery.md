@@ -94,7 +94,7 @@ Two checks hide under "is this layout OK?", and conflating them is what sends pe
 Consequences:
 
 - "Make this fragment acceptable" always means "reorder it until its $K$-row matches its **partner's**" — never "until it looks canonical."
-- `validate_operands(A, B)` compares the two fragments **to each other**; it never checks either against a canonical reference.
+- `mma_pair_k_aligned(A, B)` compares the two fragments **to each other**; it never checks either against a canonical reference.
 
 ## The traps agents fall into (name them, then don't)
 
@@ -103,7 +103,7 @@ Wrong-turns that come from pattern-matching on training data instead of reasonin
 1. **"The MFMA has a fixed layout, so the fragment must be canonical."** — No. The hardware reads slots and multiply-accumulates; the layout is bookkeeping *we* maintain. $K$-pairing is the only **cross-operand** constraint — not canonical resemblance.
 2. **"A lane can only own these $N$ strided elements, so we're capped at dwordx2."** — Reasoning from *one* canonical distribution. $M/N$ placement is free; choose a distribution where the lane owns a contiguous run and the wide store exists. "Canonical caps us" is never a valid conclusion.
 3. **"Just shuffle the canonical C into the store order."** — C's ownership is derived from A/B. The store-friendly C is *produced* by choosing A/B placement, not recovered by post-hoc shuffling a canonical accumulator (often cross-lane and expensive).
-4. **Treating `validate_operands` passing as "canonical-valid."** — It only means A and B agree on $K$. A hand-rolled distribution's correctness is confirmed by **bit-exact**, not by resemblance to canonical.
+4. **Treating `mma_pair_k_aligned` passing as "canonical-valid."** — It only means A and B agree on $K$. A hand-rolled distribution's correctness is confirmed by **bit-exact**, not by resemblance to canonical.
 5. **Fighting the author on layout direction.** — If the author says "use this interleaved layout," the question is never "but canonical…". It is only: *does $K$ match, and is it bit-exact?*
 
 ## The decision procedure (use this instead of defaulting to canonical)

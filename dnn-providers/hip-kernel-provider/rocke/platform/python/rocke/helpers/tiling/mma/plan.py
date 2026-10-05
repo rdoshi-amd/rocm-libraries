@@ -24,7 +24,7 @@ from ..encoding import WarpDistributionEncoding
 from ..fragments import TileDesc
 from ..traits import MmaTraits, MmaTraitsCatalog, load_mma_traits
 from .styles import CanonicalStyle, LayoutStyle
-from .warp_encoding import a_warp_encoding, b_warp_encoding, c_warp_encoding
+from .warp_encoding import a_warp_encoding, b_warp_encoding, c_warp_encoding, canonical_layouts
 
 __all__ = ["Tiling", "TileMmaPlan"]
 
@@ -315,7 +315,7 @@ class TileMmaPlan:
         """A operand MMA-ready `TileDesc` for the whole wave tile, as the resolved STYLE produces it.
         DISTINCT from `a_layout`: canonical makes them coincide; interleaved reorders the registers.
         A fragment is built from THIS (and the driver slices it); `a_layout`/`b_layout` stay the
-        atom-canonical, style-immutable `operand_soundness` machine reference."""
+        atom-canonical, style-immutable `mma_operand_layout_sound` machine reference."""
         return self._style.operand_desc(
             self._traits, role="A", free_sub=self._m_subtiles, k_sub=self._k_subtiles
         )
@@ -341,15 +341,16 @@ class TileMmaPlan:
         """Per-operand soundness at CONSTRUCTION: each operand descriptor the style produces must be a
         sound MMA operand (one fixed M/N per output-row, well-formed K) against the atom-canonical
         machine. Catches a per-operand-unsound custom style at plan build, matching the C-oracle's
-        timing; the driver keeps its own unconditional check. The reference is the atom-canonical
-        ``a_layout``/``b_layout`` -- NEVER the style's own descriptor (that would be vacuous)."""
-        from ..transforms import operand_soundness
+        timing; the driver keeps its own unconditional check. The reference is the shared
+        ``canonical_layouts`` helper -- NEVER the style's own descriptor (a check against itself proves nothing)."""
+        from ..transforms import mma_operand_layout_sound
 
+        a_canon, b_canon, _ = canonical_layouts(self._traits, self.subtiles)
         for role, operand_desc, canon in (
-            ("A", self.a_operand_desc, self.a_layout),
-            ("B", self.b_operand_desc, self.b_layout),
+            ("A", self.a_operand_desc, a_canon),
+            ("B", self.b_operand_desc, b_canon),
         ):
-            d = operand_soundness(operand_desc.layout, canon, role=role)
+            d = mma_operand_layout_sound(operand_desc.layout, canon, role=role)
             if d.severity != "ok":
                 raise ValueError(
                     f"style {self._style.name!r} {role} operand not sound for {self.op_id!r} -- {d.message}"
@@ -361,13 +362,14 @@ class TileMmaPlan:
         from ..transforms import derive_c_distribution
         from ..transforms._core import as_forward_map
 
+        a_canon, b_canon, c_canon = canonical_layouts(self._traits, self.subtiles)
         native = as_forward_map(self.c_native_desc.layout)
         oracle = derive_c_distribution(
             self.a_operand_desc.layout,
             self.b_operand_desc.layout,
-            a_canon=self.a_layout,
-            b_canon=self.b_layout,
-            c_canon=self.c_layout,
+            a_canon=a_canon,
+            b_canon=b_canon,
+            c_canon=c_canon,
         )
         if native != oracle:
             raise ValueError(

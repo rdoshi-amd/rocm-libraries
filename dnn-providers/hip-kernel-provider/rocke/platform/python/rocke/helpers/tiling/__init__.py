@@ -35,9 +35,10 @@ TOOLBOX -- the primitives the front door composes, callable directly for finer c
     ``load_mma_traits`` / ``MmaTraits`` / ``MmaTraitsCatalog`` / ``DEFAULT_TRAITS_PATH``   the atom SSOT.
     ``describe`` / ``render_forward_map`` / ``render_inverse_map``   see a layout instead of decoding it.
     ``emit_tensor_coordinates``   lower a desc to per-lane tensor coordinates.
-    ``classify_transform`` / ``describe_edge`` / ``diagnose_k_match`` / ``operand_soundness`` /
-        ``mma_pair_compatible`` / ``reorder_between`` / ``derive_c_distribution``   the read-only
-        transform observers -- classify an edge, check MMA soundness, derive C (never mutate/emit).
+    ``classify_transform`` / ``describe_edge`` / ``mma_pair_k_aligned`` / ``mma_operand_layout_sound`` /
+        ``mma_accumulator_flow_consistent`` / ``mma_pair_compatible`` / ``reorder_between`` /
+        ``derive_c_distribution``   the read-only transform observers -- classify an edge, check MMA
+        soundness, derive C (never mutate/emit).
     ``Diagnostic`` / ``TransformPlan`` / ``ReorderPlan``   the observers' result types (the objects the
         observers above hand back).
     ``WarpDistributionEncoding``   the raw coordinate-transform encoding (extension substrate; rarely
@@ -87,8 +88,9 @@ from .transforms import (
     transform_fragment,
     classify_transform,
     describe_edge,
-    diagnose_k_match,
-    operand_soundness,
+    mma_pair_k_aligned,
+    mma_operand_layout_sound,
+    mma_accumulator_flow_consistent,
     mma_pair_compatible,
     reorder_between,
     derive_c_distribution,
@@ -137,8 +139,9 @@ __all__ = [
     # transform observers (read-only analysis): classify an edge, check MMA soundness, derive C
     "classify_transform",
     "describe_edge",
-    "diagnose_k_match",
-    "operand_soundness",
+    "mma_pair_k_aligned",
+    "mma_operand_layout_sound",
+    "mma_accumulator_flow_consistent",
     "mma_pair_compatible",
     "reorder_between",
     "derive_c_distribution",

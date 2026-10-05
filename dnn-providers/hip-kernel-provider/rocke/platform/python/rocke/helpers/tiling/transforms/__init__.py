@@ -26,18 +26,18 @@ from .observers import (
     classify_transform,
     derive_c_distribution,
     describe_edge,
-    diagnose_k_match,
-    mma_compatible,
+    mma_accumulator_flow_consistent,
+    mma_operand_layout_sound,
+    mma_operand_repair_hint,
     mma_pair_compatible,
-    operand_soundness,
+    mma_pair_k_aligned,
     reorder_between,
-    validate_operands,
 )
 from .verb import transform_fragment
 
 __all__ = [
-    "TransformPlan", "interleave_idx", "k_distribution", "classify_transform", "validate_operands",
-    "derive_c_distribution", "Diagnostic", "diagnose_k_match", "as_forward_map",
-    "operand_soundness", "mma_compatible", "mma_pair_compatible", "transform_fragment",
+    "TransformPlan", "interleave_idx", "k_distribution", "classify_transform", "mma_pair_k_aligned",
+    "derive_c_distribution", "Diagnostic", "mma_accumulator_flow_consistent", "as_forward_map",
+    "mma_operand_layout_sound", "mma_operand_repair_hint", "mma_pair_compatible", "transform_fragment",
     "describe_edge", "name_permutation", "reorder_between", "ReorderPlan",
 ]

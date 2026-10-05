@@ -22,7 +22,7 @@ from __future__ import annotations
 from ..encoding import WarpDistributionEncoding
 from ..traits import MmaTraits
 
-__all__ = ["a_warp_encoding", "b_warp_encoding", "c_warp_encoding"]
+__all__ = ["a_warp_encoding", "b_warp_encoding", "c_warp_encoding", "canonical_layouts"]
 
 def _require_divisible(numerator: int, denominator: int, what: str, op_id: str) -> int:
     if denominator == 0 or numerator % denominator != 0:
@@ -203,4 +203,27 @@ def b_warp_encoding(
         op_id=traits.op_id,
         major_iter=n_iter,
         k_iter=k_iter,
+    )
+
+def canonical_layouts(
+    traits: MmaTraits, subtiles: tuple[int, int, int]
+) -> tuple[WarpDistributionEncoding, WarpDistributionEncoding, WarpDistributionEncoding]:
+    """The canonical-machine yardstick ``(a_canon, b_canon, c_canon)`` for a wave tile.
+
+    Sibling-facing internal factory (in ``__all__`` alongside the three ``*_warp_encoding`` fundamentals it
+    composes; kept off the public AUTHOR surface by ``mma/__init__.py``, which re-exports none of them). It
+    is the single home of the canonical A/B/C encodings that the soundness consumers route to -- the
+    driver's per-operand check, the plan's construction oracles, the recorder tee, the viz canon ref.
+    Produces layouts from ``traits`` + the wave shape; callers must never re-derive canonical via a local
+    ``CanonicalStyle()`` or read it off a public ``*_layout`` accessor.
+
+    ``subtiles`` is ``(m_sub, n_sub, k_sub)`` = wave / atom per axis. The result is byte-identical to the
+    whole-wave canonical encodings: A folds in ``m_sub`` x ``k_sub``, B folds in ``n_sub`` x ``k_sub``, C
+    folds in ``m_sub`` x ``n_sub`` (C has no K -- it is contracted).
+    """
+    m_sub, n_sub, k_sub = subtiles
+    return (
+        a_warp_encoding(traits, m_iter=m_sub, k_iter=k_sub),
+        b_warp_encoding(traits, n_iter=n_sub, k_iter=k_sub),
+        c_warp_encoding(traits, m_iter=m_sub, n_iter=n_sub),
     )

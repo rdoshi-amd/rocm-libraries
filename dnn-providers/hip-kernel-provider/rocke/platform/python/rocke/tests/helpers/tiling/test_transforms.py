@@ -4,7 +4,7 @@
 """Offline tests for the fragment-transform solver + MMA safety (no GPU).
 
 Covers: interleave_idx matches the reference layout tables; classify_transform labels a real
-register reorder, rejects different-element transforms, and is an involution; validate_operands
+register reorder, rejects different-element transforms, and is an involution; mma_pair_k_aligned
 accepts K-aligned operands and rejects a K-misaligned one with a constructive message.
 """
 
@@ -23,8 +23,8 @@ from rocke.helpers.tiling.transforms import (
     describe_edge,
     interleave_idx,
     k_distribution,
+    mma_pair_k_aligned,
     reorder_between,
-    validate_operands,
 )
 
 
@@ -140,14 +140,14 @@ def test_describe_edge_declared_relabel_must_be_consistent() -> None:
         describe_edge(s, t, relabel=True)
 
 
-def test_validate_operands_accepts_canonical() -> None:
+def test_mma_pair_k_aligned_accepts_canonical() -> None:
     tr = _traits()
     a, b = a_warp_encoding(tr), b_warp_encoding(tr)
-    ok, why = validate_operands(a, b)
-    assert ok, why
+    d = mma_pair_k_aligned(a, b)
+    assert d.severity == "ok", d.message
 
 
-def test_validate_operands_rejects_k_misaligned_with_message() -> None:
+def test_mma_pair_k_aligned_rejects_k_misaligned() -> None:
     # A wave tile whose K registers are reordered => A's K-distribution no longer matches B's.
     tr = _traits()
     a = a_warp_encoding(tr, k_iter=2)
@@ -155,9 +155,11 @@ def test_validate_operands_rejects_k_misaligned_with_message() -> None:
     a_k_scrambled = _swap_register_axes(a, 0, 2)  # reorders which K sits in which register slot
     if k_distribution(a_k_scrambled) == k_distribution(a):
         pytest.skip("swap did not perturb the K projection for this atom")
-    ok, why = validate_operands(a_k_scrambled, b)
-    assert not ok
-    assert "not K-aligned" in why and "transform_fragment" in why
+    d = mma_pair_k_aligned(a_k_scrambled, b)
+    assert d.severity in ("warning", "error")   # the driver rejects either
+    # a register-axis swap keeps the K SET per lane but changes its order -> reorder-fixable warning
+    # (names transform_fragment); if it also changed the set it would be a hard "different K sets" error.
+    assert "transform_fragment" in d.message or "different K sets" in d.message
 
 
 def test_k_distribution_a_equals_b_for_aligned_atom() -> None:
@@ -165,29 +167,28 @@ def test_k_distribution_a_equals_b_for_aligned_atom() -> None:
     assert k_distribution(a_warp_encoding(tr)) == k_distribution(b_warp_encoding(tr))
 
 
-def test_validate_operands_accepts_rectangular_per_atom() -> None:
+def test_mma_pair_k_aligned_accepts_rectangular_per_atom() -> None:
     # A rectangular wave tile (64x32x32 -> m_sub=4, n_sub=2) tiles more M-atoms in A than N-atoms in
     # B, so the WHOLE-fragment K-lists differ in length (A repeats atom-K 4x, B 2x). The per-atom gate
     # must accept it (every issued 16x16x16 atom pairs the same K); the whole-fragment default rejects.
     from rocke.helpers.tiling.kernels.tiling_gemm_interleaved_demo import _wave_descs_interleaved
 
     a, b, _ = _wave_descs_interleaved(4, 2, 2)
-    ok_atom, why = validate_operands(a.layout, b.layout, a_free_atoms=4, b_free_atoms=2)
-    assert ok_atom, why
-    ok_whole, _ = validate_operands(a.layout, b.layout)  # default 1,1 -> whole-fragment compare
-    assert not ok_whole
+    d_atom = mma_pair_k_aligned(a.layout, b.layout, a_free_atoms=4, b_free_atoms=2)
+    assert d_atom.severity == "ok", d_atom.message
+    d_whole = mma_pair_k_aligned(a.layout, b.layout)  # default 1,1 -> whole-fragment, rejects rectangular
+    assert d_whole.severity != "ok"
 
 
-def test_validate_operands_per_atom_still_rejects_k_mismatch() -> None:
-    # The per-atom relaxation must NOT mask a genuine K divergence. A's atom-K is (0..7); pairing it
-    # against a B chunked so its atom-K spans two K-groups (0..7,0..7) yields unequal atom signatures
-    # -> the gate rejects, proving the relaxation only forgives the free-dim repeat, never the K.
+def test_mma_pair_k_aligned_per_atom_still_rejects_k_mismatch() -> None:
+    # The per-atom relaxation must NOT mask a genuine K divergence. Pairing A's 4-atom reduction against a
+    # B told it has 1 atom (its whole 2-atom K-list as one signature) yields unequal atom signatures --
+    # the gate rejects, proving the relaxation only forgives the free-dim repeat, never the K.
     from rocke.helpers.tiling.kernels.tiling_gemm_interleaved_demo import _wave_descs_interleaved
 
     a, b, _ = _wave_descs_interleaved(4, 2, 2)
-    ok, why = validate_operands(a.layout, b.layout, a_free_atoms=4, b_free_atoms=1)
-    assert not ok
-    assert "not K-aligned" in why
+    d = mma_pair_k_aligned(a.layout, b.layout, a_free_atoms=4, b_free_atoms=1)
+    assert d.severity != "ok"
 
 
 def test_interleaved_style_operand_desc_is_distinct() -> None:

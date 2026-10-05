@@ -17,8 +17,8 @@ The seam owns the correctness envelope; the style owns only the recipe:
   by an independent path, in :class:`~rocke.helpers.tiling.mma.plan.TileMmaPlan`).
 - The MMA-ready descriptor a style produces is validated identically to a derived one -- ``operand_desc``
   feeds ``TileMmaPlan.a_operand_desc``/``b_operand_desc``, which the driver polices with
-  ``operand_soundness`` + the SOA slice guard. The atom-canonical ``a_layout``/``b_layout`` remain the
-  immutable soundness reference; a style never overrides them.
+  ``mma_operand_layout_sound`` + the SOA slice guard. The ``canonical_layouts`` helper remains the
+  immutable soundness reference; a style never overrides it.
 
 Adding a style: subclass :class:`LayoutStyle`, implement ``operand_desc`` + ``accumulator_desc`` from the
 public primitives, and (if it stages through LDS) expose bridge descriptors the kernel composes with

@@ -29,8 +29,9 @@ from types import SimpleNamespace
 
 from ..encoding import WarpDistributionEncoding
 from ..register_mapper import RegisterMapper
-from ..transforms import (as_forward_map, derive_c_distribution, diagnose_k_match, mma_pair_compatible,
+from ..transforms import (as_forward_map, derive_c_distribution, mma_pair_k_aligned, mma_pair_compatible,
                           classify_transform, describe_edge)
+from ..mma.warp_encoding import canonical_layouts
 from . import _canvas as cv
 from ..analysis.vectorization import vector_transactions  # noqa: F401 (re-export)
 from ._canvas import (  # colour model + low-level helpers (moved to _canvas; re-exported here)
@@ -1808,8 +1809,11 @@ class MmaTee:
         wave shape, and the canonical machine refs (so C is derived by flowing the A/B labels through the
         machine). Supply a different ``a_enc``/``b_enc`` via overrides to feed non-canonical distributions."""
         t = mma.traits
+        # a_enc/b_enc/c_enc = the encodings to RENDER (the public accessor). a_canon/b_canon/c_canon = the
+        # canonical reference from the `canonical_layouts` helper (so C derives through the fixed machine).
+        a_canon, b_canon, c_canon = canonical_layouts(mma.traits, mma.subtiles)
         base = dict(a_enc=mma.a_layout, b_enc=mma.b_layout, c_enc=mma.c_layout, atom_shape=mma.atom_shape,
-                    a_canon=mma.a_layout, b_canon=mma.b_layout, c_canon=mma.c_layout,
+                    a_canon=a_canon, b_canon=b_canon, c_canon=c_canon,
                     a_dtype_bits=_dtype_bits(t.input_dtype), b_dtype_bits=_dtype_bits(t.input_dtype),
                     c_dtype_bits=_dtype_bits(t.output_dtype), in_dtype=t.input_dtype, out_dtype=t.output_dtype,
                     op_id=mma.op_id, wave_shape=mma.shape)
@@ -2081,11 +2085,17 @@ class MmaTee:
             ax.text(tx, ty, lab, ha="center", va="bottom", fontsize=pt, weight="bold")
         if self.show_diagnostics:                              # DIAGNOSTIC only -- observes labels, never mutates C
             # full soundness + K-match when the machine refs are present; else K-match alone.
+            # per-atom K-match needs the free-dim atom counts (m_sub/n_sub) -- derive from the wave shape
+            # when present, so a rectangular wave tile isn't false-flagged on EITHER branch.
+            am = self.wave_shape[0] // self.atom_shape[0] if self.wave_shape is not None else 1
+            bn = self.wave_shape[1] // self.atom_shape[1] if self.wave_shape is not None else 1
             if self.a_canon is not None and self.b_canon is not None:
-                diag = mma_pair_compatible(self.a_enc, self.b_enc, a_canon=self.a_canon, b_canon=self.b_canon)
+                diag = mma_pair_compatible(self.a_enc, self.b_enc, a_canon=self.a_canon,
+                                           b_canon=self.b_canon, a_free_atoms=am, b_free_atoms=bn)
                 tag = "MMA-compatible"
             else:
-                diag = diagnose_k_match(self.a_enc, self.b_enc); tag = "K-match"
+                diag = mma_pair_k_aligned(self.a_enc, self.b_enc, a_free_atoms=am, b_free_atoms=bn)
+                tag = "K-match"
             if diag.severity != "ok":
                 col = "#c00000" if diag.severity == "error" else "#c07000"
                 ax.text(x0 + cw / 2, ymax + 2.2, f"{diag.severity.upper()} ({tag}): {diag.message}",

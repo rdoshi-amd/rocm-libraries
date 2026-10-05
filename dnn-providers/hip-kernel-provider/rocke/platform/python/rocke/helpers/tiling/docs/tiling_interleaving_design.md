@@ -213,7 +213,7 @@ is valid provided A holds `A[m, σ(s)]` and B holds `B[σ(s), n]` in the same sl
 - A's M-register order and B's N-register order are free; together they **determine the C output
   layout** (§7).
 
-`validate_operands(a_layout, b_layout)` enforces exactly this: `k_distribution(a) == k_distribution(b)`
+`mma_pair_k_aligned(a_layout, b_layout)` enforces exactly this: `k_distribution(a) == k_distribution(b)`
 positionally, **compared per atom** — not across the concatenated whole-fragment K-list (§8 for the
 rectangular-tile rationale). Lane ownership
 is guaranteed valid by construction (fragments come from atom-derived descs), so a positional per-atom
@@ -398,7 +398,7 @@ There is no "this fragment is MMA-ready" in isolation. The hardware's only requi
 (M on A / N on B are free) — worked in full at §2's slot tables.
 
 So "make this fragment acceptable" always means "reorder it until its K-row matches its **partner's**".
-`validate_operands(a, b)` compares the two fragments; it never checks either against a canonical.
+`mma_pair_k_aligned(a, b)` compares the two fragments; it never checks either against a canonical.
 
 ### A, B, C have different roles
 
@@ -732,8 +732,8 @@ error-prone to transcribe; construct the two states and ask the solver. The opti
 (`helpers/tiling/layout_optimizer.py`) wraps this into the two questions a designer actually asks:
 
 - **`evaluate_transform(source, target, *, canon=…, k_partner=…, dtype_bits=…)`** — is there a VALID path
-  (an MMA-sound target via `operand_soundness` + a transform via `classify_transform`), and what does the
-  cheapest edge cost?
+  (an MMA-sound target via `mma_operand_layout_sound` + a transform via `classify_transform`), and what
+  does the cheapest edge cost?
 - **`optimize_layout(source, candidates: dict, …)`** — the MINIMIZATION: sweep candidate distributions
   (different striping / ownership / register order) and rank them. It tries a free symmetry, an LDS
   reposition, an intra-lane reorder, or a *different distribution* before falling to cross-lane.
@@ -824,8 +824,8 @@ K-distribution (§2). The interleaved layouts we build — custom static tile di
 register order, rectangular per-lane patch) — are **sound for any tile shape**, square or rectangular. A
 per-operand override can force otherwise (author's responsibility; verify K-dists match).
 
-**K-alignment is validated PER ATOM, not per whole fragment.** `validate_operands` (`transforms.py`) compares
-A and B on their **per-atom** K signature, not the concatenated whole-fragment K-list — because the MMA is
+**K-alignment is validated PER ATOM, not per whole fragment.** `mma_pair_k_aligned` (`transforms/observers.py`)
+compares A and B on their **per-atom** K signature, not the concatenated whole-fragment K-list — because the MMA is
 issued per atom, and a rectangular wave tile has `m_iter ≠ n_iter` (A tiles more M-atoms than B tiles
 N-atoms), giving different whole-fragment register counts even when every issued atom pairs the same K. It
 takes the free-dim atom counts (`a_free_atoms`/`b_free_atoms` = m_iter/n_iter) so rectangular tiles like
@@ -1128,8 +1128,8 @@ separate LDS regions — isolate them (A-only / B-only, store-only / read-only) 
   per-tile A/B grids, and the ACC transform tables.
 - `helpers/tiling/traits/mma_traits.py` — the traits / catalogue registry (128 atom rows); every §9
   construction quantity is read from here.
-- `helpers/tiling/transforms.py` — `interleave_idx`, `k_distribution`, `classify_transform`,
-  `validate_operands`, `derive_c_distribution` (the §9 accumulator ground truth).
+- `helpers/tiling/transforms/` — `interleave_idx`, `k_distribution`, `classify_transform`,
+  `mma_pair_k_aligned`, `derive_c_distribution` (the §9 accumulator ground truth).
 - `helpers/tiling/mma/styles/interleaved.py` — `InterleavedStyle`: the shipped interleaved construction
   (`lds_bridge` / `operand_desc` for A/B, `accumulator_desc` for C). The API this document describes.
 - `helpers/tiling/mma/warp_encoding.py` — canonical `a_/b_warp_encoding`: the atom-native reference the

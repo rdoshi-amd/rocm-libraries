@@ -62,10 +62,6 @@ def test_interleaved_gemm_deeper_k_on_gfx90a() -> None:
     report = run_and_verify_interleaved(256, 256, 256, arch="gfx90a", tile_m=64, tile_n=64, tile_k=32)
     assert report["bit_exact"], report
 
-# NOTE: rectangular wave tiles (m_sub != n_sub) currently trip the driver's whole-fragment
-# validate_operands (A/B wave fragments differ in register count, so their K-dists differ in
-# length). The K-alignment should be checked per-ATOM. Deferred -- square tiles are the focus.
-
 
 def test_lds_staged_gemm_bit_exact_on_gfx90a() -> None:
     # LDS round-trip (single wave / single atom) through the unified load/store_fragment verbs.

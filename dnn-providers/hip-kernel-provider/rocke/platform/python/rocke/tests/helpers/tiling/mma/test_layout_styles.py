@@ -65,14 +65,14 @@ def test_shipped_styles_build_a_plan_without_raising() -> None:
 
 
 def test_unsound_operand_rejected_at_plan_construction(monkeypatch) -> None:
-    # Force operand_soundness to report an error and confirm the PLAN rejects it at build -- proving the
-    # gate fires at construction (matching the C-oracle), not only later at TileMmaDriver.__call__.
+    # Force mma_operand_layout_sound to report an error and confirm the PLAN rejects it at build --
+    # proving the gate fires at construction (matching the C-oracle), not only at TileMmaDriver.__call__.
     import rocke.helpers.tiling.transforms as transforms
     from rocke.helpers.tiling.mma.plan import TileMmaPlan
     from rocke.helpers.tiling.transforms._core import Diagnostic
 
     monkeypatch.setattr(
-        transforms, "operand_soundness", lambda *a, **k: Diagnostic("error", "forced-unsound (test)")
+        transforms, "mma_operand_layout_sound", lambda *a, **k: Diagnostic("error", "forced-unsound (test)")
     )
     with pytest.raises(ValueError, match="not sound"):
         TileMmaPlan((16, 16, 16), a="f16", b="f16", c="f32", target="gfx90a")

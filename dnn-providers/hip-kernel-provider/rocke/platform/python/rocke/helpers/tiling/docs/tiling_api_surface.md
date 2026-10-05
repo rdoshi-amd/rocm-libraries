@@ -529,8 +529,9 @@ see the C-oracle in `TileMmaPlan`). That is the composability claim, made concre
 - **Pin the atom** with `Tiling(atom_shape=...)` -- a shape tuple, an intrinsic name (escape hatch),
   or `None` for a single-MMA wave.
 - **Bring your own operand layout** by holding `mma.plan` and building a `Fragment` from your own
-  `TileDesc`; the driver validates it identically to a derived one (`operand_soundness` + the SOA
-  atom-contiguity slice guard). Overrides are OPERANDS only -- the accumulator is always derived.
+  `TileDesc`; the driver validates it identically to a derived one (`mma_operand_layout_sound` +
+  `mma_pair_k_aligned` + the SOA atom-contiguity slice guard). Overrides are OPERANDS only -- the
+  accumulator is always derived, and checked by `mma_accumulator_flow_consistent`.
 - **Add a layout style** by subclassing `LayoutStyle` (`mma/styles/`): implement `operand_desc` +
   `accumulator_desc` composing the public primitives (`cooperative_load_desc`, `TileDesc.swap_dims`
   / `.reorder_registers`, the `lds_*` bridge). See `docs/tiling_api_contract.md` -- "Adding a layout

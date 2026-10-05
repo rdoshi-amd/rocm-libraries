@@ -25,7 +25,7 @@ import pytest
 from rocke.helpers.tiling.traits import load_mma_traits
 from rocke.helpers.tiling.layouts import make_tile_desc
 from rocke.helpers.tiling.mma.styles import AtomNumbers, InterleavedStyle
-from rocke.helpers.tiling.transforms import as_forward_map, classify_transform, validate_operands
+from rocke.helpers.tiling.transforms import as_forward_map, classify_transform, mma_pair_k_aligned
 
 # The interleaved operand/accumulator descriptors are the promoted `InterleavedStyle`; the atom quantities
 # come from the library `AtomNumbers.from_traits`. The one piece not yet promoted is the C store-order
@@ -134,8 +134,8 @@ def test_dense_mma_interleavable(t):
     # lanes: A's free axis is M (free_lanes=a.m), B's is N (free_lanes=a.n) -- equal for a square atom.
     _, a_mma = _STYLE.operand_descs(t, free_sub=1, k_sub=1, free_lanes=a.m)
     _, b_mma = _STYLE.operand_descs(t, free_sub=1, k_sub=1, free_lanes=a.n)
-    ok, why = validate_operands(a_mma.layout, b_mma.layout)
-    assert ok, f"{t.op_id}: MMA soundness failed -- {why}"
+    d = mma_pair_k_aligned(a_mma.layout, b_mma.layout)
+    assert d.severity == "ok", f"{t.op_id}: MMA soundness failed -- {d.message}"
 
     # C-shuffle (native accumulator -> store), single atom AND 2x2-atom tile (free_sub>1 / multi-patch).
     for m_sub, n_sub in [(1, 1), (2, 2)]:

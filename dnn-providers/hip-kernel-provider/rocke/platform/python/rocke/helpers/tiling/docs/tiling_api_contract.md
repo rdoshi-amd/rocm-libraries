@@ -51,8 +51,8 @@ catalog-based groupings; a newcomer meets one map.
   control: `Tiling` (the `TileMma` atom/order knobs), `TileMmaPlan`/`TileMmaDriver`, the `LayoutStyle`
   seam (`canonical`/`interleaved`), `TileDesc.swap_dims`/`.reorder_registers`, `cooperative_load_desc`,
   `at_index`/`squeeze`, and the transform *observers* (surfaced at the root in the transforms split:
-  `classify_transform`, `describe_edge`, `diagnose_k_match`, `operand_soundness`, `mma_pair_compatible`,
-  `reorder_between`, `derive_c_distribution`).
+  `classify_transform`, `describe_edge`, `mma_pair_k_aligned`, `mma_operand_layout_sound`,
+  `mma_accumulator_flow_consistent`, `mma_pair_compatible`, `reorder_between`, `derive_c_distribution`).
 - **MACHINERY** -- internal, NOT authoring API, NOT re-exported: the recorder, the transform *solver*
   core (`_classify_maps`, `as_forward_map`), `RegisterMapper`, the `warp_encoding` calculators.
 
@@ -108,9 +108,11 @@ implements the protocol. The rules a new style MUST honor -- so it stays correct
   K-distribution its operands present to the atom; it must not supply a C descriptor. The runtime
   C-oracle (`_c_native_desc == derive_c_distribution(...)`) catches a style whose C geometry the
   atom-derived descriptor cannot express.
-- **Which gates police it:** `operand_soundness` + `validate_operands` (per-operand + pairwise K,
-  against the atom-canonical `a_layout`/`b_layout` -- never the style's own descriptor), the driver's
-  SOA slice descriptor (fail-fast on an AOS register order it cannot express), and the
+- **Which gates police it:** `mma_operand_layout_sound` + `mma_pair_k_aligned` (per-operand soundness +
+  pairwise K-match, against the canonical machine from the `canonical_layouts` helper -- never the style's
+  own descriptor), `mma_accumulator_flow_consistent` (the passed accumulator carries the labels the
+  machine produces from the operands, so the store writes the right coordinates), the driver's SOA
+  contiguity guard (fail-fast on an AOS register order it cannot slice), and the
   coalescing/vectorization diagnostics that price the load.
 - **Reach past the two shipped styles when** you need a global-load direction or a C-epilogue coupling
   neither canonical (K-contiguous) nor interleaved (free-contiguous, wide coalesced) expresses.
@@ -123,10 +125,12 @@ Defaults are driven by the resolved atom; every default is a value you can repla
 `tiling_api_surface.md` "the one idea"). An override runs the **same** soundness gates as the derived
 path -- the gates take raw encodings, so they validate an arbitrary custom descriptor. Concretely:
 
-- The `TileMmaDriver` runs `operand_soundness` + `validate_operands` **unconditionally** in `__call__`
-  (it is stateless and cannot tell derived from custom; derived inputs pass trivially). This makes
-  "validated identically" literally true and closes the hole where a per-operand-unsound custom operand
-  K-matches its partner yet miscompiles.
+- The `TileMmaDriver` runs one validation **unconditionally** in `__call__` (`_validate_mma_issue`:
+  per-operand soundness + pairwise K-match + accumulator store-coordinate consistency + SOA contiguity).
+  It is stateless and cannot tell derived from custom; derived inputs pass trivially. This makes
+  "validated identically" literally true, and closes the hole where a per-operand-unsound custom operand
+  K-matches its partner yet miscompiles -- and the one where a mislabeled accumulator stores to the wrong
+  coordinates.
 - **Custom overrides are OPERANDS ONLY** -- the accumulator descriptor is always derived. Atom-contiguity
   is a *separate* contract enforced by the mandatory slice descriptor, which fails-fast on any register
   layout it cannot express. The gates carry a `(lanes x regs)` dimension pre-check (clean diagnostic, not

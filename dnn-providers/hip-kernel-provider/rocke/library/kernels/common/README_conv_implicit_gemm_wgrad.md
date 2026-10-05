@@ -245,6 +245,72 @@ Both loops that Python-unroll the K iteration — `pipeline="basic"` and
 `async_dma` — are bounded by `_MAX_UNROLLED_K_ITERS` (128). Over the cap the spec
 is rejected; raise `split_k` or `tile_k` rather than the constant.
 
+### Stream-K (`streamk`, `streamk_reduction`, `streamk_ctas`)
+
+Split-K cuts `K_wg` into `split_k` equal slices and gives every output tile the
+same number of them. That is the right shape when the tiles outnumber the CUs,
+but a wgrad is usually the opposite: `wg_M x wg_N` is filter-sized while
+`K_wg = N*Ho*Wo` is huge, so the tile count can be a handful and the leftover
+CUs idle no matter how the slices are cut.
+
+Stream-K (CK Tile's `StreamKTilePartitioner`) balances *MAC iterations* instead.
+Output tiles that divide the CTA pool evenly run data-parallel — one CTA, the
+whole K loop, no reduction at all — and only the remainder is spread over
+`streamk_ctas` stream-K CTAs, each owning a contiguous, balanced range of
+iterations that may straddle tile boundaries. rocke builds one kernel per shape,
+so the whole partition is resolved host-side
+(`rocke.helpers.streamk.StreamKIterPartition`) and folded in as constants; the
+device only maps `blockIdx.x` onto its iteration range.
+
+`streamk="dp_sk"` launches `dp_tiles + sk_ctas` CTAs. `streamk="persistent"`
+launches only the pool: each CTA round-robins the data-parallel tiles
+(`tile = cta + t*pool`, CK's static `StreamKDispatch`, no work queue) and then
+runs its stream-K range. Both walk their work with one bounded `scf.for` whose
+trip count is CTA-uniform, so the barriers inside the GEMM body stay uniform and
+the body is emitted once.
+
+`streamk_reduction` picks how the CTAs sharing a tile combine partial sums:
+
+| | Determinism | dW zeroing | Workspace |
+|---|---|---|---|
+| `linear` | yes | not needed | flags + one f32 tile per SK CTA |
+| `tree` | yes | not needed | same |
+| `atomic` | no | required | none (fp32 dW only) |
+| `workspace` | no | not needed | the two-stage f32 scratch + Stage 2 reduce |
+
+`linear` and `tree` hand partials over explicitly: a non-owner stores its tile
+to its own slot, issues a release fence and sets a per-wave flag; the consumer
+spins on an acquire load of that flag and then adds. Both are deterministic
+because the fold order is fixed by the partition, not by arrival. `linear` has
+the owner walk its later contributors in turn; `tree` fans in pairwise over
+`ceil(log2)` rounds. The flag protocol is three core IR ops (`memref.fence`,
+`memref.global_flag_store`, `memref.global_flag_wait_eq`) rather than raw cache
+hints, so the AMDGPU memory model supplies the L2 writeback/invalidate that
+makes a partial visible across XCDs.
+
+Size the buffer with `wgrad_streamk_workspace_nbytes`; split it with
+`wgrad_streamk_workspace_layout` (`sk_flags` at the base, `sk_partials` at
+`base + flags_bytes`). **Only the flag region has to be zeroed before each
+launch** — partials are always written before they are read.
+
+Constraints, all enforced by `validate()` / `is_valid_wgrad_spec` in both
+engines: gfx942/gfx950 (MFMA wave64) only; `split_k=1` and no `two_stage`
+(stream-K owns the K range); `epilogue="default"`; no `async_dma` / `unroll_k`
+(the per-tile trip count is a runtime value); no `chiplet_swizzle` or
+`group_merge` (both remap tiles, which stream-K owns). Conv groups are folded
+into GEMM-M instead of riding `block_id_z`: `m_tiles = ceil(wg_M/tile_m) *
+groups`, decoded group-fastest. Defining the tile count per group makes the fold
+exact for any `wg_M`, avoiding CK's `GemmM % MPerBlock` caveat.
+
+`streamk_ctas=-1` resolves to one CTA per CU of the target. The pool must not
+exceed what the device can hold at once: a stream-K CTA waits on CTAs with
+higher indices, so one that is not resident would deadlock it.
+
+Reachable from dispatch: `ConvGroupedRequest(streamk=..., streamk_reduction=...)`,
+which pins `split_k=1` and the direct epilogue and routes `_wgrad_grid` through
+the instance's own `wgrad_streamk_grid`, so the spec and the launch grid cannot
+disagree about the pool.
+
 ## Next steps
 
 ### K0-M-K1 LDS layout

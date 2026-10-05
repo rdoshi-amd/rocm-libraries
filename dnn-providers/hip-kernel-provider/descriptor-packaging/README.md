@@ -18,6 +18,8 @@ empty-`arch` KDP is never emitted into a generic copy. The copy is a pure functi
 source tree, the generic's spelling, hipcc and the table, so the copies are byte-identical
 across member folders and across separate per-arch builds.
 
+Known limitation: every installed member package carries its own copy of the generic content, so disk use scales with the number of installed members. Identical copies collapse to one catalog entry at load; copies built by different compilers differ in `provenance` and are both dropped.
+
 Authoring rules (packer errors, stable substrings in parentheses):
 
 - A name ending `-generic` that the table does not list is an error (`generic target name

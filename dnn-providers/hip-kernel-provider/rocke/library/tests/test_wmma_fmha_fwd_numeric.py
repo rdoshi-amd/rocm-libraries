@@ -5,12 +5,65 @@
 from __future__ import annotations
 
 import math
-import struct
 
 import numpy as np
 import pytest
 
 from rocke.runtime.hip_module import get_device_arch
+from rocke.runtime.packing import pack_args
+
+
+def _dense_values(
+    q,
+    k,
+    v,
+    out,
+    *,
+    q_ptr,
+    k_ptr,
+    v_ptr,
+    out_ptr,
+    scale_log2,
+    seqlen_q,
+    seqlen_k,
+    num_query_heads,
+    num_kv_heads,
+    bottom_right=False,
+):
+    def stride(array, axis):
+        return array.strides[axis] // array.itemsize
+
+    return {
+        "Q": q_ptr,
+        "K": k_ptr,
+        "V": v_ptr,
+        "O": out_ptr,
+        "LSE": out_ptr,
+        "scale_log2": scale_log2,
+        "seqlen_q": seqlen_q,
+        "seqlen_k": seqlen_k,
+        "num_query_heads": num_query_heads,
+        "num_kv_heads": num_kv_heads,
+        "bottom_right": int(bottom_right),
+        "window_left": -1,
+        "window_right": 0,
+        "write_lse": 0,
+        "stride_q_batch": stride(q, 0),
+        "stride_q_token": stride(q, -3),
+        "stride_q_head": stride(q, -2),
+        "stride_k_batch": stride(k, 0),
+        "stride_k_token": stride(k, -3),
+        "stride_k_head": stride(k, -2),
+        "stride_v_batch": stride(v, 0),
+        "stride_v_token": stride(v, -3),
+        "stride_v_head": stride(v, -2),
+        "stride_o_batch": stride(out, 0),
+        "stride_o_token": stride(out, -3),
+        "stride_o_head": stride(out, -2),
+        "stride_lse_batch": 0,
+        "stride_lse_token": 0,
+        "stride_lse_head": 0,
+    }
 
 
 @pytest.mark.gpu
@@ -36,6 +89,7 @@ def test_large_negative_bf16_logits(mask, bottom_right, sq, sk, v_staging):
         WmmaFmhaFwdSpec,
         build_wmma_fmha_fwd,
         wmma_fmha_fwd_grid,
+        wmma_fmha_fwd_signature,
     )
     from rocke.helpers import compile_kernel
     from rocke.runtime.hip_module import Runtime
@@ -47,10 +101,8 @@ def test_large_negative_bf16_logits(mask, bottom_right, sq, sk, v_staging):
     )
     spec = WmmaFmhaFwdSpec(
         head_size=64,
-        num_query_heads=1,
         dtype="bf16",
         mask_mode=mask,
-        causal_bottom_right=bottom_right,
         v_lds_stage=v_staging,
     )
     rt = Runtime()
@@ -63,27 +115,26 @@ def test_large_negative_bf16_logits(mask, bottom_right, sq, sk, v_staging):
             backend="python",
         )
         module = rt.load_module(artifact.hsaco)
-        args = struct.pack(
-            "<QQQQfiiiiiiiiii",
-            buffers.ptrs["q"],
-            buffers.ptrs["k"],
-            buffers.ptrs["v"],
-            buffers.ptrs["rocke_out"],
-            math.log2(math.e) / 8,
-            sq,
-            sk,
-            64,
-            64,
-            64,
-            64,
-            64,
-            64,
-            64,
-            64,
+        values = _dense_values(
+            inputs.q,
+            inputs.k,
+            inputs.v,
+            buffers.arrays["rocke_out"],
+            q_ptr=buffers.ptrs["q"],
+            k_ptr=buffers.ptrs["k"],
+            v_ptr=buffers.ptrs["v"],
+            out_ptr=buffers.ptrs["rocke_out"],
+            scale_log2=math.log2(math.e) / 8,
+            seqlen_q=sq,
+            seqlen_k=sk,
+            num_query_heads=1,
+            num_kv_heads=1,
+            bottom_right=bottom_right,
         )
+        args = pack_args(wmma_fmha_fwd_signature(spec), values)
         rt.launch(
             module.get_function(artifact.kernel_name),
-            wmma_fmha_fwd_grid(spec, seqlen_q=sq, batch=1),
+            wmma_fmha_fwd_grid(spec, seqlen_q=sq, num_query_heads=1, batch=1),
             (spec.block_size, 1, 1),
             args,
         )
@@ -118,6 +169,7 @@ def test_sequence_tails_preserve_guards_and_ignore_poison(dtype, v_staging):
         WmmaFmhaFwdSpec,
         build_wmma_fmha_fwd,
         wmma_fmha_fwd_grid,
+        wmma_fmha_fwd_signature,
     )
     from rocke.helpers import compile_kernel
     from rocke.runtime.hip_module import Runtime
@@ -156,11 +208,8 @@ def test_sequence_tails_preserve_guards_and_ignore_poison(dtype, v_staging):
     try:
         spec = WmmaFmhaFwdSpec(
             head_size=64,
-            num_query_heads=4,
-            num_kv_heads=2,
             dtype=dtype,
             mask_mode="causal",
-            causal_bottom_right=True,
             query_tail=True,
             kv_tail=True,
             v_lds_stage=v_staging,
@@ -172,27 +221,26 @@ def test_sequence_tails_preserve_guards_and_ignore_poison(dtype, v_staging):
         )
         module = rt.load_module(artifact.hsaco)
         output = buffers.ptrs["guarded"] + guard * guarded.itemsize
-        args = struct.pack(
-            "<QQQQfiiiiiiiiii",
-            buffers.ptrs["q"],
-            buffers.ptrs["k"],
-            buffers.ptrs["v"],
-            output,
-            math.log2(math.e) / 8,
-            17,
-            19,
-            256,
-            64,
-            128,
-            64,
-            128,
-            64,
-            256,
-            64,
+        values = _dense_values(
+            buffers.arrays["q"],
+            buffers.arrays["k"],
+            buffers.arrays["v"],
+            logical.q,
+            q_ptr=buffers.ptrs["q"],
+            k_ptr=buffers.ptrs["k"],
+            v_ptr=buffers.ptrs["v"],
+            out_ptr=output,
+            scale_log2=math.log2(math.e) / 8,
+            seqlen_q=17,
+            seqlen_k=19,
+            num_query_heads=4,
+            num_kv_heads=2,
+            bottom_right=True,
         )
+        args = pack_args(wmma_fmha_fwd_signature(spec), values)
         rt.launch(
             module.get_function(artifact.kernel_name),
-            wmma_fmha_fwd_grid(spec, seqlen_q=17, batch=1),
+            wmma_fmha_fwd_grid(spec, seqlen_q=17, num_query_heads=4, batch=1),
             (spec.block_size, 1, 1),
             args,
         )
@@ -363,6 +411,7 @@ def test_packed_boundaries_preserve_guards_and_ignore_poison(
         WmmaFmhaFwdSpec,
         build_wmma_fmha_fwd,
         wmma_fmha_fwd_grid,
+        wmma_fmha_fwd_signature,
     )
     from rocke.helpers import compile_kernel
     from rocke.runtime.hip_module import Runtime
@@ -419,14 +468,11 @@ def test_packed_boundaries_preserve_guards_and_ignore_poison(
     try:
         spec = WmmaFmhaFwdSpec(
             head_size=64,
-            num_query_heads=4,
-            num_kv_heads=2,
             dtype=dtype,
             layout=layout,
             page_block_size=case.block_size,
             v_lds_stage=v_staging,
             mask_mode="causal",
-            causal_bottom_right=True,
             kv_dtype=kv_dtype,
         )
         kernel = build_wmma_fmha_fwd(spec)
@@ -437,9 +483,23 @@ def test_packed_boundaries_preserve_guards_and_ignore_poison(
             "K": buffers.ptrs["k"],
             "V": buffers.ptrs["v"],
             "O": buffers.ptrs["rocke_out"] + guard * output.itemsize,
+            "LSE": buffers.ptrs["rocke_out"],
             "scale_log2": case.scale * math.log2(math.e),
             "seqlen_q": max(case.q_lengths),
             "seqlen_k": max(case.k_lengths),
+            "num_query_heads": case.heads_q,
+            "num_kv_heads": case.heads_kv,
+            "bottom_right": 1,
+            "window_left": -1,
+            "window_right": 0,
+            "write_lse": 0,
+            "stride_q_batch": 0,
+            "stride_k_batch": 0,
+            "stride_v_batch": 0,
+            "stride_o_batch": 0,
+            "stride_lse_batch": 0,
+            "stride_lse_token": 0,
+            "stride_lse_head": 0,
             "cu_seqlens_q": buffers.ptrs["cu_seqlens_q"],
         }
         if kv_dtype:
@@ -462,12 +522,15 @@ def test_packed_boundaries_preserve_guards_and_ignore_poison(
                 stride_k_block=inputs.k.strides[0] // inputs.k.itemsize,
                 stride_v_block=inputs.v.strides[0] // inputs.v.itemsize,
             )
-        signature = [
-            {"name": param.name, "type": param.type.name} for param in kernel.params
-        ]
+        signature = wmma_fmha_fwd_signature(spec)
         rt.launch(
             module.get_function(artifact.kernel_name),
-            wmma_fmha_fwd_grid(spec, seqlen_q=max(case.q_lengths), batch=case.batch),
+            wmma_fmha_fwd_grid(
+                spec,
+                seqlen_q=max(case.q_lengths),
+                num_query_heads=case.heads_q,
+                batch=case.batch,
+            ),
             (spec.block_size, 1, 1),
             pack_args(signature, values),
         )
@@ -496,7 +559,7 @@ def test_compiled_wmma_preserves_declared_workgroup_limit():
     from rocke.helpers import compile_kernel
     from rocke.runtime import hip_module
 
-    spec = WmmaFmhaFwdSpec(head_size=128, num_query_heads=4)
+    spec = WmmaFmhaFwdSpec(head_size=128)
     artifact = compile_kernel(
         build_wmma_fmha_fwd(spec), arch="gfx1151", backend="python"
     )
@@ -582,10 +645,7 @@ def test_transposed_qk_preserves_output_coordinates_and_guards(
     try:
         spec = WmmaFmhaFwdSpec(
             head_size=dimension,
-            num_query_heads=hq,
-            num_kv_heads=hkv,
             mask_mode="none" if mask == "none" else "causal",
-            causal_bottom_right=mask == "bottom_right",
             transposed_qk=True,
             block_n=block_n,
             num_waves=waves,
@@ -594,21 +654,25 @@ def test_transposed_qk_preserves_output_coordinates_and_guards(
             build_wmma_fmha_fwd(spec), arch="gfx1151", backend="python"
         )
         module = rt.load_module(artifact.hsaco)
-        values = dict(
-            Q=buffers.ptrs["q"],
-            K=buffers.ptrs["k"],
-            V=buffers.ptrs["v"],
-            O=buffers.ptrs["rocke_out"] + guard * 2,
+        values = _dense_values(
+            q,
+            k,
+            v,
+            q,
+            q_ptr=buffers.ptrs["q"],
+            k_ptr=buffers.ptrs["k"],
+            v_ptr=buffers.ptrs["v"],
+            out_ptr=buffers.ptrs["rocke_out"] + guard * 2,
             scale_log2=math.log2(math.e) / math.sqrt(dimension),
             seqlen_q=sq,
             seqlen_k=sk,
+            num_query_heads=hq,
+            num_kv_heads=hkv,
+            bottom_right=mask == "bottom_right",
         )
-        for name, array in (("q", q), ("k", k), ("v", v), ("o", q)):
-            values[f"stride_{name}_token"] = array.strides[-3] // array.itemsize
-            values[f"stride_{name}_head"] = array.strides[-2] // array.itemsize
         rt.launch(
             module.get_function(artifact.kernel_name),
-            wmma_fmha_fwd_grid(spec, seqlen_q=sq, batch=batch),
+            wmma_fmha_fwd_grid(spec, seqlen_q=sq, num_query_heads=hq, batch=batch),
             (spec.block_size, 1, 1),
             pack_args(wmma_fmha_fwd_signature(spec), values),
         )

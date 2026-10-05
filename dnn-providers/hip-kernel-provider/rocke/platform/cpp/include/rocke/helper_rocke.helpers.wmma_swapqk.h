@@ -1,29 +1,26 @@
 /* Copyright (c) Advanced Micro Devices, Inc., or its affiliates.
  * SPDX-License-Identifier: MIT
  *
- * rocke/helper_rocke.helpers.wmma_swapqk.h -- C99 port of
  * rocke/helpers/wmma_swapqk.py: the transposed-QK WMMA FMHA-forward inner
- * body for gfx1151 (CK gfx11 ``qr_ks_vs`` design), FP16-only, dense, original
- * (row-major ``[B, S, H, D]``) V layout.
+ * body for gfx1151 (CK gfx11 ``qr_ks_vs`` design), FP16/BF16, dense, with
+ * runtime tensor strides.
  *
  * Python                              C99 (this header)
  * ----------------------------------  ---------------------------------------
  * wmma_swapqk_fwd_inner_body(...)     rocke_wmma_swapqk_fwd_inner_body(...)
  *
- * SCOPE. Only the single fixed configuration that was validated end-to-end:
- * head_size in {64, 128}, one query tile per wave (no query-blocking),
- * mask_mode in {"none", "causal"}, the d-outer QK loop, lazy online-softmax
- * rescale, the raw (fast) exp2, buffer-descriptor D16 dual-subtile V-gather
- * against the ORIGINAL row-major [B, S, H, D] V layout, and pingpong
- * (s_setprio) scheduling. block_n (32 or 64) and n_waves (1 or 2) are the only
+ * SCOPE. The validated D64/D128 configuration supports FP16 and BF16, one
+ * query tile per wave, mask_mode NONE/CAUSAL, d-outer QK, lazy online-softmax
+ * rescale, raw exp2, and buffer-descriptor D16 V gathers against original
+ * dense storage. block_n (32 or 64) and n_waves (1 or 2) are the only
  * tunables.
  *
  * PARAMS. Reuses the existing rocke_mfma_attn_params_t (see
  * rocke/helper_rocke.helpers.mfma_attention.h) so the caller does not need a
  * second params type; only the fields the Python keyword signature lists are
- * read (Q, K, V, O, head_size, seqlen_k, q_tile_base, q_pos_base, head_idx,
- * kv_head_idx, the eight stride_* fields, scale_log2, k_token_offset_elems,
- * v_token_offset_elems, mask_mode, arch, causal_ctx_offset, mask_neg_inf).
+ * read (Q, K, V, O, head_size, dtype, seqlen_k, q_tile_base, q_pos_base,
+ * head_idx, kv_head_idx, the eight stride fields, scale_log2, batch offsets,
+ * mask mode/context, and optional LSE output fields).
  * The caller has already declared all
  * kernel params and decoded the (q_group, head, batch) grid ids / GQA head
  * mapping (mirroring the Python docstring): this function only emits the
@@ -40,11 +37,9 @@
  * byte-identical to the Python helper's emission.
  *
  * BINDINGS.
- *   - IR builder primitives: rocke/ir.h's rocke_b_* entry points, including
- *     the new rocke_b_undef_vec / rocke_b_buffer_load_f16_d16 primitives.
- *   - WMMA atom / lane layout: rocke/arch_target.h's rocke_mma_op_t (looked
- *     up via rocke_mma_catalog_by_op_id(&target->mma,
- *     "wmma_f32_16x16x16_f16")) and rocke_layout_map_coord.
+ *   - IR builder primitives: rocke/ir.h's rocke_b_* entry points.
+ *   - WMMA atom / lane layout: rocke/arch_target.h's dtype-matched
+ *     wmma_f32_16x16x16_{f16,bf16} op and rocke_layout_map_coord.
  *   - Tensor views / tile windows: rocke/helper_rocke.helpers.tensor_view.h.
  *   - Attention mask: rocke/helper_rocke.helpers.attention.h's
  *     rocke_apply_attention_mask.

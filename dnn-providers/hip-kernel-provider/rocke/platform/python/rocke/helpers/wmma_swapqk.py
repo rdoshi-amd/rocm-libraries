@@ -1,7 +1,7 @@
 # Copyright (c) Advanced Micro Devices, Inc., or its affiliates.
 # SPDX-License-Identifier: MIT
 """Transposed-QK WMMA FMHA-forward inner body for gfx1151 (CK gfx11 ``qr_ks_vs``
-design), FP16-only, dense, original (row-major ``[B, S, H, D]``) V layout.
+design), FP16/BF16, dense, with runtime tensor strides.
 
 Computes the scores **transposed**: ``S^T = K @ Q^T`` instead of ``S = Q @
 K^T``. That puts the query on the lane (``col = lane % 16``) and the kv
@@ -20,7 +20,7 @@ per-lane distribution as the softmax stats, so the online rescale is a
 trivial in-lane vector multiply. The V gather stays column-major (this
 module's V is the ``[B, S, H, D]`` row-major layout, not the pre-transposed
 ``[B, H, D, S]`` form): each 16-key A-fragment is filled via 16
-buffer-descriptor D16 half-return loads, and the dual-subtile broadcast
+buffer-descriptor D16 loads, and the dual-subtile broadcast
 (``permlanex16`` + select) fills both WMMA lane-halves from one such gather so
 adjacent head-dim subtiles share the load traffic.
 
@@ -38,11 +38,10 @@ PermuteWarpGemmCToA`` and ``block_fmha_pipeline_qr_ks_vs.hpp``.
 
 from __future__ import annotations
 
-from rocke.core.ir import F16, F32, I16, I32, IRBuilder, Value, VectorType
+from rocke.core.ir import BF16, F16, F32, I16, I32, IRBuilder, Value, VectorType
 from rocke.helpers import (
     WmmaAtom,
     WmmaTensor,
-    load_wmma_tile,
     make_global_view,
     make_tile_window,
     store_wmma_tile,
@@ -66,6 +65,7 @@ def wmma_swapqk_fwd_inner_body(
     V: Value,
     O: Value,  # noqa: E741 - standard attention notation (Q,K,V,O)
     head_size: int,
+    dtype: str,
     seqlen_k: Value,
     q_tile_base: Value,
     q_pos_base: Value,
@@ -87,9 +87,11 @@ def wmma_swapqk_fwd_inner_body(
     n_waves: int,
     causal_ctx_offset: Value | None = None,
     mask_neg_inf: Value | None = None,
-    arch: str = "gfx1151",
     lse: Value | None = None,
-    lse_offset: Value | None = None,
+    write_lse: Value | None = None,
+    stride_lse_token: Value | None = None,
+    stride_lse_head: Value | None = None,
+    arch: str = "gfx1151",
 ) -> None:
     """Emit one transposed-QK WMMA FMHA-forward wave body.
 
@@ -121,6 +123,8 @@ def wmma_swapqk_fwd_inner_body(
         )
     if head_size not in (64, 128):
         raise ValueError(f"wmma_swapqk head_size must be 64 or 128 (got {head_size})")
+    if dtype not in ("f16", "fp16", "bf16"):
+        raise ValueError(f"wmma_swapqk dtype must be f16/bf16 (got {dtype!r})")
     if block_n not in (32, 64):
         raise ValueError(f"block_n must be 32 or 64 (got {block_n})")
     if n_waves not in (1, 2):
@@ -130,7 +134,8 @@ def wmma_swapqk_fwd_inner_body(
     if causal_ctx_offset is not None and mask_mode != "causal":
         raise ValueError("a causal context offset requires causal masking")
 
-    atom = WmmaAtom.f16_16x16x16()
+    atom = WmmaAtom.bf16_16x16x16() if dtype == "bf16" else WmmaAtom.f16_16x16x16()
+    dtype_ir = BF16 if dtype == "bf16" else F16
     wave = atom.wave_size  # 32
     c_frag = atom.c_per_lane  # 8
     a_frag = atom.a_per_lane  # 16
@@ -157,14 +162,20 @@ def wmma_swapqk_fwd_inner_body(
     # d-slices. O^T view: (head, dim, token) so store_wmma_tile's (row=d,
     # col=query) lands on O[query, d]; dim is contiguous, token strided.
     Q_view = make_global_view(
-        Q, shape=(1, 1, hs), dtype=F16, strides=(stride_q_head, stride_q_token, 1)
+        Q,
+        shape=(1, 1, hs),
+        dtype=dtype_ir,
+        strides=(stride_q_head, stride_q_token, 1),
     )
     # The leading K-view coordinate is an element offset, not a head index.
     K_view = make_global_view(
-        K, shape=(1, 1, hs), dtype=F16, strides=(1, stride_k_token, 1)
+        K, shape=(1, 1, hs), dtype=dtype_ir, strides=(1, stride_k_token, 1)
     )
     O_T_view = make_global_view(
-        O, shape=(1, hs, 1), dtype=F16, strides=(stride_o_head, 1, stride_o_token)
+        O,
+        shape=(1, hs, 1),
+        dtype=dtype_ir,
+        strides=(stride_o_head, 1, stride_o_token),
     )
 
     # This wave's 16-row query tile: sequence-local (for masking) and global
@@ -228,25 +239,27 @@ def wmma_swapqk_fwd_inner_body(
     def p_transpose_reg(ps):
         outs = []
         for m in range(c_frag // 2):
-            lo = b.zext(b.bitcast(b.cast_f32_to(ps[2 * m], F16), I16), I32)
-            hi = b.zext(b.bitcast(b.cast_f32_to(ps[2 * m + 1], F16), I16), I32)
+            lo = b.zext(b.bitcast(b.cast_f32_to(ps[2 * m], dtype_ir), I16), I32)
+            hi = b.zext(b.bitcast(b.cast_f32_to(ps[2 * m + 1], dtype_ir), I16), I32)
             v = b.lor(lo, b.shl(hi, c16))  # {kv 4m | kv 4m+2} (own parity)
             w = b.permlanex16(v)  # partner (lane^16): other kv parity
             outs.append(b.perm_b32(w, v, sel0))  # {kv 4m,   4m+1}
             outs.append(b.perm_b32(w, v, sel1))  # {kv 4m+2, 4m+3}
         packed = b.vec_pack(outs, I32)
-        return b.vec_bitcast(packed, VectorType(F16, a_frag))
+        return b.vec_bitcast(packed, VectorType(dtype_ir, a_frag))
 
     def _load_col(k_base, d_col):
-        """Gather V[kv=0..15, d_col] (per-lane d_col) via the buffer-descriptor
-        D16 half-return load; row-major ``[B, S, H, D]`` V (no host transpose)."""
+        """Gather V[kv=0..15, d_col] through a D16 buffer descriptor."""
         elem0 = b.add(b.add(kvh_off, b.mul(k_base, stride_v_token)), d_col)
         voff = b.mul(elem0, c2)
-        v_a = b.undef_vec(F16, a_frag)  # fully overwritten by the 16 loads
+        v_a = b.undef_vec(dtype_ir, a_frag)  # fully overwritten by the 16 loads
         for j in range(a_frag):
-            v_a = b.vec_insert(
-                v_a, b.buffer_load_f16_d16(v_rsrc, voff, soff_list[j]), j
+            loaded = (
+                b.buffer_load_bf16(v_rsrc, voff, soff_list[j])
+                if dtype == "bf16"
+                else b.buffer_load_f16_d16(v_rsrc, voff, soff_list[j])
             )
+            v_a = b.vec_insert(v_a, loaded, j)
         return v_a
 
     def dual_gather_issue(k_base, d):
@@ -269,8 +282,8 @@ def wmma_swapqk_fwd_inner_body(
             p = b.permlanex16(e)  # value held by lane^16 (the other subtile)
             fd.append(b.select(lane_lt16, e, p))  # subtile d, both halves
             fd1.append(b.select(lane_lt16, p, e))  # subtile d+1, both halves
-        frag_d = b.vec_bitcast(b.vec_pack(fd, I32), VectorType(F16, a_frag))
-        frag_d1 = b.vec_bitcast(b.vec_pack(fd1, I32), VectorType(F16, a_frag))
+        frag_d = b.vec_bitcast(b.vec_pack(fd, I32), VectorType(dtype_ir, a_frag))
+        frag_d1 = b.vec_bitcast(b.vec_pack(fd1, I32), VectorType(dtype_ir, a_frag))
         return frag_d, frag_d1
 
     def dual_gather(k_base, d):
@@ -285,6 +298,20 @@ def wmma_swapqk_fwd_inner_body(
             vals = nxt
         return vals[0]
 
+    def load_operand(window, role, k_offset):
+        lmap = atom.a_layout(arch) if role == "a" else atom.b_layout(arch)
+        coord = lmap.coord(b, lane, 0)
+        lane_idx = coord[0] if role == "a" else coord[1]
+        local = (c0, lane_idx, b.const_i32(k_offset))
+        global_indices = tuple(
+            b.add(origin, index) for origin, index in zip(window.origin, local)
+        )
+        offset = window.view.desc.offset(b, global_indices)
+        value = b.global_load_vN(
+            window.view.base, offset, dtype_ir, atom.a_per_lane, align=2
+        )
+        return WmmaTensor(atom, role, value, arch)
+
     def compute_qk(k_block_base):
         """S^T = K @ Q^T for all n_kv_sub sub-tiles -> list of score
         WmmaTensors. d-outer / kv-inner: Q[d] is invariant in kv, so the
@@ -297,13 +324,9 @@ def wmma_swapqk_fwd_inner_body(
         ]
         subs = [WmmaTensor.zero_acc(b, atom, arch=arch) for _ in range(n_kv_sub)]
         for d in range(n_dk):
-            q_tile = load_wmma_tile(
-                b, qwin, atom, lane, role="b", k_offset=d * 16, lead=[c0]
-            )
+            q_tile = load_operand(qwin, "b", d * 16)
             for ns in range(n_kv_sub):
-                k_frag = load_wmma_tile(
-                    b, kwins[ns], atom, lane, role="a", k_offset=d * 16, lead=[c0]
-                )
+                k_frag = load_operand(kwins[ns], "a", d * 16)
                 subs[ns] = wmma_mma(b, k_frag, q_tile, subs[ns])
         b.s_setprio(0)
         return subs
@@ -421,19 +444,32 @@ def wmma_swapqk_fwd_inner_body(
 
     m_f, l_f, accs_f = unpack(kloop.results)
 
-    # ---- Optional LSE (natural log), one query row per lane%16 on lanes <16;
-    # ``lse_offset`` is the CTA's first query row. ----
+    # ---- Runtime-gated natural-log LSE, one query row per lane%16 on lanes
+    # <16; an empty denominator stores -inf. ----
     if lse is not None:
-        ln2 = b.const_f32(0.6931471805599453)
-        lse_neg_inf = b.const_f32(float("-inf"))
-        log2_l = b.log2(l_f)
-        m_plus = b.fadd(m_f, log2_l)
-        lse_nat = b.fmul(m_plus, ln2)
-        lse_empty = b.fcmp("oeq", l_f, zero_f)
-        lse_val = b.select(lse_empty, lse_neg_inf, lse_nat)
-        lse_idx = b.add(lse_offset, b.add(wave_row, col))
-        with b.scf_if(lane_lt16):
-            b.global_store(lse, lse_idx, lse_val, align=4)
+        if write_lse is None or stride_lse_token is None or stride_lse_head is None:
+            raise ValueError(
+                "LSE output requires its runtime gate and token/head strides"
+            )
+        write_stats = b.land(
+            lane_lt16,
+            b.cmp_ne(write_lse, c0),
+        )
+        with b.scf_if(write_stats):
+            lse_nat = b.fmul(
+                b.fadd(m_f, b.log2(l_f)),
+                b.const_f32(0.6931471805599453),
+            )
+            lse_val = b.select(
+                b.fcmp("oeq", l_f, zero_f),
+                b.const_f32(float("-inf")),
+                lse_nat,
+            )
+            lse_addr = b.add(
+                b.mul(b.add(q_token_base, col), stride_lse_token),
+                b.mul(head_idx, stride_lse_head),
+            )
+            b.global_store(lse, lse_addr, lse_val, align=4)
 
     # ---- Epilogue: O^T[d, query] -> O[query, d], rescaled by 1/l. ----
     zmask = b.fcmp("oeq", l_f, zero_f)

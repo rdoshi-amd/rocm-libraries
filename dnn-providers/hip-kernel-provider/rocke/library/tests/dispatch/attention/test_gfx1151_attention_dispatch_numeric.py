@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import ctypes
 import dataclasses
+import math
 import unittest
 from typing import Optional, Tuple
 from types import SimpleNamespace
@@ -106,6 +107,16 @@ class _DeviceTensor:
 
 def _view(buffers, name: str) -> _DeviceTensor:
     array = buffers.arrays[name]
+    return _DeviceTensor(
+        _ptr=buffers.ptrs[name],
+        _shape=tuple(array.shape),
+        _strides=tuple(s // array.itemsize for s in array.strides),
+        _dtype=str(array.dtype),
+    )
+
+
+def _view_as(buffers, name: str, array: np.ndarray) -> _DeviceTensor:
+    """Describe a logical NumPy view over a named contiguous device allocation."""
     return _DeviceTensor(
         _ptr=buffers.ptrs[name],
         _shape=tuple(array.shape),
@@ -379,7 +390,7 @@ def _fake_tensor(shape, dtype="float16", strides=None, device="cuda:0"):
 def _dense_spec(**kw):
     from kernels.gfx1151.wmma_fmha_fwd import WmmaFmhaFwdSpec
 
-    base = dict(head_size=64, num_query_heads=4, num_kv_heads=2, dtype="fp16")
+    base = dict(head_size=64, dtype="fp16")
     base.update(kw)
     return WmmaFmhaFwdSpec(**base)
 
@@ -412,56 +423,37 @@ class TestMetadataSafety(unittest.TestCase):
             _dense_request(), _dense_spec(), tensors, **kwargs
         )
 
-    def test_misaligned_dense_batch_stride_is_rejected(self):
-        """A batch stride that breaks 16-byte alignment of the per-batch
-        views is rejected (the dense kernel folds ``batch * seqlen *
-        stride_token`` itself; non-folded batches launch per batch)."""
-        q = _fake_tensor((2, 32, 4, 64))
-        gapped_k = _fake_tensor(
-            (2, 32, 2, 64), strides=(32 * 2 * 64 + 1, 2 * 64, 64, 1)
-        )
-        with self.assertRaisesRegex(ValueError, "batch stride|strides must preserve"):
-            self._bind({"q": q, "k": gapped_k, "v": gapped_k, "out": q})
-
-    def test_gapped_dense_batch_stride_is_served_per_batch(self):
-        from dispatch.attention.bindings import (
-            _gfx1151_dense_needs_per_batch,
-            _gfx1151_validate_and_collect,
-        )
+    def test_accepts_independent_dense_batch_strides(self):
+        from dispatch.attention.bindings import _gfx1151_validate_and_collect
 
         q = _fake_tensor((2, 32, 4, 64))
-        folded_k = _fake_tensor((2, 32, 2, 64))
         gapped_k = _fake_tensor(
             (2, 32, 2, 64), strides=(32 * 2 * 64 + 64, 2 * 64, 64, 1)
         )
-        # [B, H, S, D] storage viewed as [B, S, H, D].
-        permuted_k = _fake_tensor(
-            (2, 32, 2, 64), strides=(2 * 32 * 64, 64, 32 * 64, 1)
+        values = _gfx1151_validate_and_collect(
+            _dense_request(),
+            _dense_spec(),
+            {"q": q, "k": gapped_k, "v": gapped_k, "out": q},
         )
-        request, spec = _dense_request(), _dense_spec()
-        for k, expected in ((folded_k, False), (gapped_k, True), (permuted_k, True)):
-            tensors = {"q": q, "k": k, "v": k, "out": q}
-            _gfx1151_validate_and_collect(request, spec, tensors)
-            self.assertEqual(_gfx1151_dense_needs_per_batch(request, tensors), expected)
+        self.assertEqual(values["stride_k_batch"], 32 * 2 * 64 + 64)
 
     def test_lse_tensor_is_required_and_validated(self):
         from dispatch.attention.bindings import _gfx1151_validate_and_collect
 
         request = _dense_request(return_lse=True)
-        spec = _dense_spec(store_lse=True)
+        spec = _dense_spec()
         q = _fake_tensor((2, 32, 4, 64))
         k = _fake_tensor((2, 32, 2, 64))
         base = {"q": q, "k": k, "v": k, "out": q}
-        with self.assertRaisesRegex(ValueError, r"requires tensors\['lse'\]"):
+        with self.assertRaisesRegex(ValueError, "missing.*lse"):
             _gfx1151_validate_and_collect(request, spec, base)
         good = _fake_tensor((2, 4, 32), dtype="float32")
         values = _gfx1151_validate_and_collect(request, spec, {**base, "lse": good})
-        self.assertIs(values["lse"], good)
-        self.assertNotIn("stride_lse_head", values)
+        self.assertIs(values["LSE"], good)
+        self.assertEqual(values["stride_lse_head"], 32)
         bad = (
             _fake_tensor((2, 4, 32), dtype="float16"),
             _fake_tensor((2, 32, 4), dtype="float32"),
-            _fake_tensor((2, 4, 32), dtype="float32", strides=(4 * 32 + 8, 32, 1)),
         )
         for lse in bad:
             with (
@@ -549,10 +541,8 @@ class TestMetadataSafety(unittest.TestCase):
     def test_overlapping_dense_out_batch_stride_is_rejected(self):
         q = _fake_tensor((2, 32, 4, 64))
         k = _fake_tensor((2, 32, 2, 64))
-        overlapping = _fake_tensor(
-            (2, 32, 4, 64), strides=(16 * 4 * 64, 4 * 64, 64, 1)
-        )
-        with self.assertRaisesRegex(ValueError, "out batch stride"):
+        overlapping = _fake_tensor((2, 32, 4, 64), strides=(16 * 4 * 64, 4 * 64, 64, 1))
+        with self.assertRaisesRegex(ValueError, "strides overlap"):
             self._bind({"q": q, "k": k, "v": k, "out": overlapping})
 
     def test_unequal_head_dims_follow_v_dim(self):
@@ -569,11 +559,11 @@ class TestMetadataSafety(unittest.TestCase):
         )
         self.assertEqual(values["stride_o_token"], 4 * 128)
         self.assertEqual(values["stride_v_token"], 2 * 128)
-        with self.assertRaisesRegex(ValueError, "out trailing dims"):
+        with self.assertRaisesRegex(ValueError, "out must have"):
             _gfx1151_validate_and_collect(
                 request, spec, {"q": q, "k": k, "v": v, "out": q}
             )
-        with self.assertRaisesRegex(ValueError, "v trailing dims"):
+        with self.assertRaisesRegex(ValueError, "v must have"):
             _gfx1151_validate_and_collect(
                 request, spec, {"q": q, "k": k, "v": k, "out": out}
             )
@@ -711,11 +701,52 @@ class TestMetadataSafety(unittest.TestCase):
                     ),
                 )
 
-    def test_rejects_rows_that_break_vector_alignment(self):
+    def test_accepts_nonoverlapping_padded_rows(self):
+        from dispatch.attention.bindings import _gfx1151_validate_and_collect
+
         q = _fake_tensor((2, 32, 4, 64), strides=(32 * 4 * 65, 4 * 65, 65, 1))
         k = _fake_tensor((2, 32, 2, 64))
-        with self.assertRaises(ValueError):
-            self._bind({"q": q, "k": k, "v": k, "out": _fake_tensor((2, 32, 4, 64))})
+        values = _gfx1151_validate_and_collect(
+            _dense_request(),
+            _dense_spec(),
+            {"q": q, "k": k, "v": k, "out": q},
+        )
+        self.assertEqual(values["stride_q_head"], 65)
+
+    def test_accepts_bhsd_and_lse_strides(self):
+        from dispatch.attention.bindings import _gfx1151_validate_and_collect
+
+        q = _fake_tensor((2, 4, 32, 64))
+        k = _fake_tensor((2, 2, 32, 64))
+        lse = _fake_tensor((2, 4, 32, 1), dtype="float32")
+        request = _dense_request(dense_layout="bhsd", return_lse=True)
+        values = _gfx1151_validate_and_collect(
+            request,
+            _dense_spec(),
+            {"q": q, "k": k, "v": k, "out": q, "lse": lse},
+        )
+        self.assertEqual(values["stride_q_token"], 64)
+        self.assertEqual(values["stride_q_head"], 32 * 64)
+        self.assertEqual(values["write_lse"], 1)
+
+    def test_legacy_window_and_bottom_right_are_runtime_arguments(self):
+        from dispatch.attention.bindings import _gfx1151_validate_and_collect
+
+        q = _fake_tensor((2, 32, 4, 64))
+        k = _fake_tensor((2, 64, 2, 64))
+        tensors = {"q": q, "k": k, "v": k, "out": q}
+        window = _gfx1151_validate_and_collect(
+            _dense_request(
+                mask_type=AttentionMaskType.BOTTOM_RIGHT_CAUSAL,
+                sliding_window=128,
+                seqlen_k=64,
+            ),
+            _dense_spec(mask_mode="window"),
+            tensors,
+        )
+        self.assertEqual(window["window_left"], 127)
+        self.assertEqual(window["window_right"], 0)
+        self.assertEqual(window["bottom_right"], 1)
 
     def test_transposed_qk_rejects_partial_kv_tiles_before_launch(self):
         from dispatch.attention.bindings import bind_gfx1151_attention_torch
@@ -732,11 +763,14 @@ class TestMetadataSafety(unittest.TestCase):
 
 @pytest.mark.gpu
 @_NEEDS_GPU
-def test_dispatch_aligned_gqa_on_nondefault_stream():
+@pytest.mark.parametrize("dtype", ["fp16", "bf16"])
+def test_dispatch_aligned_gqa_on_nondefault_stream(dtype):
+    if dtype == "bf16":
+        pytest.importorskip("ml_dtypes")
     case = _case(
         name="dispatch_aligned_gqa",
         group="dispatch",
-        dtype="fp16",
+        dtype=dtype,
         batch=2,
         seqlen_q=32,
         seqlen_k=96,
@@ -1004,8 +1038,16 @@ def test_dispatch_two_sided_local_window(mask, sq, sk, left, right):
     q, k, v = _random_qkv(201, 2, sq, sk, hq, hkv, dim, dim)
     scale = 1.0 / np.sqrt(dim)
     request = _dense_direct_request(
-        2, sq, sk, hq, hkv, dim, dim,
-        mask_type=mask, sliding_window=left, window_right=right,
+        2,
+        sq,
+        sk,
+        hq,
+        hkv,
+        dim,
+        dim,
+        mask_type=mask,
+        sliding_window=left,
+        window_right=right,
     )
     ctx = sk - sq if mask == AttentionMaskType.BOTTOM_RIGHT_CAUSAL else 0
     actual = _run_dense_direct(request, q, k, v, scale=scale)
@@ -1030,7 +1072,7 @@ def test_dispatch_unequal_head_dims(dq, dv):
 
 @pytest.mark.gpu
 @_NEEDS_GPU
-def test_dispatch_dense_gapped_batch_stride_is_served_per_batch():
+def test_dispatch_dense_gapped_batch_stride_uses_runtime_stride():
     batch, sq, sk, hq, hkv, dim, pad = 3, 32, 48, 4, 2, 64, 5
     q, k, v = _random_qkv(203, batch, sq, sk, hq, hkv, dim, dim)
     k_store = np.zeros((batch, sk + pad, hkv, dim), dtype=k.dtype)
@@ -1078,8 +1120,7 @@ def _run_dense_views(request, q, k, v, *, scale, out_bhsd=False):
                 rt.memcpy_h2d(ptr, _host_bytes(root), root.nbytes)
                 uploaded[id(root)] = ptr
             offset = (
-                a.__array_interface__["data"][0]
-                - root.__array_interface__["data"][0]
+                a.__array_interface__["data"][0] - root.__array_interface__["data"][0]
             )
             return _DeviceTensor(
                 _ptr=uploaded[id(root)] + offset,
@@ -1327,9 +1368,8 @@ def test_dispatch_dense_lse_does_not_change_output():
 
 @pytest.mark.gpu
 @_NEEDS_GPU
-def test_dispatch_dense_lse_gapped_batch_stride_is_served_per_batch():
-    """K/V with a batch-stride gap force per-batch launches; ``lse`` must be
-    sliced per batch too."""
+def test_dispatch_dense_lse_gapped_batch_stride_uses_runtime_stride():
+    """K/V and LSE preserve independent runtime batch strides."""
     batch, sq, sk, hq, hkv, dim, pad = 3, 32, 48, 4, 2, 64, 5
     q, k, v = _random_qkv(304, batch, sq, sk, hq, hkv, dim, dim)
     k_store = np.zeros((batch, sk + pad, hkv, dim), dtype=k.dtype)
@@ -1612,9 +1652,8 @@ def test_dispatch_dense_attn_bias_strided_views(bias_dtype, view):
 @pytest.mark.gpu
 @_NEEDS_GPU
 @pytest.mark.parametrize("bias_dtype", ["f32", "q"])
-def test_dispatch_dense_attn_bias_gapped_batch_stride_is_served_per_batch(bias_dtype):
-    """A K/V batch-stride gap forces per-batch launches; a batched bias must be
-    sliced ``[b:b+1]`` with them."""
+def test_dispatch_dense_attn_bias_gapped_batch_stride_uses_runtime_stride(bias_dtype):
+    """K/V and batched bias preserve their independent runtime batch strides."""
     batch, sq, sk, hq, hkv, dim, pad = 3, 32, 48, 4, 2, 64, 5
     q, k, v = _random_qkv(408, batch, sq, sk, hq, hkv, dim, dim)
     k_store = np.zeros((batch, sk + pad, hkv, dim), dtype=k.dtype)
@@ -1707,3 +1746,98 @@ def test_dispatch_ragged_attn_bias_uses_within_sequence_positions(bias_dtype, ca
             ctx=lk - lq if causal else None,
         )
         np.testing.assert_allclose(got[qs:qe], out[0], rtol=0, atol=2e-2)
+
+
+@pytest.mark.gpu
+@_NEEDS_GPU
+def test_dispatch_bhsd_head96_noncausal_window_with_lse():
+    """Exercise BHSD plus independently padded Q/K/V/O/LSE strides."""
+    from benchmarks.gfx1151.attention.benchmark_sdpa import DeviceBuffers
+    from benchmarks.gfx1151.attention.cases import CaseInputs
+
+    batch, heads_q, heads_kv, sq, sk, dim = 2, 4, 2, 17, 23, 96
+    rng = np.random.default_rng(12710)
+    q = (rng.standard_normal((batch, heads_q, sq, dim)) * 0.2).astype(np.float16)
+    k = (rng.standard_normal((batch, heads_kv, sk, dim)) * 0.2).astype(np.float16)
+    v = (rng.standard_normal((batch, heads_kv, sk, dim)) * 0.2).astype(np.float16)
+    scale = 1.0 / math.sqrt(dim)
+    kh = np.repeat(k.astype(np.float32), heads_q // heads_kv, axis=1)
+    vh = np.repeat(v.astype(np.float32), heads_q // heads_kv, axis=1)
+    scores = np.einsum("bhsd,bhkd->bhsk", q.astype(np.float32), kh) * scale
+    qpos = np.arange(sq)[:, None]
+    kpos = np.arange(sk)[None, :]
+    visible = (kpos >= qpos - 3) & (kpos <= qpos + 5)
+    masked = np.where(visible[None, None], scores, -np.inf)
+    row_max = masked.max(axis=-1, keepdims=True)
+    weights = np.exp(masked - row_max)
+    denom = weights.sum(axis=-1, keepdims=True)
+    expected_out = np.einsum("bhsk,bhkd->bhsd", weights / denom, vh)
+    expected_lse = (row_max + np.log(denom)).astype(np.float32)
+
+    def padded(array, extra):
+        storage = np.zeros((*array.shape[:-1], array.shape[-1] + extra), array.dtype)
+        view = storage[..., : array.shape[-1]]
+        view[...] = array
+        return storage, view
+
+    q_storage, q_view = padded(q, 5)
+    k_storage, k_view = padded(k, 3)
+    v_storage, v_view = padded(v, 7)
+    out_storage = np.full((batch, heads_q, sq, dim + 11), np.nan, np.float16)
+    out_view = out_storage[..., :dim]
+    lse_storage = np.full((batch, heads_q, sq, 3), np.nan, np.float32)
+    lse_view = lse_storage[..., :1]
+
+    rt = Runtime()
+    buffers = DeviceBuffers(rt, CaseInputs(q=q, k=k, v=v))
+    for name, storage in (
+        ("q", q_storage),
+        ("k", k_storage),
+        ("v", v_storage),
+        ("rocke_out", out_storage),
+    ):
+        rt.free(buffers.ptrs[name])
+        buffers.add(name, storage)
+    buffers.add("lse", lse_storage)
+    try:
+        request = AttentionRequest(
+            batch=batch,
+            nhead_q=heads_q,
+            nhead_k=heads_kv,
+            seqlen_q=sq,
+            seqlen_k=sk,
+            hdim_q=dim,
+            hdim_v=dim,
+            arch="gfx1151",
+            dtype="fp16",
+            layout="dense",
+            dense_layout="bhsd",
+            mask_type=AttentionMaskType.SLIDING_WINDOW,
+            window_left=3,
+            window_right=5,
+            return_lse=True,
+        )
+        tensors = {
+            "q": _view_as(buffers, "q", q_view),
+            "k": _view_as(buffers, "k", k_view),
+            "v": _view_as(buffers, "v", v_view),
+            "out": _view_as(buffers, "rocke_out", out_view),
+            "lse": _view_as(buffers, "lse", lse_view),
+        }
+        result = dispatch_attention(request)
+        output = result.bind_torch(tensors, softmax_scale=scale).launch()
+        assert output is tensors["out"]
+        np.testing.assert_allclose(
+            buffers.read_output("rocke_out")[..., :dim],
+            expected_out,
+            rtol=0,
+            atol=2e-2,
+        )
+        np.testing.assert_allclose(
+            buffers.read_output("lse")[..., :1],
+            expected_lse,
+            rtol=0,
+            atol=2e-2,
+        )
+    finally:
+        buffers.close()

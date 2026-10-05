@@ -109,6 +109,11 @@ class AttentionRequest(OperatorRequest):
     mask_type: AttentionMaskType | int = AttentionMaskType.NO_MASK
     use_sinks: bool = False
     sliding_window: int = 0
+    window_left: int | None = None
+    window_right: int | None = None
+    window_bottom_right: bool = False
+    return_lse: bool = False
+    dense_layout: str = "auto"  # "auto" | "bshd" | "bhsd"
     kv_block_size: int = 16  # paged KV block_size (modulus); {16,32,64}
     num_cus: int = (
         0  # 0 => auto-resolve to the device CU count at dispatch (_resolve_num_cus)
@@ -132,15 +137,6 @@ class AttentionRequest(OperatorRequest):
     use_softcap: bool = False
     use_alibi: bool = False
     use_qq_bias: bool = False
-    # Two-sided local window: keep keys with k <= q + context + window_right
-    # (and k > q + context - sliding_window when a left width is set). -1 => off.
-    # Requires mask_type NO_MASK (top-left aligned) or BOTTOM_RIGHT_CAUSAL
-    # (bottom-right aligned); a candidate must declare the "window_right" feature.
-    window_right: int = -1
-    # Also return the natural-log softmax statistics (log-sum-exp, including an
-    # attention sink when enabled) as an FP32 ``lse`` tensor; a candidate must
-    # declare the "lse" feature.
-    return_lse: bool = False
     # Dense additive attention bias ``[B|1, H|1, Sq|1, Sk]`` (unit-stride keys)
     # added to the scaled scores; ``attn_bias_dtype`` is "f32" or "q" (the Q
     # dtype). A candidate must declare the "attn_bias" feature.
@@ -175,6 +171,11 @@ class AttentionRequest(OperatorRequest):
         d["layout"] = (
             self.layout.strip().lower() if isinstance(self.layout, str) else ""
         )
+        d["dense_layout"] = (
+            self.dense_layout.strip().lower()
+            if isinstance(self.dense_layout, str)
+            else ""
+        )
         return d
 
     def dims(self) -> dict[str, int]:
@@ -197,14 +198,34 @@ class AttentionRequest(OperatorRequest):
             # Let _request_errors report the invalid ordinal. In particular, do
             # not silently classify an arbitrary nonzero value as causal.
             mask_type = None
-        if mask_type is not None and mask_type != AttentionMaskType.NO_MASK:
+        if mask_type in (
+            AttentionMaskType.TOP_LEFT_CAUSAL,
+            AttentionMaskType.BOTTOM_RIGHT_CAUSAL,
+        ):
             active.add("causal")
         if mask_type == AttentionMaskType.BOTTOM_RIGHT_CAUSAL and int(
             self.seqlen_q
         ) != int(self.seqlen_k):
             active.add("causal_bottom_right")
-        if int(self.sliding_window) > 0:
+        explicit_window = self.window_left is not None or (
+            self.window_right is not None and int(self.window_right) >= 0
+        )
+        windowed = (
+            mask_type == AttentionMaskType.SLIDING_WINDOW
+            or int(self.sliding_window) > 0
+            or explicit_window
+        )
+        if windowed:
             active.add("sliding_window")
+            if explicit_window:
+                active.add("window_bounds")
+                right = -1 if self.window_right is None else int(self.window_right)
+                if right != 0:
+                    active.add("noncausal_window")
+        if self.window_right is not None and int(self.window_right) >= 0:
+            active.add("window_right")
+        if bool(self.return_lse):
+            active.add("lse")
         if bool(self.use_sinks):
             active.add("sinks")
         if bool(self.use_fp8):
@@ -217,13 +238,16 @@ class AttentionRequest(OperatorRequest):
             active.add("qq_bias")
         if bool(self.use_attn_bias):
             active.add("attn_bias")
-        if int(self.window_right) >= 0:
-            active.add("window_right")
-        if bool(self.return_lse):
-            active.add("lse")
         layout = self.layout.strip().lower() if isinstance(self.layout, str) else ""
         if layout not in ("auto", ""):
             active.add(f"layout_{layout}")
+        dense_layout = (
+            self.dense_layout.strip().lower()
+            if isinstance(self.dense_layout, str)
+            else ""
+        )
+        if dense_layout == "bhsd":
+            active.add("layout_bhsd")
         return frozenset(active)
 
 
@@ -279,17 +303,46 @@ def _request_errors(
             errors.append("hdim_v must be positive")
     elif req.hdim_q != req.hdim_v:
         errors.append("only hdim_q == hdim_v is supported")
-    if int(req.nhead_q) % int(req.nhead_k):
+    if int(req.nhead_k) > 0 and int(req.nhead_q) % int(req.nhead_k):
         errors.append("nhead_q must be divisible by nhead_k (GQA grouping)")
     layout = req.layout.strip().lower() if isinstance(req.layout, str) else ""
     if layout not in ("auto", "dense", "ragged", "paged"):
         errors.append(f"unsupported attention layout {req.layout!r}")
+    dense_layout = (
+        req.dense_layout.strip().lower() if isinstance(req.dense_layout, str) else ""
+    )
+    if dense_layout not in ("auto", "bshd", "bhsd"):
+        errors.append(f"unsupported dense tensor layout {req.dense_layout!r}")
+    if layout in ("ragged", "paged") and dense_layout != "auto":
+        errors.append("dense_layout is only valid for dense attention")
     try:
-        _parse_attention_mask_type(req.mask_type)
+        mask_type = _parse_attention_mask_type(req.mask_type)
     except ValueError as exc:
         errors.append(str(exc))
-    if int(req.window_right) < -1:
-        errors.append("window_right must be -1 (off) or nonnegative")
+        mask_type = None
+    explicit_left = req.window_left is not None
+    explicit_right = req.window_right is not None and int(req.window_right) >= 0
+    if int(req.sliding_window) < 0:
+        errors.append("sliding_window must be nonnegative")
+    for field in ("window_left", "window_right"):
+        value = getattr(req, field)
+        if value is not None and (int(value) < -1 or int(value) > 0x7FFF_FFFF):
+            errors.append(f"{field} must be -1 (unbounded) or a nonnegative I32")
+    if explicit_left and int(req.sliding_window) != 0:
+        errors.append("sliding_window cannot be combined with explicit window_left")
+    if explicit_left and mask_type != AttentionMaskType.SLIDING_WINDOW:
+        errors.append("explicit window_left requires mask_type=SLIDING_WINDOW")
+    if explicit_right and mask_type not in (
+        AttentionMaskType.NO_MASK,
+        AttentionMaskType.SLIDING_WINDOW,
+        AttentionMaskType.BOTTOM_RIGHT_CAUSAL,
+    ):
+        errors.append(
+            "window_right requires mask_type NO_MASK, SLIDING_WINDOW, "
+            "or BOTTOM_RIGHT_CAUSAL"
+        )
+    if bool(req.window_bottom_right) and mask_type != AttentionMaskType.SLIDING_WINDOW:
+        errors.append("window_bottom_right requires mask_type=SLIDING_WINDOW")
     try:
         ArchTarget.from_gfx(req.arch)
     except KeyError as e:

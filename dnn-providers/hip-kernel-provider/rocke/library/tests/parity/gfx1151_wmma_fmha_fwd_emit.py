@@ -4,7 +4,7 @@
 #
 # tests/parity/gfx1151_wmma_fmha_fwd_emit.py -- Python reference emitter for the
 # gfx1151 (RDNA3.5 / Strix Halo) WMMA FMHA forward instance parity harness.
-# Selects one of 147 sampled configurations by argv[1] (0..146), builds it
+# Selects one of 136 sampled configurations by argv[1] (0..135), builds it
 # via build_wmma_fmha_fwd(arch='gfx1151') and prints
 # lower_kernel_to_llvm(kernel, arch='gfx1151') to stdout so it can be
 # byte-compared with the C emitter gfx1151_wmma_fmha_fwd_emit.c.
@@ -23,45 +23,23 @@ _V_HEAD_CASES = (
 )
 
 
-_WINDOW_RIGHT_CASES = (
-    # head_size, sliding_window, window_right, bottom_right (also enables tails + V LDS)
-    (64, 0, 16, False),
-    (64, 128, 16, False),
-    (128, 64, 0, True),
-    (64, 0, 32, True),
-)
-
-
-_LSE_CASES = (
-    # layout, page, head_size, mask, tails (bottom-right + tails + V LDS), sinks, transposed_qk,
-    # block_n, waves, value_tile
-    ("dense", 0, 64, "causal", True, True, False, 32, 1, 0),
-    ("dense", 0, 128, "none", False, False, False, 32, 1, 0),
-    ("ragged", 0, 64, "causal", True, True, False, 32, 1, 0),
-    ("paged", 16, 64, "causal", True, False, False, 32, 1, 0),
-    ("dense", 0, 64, "none", False, False, True, 32, 1, 0),
-    ("dense", 0, 128, "causal", False, False, True, 64, 2, 0),
-    ("dense", 0, 256, "none", False, False, False, 32, 1, 64),
-)
-
-
 _ATTN_BIAS_CASES = (
-    # layout, page, head_size, mask, tails (bottom-right + tails + V LDS), sinks, bias_dtype,
-    # extras (s=softcap a=alibi q=qq_bias l=lse), value_tile, dtype
+    # layout, page, head_size, mask, tails, sinks, bias_dtype,
+    # extras (s=softcap a=alibi q=qq_bias), value_tile, dtype
     ("dense", 0, 64, "none", False, False, "f32", "", 0, "fp16"),
     ("dense", 0, 64, "causal", True, True, "q", "", 0, "fp16"),
-    ("dense", 0, 128, "none", False, False, "q", "l", 0, "fp16"),
+    ("dense", 0, 128, "none", False, False, "q", "", 0, "fp16"),
     ("ragged", 0, 64, "causal", True, True, "f32", "", 0, "fp16"),
     ("paged", 16, 64, "causal", True, False, "q", "", 0, "fp16"),
     ("dense", 0, 64, "causal", True, False, "f32", "saq", 0, "fp16"),
     ("dense", 0, 256, "none", False, False, "f32", "", 64, "fp16"),
-    ("dense", 0, 128, "causal", True, True, "q", "saql", 0, "fp16"),
+    ("dense", 0, 128, "causal", True, True, "q", "saq", 0, "fp16"),
     ("dense", 0, 64, "none", False, False, "q", "", 0, "bf16"),
 )
 
 
 def _spec(idx: int) -> WmmaFmhaFwdSpec:
-    if 138 <= idx < 138 + len(_ATTN_BIAS_CASES):
+    if 127 <= idx < 127 + len(_ATTN_BIAS_CASES):
         (
             layout,
             page,
@@ -73,14 +51,11 @@ def _spec(idx: int) -> WmmaFmhaFwdSpec:
             extras,
             tile,
             dtype,
-        ) = _ATTN_BIAS_CASES[idx - 138]
+        ) = _ATTN_BIAS_CASES[idx - 127]
         return WmmaFmhaFwdSpec(
             head_size=head,
-            num_query_heads=8,
-            num_kv_heads=2,
             dtype=dtype,
             mask_mode=mask,
-            causal_bottom_right=tails,
             query_tail=tails,
             kv_tail=tails,
             v_lds_stage=tails,
@@ -91,68 +66,28 @@ def _spec(idx: int) -> WmmaFmhaFwdSpec:
             layout=layout,
             page_block_size=page,
             value_tile_size=tile,
-            store_lse="l" in extras,
             use_attn_bias=True,
             bias_dtype=bias_dtype,
-        )
-    if 131 <= idx < 131 + len(_LSE_CASES):
-        layout, page, head, mask, tails, sinks, swap, block_n, waves, tile = _LSE_CASES[idx - 131]
-        return WmmaFmhaFwdSpec(
-            head_size=head,
-            num_query_heads=8,
-            num_kv_heads=2,
-            mask_mode=mask,
-            causal_bottom_right=tails,
-            query_tail=tails,
-            kv_tail=tails,
-            v_lds_stage=tails,
-            use_sinks=sinks,
-            layout=layout,
-            page_block_size=page,
-            transposed_qk=swap,
-            block_n=block_n,
-            num_waves=waves,
-            value_tile_size=tile,
-            store_lse=True,
-        )
-    if 127 <= idx < 131:
-        head, left, right, bottom_right = _WINDOW_RIGHT_CASES[idx - 127]
-        return WmmaFmhaFwdSpec(
-            head_size=head,
-            num_query_heads=8,
-            num_kv_heads=2,
-            mask_mode="none",
-            sliding_window=left,
-            window_right=right,
-            causal_bottom_right=bottom_right,
-            query_tail=bottom_right,
-            kv_tail=bottom_right,
-            v_lds_stage=bottom_right,
         )
     if 123 <= idx < 127:
         head, v_head, tile, mask, vlds = _V_HEAD_CASES[idx - 123]
         return WmmaFmhaFwdSpec(
             head_size=head,
-            num_query_heads=8,
-            num_kv_heads=2,
             mask_mode=mask,
             v_lds_stage=vlds,
             v_head_size=v_head,
             value_tile_size=tile,
         )
     if 119 <= idx < 123:
-        # Standard-path causal tile skip: top-left / bottom-right x D64 / D128.
+        # Standard-path causal tile skip: two head widths, with/without tails.
         variant = idx - 119
-        bottom_right = bool(variant % 2)
+        tails = bool(variant % 2)
         return WmmaFmhaFwdSpec(
             head_size=64 if variant < 2 else 128,
-            num_query_heads=8,
-            num_kv_heads=2,
             mask_mode="causal",
-            causal_bottom_right=bottom_right,
-            query_tail=bottom_right,
-            kv_tail=bottom_right,
-            v_lds_stage=bottom_right,
+            query_tail=tails,
+            kv_tail=tails,
+            v_lds_stage=tails,
             causal_tile_skip=True,
         )
     if 99 <= idx < 115:
@@ -160,11 +95,8 @@ def _spec(idx: int) -> WmmaFmhaFwdSpec:
         vlds = bool(variant % 2)
         return WmmaFmhaFwdSpec(
             head_size=256,
-            num_query_heads=8,
-            num_kv_heads=2,
             dtype="fp16" if variant < 8 else "bf16",
             mask_mode="causal" if vlds else "none",
-            causal_bottom_right=vlds,
             query_tail=vlds,
             kv_tail=vlds,
             v_lds_stage=vlds,
@@ -175,11 +107,8 @@ def _spec(idx: int) -> WmmaFmhaFwdSpec:
         paged = bool(variant % 2)
         return WmmaFmhaFwdSpec(
             head_size=256,
-            num_query_heads=8,
-            num_kv_heads=2,
             dtype="fp16" if variant < 2 else "bf16",
             mask_mode="causal",
-            causal_bottom_right=True,
             query_tail=True,
             kv_tail=True,
             layout="paged" if paged else "ragged",
@@ -198,31 +127,32 @@ def _spec(idx: int) -> WmmaFmhaFwdSpec:
         )
         return WmmaFmhaFwdSpec(
             head_size=64,
-            num_query_heads=8,
-            num_kv_heads=8,
-            mask_mode="causal",
-            causal_bottom_right=True,
+            mask_mode="window",
             layout="ragged",
             query_tail=True,
             kv_tail=True,
             v_lds_stage=True,
-            sliding_window=320,
             scheduler_strategy=strategies[idx - 94],
         )
     if 86 <= idx < 94:
-        return replace(
-            _spec((74, 75, 76, 77, 82, 83, 84, 85)[idx - 86]), causal_bottom_right=True
+        variant = idx - 86
+        return WmmaFmhaFwdSpec(
+            head_size=96,
+            dtype="fp16" if variant < 4 else "bf16",
+            mask_mode=("none", "causal", "window", "window")[variant % 4],
+            query_tail=bool(variant % 2),
+            kv_tail=bool(variant % 2),
+            v_lds_stage=bool(variant % 2),
         )
     if 70 <= idx < 86:
         variant = idx - 70
         return WmmaFmhaFwdSpec(
-            head_size=64 if variant < 8 else 128,
-            num_query_heads=8,
-            num_kv_heads=2,
-            mask_mode="none" if variant % 8 < 4 else "causal",
+            head_size=64 if (variant % 8) < 4 else 128,
+            dtype="fp16" if variant < 8 else "bf16",
+            mask_mode="none" if variant % 4 < 2 else "causal",
             transposed_qk=True,
-            block_n=32 if variant % 4 < 2 else 64,
-            num_waves=1 + variant % 2,
+            block_n=32 if variant % 2 == 0 else 64,
+            num_waves=1 if variant % 2 == 0 else 2,
         )
     if 58 <= idx < 70:
         bases = (0, 7, 14, 15, 22, 23, 24, 25, 44, 47, 51, 57)
@@ -238,8 +168,8 @@ def _spec(idx: int) -> WmmaFmhaFwdSpec:
         )
     if 26 <= idx < 42:
         feature_cases = (
-            (12, dict(sliding_window=128)),
-            (13, dict(sliding_window=128)),
+            (12, dict(mask_mode="window")),
+            (13, dict(mask_mode="window")),
             (2, dict(use_softcap=True)),
             (8, dict(use_softcap=True)),
             (2, dict(use_sinks=True)),
@@ -248,12 +178,12 @@ def _spec(idx: int) -> WmmaFmhaFwdSpec:
             (13, dict(use_alibi=True)),
             (0, dict(use_qq_bias=True)),
             (6, dict(use_qq_bias=True)),
-            (18, dict(sliding_window=128, use_sinks=True)),
-            (19, dict(sliding_window=128, use_sinks=True)),
+            (18, dict(mask_mode="window", use_sinks=True)),
+            (19, dict(mask_mode="window", use_sinks=True)),
             (
                 24,
                 dict(
-                    sliding_window=64,
+                    mask_mode="window",
                     use_softcap=True,
                     use_sinks=True,
                     use_alibi=True,
@@ -263,7 +193,7 @@ def _spec(idx: int) -> WmmaFmhaFwdSpec:
             (
                 25,
                 dict(
-                    sliding_window=64,
+                    mask_mode="window",
                     use_softcap=True,
                     use_sinks=True,
                     use_alibi=True,
@@ -283,58 +213,42 @@ def _spec(idx: int) -> WmmaFmhaFwdSpec:
             kv_tail=idx >= 20,
         )
     if 12 <= idx < 18:
-        return replace(
-            _spec((2, 8, 3, 9, 5, 11)[idx - 12]),
-            mask_mode="causal",
-            causal_bottom_right=True,
-        )
+        return _spec((2, 8, 3, 9, 5, 11)[idx - 12])
     if 6 <= idx < 12:
         return replace(_spec(idx - 6), dtype="bf16")
     if idx == 0:
         return WmmaFmhaFwdSpec(
             head_size=64,
-            num_query_heads=4,
-            num_kv_heads=0,
             mask_mode="none",
             v_lds_stage=False,
         )
     if idx == 1:
         return WmmaFmhaFwdSpec(
             head_size=128,
-            num_query_heads=8,
-            num_kv_heads=0,
             mask_mode="none",
             v_lds_stage=False,
         )
     if idx == 2:
         return WmmaFmhaFwdSpec(
             head_size=64,
-            num_query_heads=4,
-            num_kv_heads=0,
             mask_mode="causal",
             v_lds_stage=False,
         )
     if idx == 3:
         return WmmaFmhaFwdSpec(
             head_size=256,
-            num_query_heads=8,
-            num_kv_heads=2,
             mask_mode="none",
             v_lds_stage=False,
         )
     if idx == 4:
         return WmmaFmhaFwdSpec(
             head_size=128,
-            num_query_heads=4,
-            num_kv_heads=4,
             mask_mode="causal",
             v_lds_stage=False,
         )
     if idx == 5:
         return WmmaFmhaFwdSpec(
             head_size=64,
-            num_query_heads=6,
-            num_kv_heads=0,
             mask_mode="none",
             v_lds_stage=True,
         )
@@ -345,7 +259,7 @@ def main() -> int:
     return run_emit(
         _spec,
         build_wmma_fmha_fwd,
-        usage="usage: gfx1151_wmma_fmha_fwd_emit.py <config_index 0..146>\n",
+        usage="usage: gfx1151_wmma_fmha_fwd_emit.py <config_index 0..135>\n",
         arch="gfx1151",
     )
 

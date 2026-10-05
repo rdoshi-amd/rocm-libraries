@@ -295,9 +295,10 @@ def mfma_attention_fwd_inner_body(
     wmma_value_tile_size: int = 0,
     wmma_value_offset: Optional[Value] = None,
     wmma_v_head_size: int = 0,
-    wmma_window_right: int = -1,
-    wmma_lse: Optional[Value] = None,
-    wmma_lse_offset: Optional[Value] = None,
+    lse: Optional[Value] = None,
+    write_lse: Optional[Value] = None,
+    stride_lse_token: Optional[Value] = None,
+    stride_lse_head: Optional[Value] = None,
 ) -> None:
     """One MFMA-tiled QK→softmax→PV pass for a ``BLOCK_M``-row Q tile.
 
@@ -326,12 +327,8 @@ def mfma_attention_fwd_inner_body(
     contiguous PV/output-column tile; QK still traverses the full head size.
     ``wmma_v_head_size`` (default 0 = ``head_size``) sets a V/output head width
     that differs from the Q/K ``head_size``; wave32 targets only.
-    ``wmma_window_right`` (default -1 = off) keeps only keys at most this many
-    positions right of the (context-shifted) query, composing with
-    ``sliding_window`` as the left bound for a two-sided local mask; wave32 only.
-    ``wmma_lse`` (FP32 global pointer) and ``wmma_lse_offset`` (element index of
-    this tile's first query row) request the natural-log softmax statistic per
-    query row (``-inf`` for fully masked rows); wave32 only.
+    ``lse`` is an optional FP32 output with runtime ``write_lse`` gating and
+    token/head strides; it is currently supported by the wave32 path.
 
     ``k_token_offset_elems`` / ``v_token_offset_elems`` are added to
     the K / V row base addresses (for varlen / paged-KV layouts).
@@ -367,6 +364,11 @@ def mfma_attention_fwd_inner_body(
     applies them after decoding, before the operand casts. Other paths keep
     the existing optional V-scale epilogue multiply; their callers fold K
     scale into ``scale_log2`` instead of passing ``k_scale``.
+
+    ``lse`` optionally receives FP32 ``log(sum(exp(scores)))`` in natural-log
+    units. ``write_lse`` is a runtime i32 gate; the two LSE strides are in
+    elements. A value-tiled caller may share one LSE pointer across output CTAs:
+    only the zero value tile writes each row.
     """
     if head_size % MFMA_ATTN_BLOCK_M != 0:
         raise ValueError(
@@ -527,9 +529,10 @@ def mfma_attention_fwd_inner_body(
             value_tile_size=wmma_value_tile_size,
             value_offset=wmma_value_offset,
             v_head_size=wmma_v_head_size,
-            window_right=wmma_window_right,
-            lse=wmma_lse,
-            lse_offset=wmma_lse_offset,
+            lse=lse,
+            write_lse=write_lse,
+            stride_lse_token=stride_lse_token,
+            stride_lse_head=stride_lse_head,
         )
         return
     if wmma_seqlen_q is not None or wmma_kv_tail:
@@ -538,10 +541,8 @@ def mfma_attention_fwd_inner_body(
         raise ValueError("WMMA output tiling requires a wave32 target")
     if wmma_v_head_size:
         raise ValueError("a distinct WMMA V head size requires a wave32 target")
-    if wmma_window_right >= 0:
-        raise ValueError("a right local-window bound requires a wave32 target")
-    if wmma_lse is not None or wmma_lse_offset is not None:
-        raise ValueError("WMMA LSE output requires a wave32 target")
+    if lse is not None:
+        raise ValueError("LSE output requires a wave32 target")
     if k_scale is not None:
         raise ValueError("explicit K dequant scale requires a wave32 target")
 
@@ -1043,9 +1044,10 @@ def _wmma_attention_fwd_inner_body(
     value_tile_size: int = 0,
     value_offset: Optional[Value] = None,
     v_head_size: int = 0,
-    window_right: int = -1,
     lse: Optional[Value] = None,
-    lse_offset: Optional[Value] = None,
+    write_lse: Optional[Value] = None,
+    stride_lse_token: Optional[Value] = None,
+    stride_lse_head: Optional[Value] = None,
 ) -> None:
     """One WMMA-tiled QK->softmax->PV pass for a ``BLOCK_M``-row Q tile (wave32).
 
@@ -1135,7 +1137,7 @@ def _wmma_attention_fwd_inner_body(
         q_addr = b.add(q_addr_row_base, b.const_i32(d * 16))
         if k_half_off is not None:
             q_addr = b.add(q_addr, k_half_off)
-        q_frag = b.global_load_vN(Q, q_addr, dtype_ir, a_frag, align=a_frag * 2)
+        q_frag = b.global_load_vN(Q, q_addr, dtype_ir, a_frag, align=2)
         if q_valid is not None:
             q_frag = b.select(q_valid, q_frag, q_zero)
         q_frags.append(q_frag)
@@ -1233,7 +1235,7 @@ def _wmma_attention_fwd_inner_body(
             if fp8_kv:
                 k_frag = _load_wmma_fp8(b, K, k_addr, a_frag, k_scale, dtype_ir)
             else:
-                k_frag = b.global_load_vN(K, k_addr, dtype_ir, a_frag, align=a_frag * 2)
+                k_frag = b.global_load_vN(K, k_addr, dtype_ir, a_frag, align=2)
             if k_valid is not None:
                 k_frag = b.select(k_valid, k_frag, k_zero)
             score = b.mma(op, q_frags[d], k_frag, score)
@@ -1269,26 +1271,6 @@ def _wmma_attention_fwd_inner_body(
                     sliding_window=sliding_window,
                     context_len=causal_ctx_offset,
                     neg_inf=mask_neg_inf,
-                )
-            if window_right >= 0:
-                if sliding_window > 0:
-                    s_r = apply_attention_mask(
-                        b,
-                        s_r,
-                        mask_mode="sliding_window",
-                        k_idx=k_col_pos,
-                        query_pos=row_q_pos,
-                        sliding_window=sliding_window,
-                        context_len=causal_ctx_offset,
-                        neg_inf=mask_neg_inf,
-                    )
-                right_edge = b.add(
-                    b.add(causal_ctx_offset, row_q_pos), b.const_i32(window_right)
-                )
-                s_r = b.select(
-                    b.cmp_le(k_col_pos, right_edge),
-                    s_r,
-                    mask_neg_inf if mask_neg_inf is not None else neg_inf,
                 )
             if kv_tail:
                 s_r = b.select(b.cmp_lt(k_col_pos, seqlen_k), s_r, neg_inf)
@@ -1357,7 +1339,7 @@ def _wmma_attention_fwd_inner_body(
                         b.add(v_stage_base, b.const_i32(e * 8)),
                         dtype_ir,
                         8,
-                        align=16,
+                        align=2,
                     )
                 if k_valid is not None:
                     v_g = b.select(k_valid, v_g, v_zero)
@@ -1452,32 +1434,41 @@ def _wmma_attention_fwd_inner_body(
         b.scf_yield(*yields)
 
     final = kloop.results
+    ms_final = [final[2 * r] for r in range(c_frag)]
     ls_final = [final[2 * r + 1] for r in range(c_frag)]
     accs_final = list(final[2 * c_frag :])
 
-    # ---- Optional LSE (natural log): (m + log2 l) * ln2; -inf for empty rows.
-    # The 16 lanes sharing a row hold the same m/l, so column-0 lanes store. ----
+    # ---- Runtime-gated LSE (natural log), including the optional sink in the
+    # denominator and using -inf for an empty row. Column-0 lanes store. ----
     if lse is not None:
+        if write_lse is None or stride_lse_token is None or stride_lse_head is None:
+            raise ValueError(
+                "LSE output requires its runtime gate and token/head strides"
+            )
+        write_stats = b.cmp_ne(write_lse, b.const_i32(0))
+        if value_offset is not None:
+            write_stats = b.land(write_stats, b.cmp_eq(value_offset, b.const_i32(0)))
         ln2 = b.const_f32(0.6931471805599453)
         lse_neg_inf = b.const_f32(float("-inf"))
-        lse_c0 = b.const_i32(0)
         for r in range(c_frag):
             row_rel, col_n = c_map.coord(b, lane, r)
-            l_r = ls_final[r]
-            log2_l = b.log2(l_r)
-            m_plus = b.fadd(final[2 * r], log2_l)
-            lse_nat = b.fmul(m_plus, ln2)
-            lse_empty = b.fcmp("oeq", l_r, zero_f)
-            lse_val = b.select(lse_empty, lse_neg_inf, lse_nat)
-            lse_idx = b.add(lse_offset, row_rel)
-            lse_col0 = b.cmp_eq(col_n, lse_c0)
-            with b.scf_if(lse_col0):
-                if query_length is None:
-                    b.global_store(lse, lse_idx, lse_val, align=4)
-                else:
-                    lse_keep = b.cmp_lt(b.add(q_local_base, row_rel), query_length)
-                    with b.scf_if(lse_keep):
-                        b.global_store(lse, lse_idx, lse_val, align=4)
+            keep = b.land(write_stats, b.cmp_eq(col_n, b.const_i32(0)))
+            if query_length is not None:
+                keep = b.land(
+                    keep, b.cmp_lt(b.add(q_local_base, row_rel), query_length)
+                )
+            with b.scf_if(keep):
+                l_r = ls_final[r]
+                lse_nat = b.fmul(
+                    b.fadd(ms_final[r], b.log2(l_r)),
+                    ln2,
+                )
+                lse_val = b.select(b.fcmp("oeq", l_r, zero_f), lse_neg_inf, lse_nat)
+                lse_addr = b.add(
+                    b.mul(b.add(q_tile_base, row_rel), stride_lse_token),
+                    b.mul(head_idx, stride_lse_head),
+                )
+                b.global_store(lse, lse_addr, lse_val, align=4)
 
     # ---- Epilogue: O[q,d] = acc[q,d] / l[q] (zero-denominator guarded) ----
     for d in range(n_dv):

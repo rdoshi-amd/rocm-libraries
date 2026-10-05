@@ -33,14 +33,11 @@ from .common import (
     _selector_matches,
 )
 
-# v2: ``rocke_wmma_fmha_fwd_spec_t`` gained kv_dtype, transposed_qk, block_n,
-# num_waves, scheduler_strategy and value_tile_size, and the grid's z axis became
-# ``batch * value_tiles``. Callers compiled against the v1 header must be rebuilt.
-# v3: ``rocke_wmma_fmha_fwd_spec_t`` gained store_lse, and the specialized kernel
-# ABI appends an FP32 ``lse`` pointer (plus ``stride_lse_head`` for packed layouts).
-# v4: ``rocke_wmma_fmha_fwd_spec_t`` gained use_attn_bias / bias_dtype, and the
-# specialized kernel ABI appends ``attn_bias_ptr`` plus B/H/Q element strides.
-ATTENTION_GFX1151_ABI = "rocke-attention-gfx1151/v4"
+# v5 composes the runtime-shape-generic base ABI (including runtime windows and
+# runtime-gated LSE) with unequal Q/V widths, causal tile skipping, additive
+# attention bias, output-column tiling, and the expanded multiple-of-16 catalog.
+# Callers compiled against any earlier header must be rebuilt.
+ATTENTION_GFX1151_ABI = "rocke-attention-gfx1151/v5"
 
 # Compute units of the reference gfx1151 part. The output-column tiling gate was
 # tuned at this size, so it is the fallback when no count is given or visible.
@@ -53,13 +50,7 @@ _TILED_VALUE_GROUP_WEIGHT = 5
 
 
 def _resolve_gfx1151_num_cus(req: AttentionRequest) -> int:
-    """Compute units used by CU-aware gfx1151 selection.
-
-    An explicit ``req.num_cus`` wins. Otherwise the live device count is used when
-    this box is the same arch (a cross-compile never bakes in another device's
-    size); a WGP-mode RDNA device reports half its CUs, so the live value is
-    doubled. Anything else falls back to the reference part.
-    """
+    """Compute units used by CU-aware gfx1151 selection."""
     n = int(req.num_cus)
     if n > 0:
         return n
@@ -79,27 +70,26 @@ _WMMA_FWD_CAP = Capability(
     arches=("gfx1151",),
     dtypes=("fp16", "bf16"),
     shapes=(
-        ShapeRange(
-            frozenset({"hdim_q", "hdim_v"}), min=16, max=256, multiple_of=16
-        ),
+        ShapeRange(frozenset({"hdim_q", "hdim_v"}), min=16, max=256, multiple_of=16),
     ),
-    relations=(
-        DimRelation("nhead_q", "multiple_of", "nhead_k"),  # GQA grouping
-    ),
+    relations=(DimRelation("nhead_q", "multiple_of", "nhead_k"),),  # GQA grouping
     supports_features=frozenset(
         {
             "causal",
             "causal_bottom_right",
             "sliding_window",
+            "window_bounds",
+            "noncausal_window",
+            "lse",
             "sinks",
             "fp8",
             "softcap",
             "alibi",
             "qq_bias",
             "window_right",
-            "lse",
             "attn_bias",
             "layout_dense",
+            "layout_bhsd",
             "layout_ragged",
             "layout_paged",
         }
@@ -113,6 +103,23 @@ def _resolve_layout(req: AttentionRequest) -> str:
     return "dense" if layout == "auto" else layout
 
 
+def _window_bounds(req: AttentionRequest) -> tuple[int, int]:
+    """Resolve explicit bounds and the legacy left-width/right-bound API."""
+    if req.window_left is not None:
+        left = int(req.window_left)
+    elif int(req.sliding_window) > 0:
+        left = int(req.sliding_window) - 1
+    else:
+        left = -1
+    if req.window_right is not None:
+        right = int(req.window_right)
+    elif left >= 0:
+        right = 0
+    else:
+        right = -1
+    return left, right
+
+
 def _wmma_fwd_spec(req: OperatorRequest) -> WmmaFmhaFwdSpec:
     assert isinstance(req, AttentionRequest)
     mask_type = AttentionMaskType(int(req.mask_type))
@@ -120,11 +127,16 @@ def _wmma_fwd_spec(req: OperatorRequest) -> WmmaFmhaFwdSpec:
     seqlen_q = int(req.seqlen_q)
     seqlen_k = int(req.seqlen_k)
     equal_heads = int(req.hdim_q) == int(req.hdim_v)
-    local_window = int(req.window_right) >= 0
     query_tail = layout != "dense" or bool(seqlen_q % 16)
     kv_tail = layout != "dense" or bool(seqlen_k % 16)
+    windowed = (
+        mask_type == AttentionMaskType.SLIDING_WINDOW
+        or int(req.sliding_window) > 0
+        or req.window_left is not None
+        or (req.window_right is not None and int(req.window_right) >= 0)
+    )
     transposed = (
-        req.dtype.strip().lower() == "fp16"
+        req.dtype.strip().lower() in ("fp16", "bf16")
         and layout == "dense"
         and equal_heads
         and int(req.hdim_q) in (64, 128)
@@ -138,8 +150,7 @@ def _wmma_fwd_spec(req: OperatorRequest) -> WmmaFmhaFwdSpec:
         and seqlen_k % 32 == 0
         and not (
             req.use_fp8
-            or req.sliding_window
-            or local_window
+            or windowed
             or req.use_softcap
             or req.use_sinks
             or req.use_alibi
@@ -148,14 +159,12 @@ def _wmma_fwd_spec(req: OperatorRequest) -> WmmaFmhaFwdSpec:
         )
     )
     wide = transposed and seqlen_q >= 512 and seqlen_q % 32 == 0 and seqlen_k % 64 == 0
-    maximum_length = max(seqlen_q, seqlen_k)
     tuned_small_head = (
         req.dtype.strip().lower() == "fp16"
         and int(req.hdim_q) == 64
         and equal_heads
         and not (
-            req.sliding_window
-            or local_window
+            windowed
             or req.use_fp8
             or req.use_softcap
             or req.use_sinks
@@ -163,7 +172,6 @@ def _wmma_fwd_spec(req: OperatorRequest) -> WmmaFmhaFwdSpec:
             or req.use_qq_bias
             or req.use_attn_bias
         )
-        and maximum_length <= (1 << 30)
         and (
             (
                 layout == "ragged"
@@ -185,8 +193,7 @@ def _wmma_fwd_spec(req: OperatorRequest) -> WmmaFmhaFwdSpec:
         and query_groups * _TILED_VALUE_GROUP_WEIGHT
         <= _resolve_gfx1151_num_cus(req) * _TILED_VALUE_GROUPS_PER_16_CUS
         and not (
-            req.sliding_window
-            or local_window
+            windowed
             or req.use_fp8
             or req.use_softcap
             or req.use_sinks
@@ -201,30 +208,26 @@ def _wmma_fwd_spec(req: OperatorRequest) -> WmmaFmhaFwdSpec:
         value_tile_size = (
             32 if mask_type == AttentionMaskType.NO_MASK and not short_query else 64
         )
-    # Fully masked causal K tiles are skipped on the standard path; a request
-    # sliding window already bounds the loop and the transposed path bounds it
-    # at the diagonal by construction.
+    # Runtime windows already bound the loop; the transposed path bounds it at
+    # the diagonal by construction.
     causal_tile_skip = (
-        mask_type != AttentionMaskType.NO_MASK
-        and not int(req.sliding_window)
-        and not local_window
+        mask_type
+        in (
+            AttentionMaskType.TOP_LEFT_CAUSAL,
+            AttentionMaskType.BOTTOM_RIGHT_CAUSAL,
+        )
+        and not windowed
         and not transposed
     )
     return WmmaFmhaFwdSpec(
         head_size=int(req.hdim_q),
         v_head_size=0 if equal_heads else int(req.hdim_v),
-        num_query_heads=int(req.nhead_q),
-        num_kv_heads=int(req.nhead_k),
         dtype=req.dtype.strip().lower(),
         mask_mode=(
-            "none"
-            if mask_type == AttentionMaskType.NO_MASK or local_window
-            else "causal"
+            "window"
+            if windowed
+            else ("none" if mask_type == AttentionMaskType.NO_MASK else "causal")
         ),
-        window_right=int(req.window_right),
-        # Equal maxima can still describe unequal packed sequence lengths.
-        causal_bottom_right=mask_type == AttentionMaskType.BOTTOM_RIGHT_CAUSAL,
-        sliding_window=int(req.sliding_window),
         causal_tile_skip=causal_tile_skip,
         v_lds_stage=tuned_small_head
         or (tiled_values and (short_query or mask_type == AttentionMaskType.NO_MASK)),
@@ -236,7 +239,6 @@ def _wmma_fwd_spec(req: OperatorRequest) -> WmmaFmhaFwdSpec:
         use_sinks=bool(req.use_sinks),
         use_alibi=bool(req.use_alibi),
         use_qq_bias=bool(req.use_qq_bias),
-        store_lse=bool(req.return_lse),
         use_attn_bias=bool(req.use_attn_bias),
         bias_dtype=req.attn_bias_dtype.strip().lower(),
         layout=layout,
@@ -272,10 +274,8 @@ def _sweep_variants(spec: WmmaFmhaFwdSpec, req: AttentionRequest):
                 variants.append(replace(spec, block_n=block_n, num_waves=num_waves))
     else:
         variants.append(replace(spec, v_lds_stage=not spec.v_lds_stage))
-        if spec.mask_mode == "causal" and not spec.sliding_window:
-            variants.append(
-                replace(spec, causal_tile_skip=not spec.causal_tile_skip)
-            )
+        if spec.mask_mode == "causal":
+            variants.append(replace(spec, causal_tile_skip=not spec.causal_tile_skip))
         if spec.layout == "dense" and spec.v_dim >= 128:
             for tile in (0, 32, 64, 128):
                 if tile < spec.v_dim:
@@ -291,7 +291,12 @@ def _sweep_variants(spec: WmmaFmhaFwdSpec, req: AttentionRequest):
         try:
             ok, _ = _wmma_fwd_is_valid(variant, arch=req.arch)
             if ok:
-                wmma_fmha_fwd_grid(variant, seqlen_q=seqlen_q, batch=int(req.batch))
+                wmma_fmha_fwd_grid(
+                    variant,
+                    seqlen_q=seqlen_q,
+                    num_query_heads=int(req.nhead_q),
+                    batch=int(req.batch),
+                )
         except ValueError:
             continue
         if ok:
@@ -331,20 +336,10 @@ def _make_wmma_fwd_candidate() -> KernelCandidate:
             mask_type = AttentionMaskType(int(req.mask_type))
         except ValueError:
             return False, f"unsupported mask_type {req.mask_type!r}"
-        if (
-            mask_type == AttentionMaskType.SLIDING_WINDOW
-            and int(req.sliding_window) <= 0
-        ):
-            return False, "sliding-window mask_type requires sliding_window > 0"
-        if int(req.window_right) >= 0 and mask_type not in (
-            AttentionMaskType.NO_MASK,
-            AttentionMaskType.SLIDING_WINDOW,
-            AttentionMaskType.BOTTOM_RIGHT_CAUSAL,
-        ):
-            return False, (
-                "window_right requires mask_type NO_MASK or SLIDING_WINDOW "
-                "(top-left aligned) or BOTTOM_RIGHT_CAUSAL (bottom-right aligned)"
-            )
+        if mask_type == AttentionMaskType.SLIDING_WINDOW:
+            left, right = _window_bounds(req)
+            if left == -1 and right == -1:
+                return False, "window attention requires at least one finite bound"
         try:
             spec = _wmma_fwd_spec(req)
         except ValueError as error:
@@ -370,7 +365,10 @@ def _make_wmma_fwd_candidate() -> KernelCandidate:
     def grid(spec: WmmaFmhaFwdSpec, req: OperatorRequest):
         assert isinstance(req, AttentionRequest)
         return wmma_fmha_fwd_grid(
-            spec, seqlen_q=int(req.seqlen_q), batch=int(req.batch)
+            spec,
+            seqlen_q=int(req.seqlen_q),
+            num_query_heads=int(req.nhead_q),
+            batch=int(req.batch),
         )
 
     def bind_torch(request, spec, tensors, **kwargs):

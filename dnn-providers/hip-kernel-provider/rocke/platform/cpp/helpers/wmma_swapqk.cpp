@@ -92,19 +92,20 @@ static rocke_value_t* rocke_swapqk_load_operand(rocke_ir_builder_t* b,
                                                 rocke_value_t* lane,
                                                 rocke_value_t* lead0,
                                                 bool role_is_a,
-                                                int k_offset)
+                                                int k_offset,
+                                                const rocke_type_t* dtype_ir)
 {
     const rocke_layout_map_t* lmap = role_is_a ? op->a_layout : op->b_layout;
     rocke_value_t* out0 = NULL;
     rocke_value_t* out1 = NULL;
     rocke_layout_map_coord(lmap, b, lane, 0, &out0, &out1);
     rocke_value_t* lane_idx = role_is_a ? out0 : out1;
-    rocke_value_t* k_off = rocke_b_const_i32(b, k_offset);
-    rocke_value_t* idx[3];
-    idx[0] = lead0;
-    idx[1] = lane_idx;
-    idx[2] = k_off;
-    return rocke_tile_window_load_vec(b, window, idx, 3, op->a_frag_len);
+    rocke_value_t* local[3] = {lead0, lane_idx, rocke_b_const_i32(b, k_offset)};
+    rocke_value_t* global[3];
+    for(int i = 0; i < 3; ++i)
+        global[i] = rocke_b_add(b, window->origin[i], local[i]);
+    rocke_value_t* offset = rocke_tensor_descriptor_offset(b, &window->view->desc, global, 3);
+    return rocke_b_global_load_vN(b, window->view->base, offset, dtype_ir, op->a_frag_len, 2);
 }
 
 /* --------------------------------------------------------------- k_window *
@@ -138,25 +139,26 @@ static rocke_value_t* rocke_swapqk_p_transpose_reg(rocke_ir_builder_t* b,
                                                    int a_frag,
                                                    rocke_value_t* c16,
                                                    rocke_value_t* sel0,
-                                                   rocke_value_t* sel1)
+                                                   rocke_value_t* sel1,
+                                                   const rocke_type_t* dtype_ir)
 {
     rocke_value_t* outs[ROCKE_SWAPQK_MAX_CFRAG];
     for(int m = 0; m < c_frag / 2; ++m)
     {
-        rocke_value_t* lo_f16 = rocke_b_cast_f32_to(b, ps[2 * m], rocke_f16());
-        rocke_value_t* lo_i16 = rocke_b_bitcast(b, lo_f16, rocke_i16());
+        rocke_value_t* lo_value = rocke_b_cast_f32_to(b, ps[2 * m], dtype_ir);
+        rocke_value_t* lo_i16 = rocke_b_bitcast(b, lo_value, rocke_i16());
         rocke_value_t* lo = rocke_b_zext(b, lo_i16, rocke_i32());
-        rocke_value_t* hi_f16 = rocke_b_cast_f32_to(b, ps[2 * m + 1], rocke_f16());
-        rocke_value_t* hi_i16 = rocke_b_bitcast(b, hi_f16, rocke_i16());
+        rocke_value_t* hi_value = rocke_b_cast_f32_to(b, ps[2 * m + 1], dtype_ir);
+        rocke_value_t* hi_i16 = rocke_b_bitcast(b, hi_value, rocke_i16());
         rocke_value_t* hi = rocke_b_zext(b, hi_i16, rocke_i32());
         rocke_value_t* hi_shl = rocke_b_shl(b, hi, c16);
         rocke_value_t* v = rocke_b_lor(b, lo, hi_shl);
         rocke_value_t* w = rocke_b_permlanex16(b, v);
-        outs[2 * m] = rocke_b_perm_b32(b, w, v, sel0); /* {kv 4m,   4m+1} */
-        outs[2 * m + 1] = rocke_b_perm_b32(b, w, v, sel1); /* {kv 4m+2, 4m+3} */
+        outs[2 * m] = rocke_b_perm_b32(b, w, v, sel0);
+        outs[2 * m + 1] = rocke_b_perm_b32(b, w, v, sel1);
     }
     rocke_value_t* packed = rocke_b_vec_pack(b, outs, c_frag, rocke_i32());
-    const rocke_type_t* frag_ty = rocke_vector_type(b, rocke_f16(), a_frag);
+    const rocke_type_t* frag_ty = rocke_vector_type(b, dtype_ir, a_frag);
     return rocke_b_vec_bitcast(b, packed, frag_ty);
 }
 
@@ -177,16 +179,19 @@ static rocke_value_t* rocke_swapqk_load_col(rocke_ir_builder_t* b,
                                             rocke_value_t* const* soff_list,
                                             int a_frag,
                                             rocke_value_t* k_base,
-                                            rocke_value_t* d_col)
+                                            rocke_value_t* d_col,
+                                            const rocke_type_t* dtype_ir,
+                                            bool bf16)
 {
     rocke_value_t* k_mul = rocke_b_mul(b, k_base, stride_v_token);
     rocke_value_t* base_sum = rocke_b_add(b, kvh_off, k_mul);
     rocke_value_t* elem0 = rocke_b_add(b, base_sum, d_col);
     rocke_value_t* voff = rocke_b_mul(b, elem0, c2);
-    rocke_value_t* v_a = rocke_b_undef_vec(b, rocke_f16(), a_frag);
+    rocke_value_t* v_a = rocke_b_undef_vec(b, dtype_ir, a_frag);
     for(int j = 0; j < a_frag; ++j)
     {
-        rocke_value_t* loaded = rocke_b_buffer_load_f16_d16(b, v_rsrc, voff, soff_list[j]);
+        rocke_value_t* loaded = bf16 ? rocke_b_buffer_load_bf16(b, v_rsrc, voff, soff_list[j])
+                                     : rocke_b_buffer_load_f16_d16(b, v_rsrc, voff, soff_list[j]);
         v_a = rocke_b_vec_insert(b, v_a, loaded, j);
     }
     return v_a;
@@ -209,7 +214,9 @@ static rocke_value_t* rocke_swapqk_dual_gather_issue(rocke_ir_builder_t* b,
                                                      rocke_value_t* col,
                                                      rocke_value_t* c16,
                                                      rocke_value_t* k_base,
-                                                     int d)
+                                                     int d,
+                                                     const rocke_type_t* dtype_ir,
+                                                     bool bf16)
 {
     rocke_value_t* d16 = rocke_b_const_i32(b, d * 16);
     rocke_value_t* half = rocke_b_div(b, lane, c16);
@@ -217,7 +224,7 @@ static rocke_value_t* rocke_swapqk_dual_gather_issue(rocke_ir_builder_t* b,
     rocke_value_t* half16_col = rocke_b_add(b, half16, col);
     rocke_value_t* d_col = rocke_b_add(b, d16, half16_col);
     return rocke_swapqk_load_col(
-        b, v_rsrc, kvh_off, stride_v_token, c2, soff_list, a_frag, k_base, d_col);
+        b, v_rsrc, kvh_off, stride_v_token, c2, soff_list, a_frag, k_base, d_col, dtype_ir, bf16);
 }
 
 /* ----------------------------------------------------- dual_gather_finish *
@@ -229,6 +236,7 @@ static void rocke_swapqk_dual_gather_finish(rocke_ir_builder_t* b,
                                             int n_i32,
                                             int a_frag,
                                             rocke_value_t* lane_lt16,
+                                            const rocke_type_t* dtype_ir,
                                             rocke_value_t** out_frag_d,
                                             rocke_value_t** out_frag_d1)
 {
@@ -243,7 +251,7 @@ static void rocke_swapqk_dual_gather_finish(rocke_ir_builder_t* b,
         fd[i] = rocke_b_select(b, lane_lt16, e, p);
         fd1[i] = rocke_b_select(b, lane_lt16, p, e);
     }
-    const rocke_type_t* frag_ty = rocke_vector_type(b, rocke_f16(), a_frag);
+    const rocke_type_t* frag_ty = rocke_vector_type(b, dtype_ir, a_frag);
     rocke_value_t* packed_d = rocke_b_vec_pack(b, fd, n_i32, rocke_i32());
     *out_frag_d = rocke_b_vec_bitcast(b, packed_d, frag_ty);
     rocke_value_t* packed_d1 = rocke_b_vec_pack(b, fd1, n_i32, rocke_i32());
@@ -267,7 +275,8 @@ static void rocke_swapqk_store_col(rocke_ir_builder_t* b,
                                    rocke_value_t* acc,
                                    rocke_value_t* c0,
                                    int col_offset,
-                                   rocke_value_t* inv_l)
+                                   rocke_value_t* inv_l,
+                                   const rocke_type_t* dtype_ir)
 {
     rocke_value_t* c_off = rocke_b_const_i32(b, col_offset);
     for(int r = 0; r < op->c_frag_len; ++r)
@@ -278,12 +287,12 @@ static void rocke_swapqk_store_col(rocke_ir_builder_t* b,
         rocke_value_t* val = rocke_b_vec_extract(b, acc, r);
         rocke_value_t* rescaled = rocke_b_fmul(b, val, inv_l);
         rocke_value_t* store_col = rocke_b_add(b, c_off, col);
-        rocke_value_t* store_val = rocke_b_cast_f32_to(b, rescaled, rocke_f16());
+        rocke_value_t* store_val = rocke_b_cast_f32_to(b, rescaled, dtype_ir);
         rocke_value_t* idx[3];
         idx[0] = c0;
         idx[1] = row;
         idx[2] = store_col;
-        rocke_tile_window_store_scalar(b, owin, idx, 3, store_val, 2 /* align */);
+        rocke_tile_window_store_scalar(b, owin, idx, 3, store_val, 2);
     }
 }
 
@@ -313,6 +322,13 @@ rocke_status_t rocke_wmma_swapqk_fwd_inner_body(rocke_ir_builder_t* b,
             b, ROCKE_ERR_VALUE, "wmma_swapqk head_size must be 64 or 128 (got %d)", head_size);
         return ROCKE_ERR_VALUE;
     }
+    const char* dtype = p->dtype != NULL ? p->dtype : "f16";
+    const bool bf16 = strcmp(dtype, "bf16") == 0;
+    if(!bf16 && strcmp(dtype, "f16") != 0 && strcmp(dtype, "fp16") != 0)
+    {
+        rocke_i_set_err(b, ROCKE_ERR_VALUE, "wmma_swapqk dtype must be f16/bf16");
+        return ROCKE_ERR_VALUE;
+    }
     if(block_n != 32 && block_n != 64)
     {
         rocke_i_set_err(b, ROCKE_ERR_VALUE, "block_n must be 32 or 64 (got %d)", block_n);
@@ -340,18 +356,18 @@ rocke_status_t rocke_wmma_swapqk_fwd_inner_body(rocke_ir_builder_t* b,
         rocke_i_set_err(b, ROCKE_ERR_VALUE, "wmma_swapqk: no target for arch %s", arch);
         return ROCKE_ERR_VALUE;
     }
-    const rocke_mma_op_t* op = rocke_mma_catalog_by_op_id(&target->mma, "wmma_f32_16x16x16_f16");
+    const char* op_id = bf16 ? "wmma_f32_16x16x16_bf16" : "wmma_f32_16x16x16_f16";
+    const rocke_mma_op_t* op = rocke_mma_catalog_by_op_id(&target->mma, op_id);
     if(op == NULL || op->a_layout == NULL || op->b_layout == NULL || op->c_layout == NULL)
     {
-        rocke_i_set_err(b,
-                        ROCKE_ERR_VALUE,
-                        "wmma_swapqk: wmma_f32_16x16x16_f16 atom/layout absent on %s",
-                        arch);
+        rocke_i_set_err(
+            b, ROCKE_ERR_VALUE, "wmma_swapqk: %s atom/layout absent on %s", op_id, arch);
         return ROCKE_ERR_VALUE;
     }
-    const int wave = op->wave_size; /* 32 */
-    const int c_frag = op->c_frag_len; /* 8 */
-    const int a_frag = op->a_frag_len; /* 16 */
+    const rocke_type_t* dtype_ir = bf16 ? rocke_bf16() : rocke_f16();
+    const int wave = op->wave_size;
+    const int c_frag = op->c_frag_len;
+    const int a_frag = op->a_frag_len;
     const int hs = head_size;
     const int n_dk = hs / 16;
     const int n_kv_sub = block_n / 16;
@@ -398,16 +414,16 @@ rocke_status_t rocke_wmma_swapqk_fwd_inner_body(rocke_ir_builder_t* b,
     rocke_stride_t q_strides[3] = {
         rocke_stride_value(stride_q_head), rocke_stride_value(stride_q_token), rocke_stride_imm(1)};
     rocke_tensor_view_t Q_view;
-    rocke_make_global_view(&Q_view, Q, qkv_shape, 3, rocke_f16(), q_strides);
+    rocke_make_global_view(&Q_view, Q, qkv_shape, 3, dtype_ir, q_strides);
     rocke_stride_t k_strides[3]
         = {rocke_stride_imm(1), rocke_stride_value(stride_k_token), rocke_stride_imm(1)};
     rocke_tensor_view_t K_view;
-    rocke_make_global_view(&K_view, K, qkv_shape, 3, rocke_f16(), k_strides);
+    rocke_make_global_view(&K_view, K, qkv_shape, 3, dtype_ir, k_strides);
     int o_shape[3] = {1, hs, 1};
     rocke_stride_t o_strides[3] = {
         rocke_stride_value(stride_o_head), rocke_stride_imm(1), rocke_stride_value(stride_o_token)};
     rocke_tensor_view_t O_T_view;
-    rocke_make_global_view(&O_T_view, O, o_shape, 3, rocke_f16(), o_strides);
+    rocke_make_global_view(&O_T_view, O, o_shape, 3, dtype_ir, o_strides);
 
     /* This wave's 16-row query tile: sequence-local (masking) and global
      * (addressing) row bases. */
@@ -521,11 +537,11 @@ rocke_status_t rocke_wmma_swapqk_fwd_inner_body(rocke_ir_builder_t* b,
         for(int d = 0; d < n_dk; ++d)
         {
             rocke_value_t* q_tile
-                = rocke_swapqk_load_operand(b, &qwin, op, lane, c0, false, d * 16);
+                = rocke_swapqk_load_operand(b, &qwin, op, lane, c0, false, d * 16, dtype_ir);
             for(int ns = 0; ns < n_kv_sub; ++ns)
             {
-                rocke_value_t* k_frag
-                    = rocke_swapqk_load_operand(b, &kwins[ns], op, lane, c0, true, d * 16);
+                rocke_value_t* k_frag = rocke_swapqk_load_operand(
+                    b, &kwins[ns], op, lane, c0, true, d * 16, dtype_ir);
                 subs[ns] = rocke_b_mma(b, op->op_id, k_frag, q_tile, subs[ns], NULL, 0);
             }
         }
@@ -620,8 +636,8 @@ rocke_status_t rocke_wmma_swapqk_fwd_inner_body(rocke_ir_builder_t* b,
             alpha_vec = rocke_b_vec_insert(b, alpha_vec, alpha, i);
         rocke_value_t* p_tiles[ROCKE_SWAPQK_MAX_NS];
         for(int ns = 0; ns < n_kv_sub; ++ns)
-            p_tiles[ns]
-                = rocke_swapqk_p_transpose_reg(b, ps_sub[ns], c_frag, a_frag, c16, sel0, sel1);
+            p_tiles[ns] = rocke_swapqk_p_transpose_reg(
+                b, ps_sub[ns], c_frag, a_frag, c16, sel0, sel1, dtype_ir);
 
         /* ---- rescale the O^T accumulators by alpha ONCE per block_n keys ---- */
         /* wave-uniform 0/1-trip loop: run the n_dk rescale muls only when the
@@ -668,11 +684,13 @@ rocke_status_t rocke_wmma_swapqk_fwd_inner_body(rocke_ir_builder_t* b,
                                                                        col,
                                                                        c16,
                                                                        k_bases[ns],
-                                                                       dp);
+                                                                       dp,
+                                                                       dtype_ir,
+                                                                       bf16);
                 rocke_value_t* frag_d = NULL;
                 rocke_value_t* frag_d1 = NULL;
                 rocke_swapqk_dual_gather_finish(
-                    b, loaded, a_frag / 2, a_frag, lane_lt16, &frag_d, &frag_d1);
+                    b, loaded, a_frag / 2, a_frag, lane_lt16, dtype_ir, &frag_d, &frag_d1);
                 new_accs[dp]
                     = rocke_b_mma(b, op->op_id, frag_d, p_tiles[ns], new_accs[dp], NULL, 0);
                 new_accs[dp + 1]
@@ -690,27 +708,31 @@ rocke_status_t rocke_wmma_swapqk_fwd_inner_body(rocke_ir_builder_t* b,
     }
     rocke_b_region_leave(b);
 
+    rocke_value_t* m_f = (kloop.op != NULL) ? kloop.op->results[0] : NULL;
     rocke_value_t* l_f = (kloop.op != NULL) ? kloop.op->results[1] : NULL;
     rocke_value_t* accs_f[ROCKE_SWAPQK_MAX_DK];
     for(int d = 0; d < n_dk; ++d)
         accs_f[d] = (kloop.op != NULL) ? kloop.op->results[2 + d] : NULL;
 
-    /* ---- Optional LSE (natural log): (m + log2 l) * ln2; -inf for empty rows. ---- */
+    /* ---- Runtime-gated natural-log LSE; an empty denominator stores -inf. ---- */
     if(p->lse != NULL)
     {
-        rocke_value_t* m_f = (kloop.op != NULL) ? kloop.op->results[0] : NULL;
+        rocke_value_t* write_enabled = rocke_b_cmp_ne(b, p->write_lse, c0);
+        rocke_value_t* write_stats = rocke_b_land(b, lane_lt16, write_enabled);
+        rocke_if_t gate = rocke_b_scf_if(b, write_stats);
+        rocke_b_region_enter(b, gate.then_region);
+        rocke_value_t* log_l = rocke_b_log2(b, l_f);
+        rocke_value_t* log2_sum = rocke_b_fadd(b, m_f, log_l);
         rocke_value_t* ln2 = rocke_b_const_f32(b, 0.6931471805599453);
-        rocke_value_t* lse_neg_inf = rocke_b_const_f32(b, -INFINITY);
-        rocke_value_t* log2_l = rocke_b_log2(b, l_f);
-        rocke_value_t* m_plus = rocke_b_fadd(b, m_f, log2_l);
-        rocke_value_t* lse_nat = rocke_b_fmul(b, m_plus, ln2);
+        rocke_value_t* lse_nat = rocke_b_fmul(b, log2_sum, ln2);
         rocke_value_t* lse_empty = rocke_b_fcmp(b, "oeq", l_f, zero_f);
+        rocke_value_t* lse_neg_inf = rocke_b_const_f32(b, -INFINITY);
         rocke_value_t* lse_val = rocke_b_select(b, lse_empty, lse_neg_inf, lse_nat);
-        rocke_value_t* lse_rows = rocke_b_add(b, wave_row, col);
-        rocke_value_t* lse_idx = rocke_b_add(b, p->lse_offset, lse_rows);
-        rocke_if_t lse_gate = rocke_b_scf_if(b, lane_lt16);
-        rocke_b_region_enter(b, lse_gate.then_region);
-        rocke_b_global_store(b, p->lse, lse_idx, lse_val, 4);
+        rocke_value_t* lse_row = rocke_b_add(b, q_token_base, col);
+        rocke_value_t* lse_tok = rocke_b_mul(b, lse_row, p->stride_lse_token);
+        rocke_value_t* lse_head = rocke_b_mul(b, head_idx, p->stride_lse_head);
+        rocke_value_t* lse_addr = rocke_b_add(b, lse_tok, lse_head);
+        rocke_b_global_store(b, p->lse, lse_addr, lse_val, 4);
         rocke_b_region_leave(b);
     }
 
@@ -728,7 +750,7 @@ rocke_status_t rocke_wmma_swapqk_fwd_inner_body(rocke_ir_builder_t* b,
             rocke_value_t* origin[3] = {head_idx, d_off, q_token_base};
             rocke_make_tile_window(&owin, &O_T_view, lengths, origin, 3);
         }
-        rocke_swapqk_store_col(b, &owin, op, lane, accs_f[d], c0, 0, inv_l);
+        rocke_swapqk_store_col(b, &owin, op, lane, accs_f[d], c0, 0, inv_l, dtype_ir);
     }
 
     return rocke_ir_builder_status(b);

@@ -18,6 +18,9 @@ const std::vector<IngestorPack>& ingestorPacks()
         {"hipkernel:Gfx950AttentionDense",
          &registerGfx950AttentionDenseSymbols,
          &resetGfx950AttentionDenseModuleCache},
+        {"hipkernel:Gfx1151WmmaAttention",
+         &registerGfx1151WmmaAttentionSymbols,
+         &resetGfx1151WmmaAttentionModuleCache},
     };
     return s_packs;
 }

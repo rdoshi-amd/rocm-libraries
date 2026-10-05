@@ -7,7 +7,9 @@ The current inference harness is
 It runs a fixed, seeded 54-case matrix covering FP16/BF16, head dimensions
 64/128/256, MHA/GQA/MQA, causal alignment, sequence tails, decode, paged and
 ragged inputs, sliding windows, softcap, sinks, ALiBi, FP32 QQ-bias, FP8 KV
-storage, and feature combinations. This is ordinary SDPA coverage, not an
+storage, and feature combinations. Dedicated dispatcher regressions additionally
+cover D96, BHSD with independently padded strides, two-sided noncausal windows,
+and optional FP32 LSE output. This is ordinary SDPA coverage, not an
 absorbed-attention or backward benchmark.
 
 - `cases.py` defines the immutable workload and an independent CPU oracle.
@@ -45,12 +47,14 @@ by `rocke_wmma_fmha_fwd_spec_default()`. Native callers must rebuild against
 the updated header and archive; the pybind spec adapter also carries the field.
 The parity emitters cover both dtypes, head sizes, masks, GQA, and V staging.
 
-### Aligned FP16 transposed-QK specialization
+### Aligned FP16/BF16 transposed-QK specialization
 
-Public dispatch selects `transposed_qk=True` for dense FP16 D64/D128 attention
-with no mask or either causal alignment, query lengths divisible by 16, and
-KV lengths divisible by 32. Score features, sequence tails, packed/paged
-layouts, BF16, FP8 KV, and D256 retain the shared WMMA path.
+Public dispatch selects `transposed_qk=True` for dense FP16 or BF16 D64/D128
+attention with no mask or either causal alignment, query lengths divisible by
+16, and KV lengths divisible by 32. Score features, sequence tails,
+packed/paged layouts, explicit windows, and D96/D256 retain the shared WMMA
+path. The FP16 and BF16 variants use their dtype-matched WMMA atoms; neither
+dtype is routed through the former slower shared path for eligible shapes.
 
 The specialized helper computes `K @ Q.T`, reduces softmax over lane-local
 accumulator slots and a cross-half exchange, then computes `V @ P`. The
@@ -72,11 +76,36 @@ groups skip the KV loop. True negative-infinity initialization and safe
 empty-row exponential shifts preserve exact-zero fully masked prefixes;
 the legacy top-left specialization is unchanged.
 
-The new variant has a distinct cache name and preserves the base tensor ABI.
-Its native spec fields and pybind mapping mirror Python; native consumers must
-rebuild against the updated header. Existing non-transposed specializations
-are unchanged. Numeric regressions cover both tile sizes, wave counts, masks,
-GQA, independent batch/head/column coordinates, and output guards.
+The specialization retains a distinct cache name while using the common
+runtime-shaped dense ABI. Its native spec fields and pybind mapping mirror
+Python; native consumers must rebuild against the updated header. Numeric
+regressions cover both dtypes, tile sizes, wave counts, masks, GQA, independent
+batch/head/column coordinates, and output guards.
+
+### Runtime-shaped dense ABI and AOT catalog
+
+Dense WMMA kernels specialize only code-shaping choices: dtype, Q/K and V/O
+head dimensions, mask algorithm, optional score features, and tuning knobs.
+Query/KV lengths, query/KV head counts, bottom-right alignment, two-sided
+window bounds, the optional LSE write gate, and every tensor stride are kernel
+arguments. A compiled kernel can therefore serve multiple batches, sequence
+lengths, MHA/GQA/MQA ratios, window widths, and dense layouts.
+
+The dense binding accepts logical BSHD and BHSD tensors. The innermost head
+dimension must remain contiguous, but batch, token, and head strides may be any
+positive non-overlapping element strides; compact storage is not required.
+`return_lse=True` adds a caller-owned FP32 output. hipDNN uses logical shape
+`[B,S,H,1]` for BSHD or `[B,H,S,1]` for BHSD; direct dispatch also accepts
+compact rank-3 forms. Each element is the natural-log log-sum-exp of that row.
+
+`hipkernel:Gfx1151WmmaAttention` is the packaged hipDNN engine for this dense
+surface. Its authored catalog contains 40 reusable variants: generic kernels
+for FP16/BF16, D64/D96/D128/D256, and no-mask/causal/window modes, plus aligned
+transposed-QK kernels for FP16/BF16 D64/D128. `hkp_packaging_product` lowers
+them to the per-architecture `.kpack`; runtime shapes, bounds, strides, and LSE
+selection are not descriptor dimensions. The packaged catalog intentionally
+excludes ragged/paged layouts, FP8 KV, and auxiliary score features, which
+remain available through direct rocKE dispatch.
 
 ### Output-column tiling
 
@@ -111,20 +140,20 @@ and exact-zero empty sequences.
 
 ### Bottom-right causal alignment
 
-With `mask_mode="causal"` and `causal_bottom_right=True`, the mask admits
-`key_index <= query_index + seqlen_k - seqlen_q`. This supports chunked dense
-prefill and also `seqlen_q > seqlen_k`, where the fully masked query prefix is
-written as zero. Both input dtypes and both V-staging choices use the same rule.
-Alignment uses the logical sequence lengths, including when tail flags are set.
+The runtime `bottom_right` argument selects the diagonal
+`key_index <= query_index + seqlen_k - seqlen_q`; zero selects the top-left
+diagonal. This supports chunked dense prefill and packed batches whose
+per-sequence Q/K lengths differ. When `seqlen_q > seqlen_k`, the fully masked
+query prefix is written as zero.
 
-The bottom-right variant has a distinct kernel-cache key. It uses true negative
-infinity for masked scores and the initial row maximum. An empty row uses a
-zero exponential shift, avoiding `inf-inf` while retaining zero probability
-mass. BF16 also uses this normalization for ordinary attention: large finite
-negative logits must not underflow solely because of a finite initial maximum.
+Bottom-right alignment is not a cache-key or spec field. The kernel derives
+the offset from its runtime lengths, including device-loaded ragged/paged
+lengths. True negative-infinity initialization and safe empty-row exponential
+shifts preserve exact-zero fully masked prefixes. BF16 also uses this
+normalization for ordinary attention: large finite negative logits must not
+underflow solely because of a finite initial maximum.
 `test_wmma_fmha_fwd_numeric.py` covers constant-value preservation under those
-logits and exact-zero masked prefixes. Legacy FP16 default emission remains
-unchanged; the BF16 normalization change is intentional.
+logits and exact-zero masked prefixes.
 
 ### Sequence tails and dense decode
 
@@ -144,26 +173,26 @@ Aligned configurations retain their previous code and cache names.
 
 ### Dense score features
 
-`sliding_window=W` intersects the causal mask with the last W keys. The builder
-bounds the KV tile loop to the relevant window rather than scanning masked
-cache blocks. `use_softcap`, `use_sinks`, `use_alibi`, and `use_qq_bias` are
-independent compile-time feature switches; they compose with both dtypes,
-causal alignments, and tail specializations.
+`sliding_window=W` supplies a legacy causal left width. Explicit
+`window_left`/`window_right` bounds support an arbitrary two-sided diagonal
+band; `-1` means unbounded. The builder bounds the KV tile loop to the union
+needed by each query tile rather than scanning fully masked cache blocks.
+`use_softcap`, `use_sinks`, `use_alibi`, `use_qq_bias`, and `use_attn_bias`
+are independent compile-time feature switches; they compose with both dtypes,
+runtime alignments, and tail specializations.
 
-The score order is scaled QK, softcap, ALiBi, QQ-bias, then masking. Softcap
-uses the stable AMDGPU-lowerable `tanh` operation. ALiBi uses
-`slope[head] * (key_position - context)`, including in combinations with sinks.
-QQ-bias is FP32 and uses query-local rows and context-relative key columns;
-out-of-bounds bias entries contribute zero. A sink is an always-visible
-softmax logit with no value-vector contribution, so it adds denominator mass
-without being multiplied into the output.
+The score order is scaled QK, softcap, ALiBi, QQ-bias, additive attention
+bias, then masking. Softcap uses the stable AMDGPU-lowerable `tanh` operation.
+ALiBi uses `slope[head] * (key_position - context)`, including in
+combinations with sinks. QQ-bias is FP32 and uses query-local rows and
+context-relative key columns; out-of-bounds bias entries contribute zero. A
+sink is an always-visible softmax logit with no value-vector contribution, so
+it adds denominator mass without being multiplied into the output.
 
-Enabled features append arguments to the base ABI, in order: a positive FP32
-`softcap`; an input-dtype `sink_ptr`; FP32 `alibi_slopes_ptr`; FP32 `qq_bias_ptr`
-and its I32 row count, column count, and element row stride. Disabled features
-add no arguments. Use `wmma_fmha_fwd_signature`, the actual `KernelDef.params`,
-or the native signature API with the standard kernarg packer. Native signatures
-own their names/types in the caller arena.
+Enabled features append arguments to the base ABI in declaration order. Use
+`wmma_fmha_fwd_signature`, the actual `KernelDef.params`, or the native
+signature API with the standard kernarg packer. Native signatures own their
+names/types in the caller arena.
 
 ### Packed variable lengths and paged KV
 
@@ -205,23 +234,21 @@ QQ-bias, before masking. Loads are guarded by `query_pos < seqlen_q` and
 Ragged and paged layouts take `Sq`/`Sk` as the request maxima, and each sequence
 reads the bias at its own within-sequence positions. The transposed-QK fast path
 does not support a bias and its spec rejects the combination. The kernel name
-gains an `abias_<dtype>` part. Dispatch slices the bias per batch when a dense
-request needs per-batch launches.
+gains an `abias_<dtype>` part. Runtime batch strides address each bias slice
+without host-side relaunches.
 
 ### Softmax statistics (LSE)
 
-`store_lse=True` writes the per-row natural-log log-sum-exp of the scaled,
-masked, biased scores to an FP32 `lse` buffer, appended after the layout
-metadata and FP8 scales (the name gains an `lse` part). Dense layouts index
-`[B, H, Sq]` contiguously; packed layouts (`ragged`, `paged`) index
-`[H, total_q]` and add an I32 `stride_lse_head` argument. Attention sinks add
-their mass to the denominator and so are included. A row with no visible key
-stores `-inf`. The output tensor is unchanged. Requires a wave32 target.
+`return_lse=True` supplies the runtime `write_lse` gate and a caller-owned FP32
+buffer. The kernel writes the natural-log log-sum-exp of each scaled, masked,
+biased row; sink mass is included in the denominator and an empty row stores
+`-inf`. LSE is not a spec or cache dimension.
 
-The native spec and pybind conversion mirror these fields. Existing dense
-configurations retain their ABI and emitted code. Numeric regressions cover
-empty query/KV sequences, mixed lengths, shuffled pages, poisoned padding,
-output guards, both dtypes, and both V-staging choices.
+Direct dense bindings accept `[B,H,Sq]` and the layout-shaped rank-4 form;
+packed bindings accept `[H,total_q]`, `[total_q,H]`, or `[total_q,H,1]`.
+The fixed ABI always carries the LSE pointer plus batch/token/head strides.
+The hipDNN graph contract uses rank-4 stats. Launch returns the output tensor;
+LSE is a caller-owned side effect.
 
 ### Compiler policy and launch bounds
 
@@ -257,29 +284,24 @@ two NaN encodings. Numeric regressions enumerate all 256 bytes and check
 non-power-of-two scale rounding. FP8 storage composes with packed/paged layouts,
 tail bounds, both V-staging choices, and the score features above.
 
-### Head dimensions, causal tile skipping, right windows, dense strides
+### Head dimensions, causal tile skipping, windows, dense strides
 
 - **Head dimensions.** The Q/K width (`head_size`) and the V/O width
-  (`v_head_size`, zero meaning equal) are independent multiples of 16 up to 256.
-  The transposed-QK specialization stays restricted to equal power-of-two
-  widths; every other width pair uses the standard path. Output-column tiling
-  applies to the V/O width.
+  (`v_head_size`, zero meaning equal) are independent multiples of 16 up to
+  256. The transposed-QK specialization stays restricted to equal D64/D128;
+  every other width pair uses the standard path. Output-column tiling applies
+  to the V/O width.
 - **Causal tile skipping.** `causal_tile_skip` bounds the K loop at the causal
-  diagonal of the standard path (either alignment), so fully masked key tiles
-  are never loaded. It is a default-off spec flag; dispatch sets it for
-  causal masks without an explicit window.
-- **Right window.** `window_right >= 0` keeps keys with
-  `k <= q + ctx + window_right`, where `ctx` is `0` for top-left and
-  `Sk - Sq` for bottom-right alignment. Combined with `sliding_window` it gives
-  a two-sided local window; `-1` disables it. It requires `mask_mode="none"`,
-  the standard path, and no `causal_tile_skip`, and adds a `wr{N}` part to the
-  kernel name. Dispatch accepts it for `NO_MASK`, `SLIDING_WINDOW` and
-  `BOTTOM_RIGHT_CAUSAL` requests; `TOP_LEFT_CAUSAL` is rejected because the
-  causal mask already fixes the right edge.
-- **Dense strides.** When the dense batch stride equals
-  `seqlen * token_stride` the batch is folded into the grid. Any other stride
-  (padded or gapped batches) is served by one launch per batch with
-  per-batch pointer offsets, so no layout is rejected for its batch stride.
+  diagonal of the standard path (either runtime alignment), so fully masked
+  key tiles are never loaded. It is a default-off spec flag; dispatch sets it
+  for causal masks without an explicit window.
+- **Windows.** `window_left` and `window_right` are runtime I32 bounds around
+  `q + context`; `-1` means unbounded. Legacy `sliding_window=W` maps to
+  `window_left=W-1`. The mask class, not either bound value, is part of the
+  compiled identity.
+- **Dense strides.** Batch, token, and head strides for Q/K/V/O and LSE are
+  runtime arguments. One launch handles compact, padded, or gapped BSHD/BHSD
+  batches without host-side slicing.
 - **Offset overflow.** The kernel computes element offsets in I32. The binding
   rejects any request whose largest element offset would not fit, rather than
   launching and silently wrapping.
@@ -287,9 +309,8 @@ tail bounds, both V-staging choices, and the score features above.
   gated on the device compute-unit count (`num_cus`; zero uses the reference
   part) instead of a fixed query-group limit.
 
-Adding spec fields changes the C struct layout; the ABI string is
-`rocke-attention-gfx1151/v4`. Rebuild native callers and zero-initialise with
-`rocke_wmma_fmha_fwd_spec_default()`.
+The composed native struct ABI is `rocke-attention-gfx1151/v5`. Rebuild native
+callers and initialize the struct with `rocke_wmma_fmha_fwd_spec_default()`.
 
 ### Public library selection and launch
 

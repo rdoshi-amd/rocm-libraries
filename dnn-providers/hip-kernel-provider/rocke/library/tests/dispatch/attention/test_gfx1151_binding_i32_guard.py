@@ -50,7 +50,6 @@ def _paged_case(pages):
     )
     spec = WmmaFmhaFwdSpec(
         head_size=dim,
-        num_query_heads=heads,
         layout="paged",
         page_block_size=block,
         query_tail=True,

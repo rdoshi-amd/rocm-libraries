@@ -3241,7 +3241,7 @@ rocke_fmha_mask_mode_t parse_fmha_mask(const std::string& s)
 {
     if(s == "causal")
         return ROCKE_FMHA_MASK_CAUSAL;
-    if(s == "sliding_window")
+    if(s == "window" || s == "sliding_window")
         return ROCKE_FMHA_MASK_SLIDING_WINDOW;
     if(s == "alibi")
         return ROCKE_FMHA_MASK_ALIBI;
@@ -3258,11 +3258,7 @@ rocke_wmma_fmha_fwd_spec_t w1151fmha_build_spec(const py::dict& d, std::deque<st
     };
     rocke_wmma_fmha_fwd_spec_t s = rocke_wmma_fmha_fwd_spec_default();
     s.head_size = dict_int(d, "head_size", s.head_size);
-    s.num_query_heads = dict_int(d, "num_query_heads", s.num_query_heads);
-    s.num_kv_heads = dict_int(d, "num_kv_heads", s.num_kv_heads);
     s.v_lds_stage = dict_bool(d, "v_lds_stage", s.v_lds_stage);
-    s.sliding_window = dict_int(d, "sliding_window", s.sliding_window);
-    s.causal_bottom_right = dict_bool(d, "causal_bottom_right", s.causal_bottom_right);
     s.query_tail = dict_bool(d, "query_tail", s.query_tail);
     s.kv_tail = dict_bool(d, "kv_tail", s.kv_tail);
     s.use_softcap = dict_bool(d, "use_softcap", s.use_softcap);
@@ -3276,8 +3272,6 @@ rocke_wmma_fmha_fwd_spec_t w1151fmha_build_spec(const py::dict& d, std::deque<st
     s.value_tile_size = dict_int(d, "value_tile_size", s.value_tile_size);
     s.causal_tile_skip = dict_bool(d, "causal_tile_skip", s.causal_tile_skip);
     s.v_head_size = dict_int(d, "v_head_size", s.v_head_size);
-    s.window_right = dict_int(d, "window_right", s.window_right);
-    s.store_lse = dict_bool(d, "store_lse", s.store_lse);
     s.use_attn_bias = dict_bool(d, "use_attn_bias", s.use_attn_bias);
     {
         std::string v;

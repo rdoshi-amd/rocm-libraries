@@ -52,6 +52,10 @@ void resetConvFwdModuleCache();
 void registerGfx950AttentionDenseSymbols(hipdnn_plugin_sdk::ingestor::SymbolScope<Handle>& scope);
 void resetGfx950AttentionDenseModuleCache();
 
+/// @see packs/Gfx1151WmmaAttentionNative.cpp
+void registerGfx1151WmmaAttentionSymbols(hipdnn_plugin_sdk::ingestor::SymbolScope<Handle>& scope);
+void resetGfx1151WmmaAttentionModuleCache();
+
 /// Drops every pack's cached kpack modules, so the next dispatch re-reads its archive
 /// from disk.
 ///

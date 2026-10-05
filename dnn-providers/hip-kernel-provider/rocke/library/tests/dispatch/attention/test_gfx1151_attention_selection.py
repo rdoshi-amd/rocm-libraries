@@ -51,7 +51,6 @@ class TestGfx1151AttentionSelection(unittest.TestCase):
             {"layout": "paged", "kv_block_size": 48},
             {"mask_type": 99},
             {"mask_type": AttentionMaskType.SLIDING_WINDOW},
-            {"sliding_window": 32},
             {"sliding_window": -1},
         )
         for changes in cases:
@@ -59,6 +58,41 @@ class TestGfx1151AttentionSelection(unittest.TestCase):
             fields.update(changes)
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 dispatch_attention(_request(**fields))
+
+    def test_runtime_shape_fields_reuse_one_spec(self):
+        first = dispatch_attention(_request(nhead_q=16, nhead_k=4)).spec
+        second = dispatch_attention(
+            _request(nhead_q=32, nhead_k=8, seqlen_q=1024, seqlen_k=1024)
+        ).spec
+        self.assertEqual(first, second)
+
+    def test_head_dim_96_and_lse_are_supported(self):
+        result = dispatch_attention(_request(hdim_q=96, hdim_v=96, return_lse=True))
+        self.assertEqual(result.spec.head_size, 96)
+        self.assertFalse(result.spec.transposed_qk)
+
+    def test_runtime_window_bounds_do_not_change_code_object(self):
+        left = dispatch_attention(
+            _request(
+                mask_type=AttentionMaskType.SLIDING_WINDOW,
+                window_left=31,
+                window_right=7,
+            )
+        ).spec
+        right = dispatch_attention(
+            _request(
+                mask_type=AttentionMaskType.SLIDING_WINDOW,
+                window_left=127,
+                window_right=63,
+                window_bottom_right=True,
+            )
+        ).spec
+        self.assertEqual(left, right)
+        self.assertEqual(left.mask_mode, "window")
+
+    def test_bf16_uses_transposed_fast_path(self):
+        result = dispatch_attention(_request(dtype="bf16", layout="dense"))
+        self.assertTrue(result.spec.transposed_qk)
 
     def test_explicit_layout_and_score_requirements_are_not_ignored_elsewhere(self):
         for changes in (
@@ -90,7 +124,7 @@ class TestGfx1151AttentionSelection(unittest.TestCase):
                     )
                 ).spec
                 self.assertTrue(spec.causal_tile_skip)
-                self.assertEqual(spec.sliding_window, 0)
+                self.assertEqual(spec.mask_mode, "causal")
 
     def test_unmasked_and_windowed_requests_do_not_request_tile_skip(self):
         spec = dispatch_attention(_request(layout="ragged", seqlen_q=100)).spec
@@ -104,7 +138,7 @@ class TestGfx1151AttentionSelection(unittest.TestCase):
             )
         ).spec
         self.assertFalse(spec.causal_tile_skip)
-        self.assertEqual(spec.sliding_window, 32)
+        self.assertEqual(spec.mask_mode, "window")
 
     def test_right_window_selects_the_wmma_kernel_for_unmasked_requests(self):
         for mask in (
@@ -121,14 +155,9 @@ class TestGfx1151AttentionSelection(unittest.TestCase):
                         window_right=16,
                     )
                 ).spec
-                self.assertEqual(spec.window_right, 16)
-                self.assertEqual(spec.mask_mode, "none")
+                self.assertEqual(spec.mask_mode, "window")
                 self.assertFalse(spec.causal_tile_skip)
                 self.assertFalse(spec.transposed_qk)
-                self.assertEqual(
-                    spec.causal_bottom_right,
-                    mask == AttentionMaskType.BOTTOM_RIGHT_CAUSAL,
-                )
 
     def test_right_window_combines_with_a_left_window(self):
         spec = dispatch_attention(
@@ -140,7 +169,7 @@ class TestGfx1151AttentionSelection(unittest.TestCase):
                 window_right=8,
             )
         ).spec
-        self.assertEqual((spec.sliding_window, spec.window_right), (32, 8))
+        self.assertEqual(spec.mask_mode, "window")
 
     def test_right_window_rejects_unsupported_combinations(self):
         cases = (
@@ -154,13 +183,12 @@ class TestGfx1151AttentionSelection(unittest.TestCase):
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 dispatch_attention(_request(**fields))
 
-    def test_return_lse_selects_a_store_lse_kernel_only_on_gfx1151(self):
+    def test_return_lse_reuses_the_same_gfx1151_code_object(self):
         for layout in ("dense", "ragged"):
             with self.subTest(layout=layout):
                 plain = dispatch_attention(_request(layout=layout)).spec
                 lse = dispatch_attention(_request(layout=layout, return_lse=True)).spec
-                self.assertFalse(plain.store_lse)
-                self.assertTrue(lse.store_lse)
+                self.assertEqual(plain, lse)
         for arch in ("gfx950", "gfx942"):
             with self.subTest(arch=arch), self.assertRaises(ValueError):
                 dispatch_attention(_request(arch=arch, return_lse=True))
@@ -170,7 +198,9 @@ class TestGfx1151AttentionSelection(unittest.TestCase):
             for dtype in ("f32", "q"):
                 with self.subTest(layout=layout, dtype=dtype):
                     spec = dispatch_attention(
-                        _request(layout=layout, use_attn_bias=True, attn_bias_dtype=dtype)
+                        _request(
+                            layout=layout, use_attn_bias=True, attn_bias_dtype=dtype
+                        )
                     ).spec
                     self.assertTrue(spec.use_attn_bias)
                     self.assertEqual(spec.bias_dtype, dtype)
@@ -192,9 +222,24 @@ class TestGfx1151AttentionSelection(unittest.TestCase):
             )
         ).spec
         self.assertTrue(
-            spec.use_attn_bias and spec.use_softcap and spec.use_alibi and spec.use_qq_bias
+            spec.use_attn_bias
+            and spec.use_softcap
+            and spec.use_alibi
+            and spec.use_qq_bias
         )
-        self.assertTrue(spec.store_lse)
+        self.assertEqual(
+            spec,
+            dispatch_attention(
+                _request(
+                    use_attn_bias=True,
+                    use_softcap=True,
+                    use_alibi=True,
+                    use_qq_bias=True,
+                    return_lse=False,
+                    mask_type=AttentionMaskType.TOP_LEFT_CAUSAL,
+                )
+            ).spec,
+        )
 
     def test_output_column_tiling_scales_with_the_compute_unit_count(self):
         def tile(num_cus, nhead_q):
@@ -232,22 +277,31 @@ class TestGfx1151AttentionSelection(unittest.TestCase):
     def test_default_compute_units_match_the_reference_part(self):
         # 128 query groups is the boundary on the 40-CU reference part; pin the
         # live-device query away so the result does not depend on the host GPU.
-        with mock.patch("dispatch.attention.gfx1151._device_num_cus", return_value=None):
+        with mock.patch(
+            "dispatch.attention.gfx1151._device_num_cus", return_value=None
+        ):
             spec = dispatch_attention(self._unset_cu_request()).spec
         self.assertGreater(spec.value_tile_size, 0)
 
     def test_live_device_compute_units_are_doubled_for_wgp_mode(self):
         # A device reporting 20 WGPs is 40 CUs (tiles); one reporting 16 is 32 CUs
         # (128 groups no longer fit, so the full-head kernel is kept).
-        with mock.patch("rocke.runtime.hip_module.get_device_arch", return_value="gfx1151"):
-            with mock.patch("dispatch.attention.gfx1151._device_num_cus", return_value=20):
+        with mock.patch(
+            "rocke.runtime.hip_module.get_device_arch", return_value="gfx1151"
+        ):
+            with mock.patch(
+                "dispatch.attention.gfx1151._device_num_cus", return_value=20
+            ):
                 self.assertGreater(
                     dispatch_attention(self._unset_cu_request()).spec.value_tile_size, 0
                 )
-            with mock.patch("dispatch.attention.gfx1151._device_num_cus", return_value=16):
+            with mock.patch(
+                "dispatch.attention.gfx1151._device_num_cus", return_value=16
+            ):
                 self.assertEqual(
                     dispatch_attention(self._unset_cu_request()).spec.value_tile_size, 0
                 )
+
     def test_sweep_space_offers_distinct_valid_variants_baseline_first(self):
         for changes in (
             dict(seqlen_q=1024, seqlen_k=1024, hdim_q=64, hdim_v=64),

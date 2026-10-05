@@ -58,8 +58,14 @@ from .. import (
 
 
 def build_manual_gemm(
-    M_LEN: int, N_LEN: int, K_LEN: int, *, arch: str = "gfx90a",
-    lda: int | None = None, ldb: int | None = None, ldc: int | None = None,
+    M_LEN: int,
+    N_LEN: int,
+    K_LEN: int,
+    *,
+    arch: str = "gfx90a",
+    lda: int | None = None,
+    ldb: int | None = None,
+    ldc: int | None = None,
 ):
     """Build the RCC f16->f32(->f16) GEMM from primitives only. One 16x16x16 atom per CTA."""
     from rocke.core.ir import F16, F32, I32, IRBuilder, PtrType
@@ -87,9 +93,15 @@ def build_manual_gemm(
     m_tile_base = b.mul(b.block_id_y(), b.const_i32(TILE_M))
     n_tile_base = b.mul(b.block_id_x(), b.const_i32(TILE_N))
 
-    lda = lda if lda is not None else K_LEN   # A physical (M, K): M-stride (row length K)
-    ldb = ldb if ldb is not None else K_LEN   # B physical (N, K): N-stride (column length K)
-    ldc = ldc if ldc is not None else M_LEN   # C physical (N, M): N-stride (column length M)
+    lda = (
+        lda if lda is not None else K_LEN
+    )  # A physical (M, K): M-stride (row length K)
+    ldb = (
+        ldb if ldb is not None else K_LEN
+    )  # B physical (N, K): N-stride (column length K)
+    ldc = (
+        ldc if ldc is not None else M_LEN
+    )  # C physical (N, M): N-stride (column length M)
 
     # ---- MEMORY (tensor descriptors) ----------------------------------------------------------
     # TRADITIONAL memory layout: lengths + strides with the FASTEST (stride-1) axis RIGHT-MOST,
@@ -98,9 +110,15 @@ def build_manual_gemm(
     # (row-major) and K / M for B / C (col-major -- hence their physical shapes are (N, K) and
     # (N, M)). Each is handed to its tile in LOGICAL order via `.permute([1, 0])` at the window (a
     # pure view, same bytes): a col-major operand's physical (N, K) then reads as logical (K, N).
-    a_td = make_tensor_desc((M_LEN, K_LEN), (lda, 1), F16)   # physical (M, K): K contiguous (stride 1)
-    b_td = make_tensor_desc((N_LEN, K_LEN), (ldb, 1), F16)   # physical (N, K): K contiguous (stride 1)
-    c_td = make_tensor_desc((N_LEN, M_LEN), (ldc, 1), F16)   # physical (N, M): M contiguous (stride 1)
+    a_td = make_tensor_desc(
+        (M_LEN, K_LEN), (lda, 1), F16
+    )  # physical (M, K): K contiguous (stride 1)
+    b_td = make_tensor_desc(
+        (N_LEN, K_LEN), (ldb, 1), F16
+    )  # physical (N, K): K contiguous (stride 1)
+    c_td = make_tensor_desc(
+        (N_LEN, M_LEN), (ldc, 1), F16
+    )  # physical (N, M): M contiguous (stride 1)
 
     # ---- DISTRIBUTION (the heart of this demo: PURE CUSTOMIZATION) -----------------------------
     # `make_tile_desc` is the quantity-major surface: one axes-ordered list per geometric quantity.
@@ -124,39 +142,42 @@ def build_manual_gemm(
     # thread_order lists K first. EVERY argument is spelled out below for teaching -- the trivial ones
     # (block_repeat, thread_broadcast, wave_*) sit at their no-op values.
     a_desc = make_tile_desc(
-        shape=[TILE_M, TILE_K],   # (M, K)
-        thread_tile=[1, 4],       # K: 4 contiguous per lane (k_inner) -- the vector
-        thread_dist=[16, 4],      # M -> 16 lanes, K -> 4 lanes (k_outer)
-        thread_order=[1, 0],      # M fastest, K major -- the atom's wiring (K is column 1, so A overrides)
-        thread_broadcast=1,       # no lane duplication
-        block_repeat=[1, 1],      # no stamped repeats
-        wave_dist=[1, 1],         # single wave
-        wave_order=None,          # single wave -- nothing to order
-        wave_broadcast=1,         # no wave duplication
+        shape=[TILE_M, TILE_K],  # (M, K)
+        thread_tile=[1, 4],  # K: 4 contiguous per lane (k_inner) -- the vector
+        thread_dist=[16, 4],  # M -> 16 lanes, K -> 4 lanes (k_outer)
+        thread_order=[
+            1,
+            0,
+        ],  # M fastest, K major -- the atom's wiring (K is column 1, so A overrides)
+        thread_broadcast=1,  # no lane duplication
+        block_repeat=[1, 1],  # no stamped repeats
+        wave_dist=[1, 1],  # single wave
+        wave_order=None,  # single wave -- nothing to order
+        wave_broadcast=1,  # no wave duplication
         wave_size=64,
     )  # A operand
     b_desc = make_tile_desc(
-        shape=[TILE_K, TILE_N],   # (K, N)
-        thread_tile=[4, 1],       # K: 4 contiguous per lane (k_inner) -- the vector
-        thread_dist=[4, 16],      # K -> 4 lanes (k_outer), N -> 16 lanes
-        thread_order=[0, 1],      # N fastest, K major -- column order (K already column 0)
-        thread_broadcast=1,       # no lane duplication
-        block_repeat=[1, 1],      # no stamped repeats
-        wave_dist=[1, 1],         # single wave
-        wave_order=None,          # single wave -- nothing to order
-        wave_broadcast=1,         # no wave duplication
+        shape=[TILE_K, TILE_N],  # (K, N)
+        thread_tile=[4, 1],  # K: 4 contiguous per lane (k_inner) -- the vector
+        thread_dist=[4, 16],  # K -> 4 lanes (k_outer), N -> 16 lanes
+        thread_order=[0, 1],  # N fastest, K major -- column order (K already column 0)
+        thread_broadcast=1,  # no lane duplication
+        block_repeat=[1, 1],  # no stamped repeats
+        wave_dist=[1, 1],  # single wave
+        wave_order=None,  # single wave -- nothing to order
+        wave_broadcast=1,  # no wave duplication
         wave_size=64,
     )  # B operand
     c_desc = make_tile_desc(
-        shape=[TILE_M, TILE_N],   # (M, N)
-        thread_tile=[4, 1],       # M: 4 contiguous per lane (m_inner) -- the vector
-        thread_dist=[4, 16],      # M -> 4 lanes (m_outer), N -> 16 lanes
-        thread_order=[0, 1],      # N fastest, M major -- column order (M already column 0)
-        thread_broadcast=1,       # no lane duplication
-        block_repeat=[1, 1],      # no stamped repeats
-        wave_dist=[1, 1],         # single wave
-        wave_order=None,          # single wave -- nothing to order
-        wave_broadcast=1,         # no wave duplication
+        shape=[TILE_M, TILE_N],  # (M, N)
+        thread_tile=[4, 1],  # M: 4 contiguous per lane (m_inner) -- the vector
+        thread_dist=[4, 16],  # M -> 4 lanes (m_outer), N -> 16 lanes
+        thread_order=[0, 1],  # N fastest, M major -- column order (M already column 0)
+        thread_broadcast=1,  # no lane duplication
+        block_repeat=[1, 1],  # no stamped repeats
+        wave_dist=[1, 1],  # single wave
+        wave_order=None,  # single wave -- nothing to order
+        wave_broadcast=1,  # no wave duplication
         wave_size=64,
     )  # C accumulator
 
@@ -168,8 +189,12 @@ def build_manual_gemm(
     for tile_k_base in range(0, K_LEN, TILE_K):
         k_base = b.const_i32(tile_k_base)
         # Positioned windows at this K tile; origin order matches each descriptor's axis order.
-        a_win = make_window(a_td, (m_tile_base, k_base))                  # A physical (M,K) == logical (M,K)
-        b_win = make_window(b_td.permute([1, 0]), (k_base, n_tile_base))  # B physical (N,K) -> logical (K,N)
+        a_win = make_window(
+            a_td, (m_tile_base, k_base)
+        )  # A physical (M,K) == logical (M,K)
+        b_win = make_window(
+            b_td.permute([1, 0]), (k_base, n_tile_base)
+        )  # B physical (N,K) -> logical (K,N)
         a_fragment = load_fragment(b, a_ptr, a_win, a_desc, lane_id)
         b_fragment = load_fragment(b, b_ptr, b_win, b_desc, lane_id)
         accumulator.value = b.mma(
@@ -177,7 +202,9 @@ def build_manual_gemm(
         )
 
     # Store through the hand-authored C distribution; C physical (N,M) -> logical (M,N) via permute.
-    c_win = make_window(c_td.permute([1, 0]), (m_tile_base, n_tile_base))  # C physical (N,M) -> logical (M,N)
+    c_win = make_window(
+        c_td.permute([1, 0]), (m_tile_base, n_tile_base)
+    )  # C physical (N,M) -> logical (M,N)
     store_fragment(b, c_ptr, c_win, accumulator, lane_id)
     b.ret()
     return b.kernel, mma
@@ -204,8 +231,12 @@ def run_and_verify_manual(
     artifact = compile_kernel(kernel, arch=arch)
     signature = (
         SignatureBuilder()
-        .ptr("A", "f16").ptr("B", "f16").ptr("C", "f16")
-        .scalar("M", "i32").scalar("N", "i32").scalar("K", "i32")
+        .ptr("A", "f16")
+        .ptr("B", "f16")
+        .ptr("C", "f16")
+        .scalar("M", "i32")
+        .scalar("N", "i32")
+        .scalar("K", "i32")
         .build()
     )
     launcher = KernelLauncher(
@@ -228,15 +259,16 @@ def run_and_verify_manual(
     rt.memcpy_h2d(b_dev.ptr(), as_u8_buffer(b_buf), b_buf.nbytes)
     rt.memcpy_h2d(c_dev.ptr(), as_u8_buffer(c_buf), c_buf.nbytes)
     launcher(
-        {"A": a_dev, "B": b_dev, "C": c_dev,
-         "M": M_LEN, "N": N_LEN, "K": K_LEN},
+        {"A": a_dev, "B": b_dev, "C": c_dev, "M": M_LEN, "N": N_LEN, "K": K_LEN},
         config=LaunchConfig(grid=grid, block=(mma.wave_size, 1, 1)),
     )
     synchronize_and_release()
     rt.memcpy_d2h(as_u8_buffer(c_buf), c_dev.ptr(), c_buf.nbytes)
     # logical: C[m, n] = sum_k A[m, k] * B[k, n] = sum_k a_buf[m, k] * b_buf[n, k]
-    reference = a_buf.astype(np.float32) @ b_buf.astype(np.float32).T   # (M, K) @ (K, N) = (M, N)
-    result = c_buf.astype(np.float32).T                                # (N, M) buffer -> logical (M, N) C
+    reference = (
+        a_buf.astype(np.float32) @ b_buf.astype(np.float32).T
+    )  # (M, K) @ (K, N) = (M, N)
+    result = c_buf.astype(np.float32).T  # (N, M) buffer -> logical (M, N) C
     max_abs_diff = float(np.abs(result - reference).max())
     return {
         "shape": (M_LEN, N_LEN, K_LEN),

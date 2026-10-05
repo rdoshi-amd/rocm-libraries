@@ -1,20 +1,21 @@
 # Divergences between the two forwarding replays that are known and accepted.
 #
-# One per line, four fields:
+# One per line, five fields:
 #
-#   <test name> | <disabled outcome> | <enabled outcome> | <why it is accepted>
+#   <test name> | <archs> | <disabled outcome> | <enabled outcome> | <why it is accepted>
 #
-# The outcomes are what compare_forwarding_runs.py prints for a divergence, so the
-# quickest way to write a line is to run the harness, take the failing line, and add
-# the reason. Both outcomes are pinned deliberately: a line that named only the test
-# would also silence a different divergence appearing in it later.
+# <archs> is a comma-separated list of gfx names, such as gfx90a,gfx942, or all. A line
+# applies only on the devices it lists, so a divergence on an unlisted device fails as a
+# new one.
 #
-# A line here is not a permanent exemption. If the test it names stops diverging, the
-# comparison fails and asks for the line to be deleted -- so the list describes gaps
-# that are open today, not ones that were open once. A run that tolerates a line says
-# so in its output; it never reports an ordinary clean pass.
+# Copy the outcomes from the failure compare_forwarding_runs.py prints. Both are pinned so
+# that a different divergence in the same test is not silenced.
+#
+# On a listed device, a line whose test no longer produces exactly these outcomes fails the
+# comparison until it is updated or deleted. A line whose test is not in the run is ignored,
+# because several test binaries share this list.
 #
 # Blank lines and lines starting with # are ignored.
 
-GPU_HipdnnShimConvBiasActivApi_FP16.FusedForwardMatchesCpuReference | passed[parity_served_3d-ndhwc=true] | passed[parity_served_3d-ndhwc=false] | MIOpen serves this 3-D NDHWC case with a four-operator plan (conv + scale-add + bias + activation) matched only by ConvCKIgemmFwdBiasResAddActivFused. The forwarded path drops the scale-add, so the provider builds a three-operator plan, and its only CK solver, ConvCKIgemmFwdBiasActivFused, is 2-D only -- hipDNN finds no engine configuration. Closing it needs 3-D instances in that solver, or a case both solver sets cover.
-GPU_HipdnnShimConvMixedTypeApi_I8.Int8InInt32OutMatchesCpuReference | passed[parity_served_int8-in-int32-out=true] | passed[parity_served_int8-in-int32-out=false] | MIOpen accepts int8 x and w with an int32 y, and the forwarded path builds the matching graph, but no hipDNN provider has an int8 convolution engine: the MIOpen provider converts only FLOAT, HALF and BFLOAT16 tensors and its convolution plan builders require an fp32 compute type, and the hip-kernel-provider convolution takes FLOAT or HALF with one type for all tensors. Closing it needs int8 (int32 compute) support in the MIOpen provider.
+GPU_HipdnnShimConvBiasActivApi_FP16.FusedForwardMatchesCpuReference | gfx90a | passed[parity_served_3d-ndhwc=true] | passed[parity_served_3d-ndhwc=false] | On gfx90a the MIOpen provider turns off its whole conv-fusion plan builder, because MIOpen's fused convolution has given wrong results there (REJECT_IF_WORKAROUND_ISSUE_5409 in the provider's Workarounds.hpp), so hipDNN finds no engine for the forwarded graph. The provider's 3-D fused solver, ConvCKIgemmGrpFwdBiasActivFused, does cover this case: with the reject removed it was served and matched the CPU reference. Closing it needs the provider to re-enable conv fusion on gfx90a.
+GPU_HipdnnShimConvMixedTypeApi_I8.Int8InInt32OutMatchesCpuReference | gfx90a | passed[parity_served_int8-in-int32-out=true] | passed[parity_served_int8-in-int32-out=false] | MIOpen accepts int8 x and w with an int32 y, and the forwarded path builds the matching graph, but no hipDNN provider has an int8 convolution engine: the MIOpen provider converts only FLOAT, HALF and BFLOAT16 tensors and its convolution plan builders require an fp32 compute type, and the hip-kernel-provider convolution takes FLOAT or HALF with one type for all tensors. Closing it needs int8 (int32 compute) support in the MIOpen provider.

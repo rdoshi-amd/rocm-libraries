@@ -38,10 +38,9 @@ struct PlanKeyHash
     }
 };
 
-// Everything hipDNN needs that is tied to one MIOpen handle. The workspace is
-// reused across calls rather than reallocated: the hipDNN handle runs on the
-// MIOpen handle's stream, so successive forwarded calls on that handle are
-// already ordered against each other.
+// Everything hipDNN needs that is tied to one MIOpen handle. Reusing one
+// workspace across calls is safe only because the calls are ordered: they share
+// a stream, and AcquireHandleState orders them when the stream changes.
 struct HandleState
 {
     fe::HipdnnHandlePtr hipdnnHandle;
@@ -88,13 +87,26 @@ std::unordered_map<miopenHandle_t, std::unique_ptr<HandleState>>& HandleMap()
     return handles;
 }
 
+bool WaitForEarlierStream(hipStream_t stream, hipStream_t earlier)
+{
+    hipEvent_t event = nullptr;
+    if(hipEventCreateWithFlags(&event, hipEventDisableTiming) != hipSuccess)
+        return false;
+    const bool ordered = hipEventRecord(event, earlier) == hipSuccess &&
+                         hipStreamWaitEvent(stream, event, 0) == hipSuccess;
+    static_cast<void>(hipEventDestroy(event));
+    return ordered;
+}
+
 // Created on first forwarded call rather than in miopenCreate, so a process that
 // never forwards never pays for hipdnnCreate.
-HandleState* AcquireHandleState(miopenHandle_t handle)
+std::pair<HandleState*, miopenStatus_t> AcquireHandleState(miopenHandle_t handle)
 {
     hipStream_t stream = nullptr;
     if(miopenGetStream_impl(handle, &stream) != miopenStatusSuccess)
-        return nullptr;
+        return {
+            nullptr,
+            RecordFailure(miopenStatusInternalError, "could not read the MIOpen handle's stream")};
 
     const std::lock_guard<std::mutex> lock(HandleMapMutex());
     auto& slot = HandleMap()[handle];
@@ -104,7 +116,8 @@ HandleState* AcquireHandleState(miopenHandle_t handle)
         if(!error.is_good() || created == nullptr)
         {
             HandleMap().erase(handle);
-            return nullptr;
+            return {nullptr,
+                    RecordFailure(miopenStatusInternalError, "could not create a hipDNN handle")};
         }
         slot               = std::make_unique<HandleState>();
         slot->hipdnnHandle = std::move(created);
@@ -112,12 +125,20 @@ HandleState* AcquireHandleState(miopenHandle_t handle)
     }
     else if(slot->stream != stream)
     {
-        // miopenSetStream can move a handle to a different stream at any point.
+        // Work still queued on the old stream may be using the shared workspace.
+        if(!WaitForEarlierStream(stream, slot->stream))
+            return {nullptr,
+                    RecordFailure(miopenStatusInternalError,
+                                  "could not make the MIOpen handle's new stream wait for the "
+                                  "hipDNN work queued on its old stream")};
         if(!fe::setHipdnnHandleStream(slot->hipdnnHandle, stream).is_good())
-            return nullptr;
+            return {nullptr,
+                    RecordFailure(miopenStatusInternalError,
+                                  "could not move the hipDNN handle to the MIOpen handle's new "
+                                  "stream")};
         slot->stream = stream;
     }
-    return slot.get();
+    return {slot.get(), miopenStatusSuccess};
 }
 
 using GraphPtr = std::shared_ptr<fe::graph::Graph>;
@@ -162,7 +183,7 @@ miopenStatus_t RecordHipdnnFailure(const fe::Error& error)
 
 miopenStatus_t RecordSuccess()
 {
-    LastError().failed = false;
+    ClearForwardedFailure();
     return miopenStatusSuccess;
 }
 
@@ -217,14 +238,16 @@ miopenStatus_t RecordFailure(miopenStatus_t status, std::string message)
     return status;
 }
 
+void ClearForwardedFailure() { LastError().failed = false; }
+
 miopenStatus_t RunCachedGraph(miopenHandle_t handle,
                               const PlanKey& key,
                               const PopulateGraphFn& populate,
                               VariantPack& variantPack)
 {
-    HandleState* state = AcquireHandleState(handle);
+    auto [state, acquired] = AcquireHandleState(handle);
     if(state == nullptr)
-        return RecordFailure(miopenStatusInternalError, "could not create a hipDNN handle");
+        return acquired;
 
     auto [graph, status] = AcquireGraph(key, populate, *state->hipdnnHandle);
     if(graph == nullptr)

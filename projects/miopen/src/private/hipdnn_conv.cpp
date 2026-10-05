@@ -38,6 +38,8 @@ struct TensorInfo
     miopenDataType_t dataType{};
     std::vector<int64_t> dims;
     std::vector<int64_t> strides;
+    // Above 1 only for NCHWc4, NCHWc8, CHWNc4 and CHWNc8.
+    int64_t vectorLength = 1;
 };
 
 struct ConvInfo
@@ -59,6 +61,23 @@ struct ConvProblem
     miopenActivationMode_t act = miopenActivationPASTHRU;
 };
 
+size_t TypeSize(miopenDataType_t type)
+{
+    switch(type)
+    {
+    case miopenInt8:
+    case miopenFloat8_fnuz:
+    case miopenBFloat8_fnuz: return 1;
+    case miopenHalf:
+    case miopenBFloat16: return 2;
+    case miopenFloat:
+    case miopenInt32: return 4;
+    case miopenDouble:
+    case miopenInt64: return 8;
+    }
+    return 0;
+}
+
 // miopenGetTensorDescriptor fills caller-provided int arrays, so the size query
 // has to come first.
 miopenStatus_t ReadTensor(miopenTensorDescriptor_t desc, TensorInfo& out)
@@ -77,6 +96,17 @@ miopenStatus_t ReadTensor(miopenTensorDescriptor_t desc, TensorInfo& out)
     out.dataType = dataType;
     out.dims.assign(dims.begin(), dims.end());
     out.strides.assign(strides.begin(), strides.end());
+
+    // No getter exposes the vector length, but MIOpen's byte count is
+    // typeSize * (vectorLength + sum of (dim - 1) * stride), so it can be solved for.
+    size_t numBytes       = 0;
+    const size_t typeSize = TypeSize(dataType);
+    if(miopenGetTensorNumBytes_impl(desc, &numBytes) != miopenStatusSuccess || typeSize == 0)
+        return miopenStatusInvalidValue;
+    int64_t span = 0;
+    for(size_t i = 0; i < out.dims.size(); ++i)
+        span += (out.dims[i] - 1) * out.strides[i];
+    out.vectorLength = static_cast<int64_t>(numBytes / typeSize) - span;
     return miopenStatusSuccess;
 }
 
@@ -125,43 +155,35 @@ bool ScalarEquals(const void* value, miopenDataType_t type, double expected)
     return static_cast<double>(*static_cast<const float*>(value)) == expected;
 }
 
-// Boundary of what this translation has been exercised against.
-constexpr size_t kMaxSpatialDims = 5;
+// MIOpen itself serves only 2-D and 3-D convolutions.
+constexpr size_t kMinSpatialDims = 2;
+constexpr size_t kMaxSpatialDims = 3;
 
-// The vectorized layouts (NCHWc4, NCHWc8, CHWNc4, CHWNc8) have no dims-plus-
-// strides spelling, which is the only way hipDNN takes a layout. There is no
-// public getter for the layout, but MIOpen sets the innermost stride of a
-// vectorized descriptor to the vector length, so such a tensor is exactly the
-// one with no unit-stride dimension.
-bool IsPlainLayout(const TensorInfo& tensor)
-{
-    for(const int64_t stride : tensor.strides)
-    {
-        if(stride == 1)
-            return true;
-    }
-    return false;
-}
-
-miopenStatus_t CheckSupported(const std::vector<TensorInfo>& tensors, const ConvInfo& conv)
+// Returns why hipDNN cannot take this problem, or null when it can.
+const char* CheckSupported(const std::vector<TensorInfo>& tensors, const ConvInfo& conv)
 {
     fe::DataType unused{};
     if(!ComputeTypeFor(tensors.front().dataType, unused))
-        return miopenStatusUnsupportedOp;
+        return "this data type has no hipDNN convolution";
     for(const TensorInfo& tensor : tensors)
     {
-        if(!ToHipdnnDataType(tensor.dataType, unused) || !IsPlainLayout(tensor))
-            return miopenStatusUnsupportedOp;
+        if(!ToHipdnnDataType(tensor.dataType, unused))
+            return "this data type has no hipDNN convolution";
+        // hipDNN describes a tensor only by dims and strides, which cannot
+        // express a vector packed into each element.
+        if(tensor.vectorLength != 1)
+            return "vectorized tensor layouts (NCHWc4, NCHWc8, CHWNc4, CHWNc8) are not "
+                   "forwarded to hipDNN";
     }
     if(conv.groupCount != 1)
-        return miopenStatusUnsupportedOp;
-    if(conv.pads.size() > kMaxSpatialDims)
-        return miopenStatusUnsupportedOp;
+        return "grouped convolution is not forwarded to hipDNN";
+    if(conv.pads.size() < kMinSpatialDims || conv.pads.size() > kMaxSpatialDims)
+        return "only 2-D and 3-D convolutions are forwarded to hipDNN";
     // A transposed convolution is not a forward-convolution op: it maps to the
     // backward-data node and is a different graph.
     if(conv.mode == miopenTranspose)
-        return miopenStatusUnsupportedOp;
-    return miopenStatusSuccess;
+        return "transposed convolution is not forwarded to hipDNN";
+    return nullptr;
 }
 
 void AppendList(std::vector<int64_t>& out, const std::vector<int64_t>& values)
@@ -275,8 +297,10 @@ bool PopulateGraph(const ConvProblem& problem, fe::graph::Graph& graph)
 
         auto bias = MakeTensor(problem.tensors[3], types[3], kUidBias);
 
+        // The MIOpen provider requires the bias add to compute in the bias type
+        // and the activation in FLOAT.
         fe::graph::PointwiseAttributes add;
-        add.set_mode(fe::PointwiseMode::ADD).set_compute_data_type(computeType);
+        add.set_mode(fe::PointwiseMode::ADD).set_compute_data_type(types[3]);
         out = graph.pointwise(out, bias, add);
 
         fe::PointwiseMode activation{};
@@ -338,9 +362,8 @@ miopenStatus_t ForwardConvolution(miopenHandle_t handle,
         return RecordFailure(miopenStatusUnsupportedOp,
                              "hipDNN convolution supports only alpha=1, beta=0");
 
-    if(const miopenStatus_t status = CheckSupported(problem.tensors, problem.conv);
-       status != miopenStatusSuccess)
-        return RecordFailure(status, "this convolution is not expressible as a hipDNN graph");
+    if(const char* reason = CheckSupported(problem.tensors, problem.conv))
+        return RecordFailure(miopenStatusUnsupportedOp, reason);
 
     VariantPack variantPack{
         {kUidA, const_cast<void*>(aData)},
@@ -461,9 +484,8 @@ miopenStatus_t ConvolutionBiasActivationForward(miopenHandle_t handle,
         return RecordFailure(miopenStatusUnsupportedOp,
                              "hipDNN fused convolution supports only alpha2=0");
 
-    if(const miopenStatus_t status = CheckSupported(problem.tensors, problem.conv);
-       status != miopenStatusSuccess)
-        return RecordFailure(status, "this convolution is not expressible as a hipDNN graph");
+    if(const char* reason = CheckSupported(problem.tensors, problem.conv))
+        return RecordFailure(miopenStatusUnsupportedOp, reason);
 
     // RELU, the only mode accepted, ignores these. The getter just needs
     // somewhere to write them.

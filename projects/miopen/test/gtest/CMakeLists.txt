@@ -80,6 +80,7 @@ if(NOT MIOPEN_ENABLE_HIPDNN_WRAPPER)
     list(APPEND SKIP_TESTS
         hipdnn_lru_cache.cpp
         hipdnn_shim_conv.cpp
+        hipdnn_shim_conv_translation.cpp
         version_api.cpp
     )
 endif()
@@ -306,9 +307,9 @@ function(add_gtest TEST_NAME TEST_CPP)
 
   endif()
 
-  # Among discrete binaries only hipdnn_shim_conv.cpp has shim tests; any other would replay
-  # nothing, which the comparison rejects. No GPU: the shim tests are all GPU tests.
-  if(MIOPEN_ENABLE_HIPDNN_WRAPPER AND NOT MIOPEN_NO_GPU AND (NOT MIOPEN_TEST_DISCRETE OR TEST_CPP STREQUAL "hipdnn_shim_conv.cpp"))
+  # Among discrete binaries only the hipdnn_shim_conv*.cpp files have shim tests; any other
+  # would replay nothing, which the comparison rejects. No GPU: the shim tests are all GPU tests.
+  if(MIOPEN_ENABLE_HIPDNN_WRAPPER AND NOT MIOPEN_NO_GPU AND (NOT MIOPEN_TEST_DISCRETE OR TEST_CPP MATCHES "^hipdnn_shim_conv"))
     miopen_forwarding_parity_entries(BUILD ${TEST_NAME})
   endif()
 
@@ -351,8 +352,9 @@ target_link_libraries(miopen_gtest_common PRIVATE GTest::gtest GTest::gmock MIOp
 #
 # hipdnn_graph.cpp (with the hipdnn_types.cpp it uses) comes along because
 # routing.cpp asks it whether hipDNN is available before reporting a route. The
-# test binary's copy only ever answers that question -- the forwarding the shim
-# tests exercise happens inside libMIOpen.so, against its own copy.
+# test binary's copy answers that question and serves the last-error unit tests
+# in wrapper_routing.cpp. The forwarding the shim tests exercise happens inside
+# libMIOpen.so, against its own copy.
 if(MIOPEN_ENABLE_HIPDNN_WRAPPER)
   if(NOT TARGET hipdnn_frontend_dynamic)
     find_package(hipdnn_frontend REQUIRED)

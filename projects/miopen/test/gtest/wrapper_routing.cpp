@@ -17,6 +17,7 @@
 
 #ifdef MIOPEN_ENABLE_HIPDNN_WRAPPER
 
+#include "../../src/private/hipdnn_graph.hpp"
 #include "../../src/private/routing.hpp"
 
 #include <cstdlib>
@@ -562,6 +563,42 @@ TEST_P(CPU_WrapperRoutingDispatchUnforwarded_NONE, RoutesToMiopen)
 INSTANTIATE_TEST_SUITE_P(Smoke,
                          CPU_WrapperRoutingDispatchUnforwarded_NONE,
                          ::testing::Values("miopenCreate", "miopenGetErrorString"));
+
+// ---------------------------------------------------------------------------
+// The record behind miopenGetErrorString's "[hipDNN-forwarded]" prefix. These
+// cover its logic only, not that the stubs MIOpen serves actually clear it.
+// ---------------------------------------------------------------------------
+
+namespace hipdnn = miopen::wrapper::hipdnn;
+
+TEST(CPU_WrapperRoutingLastError_NONE, PrefixesTheForwardedFailure)
+{
+    hipdnn::RecordFailure(miopenStatusUnsupportedOp, "hipDNN's reason");
+    const char* const prefixed = hipdnn::PrefixedErrorString(miopenStatusUnsupportedOp, "native");
+    hipdnn::ClearForwardedFailure();
+
+    ASSERT_NE(prefixed, nullptr);
+    const std::string text = prefixed;
+    EXPECT_EQ(text.rfind("[hipDNN-forwarded] native", 0), 0u) << text;
+    EXPECT_NE(text.find("hipDNN's reason"), std::string::npos) << text;
+}
+
+TEST(CPU_WrapperRoutingLastError_NONE, IgnoresADifferentStatus)
+{
+    hipdnn::RecordFailure(miopenStatusUnsupportedOp, "hipDNN's reason");
+    const char* const prefixed = hipdnn::PrefixedErrorString(miopenStatusBadParm, "native");
+    hipdnn::ClearForwardedFailure();
+
+    EXPECT_EQ(prefixed, nullptr) << prefixed;
+}
+
+TEST(CPU_WrapperRoutingLastError_NONE, ClearedFailureIsNotPrefixed)
+{
+    hipdnn::RecordFailure(miopenStatusUnsupportedOp, "hipDNN's reason");
+    hipdnn::ClearForwardedFailure();
+
+    EXPECT_EQ(hipdnn::PrefixedErrorString(miopenStatusUnsupportedOp, "native"), nullptr);
+}
 
 } // namespace
 

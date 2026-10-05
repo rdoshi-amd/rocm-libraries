@@ -221,6 +221,8 @@ Route DispatchFromStub(const char* entryPoint, const char* enclosingFunction);
 // forwarding set is compile-time). That keeps hot entry points such as
 // miopenSetTensorDescriptor about as cheap as the plain tail-call they were
 // before the seam existed.
+//
+// Requires hipdnn_graph.hpp to be included, for ClearForwardedFailure.
 #define MIOPEN_WRAPPER_FORWARD(fn, expr)                              \
     do                                                                \
     {                                                                 \
@@ -228,6 +230,7 @@ Route DispatchFromStub(const char* entryPoint, const char* enclosingFunction);
             ::miopen::wrapper::DispatchFromStub(#fn, __func__);       \
         if(miopen_wrapper_route_ == ::miopen::wrapper::Route::Hipdnn) \
             return (expr);                                            \
+        ::miopen::wrapper::hipdnn::ClearForwardedFailure();           \
     } while(false)
 
 // The same seam for the stubs with nowhere to forward to yet:

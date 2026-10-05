@@ -11,9 +11,9 @@ build, and two runs that skipped everything. Comparing two well-formed, agreeing
 files only ever exercises the passing path.
 
 The known-divergence list is covered from the same angle: that it tolerates only
-the divergence it names, that a line which has stopped applying fails rather than
-lingering, and that tolerating one is said out loud instead of reported as a
-clean pass.
+the divergence it names and only on the devices it names, that a line which has
+stopped matching fails rather than lingering, and that tolerating one is said out
+loud instead of reported as a clean pass.
 
 Written against the standard library's unittest rather than pytest: this runs as
 a ctest entry in a wrapper-enabled build, and nothing provisions pytest for a
@@ -40,7 +40,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import compare_forwarding_runs as cmp  # noqa: E402
 
 
-def suite(*cases):
+def suite(*cases, device="gfx942"):
     """Build a JUnit document from (name, status) pairs, statuses as gtest emits them.
 
     "skipped" is a DISABLED_ test, which gtest never starts. "gtest_skipped" is a
@@ -48,8 +48,16 @@ def suite(*cases):
 
     A case may carry a third element, a dict of recorded properties, written the
     way gtest writes them: a properties element inside the testcase.
+
+    The device goes in a properties element under testsuites, as gtest writes a
+    property recorded outside any test. None leaves it out.
     """
     body = []
+    if device is not None:
+        body.append(
+            '<properties><property name="forwarding_parity_device" value="{}"/>'
+            "</properties>".format(device)
+        )
     for case in cases:
         name, status = case[0], case[1]
         inner = ""
@@ -79,9 +87,10 @@ def suite(*cases):
 SERVED = ("A", "passed", {"parity_served_case": "true"})
 DECLINED = ("A", "passed", {"parity_served_case": "false"})
 KNOWN_LINE = (
-    "Shim.A | passed[parity_served_case=true] | passed[parity_served_case=false] "
+    "Shim.A | gfx942 | passed[parity_served_case=true] | passed[parity_served_case=false] "
     "| the forwarded path cannot express this problem"
 )
+OTHER_ARCH_LINE = KNOWN_LINE.replace("gfx942", "gfx90a")
 
 
 def aged(path, seconds):
@@ -273,19 +282,115 @@ class ComparatorTest(unittest.TestCase):
     def test_a_listed_divergence_that_stopped_happening_fails(self):
         rc, _, err = self.compare(suite(SERVED), suite(SERVED), known=KNOWN_LINE)
         self.assertEqual(rc, 1)
-        self.assertIn("no longer diverges", err)
-        self.assertIn("remove its line", err)
+        self.assertIn("no longer diverges on gfx942", err)
+        self.assertIn("update or delete its line", err)
 
-    def test_a_listed_divergence_declined_in_both_modes_is_not_stale(self):
-        # On a device with no engine for the case, forwarding off declines it too. The
-        # runs agree, but the gap is still open on devices where MIOpen serves the case.
+    def test_a_listed_divergence_closed_by_a_native_fix_fails(self):
+        # MIOpen fixed its own bug, so the disabled outcome is the one that changed.
+        listing = (
+            "Shim.A | gfx942 | passed[parity_correct_c=false] | "
+            "passed[parity_correct_c=true] | MIOpen reuses the wrong invoker"
+        )
+        fixed = suite(("A", "passed", {"parity_correct_c": "true"}))
+        rc, _, err = self.compare(fixed, fixed, known=listing)
+        self.assertEqual(rc, 1)
+        self.assertIn("no longer diverges", err)
+        self.assertIn("parity_correct_c=true", err)
+
+    def test_a_listed_divergence_declined_in_both_modes_fails_where_it_applies(self):
         rc, _, err = self.compare(suite(DECLINED), suite(DECLINED), known=KNOWN_LINE)
+        self.assertEqual(rc, 1)
+        self.assertIn("no longer diverges", err)
+
+    def test_a_listed_divergence_declined_in_both_modes_passes_on_another_arch(self):
+        # Where MIOpen has no kernel for the case, both modes decline it.
+        rc, _, err = self.compare(
+            suite(DECLINED), suite(DECLINED), known=OTHER_ARCH_LINE
+        )
         self.assertEqual(rc, 0, err)
 
-    def test_a_listed_divergence_skipped_in_both_modes_is_not_stale(self):
+    def test_a_listed_divergence_skipped_in_both_modes_fails_where_it_applies(self):
         xml = suite(("A", "gtest_skipped"), ("B", "passed"))
         rc, _, err = self.compare(xml, xml, known=KNOWN_LINE)
+        self.assertEqual(rc, 1)
+        self.assertIn("no longer diverges", err)
+
+    def test_a_listed_divergence_skipped_in_both_modes_passes_on_another_arch(self):
+        xml = suite(("A", "gtest_skipped"), ("B", "passed"))
+        rc, _, err = self.compare(xml, xml, known=OTHER_ARCH_LINE)
         self.assertEqual(rc, 0, err)
+
+    def test_a_different_divergence_on_a_listed_arch_points_at_the_line(self):
+        rc, _, err = self.compare(
+            suite(SERVED), suite(("A", "failed")), known=KNOWN_LINE
+        )
+        self.assertEqual(rc, 1)
+        self.assertIn("update or delete that line", err)
+
+    def test_an_entry_for_another_arch_tolerates_nothing_here(self):
+        rc, _, err = self.compare(suite(SERVED), suite(DECLINED), known=OTHER_ARCH_LINE)
+        self.assertEqual(rc, 1)
+        self.assertIn(
+            "disabled=passed[parity_served_case=true] "
+            "enabled=passed[parity_served_case=false]",
+            err,
+        )
+
+    def test_an_entry_for_all_archs_applies_on_any_device(self):
+        listing = KNOWN_LINE.replace("gfx942", "all")
+        rc, out, err = self.compare(
+            suite(SERVED, device="gfx1030"),
+            suite(DECLINED, device="gfx1030"),
+            known=listing,
+        )
+        self.assertEqual(rc, 0, err)
+        self.assertIn("1 known divergence tolerated", out)
+
+    def test_an_entry_listing_several_archs_applies_on_each(self):
+        listing = KNOWN_LINE.replace("gfx942", "gfx90a, gfx942")
+        rc, _, err = self.compare(suite(SERVED), suite(DECLINED), known=listing)
+        self.assertEqual(rc, 0, err)
+
+    def test_a_report_without_a_device_cannot_be_matched_to_the_list(self):
+        rc, _, err = self.compare(
+            suite(SERVED, device=None), suite(DECLINED, device=None), known=KNOWN_LINE
+        )
+        self.assertEqual(rc, 1)
+        self.assertIn("neither report names the device", err)
+
+    def test_a_report_without_a_device_is_fine_without_a_list(self):
+        xml = suite(("A", "passed"), device=None)
+        rc, _, err = self.compare(xml, xml)
+        self.assertEqual(rc, 0, err)
+
+    def test_replays_on_different_devices_are_rejected(self):
+        rc, _, err = self.compare(
+            suite(SERVED, device="gfx942"), suite(SERVED, device="gfx90a")
+        )
+        self.assertEqual(rc, 1)
+        self.assertIn("different devices", err)
+
+    def test_a_device_written_as_an_attribute_is_also_read(self):
+        # Older gtest releases write a property recorded outside any test as an
+        # attribute on testsuites.
+        xml = (
+            '<?xml version="1.0"?><testsuites forwarding_parity_device="gfx942">'
+            '<testcase name="A" classname="Shim"><properties>'
+            '<property name="parity_served_case" value="{}"/></properties></testcase>'
+            "</testsuites>"
+        )
+        rc, _, err = self.compare(
+            xml.format("true"), xml.format("false"), known=KNOWN_LINE
+        )
+        self.assertEqual(rc, 0, err)
+
+    def test_a_malformed_arch_field_is_rejected(self):
+        for archs in ("942", "gfx942,", "all,gfx942", "GFX942"):
+            with self.subTest(archs=archs):
+                listing = KNOWN_LINE.replace("gfx942", archs)
+                rc, _, err = self.compare(suite(SERVED), suite(DECLINED), known=listing)
+                self.assertEqual(rc, 1)
+                self.assertIn("archs field", err)
 
     def test_a_listed_test_absent_from_the_run_is_not_stale(self):
         # The discrete build registers the harness against several binaries, and only
@@ -305,7 +410,7 @@ class ComparatorTest(unittest.TestCase):
 
     def test_a_malformed_list_line_is_not_skipped_over(self):
         rc, _, err = self.compare(
-            suite(SERVED), suite(DECLINED), known="Shim.A | passed | failed"
+            suite(SERVED), suite(DECLINED), known="Shim.A | gfx942 | passed | failed"
         )
         self.assertEqual(rc, 1)
         self.assertIn("line 1", err)

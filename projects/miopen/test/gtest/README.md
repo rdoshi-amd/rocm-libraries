@@ -121,17 +121,27 @@ cannot overwrite each other — gtest replaces a property recorded twice under t
 ### Known divergences
 
 `known_forwarding_divergences.txt` lists divergences that are accepted for now. Each line names
-a test, the outcome expected from each replay, and why the gap exists. A matching divergence is
-printed and tolerated; anything else still fails.
+a test, the devices the gap is open on (`all`, or a comma-separated list of gfx names such as
+`gfx90a,gfx942`), the outcome expected from each replay, and why the gap exists. A matching
+divergence is printed and tolerated; anything else still fails.
 
-Two rules make the list safe to have:
+The device a run used comes from the test binary itself: a shim test binary records MIOpen's
+device name as the `forwarding_parity_device` property of its report. The comparison refuses to
+run when the two reports name different devices, and when neither names one while the list has
+entries, because then no line can be matched to the run.
 
-- A line that stops applying fails the comparison, which asks for it to be deleted. The list
-  therefore describes gaps that are open today rather than accumulating history.
+Three rules make the list safe to have:
+
+- A line applies only to runs on a device it lists. On any other device it tolerates nothing, so
+  a gap that shows up on a new device fails until someone checks it there.
+- A line that applies to the run but whose test no longer produces exactly those outcomes fails
+  the comparison, which asks for it to be updated or deleted. The list therefore describes gaps
+  that are open today rather than accumulating history. A line whose test is not in the run at
+  all is ignored, because several test binaries share the list.
 - A run that tolerates a line says so in its output and does not print the ordinary success
   line, so a known divergence never reads as a clean pass.
 
-To add one, run the harness, copy the failing line's test name and both outcomes into the
-file, and write down the reason. The list's own rules are covered by
+To add one, run the harness, copy the failing line's test name, the device it ran on, and both
+outcomes into the file, and write down the reason. The list's own rules are covered by
 `test_forwarding_parity_scripts`, or by hand with
 `python3 -m unittest test_compare_forwarding_runs` from `script/`; neither needs a build or GPU.

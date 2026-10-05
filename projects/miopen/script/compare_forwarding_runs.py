@@ -10,8 +10,9 @@ that computed a result and one that was declined the problem do not both count a
 a plain pass.
 
 Divergences listed in --known-divergences are tolerated and printed rather than
-failed, and a listed divergence that has stopped happening fails the comparison
-so the list cannot go stale.
+failed, but only on the devices each line names. A listed divergence that no
+longer matches what this device produced fails the comparison, so the list
+cannot go stale.
 
 Both runs execute the same binary from the same build, so any divergence is a
 behavioural difference introduced by forwarding.
@@ -20,6 +21,7 @@ behavioural difference introduced by forwarding.
 import argparse
 import collections
 import os
+import re
 import sys
 import xml.etree.ElementTree as ET
 
@@ -31,8 +33,13 @@ import xml.etree.ElementTree as ET
 # drop them and leave two runs looking like they agreed.
 PROPERTY_PREFIX = "parity_"
 
+DEVICE_PROPERTY = "forwarding_parity_device"
+
+ALL_ARCHS = "all"
+ARCH_NAME = re.compile(r"gfx[0-9a-z]+")
+
 KnownDivergence = collections.namedtuple(
-    "KnownDivergence", "name disabled enabled reason"
+    "KnownDivergence", "name archs disabled enabled reason"
 )
 
 
@@ -40,15 +47,10 @@ class UnreadableRun(Exception):
     """An XML that cannot be turned into a set of outcomes at all."""
 
 
-def outcomes(path):
-    """Map each test name to the statuses recorded for it, in document order.
-
-    A name maps to a list rather than a single status because a JUnit file can
-    carry the same fully-qualified name more than once, and collapsing those
-    into one entry would hide a divergence between them.
-    """
+def parse_report(path):
+    """Return the root element of one replay's JUnit XML."""
     try:
-        root = ET.parse(path).getroot()
+        return ET.parse(path).getroot()
     except ET.ParseError as exc:
         # What a crashed or killed replay leaves behind. Say so, rather than
         # letting the traceback stand in for a diagnostic.
@@ -59,6 +61,28 @@ def outcomes(path):
     except OSError as exc:
         raise UnreadableRun("{} could not be read ({})".format(path, exc))
 
+
+def device(root):
+    """The device the replay ran on, or None if the report does not name one.
+
+    gtest versions differ in where they write a run-level property, so both
+    places are checked.
+    """
+    if root.get(DEVICE_PROPERTY):
+        return root.get(DEVICE_PROPERTY)
+    for prop in root.findall("properties/property"):
+        if prop.get("name") == DEVICE_PROPERTY:
+            return prop.get("value")
+    return None
+
+
+def outcomes(root):
+    """Map each test name to the statuses recorded for it, in document order.
+
+    A name maps to a list rather than a single status because a JUnit file can
+    carry the same fully-qualified name more than once, and collapsing those
+    into one entry would hide a divergence between them.
+    """
     result = {}
     for case in root.iter("testcase"):
         name = "{}.{}".format(case.get("classname"), case.get("name"))
@@ -85,9 +109,12 @@ def outcomes(path):
 def load_known_divergences(path):
     """Read the list of divergences that are known and accepted.
 
-    Four fields per line, the two outcomes pinned rather than the test name alone:
+    Five fields per line, the two outcomes pinned rather than the test name alone:
     a line keyed on the name would also silence a different divergence appearing
     later in the same test, which is the way an allowlist usually goes wrong.
+
+    Devices are listed explicitly because where MIOpen itself cannot serve a
+    case the two modes agree, which would otherwise look like a closed gap.
     """
     try:
         with open(path) as handle:
@@ -101,16 +128,31 @@ def load_known_divergences(path):
         if not line or line.startswith("#"):
             continue
         fields = [field.strip() for field in line.split("|")]
-        if len(fields) != 4 or not all(fields):
+        if len(fields) != 5 or not all(fields):
             # Rejected rather than skipped: a line that does not parse is one
             # someone meant to have an effect, and skipping it silently would
             # leave them believing it had one.
             raise UnreadableRun(
-                "{} line {} is not <test name> | <disabled outcome> | <enabled outcome> "
-                "| <why it is accepted>: {}".format(path, number, line)
+                "{} line {} is not <test name> | <archs> | <disabled outcome> | "
+                "<enabled outcome> | <why it is accepted>: {}".format(
+                    path, number, line
+                )
             )
-        known.append(KnownDivergence(*fields))
+        name, archs, disabled, enabled, reason = fields
+        arch_list = tuple(arch.strip() for arch in archs.split(","))
+        if arch_list != (ALL_ARCHS,) and not all(
+            ARCH_NAME.fullmatch(arch) for arch in arch_list
+        ):
+            raise UnreadableRun(
+                "{} line {}: the archs field must be {} or a comma-separated list of "
+                "gfx names, not '{}'".format(path, number, ALL_ARCHS, archs)
+            )
+        known.append(KnownDivergence(name, arch_list, disabled, enabled, reason))
     return known
+
+
+def applies(entry, run_device):
+    return entry.archs == (ALL_ARCHS,) or run_device in entry.archs
 
 
 def counts(run):
@@ -163,11 +205,39 @@ def main(disabled_xml, enabled_xml, newer_than=None, known_divergences=None):
         return 1
 
     try:
-        a, b = outcomes(disabled_xml), outcomes(enabled_xml)
+        disabled_root, enabled_root = parse_report(disabled_xml), parse_report(
+            enabled_xml
+        )
         known = load_known_divergences(known_divergences) if known_divergences else []
     except UnreadableRun as exc:
         sys.stderr.write("forwarding parity cannot be checked:\n  {}\n".format(exc))
         return 1
+    a, b = outcomes(disabled_root), outcomes(enabled_root)
+
+    run_device = device(disabled_root)
+    setup_problem = None
+    if run_device != device(enabled_root):
+        setup_problem = (
+            "the replays name different devices (disabled: {}, enabled: {}), so they "
+            "are not two runs of the same thing".format(
+                run_device, device(enabled_root)
+            )
+        )
+    elif run_device is None and known:
+        setup_problem = (
+            "neither report names the device it ran on (the {} property), so the "
+            "entries in {} cannot be matched to it".format(
+                DEVICE_PROPERTY, known_divergences
+            )
+        )
+    if setup_problem:
+        sys.stderr.write(
+            "forwarding parity cannot be checked:\n  {}\n".format(setup_problem)
+        )
+        return 1
+    # Entries for other devices tolerate nothing, so a divergence on an unlisted
+    # device fails as a new one.
+    known_here = [entry for entry in known if applies(entry, run_device)]
 
     problems = []
     tolerated = []
@@ -185,37 +255,37 @@ def main(disabled_xml, enabled_xml, newer_than=None, known_divergences=None):
             continue
         diverged.add(name)
         left, right = describe(a[name]), describe(b[name])
+        listed = [entry for entry in known_here if entry.name == name]
         match = next(
             (
                 entry
-                for entry in known
-                if entry.name == name
-                and entry.disabled == left
-                and entry.enabled == right
+                for entry in listed
+                if entry.disabled == left and entry.enabled == right
             ),
             None,
         )
         if match:
             tolerated.append(match)
-        else:
-            problems.append("{}: disabled={} enabled={}".format(name, left, right))
+            continue
+        problem = "{}: disabled={} enabled={}".format(name, left, right)
+        for entry in listed:
+            problem += (
+                " -- {} lists disabled={} enabled={} for it on {}; update or delete "
+                "that line".format(
+                    known_divergences, entry.disabled, entry.enabled, run_device
+                )
+            )
+        problems.append(problem)
 
-    # The list is policed in both directions. Without this, a line outlives the gap
-    # it describes and goes on silencing a test that has started agreeing, so the
-    # list only ever grows. A listed test missing from the run is left alone: the
-    # harness is registered against several binaries and only one holds any given
-    # test, which is absence rather than staleness. A run whose disabled outcome
-    # differs from the listed one is also left alone: the gap belongs to another
-    # device or build, where the line is still needed.
-    for entry in known:
-        if (
-            entry.name in shared
-            and entry.name not in diverged
-            and describe(a[entry.name]) == entry.disabled
-        ):
+    # Fail lines whose test now agrees, so the list cannot only grow. A listed test
+    # missing from the run is skipped: several binaries share the list.
+    for entry in known_here:
+        if entry.name in shared and entry.name not in diverged:
             problems.append(
-                "{} no longer diverges (both runs report {}) -- remove its line from "
-                "{}".format(entry.name, describe(a[entry.name]), known_divergences)
+                "{} no longer diverges on {} (both runs report {}) -- update or delete "
+                "its line in {}".format(
+                    entry.name, run_device, describe(a[entry.name]), known_divergences
+                )
             )
 
     # Two runs that skipped everything agree perfectly and prove nothing, exactly

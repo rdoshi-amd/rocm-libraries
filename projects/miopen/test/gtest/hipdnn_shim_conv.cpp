@@ -1,195 +1,22 @@
 // Copyright © Advanced Micro Devices, Inc., or its affiliates.
 // SPDX-License-Identifier:  MIT
 
-// Convolution coverage for the hipDNN shim surface. Every call that selects or performs
-// compute goes through a public miopen.h entry point, so that swapping the implementation
-// behind them is the only thing these tests can observe; the handle and the host/device
-// buffer staging around them come from the shared test infrastructure, which the wrapper
-// does not sit in front of. Results are checked against an independent CPU reference rather
-// than a second MIOpen run. The "HipdnnShim" token in each suite name is what selects them
-// into the parity surface; see README.md. CMakeLists.txt builds this file only under
-// MIOPEN_ENABLE_HIPDNN_WRAPPER.
-//
-// Convolution is covered through both public entry points into it, because they are separate
-// code paths that will be swapped over to hipDNN independently.
+// Convolution through each public entry point, since each is forwarded to hipDNN separately.
+// "HipdnnShim" in a suite name is what puts the suite in the parity run; see README.md.
 
-#include <gtest/gtest.h>
-#include "get_handle.hpp"
-#include "gtest_common.hpp"
-#include "../cpu_conv.hpp"
-#include "../verify.hpp"
-#include "../workspace.hpp"
+#include "hipdnn_shim_helpers.hpp"
 
-#include <miopen/miopen.h>
+#include <hip/hip_runtime_api.h>
 
-// Reached by relative path because src/private is deliberately off the test include path.
-#include "../../src/private/routing.hpp"
-
-#include <algorithm>
 #include <array>
-#include <limits>
-#include <string>
-#include <vector>
+#include <atomic>
+#include <chrono>
+#include <cstdint>
+#include <thread>
+
+using namespace hipdnn_shim_test;
 
 namespace {
-
-const std::vector<int> pads{1, 1};
-const std::vector<int> strides{1, 1};
-const std::vector<int> dilations{1, 1};
-constexpr std::size_t group_count = 1;
-
-constexpr float kOne  = 1.0f;
-constexpr float kZero = 0.0f;
-
-// Small enough to stay cheap in a doubled replay, large enough that a wrong kernel cannot
-// coincidentally match the reference.
-tensor<float> MakeInput()
-{
-    tensor<float> x{2, 4, 8, 8};
-    x.generate(tensor_elem_gen_integer{17});
-    return x;
-}
-
-tensor<float> MakeWeights()
-{
-    tensor<float> w{4, 4, 3, 3};
-    w.generate(tensor_elem_gen_integer{17});
-    return w;
-}
-
-// Releases the handle on scope exit, so an ASSERT_* that stops a test early does not leak
-// it into an ASAN lane.
-template <class T, miopenStatus_t (*Destroy)(T)>
-struct Owned
-{
-    Owned()                        = default;
-    Owned(const Owned&)            = delete;
-    Owned& operator=(const Owned&) = delete;
-    ~Owned()
-    {
-        if(handle != nullptr)
-            EXPECT_EQ(Destroy(handle), miopenStatusSuccess);
-    }
-
-    T handle = nullptr;
-};
-
-using OwnedConvDescriptor =
-    Owned<miopenConvolutionDescriptor_t, miopenDestroyConvolutionDescriptor>;
-using OwnedProblem = Owned<miopenProblem_t, miopenDestroyProblem>;
-using OwnedActivationDescriptor =
-    Owned<miopenActivationDescriptor_t, miopenDestroyActivationDescriptor>;
-
-// Every solution the find call handed back, released together on scope exit. Two things keep
-// this safe and both are easy to break by reordering: the guard has to be declared after the
-// vector so it destructs first, and the later resize() to the found count may leave
-// value-initialized entries behind, which is why the loop skips nulls.
-struct OwnedSolutions
-{
-    explicit OwnedSolutions(const std::vector<miopenSolution_t>& s) : solutions(s) {}
-    OwnedSolutions(const OwnedSolutions&)            = delete;
-    OwnedSolutions& operator=(const OwnedSolutions&) = delete;
-    ~OwnedSolutions()
-    {
-        for(auto* solution : solutions)
-        {
-            if(solution != nullptr)
-                EXPECT_EQ(miopenDestroySolution(solution), miopenStatusSuccess);
-        }
-    }
-
-    const std::vector<miopenSolution_t>& solutions;
-};
-
-// ASSERT_* rather than EXPECT_*: on a failure here conv.handle stays null and every call below
-// would be handed a null descriptor, burying the real failure under a cascade of secondary
-// ones. A fatal failure only returns from this function, so callers wrap the call in
-// ASSERT_NO_FATAL_FAILURE to actually stop.
-void InitConvDescriptor(OwnedConvDescriptor& conv,
-                        miopenConvolutionMode_t mode           = miopenConvolution,
-                        const std::vector<int>& conv_pads      = pads,
-                        const std::vector<int>& conv_strides   = strides,
-                        const std::vector<int>& conv_dilations = dilations)
-{
-    ASSERT_EQ(miopenCreateConvolutionDescriptor(&conv.handle), miopenStatusSuccess);
-    ASSERT_EQ(miopenInitConvolutionNdDescriptor(conv.handle,
-                                                static_cast<int>(conv_pads.size()),
-                                                conv_pads.data(),
-                                                conv_strides.data(),
-                                                conv_dilations.data(),
-                                                mode),
-              miopenStatusSuccess);
-}
-
-// Ask the library for the output shape rather than recomputing it here, so the shape is part
-// of what the two implementations must agree on.
-// Takes its tensors by non-const reference because the C entry point spells its descriptor
-// parameters `const miopenTensorDescriptor_t` — a const pointer to a non-const descriptor —
-// so a descriptor reached through a const tensor does not convert.
-// Fatal on failure: a failed query leaves an empty output, and an empty output compares
-// equal to an empty reference.
-template <class T>
-void OutputLengths(miopenConvolutionDescriptor_t conv_desc,
-                   tensor<T>& x,
-                   tensor<T>& w,
-                   std::vector<std::size_t>& out_lengths)
-{
-    const auto expected_dims = x.desc.GetNumDims();
-    int out_dim_count        = 0;
-    std::vector<int> out_dims(expected_dims);
-    ASSERT_EQ(miopenGetConvolutionNdForwardOutputDim(
-                  conv_desc, &x.desc, &w.desc, &out_dim_count, out_dims.data()),
-              miopenStatusSuccess);
-    ASSERT_EQ(out_dim_count, static_cast<int>(expected_dims));
-    out_lengths.assign(out_dims.begin(), out_dims.end());
-}
-
-// Scaffolding, not code under test, so internal helpers are fine in the reference checks; what
-// matters is that the reference is not another MIOpen solver.
-template <class T>
-void CheckWithinTolerance(const tensor<T>& reference, const tensor<T>& got, const char* what)
-{
-    // rms_range() is 0 for two empty or two all-zero ranges, so without these a run that
-    // produced nothing would pass.
-    ASSERT_FALSE(miopen::range_zero(reference)) << what << ": CPU reference is all zeros";
-    ASSERT_FALSE(miopen::range_zero(got)) << what << ": GPU result is all zeros";
-    ASSERT_EQ(miopen::range_distance(reference), miopen::range_distance(got)) << what;
-    ASSERT_LT(miopen::find_idx(reference, miopen::not_finite), 0)
-        << what << ": non-finite value in the CPU reference";
-
-    // Cross-implementation comparison, not bit-reproducibility: same tolerance used by
-    // ConvFwdSolverTestBase::ThresholdChecks() for FP32.
-    const double tolerance = std::numeric_limits<T>::epsilon() * 80;
-    const double error     = miopen::rms_range(reference, got);
-    EXPECT_LT(error, tolerance) << what << " beyond cross-implementation tolerance";
-}
-
-void CheckMatchesCpuReference(const tensor<float>& x, const tensor<float>& w, tensor<float>& y)
-{
-    tensor<float> ref_y{y.desc.GetLengths()};
-    cpu_convolution_forward(pads.size(), x, w, ref_y, pads, strides, dilations, group_count);
-    CheckWithinTolerance(ref_y, y, "convolution result");
-}
-
-void CheckMatchesCpuBackwardData(const tensor<float>& dx,
-                                 const tensor<float>& w,
-                                 const tensor<float>& dy)
-{
-    tensor<float> ref_dx{dx.desc.GetLengths()};
-    cpu_convolution_backward_data(
-        pads.size(), ref_dx, w, dy, pads, strides, dilations, group_count);
-    CheckWithinTolerance(ref_dx, dx, "backward-data result");
-}
-
-void CheckMatchesCpuBackwardWeights(const tensor<float>& x,
-                                    const tensor<float>& dw,
-                                    const tensor<float>& dy)
-{
-    tensor<float> ref_dw{dw.desc.GetLengths()};
-    cpu_convolution_backward_weight(
-        pads.size(), x, ref_dw, dy, pads, strides, dilations, group_count);
-    CheckWithinTolerance(ref_dw, dw, "backward-weights result");
-}
 
 // Half precision in a channels-last layout, because the only MIOpen solver that matches the
 // four-operation plan this entry point always builds requires both. Whole numbers in [-4, 4]
@@ -262,26 +89,6 @@ void CheckMatchesCpuBiasActivation(const FusedCase& config,
     CheckWithinTolerance(ref_y, y, "fused bias+activation result");
 }
 
-// Whether the library computed the result or declined the problem, written into the JUnit XML
-// where the parity comparison can read it. Both endings leave the test passing, so without this
-// a replay that served the case and a replay that refused it are the same three characters in
-// the report, and the comparison calls the two modes agreed.
-//
-// Keyed by case name: gtest replaces a property that is recorded twice, so one key shared by
-// every case would describe only whichever ran last.
-void RecordServed(const std::string& case_name, bool served)
-{
-    ::testing::Test::RecordProperty("parity_served_" + case_name, served ? "true" : "false");
-}
-
-// The decline rules live on the hipDNN side, so there is nothing to assert when the run is
-// serving these calls from MIOpen. The mode is fixed for the life of the process, which is
-// why it is read rather than set.
-bool ForwardingEnabled()
-{
-    return miopen::wrapper::GetForwardingMode() == miopen::wrapper::ForwardingMode::Enabled;
-}
-
 // The setup the forward tests share: the same input, weights and convolution, the output shape
 // the library reports for them, and all three tensors on the device. A fatal failure in SetUp()
 // skips the test body, and the members still clean up.
@@ -332,7 +139,10 @@ class GPU_HipdnnShimConvDeclined_FP32 : public HipdnnShimConvFwd
 protected:
     // Runs the fused entry point on the fixture's problem. z is always passed because the
     // entry point needs a valid descriptor, even when alpha2 = 0 drops it.
-    void RunFused(const float* alpha2, miopenActivationMode_t mode, miopenStatus_t& status)
+    void RunFused(const float* alpha2,
+                  miopenActivationMode_t mode,
+                  miopenStatus_t& status,
+                  std::string* message = nullptr)
     {
         tensor<float> bias{1, 4, 1, 1};
         tensor<float> z{y.desc.GetLengths()};
@@ -362,7 +172,92 @@ protected:
                                                         activation.handle,
                                                         &y.desc,
                                                         y_dev.get());
+        // Read now: MIOpen serves the activation descriptor's release, which clears the
+        // forwarded failure.
+        if(message != nullptr)
+            *message = miopenGetErrorString(status);
     }
+};
+
+template <class T, hipError_t (*Destroy)(T)>
+struct OwnedHip
+{
+    OwnedHip()                           = default;
+    OwnedHip(const OwnedHip&)            = delete;
+    OwnedHip& operator=(const OwnedHip&) = delete;
+    ~OwnedHip()
+    {
+        if(handle != nullptr)
+            EXPECT_EQ(Destroy(handle), hipSuccess);
+    }
+
+    T handle = nullptr;
+};
+
+using OwnedStream = OwnedHip<hipStream_t, hipStreamDestroy>;
+using OwnedEvent  = OwnedHip<hipEvent_t, hipEventDestroy>;
+
+// Holds back the work queued on a stream after Close() until Open(), so a test can order work
+// across streams without relying on timing.
+class StreamGate
+{
+public:
+    StreamGate()                             = default;
+    StreamGate(const StreamGate&)            = delete;
+    StreamGate& operator=(const StreamGate&) = delete;
+
+    // Opens first, so a test that stops early does not leave the stream blocked.
+    ~StreamGate()
+    {
+        Open();
+        if(stream_ != nullptr)
+            static_cast<void>(hipStreamSynchronize(stream_));
+        if(flag_ != nullptr)
+            static_cast<void>(hipHostFree(flag_));
+    }
+
+    void Close(hipStream_t stream)
+    {
+        stream_ = stream;
+
+        int device            = 0;
+        int can_wait_on_value = 0;
+        ASSERT_EQ(hipGetDevice(&device), hipSuccess);
+        ASSERT_EQ(hipDeviceGetAttribute(
+                      &can_wait_on_value, hipDeviceAttributeCanUseStreamWaitValue, device),
+                  hipSuccess);
+        if(can_wait_on_value == 0)
+        {
+            ASSERT_EQ(hipLaunchHostFunc(stream, &StreamGate::Wait, this), hipSuccess);
+            return;
+        }
+
+        void* flag = nullptr;
+        ASSERT_EQ(hipHostMalloc(
+                      &flag, sizeof(std::uint32_t), hipHostMallocMapped | hipHostMallocCoherent),
+                  hipSuccess);
+        flag_  = static_cast<std::uint32_t*>(flag);
+        *flag_ = 0;
+        ASSERT_EQ(hipStreamWaitValue32(stream, flag_, 1, hipStreamWaitValueEq), hipSuccess);
+    }
+
+    void Open()
+    {
+        if(flag_ != nullptr)
+            std::atomic_ref<std::uint32_t>(*flag_).store(1);
+        opened_.store(true);
+    }
+
+private:
+    static void Wait(void* gate)
+    {
+        while(!static_cast<StreamGate*>(gate)->opened_.load())
+            std::this_thread::yield();
+    }
+
+    hipStream_t stream_  = nullptr;
+    std::uint32_t* flag_ = nullptr;
+    std::atomic<bool> opened_{false};
 };
 
 } // namespace
@@ -592,6 +487,145 @@ TEST(GPU_HipdnnShimConvBwdWeightsApi_FP32, BackwardWeightsMatchesCpuReference)
     CheckMatchesCpuBackwardWeights(x, dw, dy);
 }
 
+// Forwarded calls on one handle share a workspace. The gate holds back the call on stream A, so
+// the call on stream B can finish first only if it does not wait for A.
+TEST(GPU_HipdnnShimConvStreamSwitch_FP32, CallAfterStreamSwitchWaitsForOldStream)
+{
+    OwnedStream stream_a;
+    OwnedStream stream_b;
+    ASSERT_EQ(hipStreamCreate(&stream_a.handle), hipSuccess);
+    ASSERT_EQ(hipStreamCreate(&stream_b.handle), hipSuccess);
+    OwnedEvent event_a;
+    OwnedEvent event_b;
+    ASSERT_EQ(hipEventCreate(&event_a.handle), hipSuccess);
+    ASSERT_EQ(hipEventCreate(&event_b.handle), hipSuccess);
+
+    // Its own handle, since the test changes its stream. Declared after the streams so it is
+    // destroyed first.
+    Owned<miopenHandle_t, miopenDestroy> owned_handle;
+    ASSERT_EQ(miopenCreateWithStream(&owned_handle.handle, stream_a.handle), miopenStatusSuccess);
+    miopenHandle_t handle = owned_handle.handle;
+
+    // The MIOpen provider needs workspace for this problem, so both calls use the shared one.
+    const ConvGeometry geometry{{1, 1, 1}, {1, 1, 1}, {1, 1, 1}};
+    tensor<float> x1{1, 4, 6, 8, 8};
+    x1.generate(tensor_elem_gen_integer{17});
+    tensor<float> x2{1, 4, 6, 8, 8};
+    x2.generate(tensor_elem_gen_integer{13});
+    tensor<float> w{4, 4, 3, 3, 3};
+    w.generate(tensor_elem_gen_integer{17});
+    OwnedConvDescriptor conv;
+    ASSERT_NO_FATAL_FAILURE(InitConvDescriptor(conv, miopenConvolution, geometry));
+    std::vector<std::size_t> out_lengths;
+    ASSERT_NO_FATAL_FAILURE(OutputLengths(conv.handle, x1, w, out_lengths));
+    tensor<float> y1{out_lengths};
+    tensor<float> y2{out_lengths};
+
+    auto& staging = get_handle();
+    auto x1_dev   = staging.Write(x1.data);
+    auto x2_dev   = staging.Write(x2.data);
+    auto w_dev    = staging.Write(w.data);
+    auto y1_dev   = staging.Write(y1.data);
+    auto y2_dev   = staging.Write(y2.data);
+
+    std::size_t workspace_size = 0;
+    ASSERT_EQ(miopenConvolutionForwardGetWorkSpaceSize(
+                  handle, &w.desc, &x1.desc, conv.handle, &y1.desc, &workspace_size),
+              miopenStatusSuccess);
+    Workspace workspace1{workspace_size};
+    Workspace workspace2{workspace_size};
+
+    int returned_algo_count = 0;
+    miopenConvAlgoPerf_t perf{};
+    ASSERT_EQ(miopenFindConvolutionForwardAlgorithm(handle,
+                                                    &x1.desc,
+                                                    x1_dev.get(),
+                                                    &w.desc,
+                                                    w_dev.get(),
+                                                    conv.handle,
+                                                    &y1.desc,
+                                                    y1_dev.get(),
+                                                    1,
+                                                    &returned_algo_count,
+                                                    &perf,
+                                                    workspace1.ptr(),
+                                                    workspace1.size(),
+                                                    false),
+              miopenStatusSuccess);
+    ASSERT_GT(returned_algo_count, 0);
+
+    auto forward = [&](tensor<float>& x,
+                       const miopen::Allocator::ManageDataPtr& x_dev,
+                       tensor<float>& y,
+                       const miopen::Allocator::ManageDataPtr& y_dev,
+                       Workspace& workspace) {
+        return miopenConvolutionForward(handle,
+                                        &kOne,
+                                        &x.desc,
+                                        x_dev.get(),
+                                        &w.desc,
+                                        w_dev.get(),
+                                        conv.handle,
+                                        perf.fwd_algo,
+                                        &kZero,
+                                        &y.desc,
+                                        y_dev.get(),
+                                        workspace.ptr(),
+                                        workspace.size());
+    };
+
+    // Warm up on each stream. Building the plan or growing the workspace during the gated part
+    // would make the host wait, which hides the race.
+    ASSERT_EQ(forward(x1, x1_dev, y1, y1_dev, workspace1), miopenStatusSuccess);
+    ASSERT_EQ(miopenSetStream(handle, stream_b.handle), miopenStatusSuccess);
+    ASSERT_EQ(forward(x2, x2_dev, y2, y2_dev, workspace2), miopenStatusSuccess);
+    ASSERT_EQ(miopenSetStream(handle, stream_a.handle), miopenStatusSuccess);
+    ASSERT_EQ(hipStreamSynchronize(stream_a.handle), hipSuccess);
+    ASSERT_EQ(hipStreamSynchronize(stream_b.handle), hipSuccess);
+
+    StreamGate gate;
+    ASSERT_NO_FATAL_FAILURE(gate.Close(stream_a.handle));
+
+    // Started before the gated calls, so a call that makes the host wait for stream A fails
+    // late instead of hanging. Nothing may return before the join.
+    std::thread opener([&gate] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        gate.Open();
+    });
+
+    const miopenStatus_t status1  = forward(x1, x1_dev, y1, y1_dev, workspace1);
+    const hipError_t record_a     = hipEventRecord(event_a.handle, stream_a.handle);
+    const miopenStatus_t switched = miopenSetStream(handle, stream_b.handle);
+    const miopenStatus_t status2  = forward(x2, x2_dev, y2, y2_dev, workspace2);
+    const hipError_t record_b     = hipEventRecord(event_b.handle, stream_b.handle);
+
+    const hipError_t waited_b = hipEventSynchronize(event_b.handle);
+    const hipError_t a_done   = hipEventQuery(event_a.handle);
+
+    opener.join();
+    ASSERT_EQ(hipStreamSynchronize(stream_a.handle), hipSuccess);
+    ASSERT_EQ(hipStreamSynchronize(stream_b.handle), hipSuccess);
+
+    ASSERT_EQ(status1, miopenStatusSuccess);
+    ASSERT_EQ(record_a, hipSuccess);
+    ASSERT_EQ(switched, miopenStatusSuccess);
+    ASSERT_EQ(status2, miopenStatusSuccess);
+    ASSERT_EQ(record_b, hipSuccess);
+    ASSERT_EQ(waited_b, hipSuccess);
+
+    // MIOpen uses each caller's own workspace, so natively B may finish first.
+    if(ForwardingEnabled())
+    {
+        EXPECT_EQ(a_done, hipSuccess)
+            << "the call on stream B finished while the call on stream A was still waiting";
+    }
+
+    y1.data = staging.Read<float>(y1_dev, y1.data.size());
+    y2.data = staging.Read<float>(y2_dev, y2.data.size());
+    CheckMatchesCpuReference(x1, w, y1, geometry);
+    CheckMatchesCpuReference(x2, w, y2, geometry);
+}
+
 void RunFusedCase(const FusedCase& config)
 {
     SCOPED_TRACE(config.name);
@@ -607,7 +641,7 @@ void RunFusedCase(const FusedCase& config)
 
     const std::vector<int> unit(config.pads.size(), 1);
     OwnedConvDescriptor conv;
-    ASSERT_NO_FATAL_FAILURE(InitConvDescriptor(conv, miopenConvolution, config.pads, unit, unit));
+    ASSERT_NO_FATAL_FAILURE(InitConvDescriptor(conv, miopenConvolution, {config.pads, unit, unit}));
     std::vector<std::size_t> out_lengths;
     ASSERT_NO_FATAL_FAILURE(OutputLengths(conv.handle, x, w, out_lengths));
     tensor<FusedType> y{config.layout, out_lengths};
@@ -683,6 +717,16 @@ TEST(GPU_HipdnnShimConvBiasActivApi_FP16, FusedForwardMatchesCpuReference)
         ASSERT_NO_FATAL_FAILURE(RunFusedCase(config));
 }
 
+// fp16, so the forwarded graph is served only if its bias add computes in the bias type (in
+// fp32 that is also the compute type). NCHW because MIOpen declines it before launching a
+// kernel, so it cannot fault the test process. Both modes decline it on gfx90a, where the
+// MIOpen provider turns fusion off.
+TEST(GPU_HipdnnShimConvBiasActiv2d_FP16, FusedForwardMatchesCpuReference)
+{
+    ASSERT_NO_FATAL_FAILURE(RunFusedCase(
+        FusedCase{"2d-nchw", miopenTensorNCHW, {1, 16, 8, 8}, {16, 16, 3, 3}, {1, 1}}));
+}
+
 // MIOpen accepts int8 input and weights with an int32 output, so the forwarded path must keep
 // each tensor's type instead of declining the mix. No hipDNN provider has an int8 convolution
 // engine yet, so with forwarding on this is declined, and the parity run lists it as a known
@@ -754,8 +798,11 @@ TEST(GPU_HipdnnShimConvMixedTypeApi_I8, Int8InInt32OutMatchesCpuReference)
         const std::string message = miopenGetErrorString(status);
         EXPECT_NE(message.find("[hipDNN-forwarded]"), std::string::npos)
             << "decline did not come from hipDNN: " << message;
-        EXPECT_EQ(message.find("not expressible as a hipDNN graph"), std::string::npos)
-            << "the mixed types were refused instead of translated: " << message;
+        for(const char* check_reason : {"has no hipDNN convolution", "not forwarded to hipDNN"})
+        {
+            EXPECT_EQ(message.find(check_reason), std::string::npos)
+                << "the mixed types were refused instead of translated: " << message;
+        }
         return;
     }
     ASSERT_EQ(status, miopenStatusSuccess);
@@ -763,65 +810,114 @@ TEST(GPU_HipdnnShimConvMixedTypeApi_I8, Int8InInt32OutMatchesCpuReference)
 
     y.data = handle_deref.Read<int>(y_dev, y.data.size());
     tensor<int> ref_y{out_lengths};
-    cpu_convolution_forward(pads.size(), x, w, ref_y, pads, strides, dilations, group_count);
+    const ConvGeometry geometry;
+    cpu_convolution_forward(geometry.pads.size(),
+                            x,
+                            w,
+                            ref_y,
+                            geometry.pads,
+                            geometry.strides,
+                            geometry.dilations,
+                            group_count);
     ASSERT_FALSE(miopen::range_zero(ref_y)) << "CPU reference is all zeros";
     // Integer arithmetic, so the results must match exactly.
     EXPECT_EQ(ref_y.data, y.data);
 }
 
-// Every problem here is one MIOpen itself accepts. What is being checked is that the hipDNN
-// path recognises it cannot express them and says so, instead of quietly producing a result
-// that is wrong in a way no tolerance would catch.
-TEST_F(GPU_HipdnnShimConvDeclined_FP32, UnexpressibleProblemsReturnUnsupported)
+// One call per check the forwarded path makes before building a graph. Forwarding only, since
+// natively several of these problems are malformed or crash. The reason is checked, not just
+// the status, because a hipDNN decline for lack of an engine would hide a missing check. The
+// data-type check has no case: no type the public API can describe reaches it.
+TEST_F(GPU_HipdnnShimConvDeclined_FP32, UnsupportedProblemsAreDeclinedWithReason)
 {
     if(!ForwardingEnabled())
         return;
 
-    // The declines happen before any hipDNN object is built, so no workspace is needed to
-    // reach them.
-    auto forward = [&](const float alpha, const float beta, miopenConvolutionDescriptor_t c) {
-        return miopenConvolutionForward(handle,
-                                        &alpha,
-                                        &x.desc,
-                                        x_dev.get(),
-                                        &w.desc,
-                                        w_dev.get(),
-                                        c,
-                                        miopenConvolutionFwdAlgoGEMM,
-                                        &beta,
-                                        &y.desc,
-                                        y_dev.get(),
-                                        nullptr,
-                                        0);
+    auto expect_declined_because = [](miopenStatus_t status, const char* reason) {
+        EXPECT_EQ(status, miopenStatusUnsupportedOp) << reason;
+        const std::string message = miopenGetErrorString(status);
+        EXPECT_NE(message.find(reason), std::string::npos) << message;
     };
 
-    EXPECT_EQ(forward(2.0f, 0.0f, conv.handle), miopenStatusUnsupportedOp) << "alpha != 1";
-    EXPECT_EQ(forward(1.0f, 1.0f, conv.handle), miopenStatusUnsupportedOp) << "beta != 0";
+    // The declines happen before any hipDNN object is built, so no workspace is needed to
+    // reach them.
+    auto forward = [&](const float* alpha,
+                       const float* beta,
+                       tensor<float>& in,
+                       tensor<float>& weights,
+                       miopenConvolutionDescriptor_t c,
+                       tensor<float>& out) {
+        auto in_dev       = handle_deref.Write(in.data);
+        auto weights_dev  = handle_deref.Write(weights.data);
+        auto out_dev      = handle_deref.Write(out.data);
+        const auto status = miopenConvolutionForward(handle,
+                                                     alpha,
+                                                     &in.desc,
+                                                     in_dev.get(),
+                                                     &weights.desc,
+                                                     weights_dev.get(),
+                                                     c,
+                                                     miopenConvolutionFwdAlgoGEMM,
+                                                     beta,
+                                                     &out.desc,
+                                                     out_dev.get(),
+                                                     nullptr,
+                                                     0);
+        // With a check missing the call is served, so its work must finish before the buffers
+        // are freed.
+        handle_deref.Finish();
+        return status;
+    };
+
+    const float two = 2.0f;
+    expect_declined_because(forward(&two, &kZero, x, w, conv.handle, y),
+                            "supports only alpha=1, beta=0");
+    expect_declined_because(forward(&kOne, &kOne, x, w, conv.handle, y),
+                            "supports only alpha=1, beta=0");
+    expect_declined_because(forward(nullptr, &kZero, x, w, conv.handle, y),
+                            "supports only alpha=1, beta=0");
+
+    {
+        tensor<float> vectorized_x{miopenTensorNCHWc4, x.desc.GetLengths()};
+        tensor<float> vectorized_w{miopenTensorNCHWc4, w.desc.GetLengths()};
+        expect_declined_because(forward(&kOne, &kZero, vectorized_x, vectorized_w, conv.handle, y),
+                                "vectorized tensor layouts");
+    }
 
     {
         OwnedConvDescriptor grouped;
         ASSERT_NO_FATAL_FAILURE(InitConvDescriptor(grouped));
         ASSERT_EQ(miopenSetConvolutionGroupCount(grouped.handle, 2), miopenStatusSuccess);
-
         tensor<float> grouped_w{4, 2, 3, 3};
-        grouped_w.generate(tensor_elem_gen_integer{17});
-        auto grouped_w_dev = handle_deref.Write(grouped_w.data);
+        expect_declined_because(forward(&kOne, &kZero, x, grouped_w, grouped.handle, y),
+                                "grouped convolution is not forwarded");
+    }
 
-        EXPECT_EQ(miopenConvolutionForward(handle,
-                                           &kOne,
-                                           &x.desc,
-                                           x_dev.get(),
-                                           &grouped_w.desc,
-                                           grouped_w_dev.get(),
-                                           grouped.handle,
-                                           miopenConvolutionFwdAlgoGEMM,
-                                           &kZero,
-                                           &y.desc,
-                                           y_dev.get(),
-                                           nullptr,
-                                           0),
-                  miopenStatusUnsupportedOp)
-            << "group count != 1";
+    {
+        const ConvGeometry geometry{{1}, {1}, {1}};
+        OwnedConvDescriptor one_d;
+        ASSERT_NO_FATAL_FAILURE(InitConvDescriptor(one_d, miopenConvolution, geometry));
+        // Written out because MIOpen's output-size query fails for 1-D. A pad of 1 around a
+        // 3-wide filter keeps the length.
+        tensor<float> one_d_x{std::vector<std::size_t>{2, 4, 8}};
+        tensor<float> one_d_w{std::vector<std::size_t>{4, 4, 3}};
+        tensor<float> one_d_y{std::vector<std::size_t>{2, 4, 8}};
+        expect_declined_because(forward(&kOne, &kZero, one_d_x, one_d_w, one_d.handle, one_d_y),
+                                "only 2-D and 3-D convolutions");
+    }
+
+    {
+        const ConvGeometry geometry{{0, 0, 0, 0}, {1, 1, 1, 1}, {1, 1, 1, 1}};
+        OwnedConvDescriptor four_d;
+        ASSERT_NO_FATAL_FAILURE(InitConvDescriptor(four_d, miopenConvolution, geometry));
+        // A 1x1x1x1 filter with no padding keeps the input's shape. Left zeroed because the
+        // element generator does not take six dimensions.
+        const std::vector<std::size_t> lengths{1, 1, 2, 2, 2, 2};
+        tensor<float> four_d_x{lengths};
+        tensor<float> four_d_w{std::vector<std::size_t>(6, 1)};
+        tensor<float> four_d_y{lengths};
+        expect_declined_because(forward(&kOne, &kZero, four_d_x, four_d_w, four_d.handle, four_d_y),
+                                "only 2-D and 3-D convolutions");
     }
 
     {
@@ -830,107 +926,15 @@ TEST_F(GPU_HipdnnShimConvDeclined_FP32, UnexpressibleProblemsReturnUnsupported)
         std::vector<std::size_t> transposed_lengths;
         ASSERT_NO_FATAL_FAILURE(OutputLengths(transposed.handle, x, w, transposed_lengths));
         tensor<float> transposed_y{transposed_lengths};
-        auto transposed_y_dev = handle_deref.Write(transposed_y.data);
-
-        EXPECT_EQ(miopenConvolutionForward(handle,
-                                           &kOne,
-                                           &x.desc,
-                                           x_dev.get(),
-                                           &w.desc,
-                                           w_dev.get(),
-                                           transposed.handle,
-                                           miopenConvolutionFwdAlgoGEMM,
-                                           &kZero,
-                                           &transposed_y.desc,
-                                           transposed_y_dev.get(),
-                                           nullptr,
-                                           0),
-                  miopenStatusUnsupportedOp)
-            << "transposed convolution";
+        expect_declined_because(forward(&kOne, &kZero, x, w, transposed.handle, transposed_y),
+                                "transposed convolution is not forwarded");
     }
 
-    // If the next two got past the checks, they would give a wrong answer, not an error. hipDNN
-    // may also decline them for lack of an engine, which would hide a missing check, so the
-    // message must show that the up-front checks declined them.
-    auto expect_declined_by_checks = [](miopenStatus_t status, const char* what) {
-        EXPECT_EQ(status, miopenStatusUnsupportedOp) << what;
-        const std::string message = miopenGetErrorString(status);
-        EXPECT_NE(message.find("not expressible as a hipDNN graph"), std::string::npos)
-            << what << ": " << message;
-    };
-
-    {
-        tensor<float> vectorized_x{miopenTensorNCHWc4, x.desc.GetLengths()};
-        auto vectorized_x_dev = handle_deref.Write(vectorized_x.data);
-
-        expect_declined_by_checks(miopenConvolutionForward(handle,
-                                                           &kOne,
-                                                           &vectorized_x.desc,
-                                                           vectorized_x_dev.get(),
-                                                           &w.desc,
-                                                           w_dev.get(),
-                                                           conv.handle,
-                                                           miopenConvolutionFwdAlgoGEMM,
-                                                           &kZero,
-                                                           &y.desc,
-                                                           y_dev.get(),
-                                                           nullptr,
-                                                           0),
-                                  "vectorized NCHWc4 input");
-    }
-
-    {
-        const std::vector<int> zeros(6, 0);
-        const std::vector<int> ones(6, 1);
-        OwnedConvDescriptor deep;
-        ASSERT_NO_FATAL_FAILURE(InitConvDescriptor(deep, miopenConvolution, zeros, ones, ones));
-
-        // A 1x1 filter with no padding keeps the output the shape of the input.
-        const std::vector<std::size_t> deep_lengths{1, 1, 2, 2, 2, 2, 2, 2};
-        tensor<float> deep_x{deep_lengths};
-        tensor<float> deep_w{std::vector<std::size_t>(8, 1)};
-        tensor<float> deep_y{deep_lengths};
-        auto deep_x_dev = handle_deref.Write(deep_x.data);
-        auto deep_w_dev = handle_deref.Write(deep_w.data);
-        auto deep_y_dev = handle_deref.Write(deep_y.data);
-
-        expect_declined_by_checks(miopenConvolutionForward(handle,
-                                                           &kOne,
-                                                           &deep_x.desc,
-                                                           deep_x_dev.get(),
-                                                           &deep_w.desc,
-                                                           deep_w_dev.get(),
-                                                           deep.handle,
-                                                           miopenConvolutionFwdAlgoGEMM,
-                                                           &kZero,
-                                                           &deep_y.desc,
-                                                           deep_y_dev.get(),
-                                                           nullptr,
-                                                           0),
-                                  "six spatial dimensions");
-    }
-
-    // MIOpen would dereference these, so declining is the only safe answer.
-    EXPECT_EQ(miopenConvolutionForward(handle,
-                                       nullptr,
-                                       &x.desc,
-                                       x_dev.get(),
-                                       &w.desc,
-                                       w_dev.get(),
-                                       conv.handle,
-                                       miopenConvolutionFwdAlgoGEMM,
-                                       &kZero,
-                                       &y.desc,
-                                       y_dev.get(),
-                                       nullptr,
-                                       0),
-              miopenStatusUnsupportedOp)
-        << "null alpha";
-
-    // MIOpen reads a null alpha2 as 1, which adds z, and the hipDNN graph has no z.
     miopenStatus_t fused_status = miopenStatusSuccess;
-    ASSERT_NO_FATAL_FAILURE(RunFused(nullptr, miopenActivationRELU, fused_status));
-    EXPECT_EQ(fused_status, miopenStatusUnsupportedOp) << "fused call with a null alpha2";
+    std::string fused_message;
+    ASSERT_NO_FATAL_FAILURE(RunFused(nullptr, miopenActivationRELU, fused_status, &fused_message));
+    EXPECT_EQ(fused_status, miopenStatusUnsupportedOp);
+    EXPECT_NE(fused_message.find("alpha2 is null"), std::string::npos) << fused_message;
 }
 
 // Runs in both modes: for an activation other than ReLU, the forwarded path must return the

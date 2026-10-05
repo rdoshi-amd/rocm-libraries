@@ -128,15 +128,15 @@ def main():
         # A replay that dies before writing must not leave an old report behind.
         report.unlink(missing_ok=True)
         reports.append(report)
-        # A database and kernel cache per mode, so the enabled replay cannot reuse
-        # what the disabled one found and compiled.
-        cache = output_dir / f"{mode}_cache"
+        # A find database per mode, so the enabled replay cannot reuse what the
+        # disabled one found. The kernel cache is keyed by source and build options,
+        # so sharing it only saves compile time.
         env = dict(
             os.environ,
             MIOPEN_HIPDNN_FORWARDING=mode,
             LD_LIBRARY_PATH=ld_path,
-            MIOPEN_USER_DB_PATH=str(cache),
-            MIOPEN_CUSTOM_CACHE_DIR=str(cache),
+            MIOPEN_USER_DB_PATH=str(output_dir / f"{mode}_db"),
+            MIOPEN_CUSTOM_CACHE_DIR=str(output_dir / "kernel_cache"),
         )
         ok = replay(
             [

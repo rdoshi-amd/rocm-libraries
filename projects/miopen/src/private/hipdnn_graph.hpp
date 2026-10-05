@@ -43,14 +43,18 @@ bool IsAvailable();
 // calls use the handle's state without holding the map lock.
 void ReleaseHandle(miopenHandle_t handle);
 
-// Replacement text for miopenGetErrorString when the last forwarded call on this
-// thread failed with `status`, or null when it did not. The result has
-// thread-local storage duration, matching what miopenGetErrorString promises its
-// callers.
+// Replacement text for miopenGetErrorString when the last wrapped call on this
+// thread was forwarded and failed with `status`, or null otherwise. The result
+// has thread-local storage duration, matching what miopenGetErrorString promises
+// its callers.
 //
 // This exists so a forwarded failure is distinguishable from the same status
 // raised by MIOpen itself, without adding a public symbol to do it.
 const char* PrefixedErrorString(miopenStatus_t status, const char* nativeMessage);
+
+// Every stub that MIOpen serves calls this, so a later MIOpen failure with the
+// same status is not reported as forwarded.
+void ClearForwardedFailure();
 
 // One value per kind of graph the wrapper builds. Kept in one list so that the
 // values stay distinct as operations are added: it is the first element of

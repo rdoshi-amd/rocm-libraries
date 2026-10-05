@@ -295,7 +295,7 @@ namespace
         jit::Solution    solution;
         jit::Diagnostics diagnostics;
         const auto       initial = jit::getJitAlgo(
-            device, request, provider, std::numeric_limits<size_t>::max(), solution, diagnostics);
+            device, request, provider, std::numeric_limits<uint32_t>::max(), solution, diagnostics);
         require(initial == HIPBLAS_STATUS_SUCCESS,
                 "Mock generation: " + diagnostics.message + " (status " + std::to_string(initial)
                     + ")");
@@ -489,6 +489,21 @@ namespace
         }
         std::cout << "PASS wrong device rejected\n";
 
+        const size_t tooLarge = size_t(std::numeric_limits<uint32_t>::max()) + 1;
+        require(jit::getJitAlgo(device, request, provider, tooLarge, solution, diagnostics)
+                        == HIPBLAS_STATUS_INVALID_VALUE
+                    && !abi::SolutionAccess::get(solution) && !diagnostics.message.empty(),
+                "getJitAlgo accepted a workspace limit above UINT32_MAX");
+        {
+            std::vector<int32_t> indices{1 << 30};
+            const auto status = jit::getLibraryAlgos(
+                device, request, provider, 1, tooLarge, indices, diagnostics);
+            require(status == HIPBLAS_STATUS_INVALID_VALUE && indices.empty()
+                        && !diagnostics.message.empty(),
+                    "getLibraryAlgos accepted a workspace limit above UINT32_MAX");
+        }
+        std::cout << "PASS workspace limits above UINT32_MAX rejected\n";
+
         const auto probe = abi::RequestAccess::make(std::make_shared<ProbeRequest>());
         require(jit::getJitAlgo(device, probe, provider, 0, solution, diagnostics)
                         == HIPBLAS_STATUS_NOT_SUPPORTED
@@ -621,7 +636,7 @@ namespace
                                                  p.request(alpha, beta),
                                                  provider,
                                                  1,
-                                                 std::numeric_limits<size_t>::max(),
+                                                 std::numeric_limits<uint32_t>::max(),
                                                  indices,
                                                  diagnostics);
         require(status == HIPBLAS_STATUS_SUCCESS && indices.size() == 1 && indices[0] >= (1 << 30),
@@ -675,7 +690,7 @@ namespace
                                                      p.request(alpha, beta),
                                                      backend(replay),
                                                      2,
-                                                     std::numeric_limits<size_t>::max(),
+                                                     std::numeric_limits<uint32_t>::max(),
                                                      indices,
                                                      diagnostics);
             require(status == HIPBLAS_STATUS_SUCCESS && indices == std::vector<int32_t>{index}

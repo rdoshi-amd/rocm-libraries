@@ -1292,7 +1292,9 @@ def _c_numpy_dtype(dtype: str):
 
 
 def _decode_c(C_h: np.ndarray, out_dtype: str) -> np.ndarray:
-    """Decode a host C buffer into a numerically comparable array."""
+    """Decode a host C buffer into a numerically comparable array; raise if unknown."""
+    if out_dtype not in _C_NP:
+        raise ValueError(f"unsupported C dtype {out_dtype!r}; add it to _C_NP")
     return _bf16_u16_to_fp32(C_h) if out_dtype == "bf16" else C_h
 
 

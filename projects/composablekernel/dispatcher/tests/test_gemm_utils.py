@@ -518,6 +518,10 @@ class TestHostBufferHelpers(unittest.TestCase):
         np.testing.assert_array_equal(_decode_c(_fp32_to_bf16_u16(x), "bf16"), x)
         self.assertIs(_decode_c(x, "fp32"), x)
 
+    def test_decode_c_rejects_unknown(self):
+        with self.assertRaises(ValueError):
+            _decode_c(np.zeros(2, dtype=np.float32), "fp8")
+
 
 if __name__ == "__main__":
     unittest.main()

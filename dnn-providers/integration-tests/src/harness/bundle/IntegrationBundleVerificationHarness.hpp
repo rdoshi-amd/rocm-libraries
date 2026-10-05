@@ -320,8 +320,9 @@ private:
     static void reportOutcome(const VerificationOutcome& outcome);
 
     // Records the bundle as unverifiable and yields the skip outcome for TestBody()
-    // to issue. Its message, "Unverifiable: <reason> (<bundle>)", is also what
-    // --fail-on-no-oracle FAILs with, so one log grep finds both.
+    // to issue, worded "Unverifiable: <reason> (<bundle>)". Always a SKIP here:
+    // policy.failOnNoOracle covers only the no-oracle case, and noOracle() is the one
+    // caller that reads it.
     VerificationOutcome unverifiable(const std::string& reason,
                                      VerificationDepth reached = VerificationDepth::NOT_REACHED);
 
@@ -444,7 +445,8 @@ private:
     VerificationOutcome lastOracleErrored(const OracleChain& chain) const;
     // Every oracle declined, possibly after an earlier one errored. Recorded as
     // unverifiable; a SKIP, or under policy.failOnNoOracle a FAIL (ORACLE if one
-    // errored along the way, HARNESS if not).
+    // errored along the way, HARNESS if not). The FAIL keeps the SKIP's
+    // "Unverifiable: ..." message and report entry, so one log grep finds both.
     VerificationOutcome noOracle(const OracleChain& chain);
     // "tried: ..." for both messages above.
     std::string describeTried(const OracleChain& chain) const;

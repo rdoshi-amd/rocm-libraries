@@ -242,8 +242,12 @@ that errors is listed under "REFERENCE EXECUTOR ERRORS" and the chain also moves
 but if it was the last one tried (the only one in `gpu`/`cpu` mode, the CPU
 reference in `auto`), the bundle FAILs whatever `--fail-on-no-oracle` says. That
 FAIL is a broken oracle, not a coverage gap: its message is the reference error, and
-the bundle is not listed under "UNVERIFIABLE BUNDLES". Only the no-oracle SKIP, and
-the FAIL `--fail-on-no-oracle` turns it into, start with `Unverifiable:`.
+the bundle is not listed under "UNVERIFIABLE BUNDLES".
+
+`--fail-on-no-oracle` covers only the no-oracle case: its FAIL keeps the SKIP's
+`Unverifiable:` message, so one grep finds both. Other `Unverifiable:` SKIPs (inputs
+that cannot be filled, a bundle with no outputs) are not about the oracle and stay
+SKIPs under the flag.
 
 Each verification test body prints the oracle that graded it, between its
 `[ RUN ]` and result lines, and the coverage summary totals them:

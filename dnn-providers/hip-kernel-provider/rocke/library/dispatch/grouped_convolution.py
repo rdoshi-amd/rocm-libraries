@@ -156,6 +156,7 @@ from kernels.common.conv_implicit_gemm_wgrad import (
     _DEFAULT_WS_REPLICAS as _WGRAD_WS_REPLICAS,
     is_valid_wgrad_spec as _wgrad_is_valid_spec,
     wgrad_atomic_epilogue_available as _wgrad_atomic_epilogue_available,
+    wgrad_streamk_grid as _wgrad_streamk_grid,
 )
 from kernels.common.conv_implicit_gemm_dgrad import (
     DgradConvSpec,
@@ -275,6 +276,11 @@ class ConvGroupedRequest(OperatorRequest):
     dilation_d: Optional[int] = None
     # optional vec_size_c override; None = let the candidate decide
     vec_size_c: Optional[int] = None
+    # wgrad only: opt into stream-K ("dp_sk" | "persistent"); "off" keeps the
+    # grid-per-tile kernel with auto split-K. streamk_reduction picks how the
+    # CTAs sharing an output tile combine their partial sums.
+    streamk: str = "off"
+    streamk_reduction: str = "linear"
     op: str = "conv_grouped"
     algorithm: str = "auto"
     spec_id: str = "auto"
@@ -369,6 +375,18 @@ def _request_errors(req: OperatorRequest) -> list[str]:
         errors.append(f"unsupported dtype {req.dtype!r}; fp16 or bf16 only")
     if req.layout.upper() != "NHWC":
         errors.append(f"unsupported layout {req.layout!r}; NHWC only")
+    if req.streamk not in ("off", "dp_sk", "persistent"):
+        errors.append(
+            f"streamk must be 'off', 'dp_sk' or 'persistent', got {req.streamk!r}"
+        )
+    elif req.streamk != "off" and req.direction != "wgrad":
+        errors.append(f"streamk is wgrad-only, got direction={req.direction!r}")
+    if req.streamk_reduction not in ("linear", "tree", "workspace"):
+        # 'atomic' needs an fp32 dW, which a fp16/bf16 request never has.
+        errors.append(
+            "streamk_reduction must be 'linear', 'tree' or 'workspace', got "
+            f"{req.streamk_reduction!r}"
+        )
     try:
         ArchTarget.from_gfx(req.arch)
     except KeyError as e:
@@ -447,7 +465,27 @@ def _wgrad_grouped_overrides(req: ConvGroupedRequest) -> Tuple[str, int]:
     (WMMA grouped is handled by its own candidate, which forces
     default@split_k=1 -- WMMA has neither a cshuffle nor a split-K path.)
     """
+    if req.streamk != "off":
+        # Stream-K owns the K range (no split-K) and stores each tile through
+        # the direct epilogue once per tile inside its tile loop.
+        return "default", 1
     return _epilogue_for(req), -1
+
+
+def _wgrad_streamk_fields(req: ConvGroupedRequest) -> dict:
+    """The WgradConvSpec stream-K fields a request asks for.
+
+    ``streamk_ctas`` stays -1 (one CTA per CU of the target, resolved by the
+    instance) so the spec, the kernel and the launch grid all derive the pool
+    from the same place.
+    """
+    if req.streamk == "off":
+        return {}
+    return {
+        "streamk": req.streamk,
+        "streamk_reduction": req.streamk_reduction,
+        "streamk_ctas": -1,
+    }
 
 
 def _data_spec(req: ConvGroupedRequest) -> ConvDataSpec:
@@ -493,6 +531,8 @@ class ConvGroupedSpec:
     arch: str
     split_k: int = 1  # wgrad only
     lds_k_outer: bool = False  # wgrad only
+    streamk: str = "off"  # wgrad only
+    streamk_reduction: str = "linear"  # wgrad only
     name: str = "rocke_conv_grouped"
 
     def kernel_name(self) -> str:
@@ -516,6 +556,9 @@ class ConvGroupedSpec:
         #     fetch rather than a transpose-on-store.
         if self.direction in ("wgrad", "dgrad") and self.lds_k_outer:
             parts.append("kouter")
+        #   streamk: a different grid, K ranges and fixup epilogue.
+        if self.direction == "wgrad" and self.streamk != "off":
+            parts.append(f"sk_{self.streamk}_{self.streamk_reduction}")
         return kernel_name_join(self.name, *parts)
 
     def to_fwd_spec(self, problem: "ConvProblem") -> "ImplicitGemmConvSpec":
@@ -553,7 +596,18 @@ class ConvGroupedSpec:
         """
         assert self.direction == "wgrad", "to_wgrad_spec is only valid for wgrad specs"
         target = ArchTarget.from_gfx(self.arch)
-        resolved_split_k, two_stage, _ = _resolve_wgrad_split_k(self, problem)
+        if self.streamk != "off":
+            # Stream-K owns the K range: no split-K, no two-stage, and the
+            # direct epilogue runs per tile.
+            resolved_split_k, two_stage = 1, False
+            streamk = {
+                "streamk": self.streamk,
+                "streamk_reduction": self.streamk_reduction,
+                "streamk_ctas": -1,
+            }
+        else:
+            resolved_split_k, two_stage, _ = _resolve_wgrad_split_k(self, problem)
+            streamk = {}
         return WgradConvSpec(
             problem=problem,
             name=self.name,
@@ -575,7 +629,8 @@ class ConvGroupedSpec:
             pipeline=self.pipeline,
             # two_stage writes one f32 per element via workspace store; cshuffle
             # is not used and would produce an invalid spec (validator rejects it).
-            epilogue="default" if two_stage else self.epilogue,
+            # Stream-K likewise stores through the direct epilogue.
+            epilogue="default" if (two_stage or streamk) else self.epilogue,
             split_k=resolved_split_k,
             two_stage=two_stage,
             # Pin the replica count explicitly rather than inheriting the
@@ -583,6 +638,7 @@ class ConvGroupedSpec:
             # the i32 ws_bytes ABI using this same constant, and a cap computed
             # over a different R than the spec carries bounds nothing.
             ws_replicas=_WGRAD_WS_REPLICAS,
+            **streamk,
         )
 
     def to_dgrad_spec(self, problem: "ConvProblem") -> "DgradConvSpec":
@@ -722,6 +778,10 @@ def _resolve_wgrad_split_k(
 def _wgrad_grid(spec: ConvGroupedSpec, req: OperatorRequest) -> Tuple[int, int, int]:
     assert isinstance(req, ConvGroupedRequest)
     p = _problem(req)
+    if spec.streamk != "off":
+        # One-dimensional stream-K launch, sized from the same spec the kernel
+        # is built from so the two cannot disagree on the CTA pool.
+        return _wgrad_streamk_grid(spec.to_wgrad_spec(p), arch=spec.arch)
     spatial = (p.Z if p.is_3d else 1) * p.Y * p.X
     # Per-group GEMM dims. For the ungrouped path G==1 these reduce to wg_M=K,
     # wg_N=spatial*C.
@@ -1126,6 +1186,7 @@ def _make_gfx942_wgrad_candidate() -> KernelCandidate:
             pipeline=_PIPELINE,
             epilogue=_ep,
             split_k=_sk,
+            **_wgrad_streamk_fields(req),
         )
 
     def support(req: OperatorRequest) -> Tuple[bool, str]:
@@ -1166,6 +1227,8 @@ def _make_gfx942_wgrad_candidate() -> KernelCandidate:
             dtype=req.dtype.lower(),
             arch=req.arch,
             split_k=_sk,
+            streamk=req.streamk,
+            streamk_reduction=req.streamk_reduction,
             name=name,
         )
 
@@ -1318,6 +1381,7 @@ def _make_gfx950_wgrad_candidate() -> KernelCandidate:
             pipeline=_pipeline(req),
             epilogue=_ep,
             split_k=_sk,
+            **_wgrad_streamk_fields(req),
         )
 
     def support(req: OperatorRequest) -> Tuple[bool, str]:
@@ -1359,6 +1423,8 @@ def _make_gfx950_wgrad_candidate() -> KernelCandidate:
             dtype=req.dtype.lower(),
             arch=req.arch,
             split_k=_sk,
+            streamk=req.streamk,
+            streamk_reduction=req.streamk_reduction,
             name=name,
         )
 
@@ -1531,7 +1597,9 @@ def _make_gfx1250_wgrad_candidate() -> KernelCandidate:
     test_gfx1250_grouped_wgrad_dual_engine). Group merging (``group_merge > 1``)
     is MFMA-only and additionally needs split_k > 1 on the two-stage path, so it
     is unreachable here on both counts: is_valid_wgrad_spec rejects it for
-    wave32 and for the split_k=1 this candidate forces.
+    wave32 and for the split_k=1 this candidate forces. Stream-K is MFMA-only
+    too, so a stream-K request is turned away rather than silently served by
+    the grid-per-tile kernel.
     """
     name = "implicit_gemm_conv_wgrad_gfx1250"
     spec_id = "igemm_conv_wgrad_gfx1250_32x32"
@@ -1578,6 +1646,8 @@ def _make_gfx1250_wgrad_candidate() -> KernelCandidate:
             return False, f"gfx1250 candidate requires arch=gfx1250 (got {req.arch!r})"
         if req.direction != "wgrad":
             return False, f"candidate handles 'wgrad', got direction={req.direction!r}"
+        if req.streamk != "off":
+            return False, "stream-K wgrad is MFMA-only (gfx942, gfx950)"
         ok, why = selector_matches(req, candidate)
         if not ok:
             return False, why
@@ -1770,7 +1840,12 @@ def dispatch_conv_grouped(
         f"spec_hash={kid.spec_hash}",
         f"request_hash={kid.request_hash}",
     ]
-    if req.direction == "wgrad":
+    if req.direction == "wgrad" and spec.streamk != "off":
+        explanation.append(
+            f"streamk={spec.streamk} reduction={spec.streamk_reduction} "
+            "(split-K off; one CTA per CU in the stream-K pool)"
+        )
+    elif req.direction == "wgrad":
         split_k, _two_stage, requested = _resolve_wgrad_split_k(spec, _problem(req))
         if split_k != requested:
             explanation.append(

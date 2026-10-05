@@ -541,6 +541,26 @@ def main() -> int:
         help="data type (default: fp16)",
     )
     parser.add_argument(
+        "--streamk",
+        default="off",
+        choices=["off", "dp_sk", "persistent"],
+        help=(
+            "wgrad only: ask the dispatcher for the stream-K kernel "
+            "(dp_sk = data-parallel + stream-K CTAs, persistent = one CTA per CU "
+            "round-robining tiles); off keeps the grid-per-tile kernel (default)"
+        ),
+    )
+    parser.add_argument(
+        "--streamk-reduction",
+        default="linear",
+        dest="streamk_reduction",
+        choices=["linear", "tree", "workspace"],
+        help=(
+            "wgrad stream-K fixup: linear/tree (deterministic flag hand-off) or "
+            "workspace (f32 scratch atomics + reduce kernel) (default: linear)"
+        ),
+    )
+    parser.add_argument(
         "--warmup", type=int, default=3, help="warmup iterations (default: 3)"
     )
     parser.add_argument(
@@ -823,6 +843,10 @@ def main() -> int:
             dtype=dtype,
             direction=args.direction,
         )
+        if args.streamk != "off":
+            req_base.update(
+                streamk=args.streamk, streamk_reduction=args.streamk_reduction
+            )
         if problem.is_3d:
             req_base.update(
                 Di=problem.Di,
@@ -1105,6 +1129,114 @@ def _run_fwd(
     return 0
 
 
+def _streamk_launcher(
+    *,
+    rt,
+    spec,
+    kernel,
+    arch: str,
+    grid,
+    block,
+    stream,
+    ws_dev,
+    ws_nbytes: int,
+    buffers,
+    nbytes,
+    compile_kernel,
+    KernelLauncher,
+    LaunchConfig,
+):
+    """``(launcher, kernel_name, launch(fence))`` for a stream-K wgrad spec.
+
+    Each launch resets exactly what the reduction's contract requires before
+    the kernel runs: the flag table for linear/tree (dW is stored once by the
+    tile owner), the f32 scratch for the workspace reduction, which is then
+    cast into dW by the Stage 2 reduce kernel on the same stream.
+    """
+    from kernels.common.conv_implicit_gemm_wgrad import (
+        wgrad_streamk_signature,
+        wgrad_streamk_workspace_layout,
+    )
+    from kernels.common.conv_wgrad_workspace_reduce import (
+        WgradReduceSpec,
+        build_conv_wgrad_workspace_reduce,
+        wgrad_reduce_grid,
+        wgrad_reduce_signature,
+    )
+
+    dY_dev, X_dev, dW_dev = buffers
+    dY_nb, X_nb, dW_nb = nbytes
+    artifact = compile_kernel(kernel, arch=arch)
+    launcher = KernelLauncher(
+        hsaco=artifact.hsaco,
+        kernel_name=artifact.kernel_name,
+        signature=wgrad_streamk_signature(spec),
+    )
+    values = {
+        "A": dY_dev,
+        "B": X_dev,
+        "D": dW_dev,
+        "A_bytes": dY_nb,
+        "B_bytes": X_nb,
+        "D_bytes": dW_nb,
+    }
+    reducer = None
+    if spec.streamk_reduction == "workspace":
+        values.update(ws_ptr=ws_dev, ws_bytes=ws_nbytes)
+        p = spec.problem
+        rspec = WgradReduceSpec(
+            problem=p,
+            dtype_d=spec.data.dtype_d,
+            groups=p.groups,
+            ws_replicas=spec.ws_replicas,
+        )
+        rart = compile_kernel(
+            build_conv_wgrad_workspace_reduce(rspec, arch=arch), arch=arch
+        )
+        reducer = KernelLauncher(
+            hsaco=rart.hsaco,
+            kernel_name=rart.kernel_name,
+            signature=wgrad_reduce_signature(rspec),
+        )
+        rvalues = {
+            "ws_ptr": ws_dev,
+            "dw_ptr": dW_dev,
+            "wg_M": spec.wg_M,
+            "wg_N": spec.wg_N,
+            "ws_bytes": ws_nbytes,
+            "dw_bytes": dW_nb,
+            "groups": p.groups,
+        }
+        reset_bytes = ws_nbytes
+    else:
+        flags_bytes, _ = wgrad_streamk_workspace_layout(spec, arch=arch)
+        values.update(sk_flags=ws_dev, sk_partials=ws_dev + flags_bytes)
+        reset_bytes = flags_bytes
+
+    def _launch(fence: bool):
+        if reset_bytes:
+            rt.memset(ws_dev, 0, reset_bytes)
+        launcher(
+            values,
+            config=LaunchConfig(
+                grid=grid, block=block, stream=stream, fence=fence and reducer is None
+            ),
+        )
+        if reducer is not None:
+            reducer(
+                rvalues,
+                config=LaunchConfig(
+                    grid=wgrad_reduce_grid(rspec),
+                    block=(rspec.block_size, 1, 1),
+                    stream=stream,
+                    fence=fence,
+                ),
+            )
+
+    name = artifact.kernel_name + ("+cast" if reducer is not None else "")
+    return launcher, name, _launch
+
+
 def _run_wgrad(
     *,
     args,
@@ -1131,6 +1263,9 @@ def _run_wgrad(
     from kernels.common.conv_wgrad_workspace_reduce import (
         _DEFAULT_TILE_M as _WGRAD_REDUCE_TILE_M,
         _DEFAULT_TILE_N as _WGRAD_REDUCE_TILE_N,
+    )
+    from kernels.common.conv_implicit_gemm_wgrad import (
+        wgrad_streamk_workspace_nbytes,
     )
 
     _u8 = u8
@@ -1224,6 +1359,9 @@ def _run_wgrad(
                 launcher, ws_nbytes = build_implicit_gemm_conv_wgrad_two_stage(
                     instance_spec, arch=arch
                 )
+            elif instance_spec.streamk != "off":
+                kernel = build_implicit_gemm_conv_wgrad(instance_spec, arch=arch)
+                ws_nbytes = wgrad_streamk_workspace_nbytes(instance_spec, arch=arch)
             else:
                 kernel = build_implicit_gemm_conv_wgrad(instance_spec, arch=arch)
                 ws_nbytes = 0
@@ -1242,7 +1380,27 @@ def _run_wgrad(
         # factor from z entirely, so every grouped launch covered group 0 only.
         grid = _wgrad_grid(dspec, req)
 
-        if instance_spec.two_stage:
+        if instance_spec.streamk != "off":
+            if ws_dev is not None:
+                rt.free(ws_dev)
+            ws_dev = rt.alloc(max(ws_nbytes, 4))
+            launcher, kernel_name, _launch = _streamk_launcher(
+                rt=rt,
+                spec=instance_spec,
+                kernel=kernel,
+                arch=arch,
+                grid=grid,
+                block=block,
+                stream=stream,
+                ws_dev=ws_dev,
+                ws_nbytes=ws_nbytes,
+                buffers=(dY_dev, X_dev, dW_dev),
+                nbytes=(dY_t.nbytes, X_t.nbytes, dW_t.nbytes),
+                compile_kernel=compile_kernel,
+                KernelLauncher=KernelLauncher,
+                LaunchConfig=LaunchConfig,
+            )
+        elif instance_spec.two_stage:
             if ws_dev is not None:
                 rt.free(ws_dev)
             ws_dev = rt.alloc(ws_nbytes)

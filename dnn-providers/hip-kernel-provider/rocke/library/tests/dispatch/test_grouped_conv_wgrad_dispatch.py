@@ -422,5 +422,82 @@ class TestGroupedSpecKernelNameDistinguishesBody(unittest.TestCase):
         )
 
 
+class TestStreamKSelection(unittest.TestCase):
+    """Stream-K is opt-in on the request and reaches the instance spec intact."""
+
+    def test_streamk_reaches_the_instance_spec(self):
+        for arch in ("gfx942", "gfx950"):
+            for mode in ("dp_sk", "persistent"):
+                for reduction in ("linear", "tree", "workspace"):
+                    r = dispatch_conv_grouped(
+                        _wgrad(arch, G=4, streamk=mode, streamk_reduction=reduction)
+                    )
+                    ws = r.spec.to_wgrad_spec(_problem(r.request))
+                    with self.subTest(arch=arch, mode=mode, reduction=reduction):
+                        self.assertEqual(ws.streamk, mode)
+                        self.assertEqual(ws.streamk_reduction, reduction)
+                        self.assertEqual(ws.split_k, 1)
+                        self.assertFalse(ws.two_stage)
+                        self.assertEqual(ws.epilogue, "default")
+
+    def test_default_request_is_unchanged(self):
+        r = dispatch_conv_grouped(_wgrad("gfx950", G=4))
+        self.assertEqual(r.spec.streamk, "off")
+        self.assertEqual(r.spec.to_wgrad_spec(_problem(r.request)).streamk, "off")
+
+    def test_streamk_builds_from_dispatch(self):
+        from kernels.common.conv_implicit_gemm_wgrad import (
+            build_implicit_gemm_conv_wgrad,
+        )
+
+        r = dispatch_conv_grouped(_wgrad("gfx950", G=2, streamk="dp_sk"))
+        k = build_implicit_gemm_conv_wgrad(
+            r.spec.to_wgrad_spec(_problem(r.request)), arch="gfx950"
+        )
+        self.assertIn("_sk256", k.name)
+
+    def test_gfx1250_turns_streamk_away(self):
+        with self.assertRaises(ValueError) as cm:
+            dispatch_conv_grouped(_wgrad("gfx1250", streamk="dp_sk"))
+        self.assertIn("stream-K wgrad is MFMA-only", str(cm.exception))
+
+    def test_request_validation(self):
+        from dispatch.grouped_convolution import _request_errors
+
+        self.assertTrue(_request_errors(_wgrad("gfx950", streamk="sideways")))
+        self.assertTrue(_request_errors(_wgrad("gfx950", streamk_reduction="atomic")))
+        fwd = ConvGroupedRequest(
+            N=2, C=64, K=64, Hi=8, Wi=8, Y=3, X=3, arch="gfx950", streamk="dp_sk"
+        )
+        self.assertTrue(_request_errors(fwd))
+
+
+class TestStreamKGridShape(unittest.TestCase):
+    """The dispatch grid is the instance's stream-K grid, one-dimensional."""
+
+    def test_grid_matches_instance_partition(self):
+        from kernels.common.conv_implicit_gemm_wgrad import wgrad_streamk_grid
+
+        for arch in ("gfx942", "gfx950"):
+            for mode in ("dp_sk", "persistent"):
+                r = dispatch_conv_grouped(_wgrad(arch, G=4, streamk=mode))
+                ws = r.spec.to_wgrad_spec(_problem(r.request))
+                with self.subTest(arch=arch, mode=mode):
+                    self.assertEqual(r.grid, wgrad_streamk_grid(ws, arch=arch))
+                    self.assertEqual(r.grid[1:], (1, 1))
+
+    def test_streamk_changes_the_dispatch_name(self):
+        off = dispatch_conv_grouped(_wgrad("gfx950", G=4)).spec.kernel_name()
+        names = {
+            dispatch_conv_grouped(
+                _wgrad("gfx950", G=4, streamk=m, streamk_reduction=red)
+            ).spec.kernel_name()
+            for m in ("dp_sk", "persistent")
+            for red in ("linear", "tree")
+        }
+        self.assertEqual(len(names), 4)
+        self.assertNotIn(off, names)
+
+
 if __name__ == "__main__":
     unittest.main()

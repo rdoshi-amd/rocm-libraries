@@ -524,19 +524,7 @@ class GFX1250GAParams(GFX1250GAOrigamiPolicy, BaseOptimizationParams):
 
     @param
     def tdm_iterate_mode(self, ctx: SizeContext) -> ForkParameter:
-        """Full range for an Equality library, 0 only for an out-of-box one.
-
-        TDMIterateMode picks the order the TDM walks its tiles. Modes 1-3 are
-        shape-specialised: the winner depends on the exact M/N/K the kernel was
-        tuned at, so a kernel picked out of an OOB library for a different size
-        can land on the wrong walk order. In an Equality library the kernel only
-        ever runs on the shape it was tuned for, so the axis is safe there.
-
-        Set ``LIBRARY_TYPE: Equality`` in the geko input config to tune it.
-        """
-        if str(self.config.get("LIBRARY_TYPE", "OOB")).lower() == "equality":
-            return self._make_param("TDMIterateMode", [0, 1, 2, 3])
-        return self._make_param("TDMIterateMode", [0])
+        return self._make_param("TDMIterateMode", [0, 1, 2, 3])
 
     @param
     def tdm_split(self, ctx: SizeContext) -> ForkParameter:

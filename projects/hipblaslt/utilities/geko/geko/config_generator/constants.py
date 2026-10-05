@@ -499,9 +499,9 @@ _CONFIG_OPTIONAL_COMMON = {
     #                 shape it was tuned for, so shape-specialised axes are safe.
     #   "OOB"      -- out-of-box library; a kernel is selected for arbitrary
     #                 sizes, so only shape-agnostic axes may be tuned.
-    # Read by the gfx1250 generic profile: it decides whether TDMIterateMode is
-    # tunable, and, with StreamK on, whether WGM / WGMXCC / StaggerU / SKXCC are
-    # left to origami at run time. Default "OOB" is the conservative one.
+    # Read by the gfx1250 generic profile: it decides, with StreamK on, whether 
+    # WGM / WGMXCC / StaggerU / SKXCC are left to origami at run time. 
+    # Default "OOB" is the conservative one.
     "LIBRARY_TYPE": "OOB",
     # MX block scaling is one setting spelled by three keys (``MX`` above and the
     # two below), resolved into each GemmConfig when the config is loaded:

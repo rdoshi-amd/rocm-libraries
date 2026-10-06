@@ -16,6 +16,7 @@
 #include <hipdnn_plugin_sdk/ingestor/Descriptors.hpp>
 #include <hipdnn_plugin_sdk/ingestor/IKernelHeuristic.hpp>
 #include <hipdnn_plugin_sdk/ingestor/KernelIngestorStateManager.hpp>
+#include <hipdnn_plugin_sdk/ingestor/MakeEngine.hpp>
 #include <hipdnn_plugin_sdk/ingestor/MatchContext.hpp>
 #include <hipdnn_plugin_sdk/ingestor/NativeRegistry.hpp>
 
@@ -1136,6 +1137,17 @@ INSTANTIATE_TEST_SUITE_P(
     [](const ::testing::TestParamInfo<StateManagerConstructionThrowCase>& info) {
         return info.param.name;
     });
+
+TEST(TestKernelIngestorStateManager, MakeEngineRejectsANullStateManager)
+{
+    const StubDeviceResolver resolver;
+
+    EXPECT_THROW((makeEngine<StubHandle, StubSettings, StubContext>(
+                     makeEngineWithKnobs({}),
+                     std::unique_ptr<KernelIngestorStateManager<StubHandle>>{},
+                     resolver)),
+                 std::invalid_argument);
+}
 
 } // namespace
 

@@ -207,6 +207,7 @@ bool buildGfx1250Pipeline(ModulePassManager& mpm, StinkyAsmModule& module, const
                         static_cast<PassFeatureConfig::DsReadOrder>(moduleOptions.DsReadOrder);
                 passFeatureConfig.dagFeatures.enableESM2TrackValuVsrc =
                     moduleOptions.EnableESM2 && moduleOptions.EnableESM2TrackValuVsrc;
+                passFeatureConfig.dagFeatures.scalarInterlocks = moduleOptions.DagScalarInterlocks;
             }
 
             PassManager innerPM;

@@ -525,6 +525,9 @@ static void scheduleRegionWithMovableSideEffects(
             // writer and never appears in getUsers(). Those rules are stamped at issue
             // time by the ready queue instead.
             if (rule.dir != HazardDir::WriteThenRead) continue;
+            // Its consumer reads any scalar register, so def-use cannot find it; the ready
+            // queue stamps such a rule at issue time.
+            if (rule.scope == HazardScope::AnyRegister) continue;
             if (!rule.isProducer(*prod)) continue;
 
             std::unordered_map<uint32_t, int> defKey;

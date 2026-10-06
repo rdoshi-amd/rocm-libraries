@@ -63,7 +63,8 @@ struct RuleStat {
     int violations = 0;
 };
 
-std::vector<Violation> analyzeBlock(const BasicBlock& bb) {
+// Every producer/consumer pair of \p rule in \p bb, with the cycle gap between them.
+std::vector<Violation> analyzeBlock(const BasicBlock& bb, const HazardRule& rule) {
     struct Entry {
         const StinkyInstruction* inst;
     };
@@ -79,63 +80,71 @@ std::vector<Violation> analyzeBlock(const BasicBlock& bb) {
         cumCycles[i + 1] = cumCycles[i] + instCycles(*instrs[i].inst);
 
     std::vector<Violation> results;
+    auto record = [&](int producer, int consumer) {
+        Violation v;
+        v.ruleName = rule.name;
+        v.required = rule.distance;
+        v.producerMnemonic = instMnemonic(*instrs[producer].inst);
+        v.producerIdx = producer;
+        v.consumerMnemonic = instMnemonic(*instrs[consumer].inst);
+        v.consumerIdx = consumer;
+        // Gap = sum of cycles of instructions strictly between producer and consumer.
+        v.gap = cumCycles[consumer] - cumCycles[producer + 1];
+        results.push_back(v);
+    };
 
-    for (int ruleIdx = 0; ruleIdx < kNumCdna5HazardRules; ++ruleIdx) {
-        const HazardRule& rule = kCdna5HazardRules[ruleIdx];
-        // This pass measures write->read cycle gaps only; other directions/units are
-        // enforced by the scheduler, not measurable as a cycle distance here.
-        if (rule.dir != HazardDir::WriteThenRead || rule.unit != HazardUnit::Cycles) continue;
+    // This pass measures write->read cycle gaps only; other directions/units are
+    // enforced by the scheduler, not measurable as a cycle distance here.
+    if (rule.dir != HazardDir::WriteThenRead || rule.unit != HazardUnit::Cycles) return results;
 
-        // lastWriter[regKey] = the most recent instruction that wrote that reg, plus
-        // whether that writer is a hazard producer. A non-producer write (e.g. a load
-        // dest) still overwrites the register's value, so it must overwrite the entry
-        // too — otherwise a stale earlier producer would be paired against a consumer
-        // that no longer reads the producer's value.
-        struct Writer {
-            int idx;
-            bool isProducer;
-        };
-        std::map<int, Writer> lastWriter;
-
+    if (rule.scope == HazardScope::AnyRegister) {
+        // Any producer write stays in flight whatever later writes the family sees.
+        int lastProducer = -1;
         for (int ci = 0; ci < (int)instrs.size(); ++ci) {
             const StinkyInstruction& inst = *instrs[ci].inst;
+            if (rule.isConsumer(inst) && lastProducer >= 0) record(lastProducer, ci);
+            if (rule.isProducer(inst)) lastProducer = ci;
+        }
+        return results;
+    }
 
-            // Record the latest writer for every dest reg, producer or not.
-            std::vector<int> destKeys;
-            collectRegKeys(inst.getDestRegs(), rule.regType, destKeys);
-            if (!destKeys.empty()) {
-                bool isProd = rule.isProducer(inst);
-                for (int k : destKeys) lastWriter[k] = {ci, isProd};
-            }
+    // lastWriter[regKey] = the most recent instruction that wrote that reg, plus
+    // whether that writer is a hazard producer. A non-producer write (e.g. a load
+    // dest) still overwrites the register's value, so it must overwrite the entry
+    // too — otherwise a stale earlier producer would be paired against a consumer
+    // that no longer reads the producer's value.
+    struct Writer {
+        int idx;
+        bool isProducer;
+    };
+    std::map<int, Writer> lastWriter;
 
-            if (!rule.isConsumer(inst)) continue;
+    for (int ci = 0; ci < (int)instrs.size(); ++ci) {
+        const StinkyInstruction& inst = *instrs[ci].inst;
 
-            // Find the latest producer across all matching source regs. A source whose
-            // most recent writer is not a producer contributes no hazard pair.
+        // Find the latest producer across all matching source regs. A source whose
+        // most recent writer is not a producer contributes no hazard pair. Reads are
+        // matched before this instruction's own writes are recorded, so one that reads
+        // and writes the same register (v_add_co_ci_u32 and vcc) pairs with the writer
+        // before it, not with itself.
+        if (rule.isConsumer(inst)) {
             std::vector<int> srcKeys;
             collectRegKeys(inst.getSrcRegs(), rule.regType, srcKeys);
-            if (srcKeys.empty()) continue;
-
             int latestProducer = -1;
             for (int k : srcKeys) {
                 auto it = lastWriter.find(k);
                 if (it != lastWriter.end() && it->second.isProducer)
                     latestProducer = std::max(latestProducer, it->second.idx);
             }
-            if (latestProducer < 0) continue;  // no in-block producer feeds this consumer
+            if (latestProducer >= 0) record(latestProducer, ci);
+        }
 
-            // Gap = sum of cycles of instructions strictly between producer and consumer.
-            int gap = cumCycles[ci] - cumCycles[latestProducer + 1];
-
-            Violation v;
-            v.ruleName = rule.name;
-            v.required = rule.distance;
-            v.producerMnemonic = instMnemonic(*instrs[latestProducer].inst);
-            v.producerIdx = latestProducer;
-            v.consumerMnemonic = instMnemonic(inst);
-            v.consumerIdx = ci;
-            v.gap = gap;
-            results.push_back(v);
+        // Record the latest writer for every dest reg, producer or not.
+        std::vector<int> destKeys;
+        collectRegKeys(inst.getDestRegs(), rule.regType, destKeys);
+        if (!destKeys.empty()) {
+            bool isProd = rule.isProducer(inst);
+            for (int k : destKeys) lastWriter[k] = {ci, isProd};
         }
     }
     return results;
@@ -156,30 +165,33 @@ class HazardGapAnalysisPass : public StinkyInstPass {
     PreservedAnalyses run(Function& func, PassContext& passCtx, AnalysisManager& /*AM*/) override {
         std::map<std::string, RuleStat> stats;
         for (int i = 0; i < kNumCdna5HazardRules; ++i) stats[kCdna5HazardRules[i].name] = {};
+        for (int i = 0; i < kNumCdna5InterlockRules; ++i) stats[kCdna5InterlockRules[i].name] = {};
 
         bool anyViolation = false;
 
-        for (const BasicBlock& bb : func) {
-            auto entries = analyzeBlock(bb);
-            for (const auto& v : entries) {
+        // An interlock below its distance is a stall, not a wrong result: it is
+        // reported as BELOW and never fails the analysis.
+        auto check = [&](const BasicBlock& bb, const HazardRule& rule, bool interlock) {
+            for (const auto& v : analyzeBlock(bb, rule)) {
                 stats[v.ruleName].pairs++;
                 bool bad = v.gap < v.required;
-                if (bad) {
-                    stats[v.ruleName].violations++;
-                    anyViolation = true;
-                    std::cerr << "[HazardGapAnalysisPass] VIOLATION" << " rule=" << v.ruleName
-                              << " bb=" << bb.getLabel() << " producer[" << v.producerIdx
-                              << "]=" << v.producerMnemonic << " consumer[" << v.consumerIdx
-                              << "]=" << v.consumerMnemonic << " gap=" << v.gap
-                              << " required>=" << v.required << "\n";
-                } else if (verbose_) {
-                    std::cerr << "[HazardGapAnalysisPass] OK" << " rule=" << v.ruleName
-                              << " bb=" << bb.getLabel() << " producer[" << v.producerIdx
-                              << "]=" << v.producerMnemonic << " consumer[" << v.consumerIdx
-                              << "]=" << v.consumerMnemonic << " gap=" << v.gap
-                              << " required>=" << v.required << "\n";
-                }
+                if (bad) stats[v.ruleName].violations++;
+                if (bad && !interlock) anyViolation = true;
+                if (!bad && !verbose_) continue;
+                if (bad && interlock && !verbose_) continue;
+                const char* tag = !bad ? "OK" : interlock ? "BELOW" : "VIOLATION";
+                std::cerr << "[HazardGapAnalysisPass] " << tag << " rule=" << v.ruleName
+                          << " bb=" << bb.getLabel() << " producer[" << v.producerIdx
+                          << "]=" << v.producerMnemonic << " consumer[" << v.consumerIdx
+                          << "]=" << v.consumerMnemonic << " gap=" << v.gap
+                          << " required>=" << v.required << "\n";
             }
+        };
+        for (const BasicBlock& bb : func) {
+            for (int i = 0; i < kNumCdna5HazardRules; ++i)
+                check(bb, kCdna5HazardRules[i], /*interlock=*/false);
+            for (int i = 0; i < kNumCdna5InterlockRules; ++i)
+                check(bb, kCdna5InterlockRules[i], /*interlock=*/true);
         }
 
         std::cerr << "\n[HazardGapAnalysisPass] Summary for " << func.getName() << ":\n";
@@ -188,6 +200,13 @@ class HazardGapAnalysisPass : public StinkyInstPass {
             const auto& s = stats[rule.name];
             std::cerr << "  " << rule.name << " (>=" << rule.distance << " cyc):" << "  " << s.pairs
                       << " pair(s) checked," << "  " << s.violations << " VIOLATION(s)\n";
+        }
+        for (int i = 0; i < kNumCdna5InterlockRules; ++i) {
+            const auto& rule = kCdna5InterlockRules[i];
+            const auto& s = stats[rule.name];
+            std::cerr << "  " << rule.name << " (interlock, >=" << rule.distance << " cyc):" << "  "
+                      << s.pairs << " pair(s) checked," << "  " << s.violations
+                      << " below the distance\n";
         }
 
         // Report failure through the pass framework rather than aborting the process,

@@ -170,6 +170,11 @@ struct PassFeatureConfig {
         /// Mirrors ModuleOptions::WarGateWmmas. WMMAs a ds_load waits before
         /// overwriting a vgpr a WMMA read (WmmaVgprSrcToDsWrite); <= 0 = derived.
         int warGateWmmas = 0;
+        /// Mirrors ModuleOptions::DagScalarInterlocks. The CDNA5 ready queue also enforces
+        /// kCdna5InterlockRules: a VALU with a scalar or VCC operand is held until 9 cycles
+        /// after the latest SALU write of a scalar register, and a VCC reader until 8
+        /// cycles after the VALU that wrote it.
+        bool scalarInterlocks = false;
     };
 
     LoopConfig loopConfig;

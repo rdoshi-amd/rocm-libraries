@@ -669,7 +669,14 @@ class CDNA5ReadyQueue : public ReadyQueue {
     // BBScheduleState.dsResiduals.
     std::map<int, int> regDataReadyCounters;
 
-    // Hazard gates, one independent lane per config_.hazardRules entry. Per reg
+    // The hazard rules this queue enforces: the arch table (hw_.hazards) first, so the
+    // ruleIdx values the scheduler pre-scan assigns stay valid, then kCdna5InterlockRules
+    // when dagFeatures.scalarInterlocks is set. Every per-rule lane below is indexed the
+    // same way.
+    std::vector<const HazardRule*> rules_;
+    int numArchRules_ = 0;
+
+    // Hazard gates, one independent lane per rules_ entry. Per reg
     // key: remaining cycles until a rule.isConsumer instruction may read it
     // (stamped rule.cycles when a flagged producer issues). Kept SEPARATE per
     // rule (and separate from regDataReadyCounters) because each hazard is
@@ -810,6 +817,7 @@ class CDNA5ReadyQueue : public ReadyQueue {
     void touchOperands(const StinkyInstruction& inst);
     int getMaxSrcDataWait(DAGNode* node) const;
     int getHazardWait(DAGNode* node) const;
+    void stampIssueTimeHazards(const StinkyInstruction& inst);
     bool destOverlapsActiveWmmaSrc(DAGNode* node) const;
     bool pipeOpGateBlocks(DAGNode* node) const;
     // dagFeatures.prefetchLeadWmmas for this basic block (StageWmmaCounter, set in onInit).
@@ -936,11 +944,16 @@ class CDNA5ReadyQueue : public ReadyQueue {
     explicit CDNA5ReadyQueue(const PassContext& passCtx)
         : ReadyQueue(passCtx),
           config_(cdna5ConfigForArch(passCtx.getGemmTileConfig().arch)),
-          hw_(passCtx.getHWModel()),
-          hazardGates_(hw_.hazards.numRules),
-          pipeOpGates_(hw_.hazards.numRules),
-          pipeOpCount_(hw_.hazards.numRules, 0),
-          pipeOpDistance_(hw_.hazards.numRules, 0) {}
+          hw_(passCtx.getHWModel()) {
+        numArchRules_ = hw_.hazards.numRules;
+        for (int i = 0; i < hw_.hazards.numRules; ++i) rules_.push_back(&hw_.hazards.rules[i]);
+        if (passCtx.getPassFeatureConfig().dagFeatures.scalarInterlocks)
+            for (const HazardRule& rule : kCdna5InterlockRules) rules_.push_back(&rule);
+        hazardGates_.resize(rules_.size());
+        pipeOpGates_.resize(rules_.size());
+        pipeOpCount_.assign(rules_.size(), 0);
+        pipeOpDistance_.assign(rules_.size(), 0);
+    }
 
     DAGNode* pickOne() override;
     void push(DAGNode* node) override;
@@ -1126,7 +1139,8 @@ DAGNode* CDNA5ReadyQueue::popNonWmma(DAGNode* node, int pickKind) {
         // rule.cycles == -1 ("hoist as far as possible"): the strategy is producer-side
         // hoisting (deadline forced to 0 in the pre-scan), not a consumer-side hold, so
         // clamp the gate to 0 rather than stamping a negative wait.
-        hazardGates_[hf.ruleIdx][hf.regKey] = std::max(0, hw_.hazards.rules[hf.ruleIdx].distance);
+        hazardGates_[hf.ruleIdx][hf.regKey] = std::max(0, rules_[hf.ruleIdx]->distance);
+    stampIssueTimeHazards(*node->inst);
     // No longer a live hoist candidate once issued (decidePromote() must not try to
     // force it again).
     if (!node->hazardFlags.empty()) {
@@ -1194,10 +1208,15 @@ int CDNA5ReadyQueue::getMaxSrcDataWait(DAGNode* node) const {
 // findSmallestPickableNonWmma).
 int CDNA5ReadyQueue::getHazardWait(DAGNode* node) const {
     int maxLat = 0;
-    for (int ruleIdx = 0; ruleIdx < hw_.hazards.numRules; ++ruleIdx) {
-        const HazardRule& rule = hw_.hazards.rules[ruleIdx];
+    for (size_t ruleIdx = 0; ruleIdx < rules_.size(); ++ruleIdx) {
+        const HazardRule& rule = *rules_[ruleIdx];
         const auto& gate = hazardGates_[ruleIdx];
         if (gate.empty() || !rule.isConsumer(*node->inst)) continue;
+        if (rule.scope == HazardScope::AnyRegister) {
+            auto it = gate.find(kAnyRegisterHazardKey);
+            if (it != gate.end() && it->second > maxLat) maxLat = it->second;
+            continue;
+        }
         for (const StinkyRegister& srcReg : node->inst->getSrcRegs()) {
             if (!srcReg.isRegister() || isPseudoReg(srcReg) || srcReg.reg.type != rule.regType)
                 continue;
@@ -1208,6 +1227,30 @@ int CDNA5ReadyQueue::getHazardWait(DAGNode* node) const {
         }
     }
     return maxLat;
+}
+
+// Stamp, at issue, the Cycles rules the pre-scan does not flag: the rules after the arch
+// table, and any AnyRegister rule (its consumer is not reachable through def-use).
+void CDNA5ReadyQueue::stampIssueTimeHazards(const StinkyInstruction& inst) {
+    for (size_t ruleIdx = 0; ruleIdx < rules_.size(); ++ruleIdx) {
+        const HazardRule& rule = *rules_[ruleIdx];
+        const bool preScanned =
+            static_cast<int>(ruleIdx) < numArchRules_ && rule.scope == HazardScope::SameRegister;
+        if (preScanned) continue;
+        if (rule.dir != HazardDir::WriteThenRead || rule.unit != HazardUnit::Cycles) continue;
+        if (!rule.isProducer(inst)) continue;
+        auto& gate = hazardGates_[ruleIdx];
+        const int distance = std::max(0, rule.distance);
+        if (rule.scope == HazardScope::AnyRegister) {
+            gate[kAnyRegisterHazardKey] = distance;
+            continue;
+        }
+        for (const StinkyRegister& dst : inst.getDestRegs()) {
+            if (!dst.isRegister() || isPseudoReg(dst) || dst.reg.type != rule.regType) continue;
+            for (unsigned off = 0; off < dst.reg.num; ++off)
+                gate[regDepKey(dst.reg.type, dst.reg.idx + off)] = distance;
+        }
+    }
 }
 
 // True if issuing \p node now would risk a co-execution hazard: while the WMMA
@@ -1236,8 +1279,8 @@ bool CDNA5ReadyQueue::pipeOpGateBlocks(DAGNode* node) const {
     // Nothing to recover without va_vsrc tracking: the gate is pure cost there.
     if (!getPassContext().getPassFeatureConfig().dagFeatures.enableESM2TrackValuVsrc) return false;
     if (node == nullptr) return false;
-    for (int ruleIdx = 0; ruleIdx < hw_.hazards.numRules; ++ruleIdx) {
-        const HazardRule& rule = hw_.hazards.rules[ruleIdx];
+    for (size_t ruleIdx = 0; ruleIdx < rules_.size(); ++ruleIdx) {
+        const HazardRule& rule = *rules_[ruleIdx];
         if (rule.unit != HazardUnit::PipeOps || rule.dir != HazardDir::ReadThenWrite) continue;
         const int distance = pipeOpDistance_[ruleIdx];
         if (distance <= 0 || !rule.isConsumer(*node->inst)) continue;
@@ -1259,8 +1302,8 @@ bool CDNA5ReadyQueue::pipeOpGateBlocks(DAGNode* node) const {
 // Advance each PipeOps lane whose isPipeOp matches, and stamp the regs this instruction
 // reads as a rule.isProducer, so a later isConsumer write to them is held off.
 void CDNA5ReadyQueue::stampPipeOpGates(const StinkyInstruction& inst) {
-    for (int ruleIdx = 0; ruleIdx < hw_.hazards.numRules; ++ruleIdx) {
-        const HazardRule& rule = hw_.hazards.rules[ruleIdx];
+    for (size_t ruleIdx = 0; ruleIdx < rules_.size(); ++ruleIdx) {
+        const HazardRule& rule = *rules_[ruleIdx];
         if (rule.unit != HazardUnit::PipeOps || rule.dir != HazardDir::ReadThenWrite) continue;
         if (rule.isPipeOp != nullptr && rule.isPipeOp(inst)) ++pipeOpCount_[ruleIdx];
         if (!rule.isProducer(inst)) continue;
@@ -2585,8 +2628,8 @@ void CDNA5ReadyQueue::onInit(IRList::iterator regionStart, IRList::iterator regi
     }
     // Resolve each PipeOps rule's distance: table value, else arch policy, else derived
     // from this BB's WMMA cost.
-    for (int ruleIdx = 0; ruleIdx < hw_.hazards.numRules; ++ruleIdx) {
-        const HazardRule& rule = hw_.hazards.rules[ruleIdx];
+    for (size_t ruleIdx = 0; ruleIdx < rules_.size(); ++ruleIdx) {
+        const HazardRule& rule = *rules_[ruleIdx];
         if (rule.unit != HazardUnit::PipeOps) continue;
         const int warGateOverride =
             getPassContext().getPassFeatureConfig().dagFeatures.warGateWmmas;

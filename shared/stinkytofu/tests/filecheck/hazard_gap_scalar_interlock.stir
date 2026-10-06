@@ -1,0 +1,27 @@
+# RUN: %stinkytofu-opt --arch gfx1250 %s --HazardGapAnalysisPass=verbose 2>&1
+#
+# The interlock rules are reported, and a pair below its distance is BELOW, not a
+# VIOLATION: the hardware holds the VALU, so it costs a stall, not a wrong result, and
+# the analysis still succeeds. SaluSgprToValuScalarSrc pairs a reader with the latest
+# scalar write of any register: v_add_co_ci_u32 reads only vcc, yet the unrelated s6
+# write holds it.
+
+# CHECK: BELOW rule=SaluSgprToValuScalarSrc bb=entry producer[0]=s_mov_b32 consumer[1]=v_add_co_u32 gap=0 required>=9
+# CHECK: BELOW rule=SaluSgprToValuScalarSrc bb=entry producer[2]=s_mov_b32 consumer[3]=v_add_co_ci_u32 gap=0 required>=9
+# CHECK: OK rule=SaluSgprToValuScalarSrc bb=entry producer[2]=s_mov_b32 consumer[6]=v_add_co_u32 gap=17 required>=9
+# CHECK: BELOW rule=ValuVccToValuVccSrc bb=entry producer[1]=v_add_co_u32 consumer[3]=v_add_co_ci_u32 gap=1 required>=8
+# CHECK: SaluSgprToMemAddr (>=8 cyc):  0 pair(s) checked,  0 VIOLATION(s)
+# CHECK: SaluSgprToValuScalarSrc (interlock, >=9 cyc):  3 pair(s) checked,  2 below the distance
+# CHECK: ValuVccToValuVccSrc (interlock, >=8 cyc):  1 pair(s) checked,  1 below the distance
+# CHECK-NOT: VIOLATION rule=
+st.func @hazard_gap_scalar_interlock() {
+^entry:
+  s83 = "st.s_mov_b32"(64) { issueCycles = 1, latencyCycles = 2 }
+  v1006, vcc_lo0 = "st.v_add_co_u32"(v1006, s83) { issueCycles = 1, latencyCycles = 5 }
+  s6 = "st.s_mov_b32"(1) { issueCycles = 1, latencyCycles = 2 }
+  v1007, vcc_lo0 = "st.v_add_co_ci_u32"(v1007, 0, vcc_lo0) { issueCycles = 1, latencyCycles = 5 }
+  v[0:7] = "st.v_wmma_scale_f32_16x16x128_f8f6f4"(v[100:115], v[116:131], v[0:7]) { mod.matrix_fmt = { fmtA = MATRIX_FMT_FP8, fmtB = MATRIX_FMT_FP8 } }
+  v[8:15] = "st.v_wmma_scale_f32_16x16x128_f8f6f4"(v[100:115], v[116:131], v[8:15]) { mod.matrix_fmt = { fmtA = MATRIX_FMT_FP8, fmtB = MATRIX_FMT_FP8 } }
+  v1008, vcc_lo0 = "st.v_add_co_u32"(v1008, s84) { issueCycles = 1, latencyCycles = 5 }
+  "st.s_endpgm"()
+}

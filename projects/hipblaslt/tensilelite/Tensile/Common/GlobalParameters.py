@@ -403,6 +403,11 @@ globalParameters["StinkyTofuEnableRemarks"] = False
 # slow kernel generation can be attributed to individual passes.
 globalParameters["StinkyTofuTimePasses"] = False
 
+# Give the StinkyTofu DAG scheduler the measured interlocks: a VALU with a scalar or VCC
+# operand issues 9 cycles after the latest SALU write of any scalar register, and a VALU
+# reading VCC 8 cycles after the VALU that wrote it.
+globalParameters["StinkyTofuDagScalarInterlocks"] = False
+
 # Directory for StinkyTofu per-kernel instruction-cost output files (empty = disabled).
 # When set, each kernel's StinkyTofu module writes its cost file here via
 # StinkyTofuModule.setOutputDir (see KernelWriter._convertToStinkyTofu).

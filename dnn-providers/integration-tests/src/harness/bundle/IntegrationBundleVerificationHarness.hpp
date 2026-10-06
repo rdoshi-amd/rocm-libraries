@@ -422,7 +422,6 @@ private:
     {
         VerificationMode mode = VerificationMode::AUTO;
         std::vector<ReferenceExecutorType> candidates;
-        std::size_t next = 0; ///< first candidate not yet probed
         std::vector<TriedOracle> tried;
 
         void declined(std::string entry)
@@ -443,7 +442,9 @@ private:
     };
 
     static OracleChain resolveOracles(VerificationMode mode);
-    std::optional<ResolvedReference> nextApplicableReference(OracleChain& chain);
+    // Creates `type`'s executor and asks isApplicable(). If it cannot be used, notes
+    // why in the chain and returns nothing.
+    std::optional<ResolvedReference> probeReference(OracleChain& chain, ReferenceExecutorType type);
     // Notes a reference that errored rather than declined, and puts it in the
     // reference-error report, worded `error`.
     void referenceErrored(OracleChain& chain, std::string entry, std::string error);

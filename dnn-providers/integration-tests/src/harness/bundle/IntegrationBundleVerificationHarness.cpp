@@ -384,38 +384,35 @@ IntegrationBundleVerificationHarness::OracleChain
 }
 
 std::optional<IntegrationBundleVerificationHarness::ResolvedReference>
-    IntegrationBundleVerificationHarness::nextApplicableReference(OracleChain& chain)
+    IntegrationBundleVerificationHarness::probeReference(OracleChain& chain,
+                                                         ReferenceExecutorType type)
 {
-    while(chain.next < chain.candidates.size())
+    const std::string label = refLabel(type);
+    // Still null in the catch below if creating the executor is what threw.
+    IReferenceGraphExecutor* executor = nullptr;
+    try
     {
-        const ReferenceExecutorType type = chain.candidates[chain.next++];
-        const std::string label = refLabel(type);
-        // Still null in the catch below if creating the executor is what threw.
-        IReferenceGraphExecutor* executor = nullptr;
-        try
+        executor = &_deps.referenceExecutors->get(type);
+        if(executor->isApplicable(_bundle->graphBuffer.data(), _bundle->graphBuffer.size()))
         {
-            executor = &_deps.referenceExecutors->get(type);
-            if(executor->isApplicable(_bundle->graphBuffer.data(), _bundle->graphBuffer.size()))
-            {
-                return ResolvedReference{type, executor};
-            }
-            chain.declined(label + " (not applicable)");
+            return ResolvedReference{type, executor};
         }
-        catch(const ReferenceCapabilityError& e)
-        {
-            chain.declined(label + " (not applicable: " + e.what() + ")");
-        }
-        catch(const std::exception& e)
-        {
-            std::string detail
-                = executor != nullptr ? "errored checking applicability" : "could not be created";
-            detail.append(": ").append(e.what());
-            std::string entry = label;
-            entry.append(" (").append(detail).append(")");
-            std::string error = label;
-            error.append(" ").append(detail);
-            referenceErrored(chain, std::move(entry), std::move(error));
-        }
+        chain.declined(label + " (not applicable)");
+    }
+    catch(const ReferenceCapabilityError& e)
+    {
+        chain.declined(label + " (not applicable: " + e.what() + ")");
+    }
+    catch(const std::exception& e)
+    {
+        std::string detail
+            = executor != nullptr ? "errored checking applicability" : "could not be created";
+        detail.append(": ").append(e.what());
+        std::string entry = label;
+        entry.append(" (").append(detail).append(")");
+        std::string error = label;
+        error.append(" ").append(detail);
+        referenceErrored(chain, std::move(entry), std::move(error));
     }
     return std::nullopt;
 }
@@ -517,8 +514,15 @@ VerificationOutcome
     // isApplicable() said yes, but execute() can still find a capability gap the
     // check could not see, or crash. Either way the next candidate gets its turn;
     // only once the chain is spent does the bundle go without a verdict.
-    while(auto ref = nextApplicableReference(chain))
+    for(std::size_t i = 0; i < chain.candidates.size(); ++i)
     {
+        const auto ref = probeReference(chain, chain.candidates[i]);
+        if(!ref)
+        {
+            continue;
+        }
+        const bool lastResort = i + 1 == chain.candidates.size();
+
         OutputTensors refOutputs;
         const RefRunResult result = runReferenceCapturingOutputs(*ref, refOutputs);
         const std::string label = refLabel(ref->type);
@@ -538,13 +542,13 @@ VerificationOutcome
             {
                 context = std::string("verification-mode=") + modeName(chain.mode);
             }
-            else if(chain.next < chain.candidates.size())
+            else if(lastResort)
             {
-                context = "auto mode, falling through to the next reference";
+                context = "auto mode, last resort";
             }
             else
             {
-                context = "auto mode, last resort";
+                context = "auto mode, falling through to the next reference";
             }
             std::string entry = label;
             entry.append(" (errored: ").append(result.message).append(")");
@@ -809,7 +813,7 @@ IntegrationBundleVerificationHarness::RefRunResult
     // not an error, and the executor is the one that knows which it needs.
     bool useDevice = false;
 
-    // isApplicable() already said yes in nextApplicableReference(); execute() can
+    // isApplicable() already said yes in probeReference(); execute() can
     // still throw a ReferenceCapabilityError for what that check could not see.
     try
     {

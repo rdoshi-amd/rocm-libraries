@@ -9,6 +9,8 @@
  *   - ROCKE_LL_INTRINSIC_DECLS[]   (+ _COUNT)      (Python _INTRINSIC_DECLS)
  *   - ROCKE_LL_INTRINSIC_DECLS_LLVM22_OVERRIDES[]  (+ _COUNT)
  *                                                (Python ..._LLVM22_OVERRIDES)
+ *   - ROCKE_LL_INTRINSIC_DECLS_LLVM23_OVERRIDES[]  (+ _COUNT)
+ *                                                (Python ..._LLVM23_OVERRIDES)
  *
  * The decl table is INSERTION-ORDERED exactly like the Python dict; that order
  * drives finalize()'s emit order. Transcribed verbatim from
@@ -100,6 +102,15 @@ const rocke_ll_decl_t ROCKE_LL_INTRINSIC_DECLS[] = {
     {"s.wait.kmcnt", "declare void @llvm.amdgcn.s.wait.kmcnt(i16)"},
     {"s.wait.expcnt", "declare void @llvm.amdgcn.s.wait.expcnt(i16)"},
     {"s.wait.asynccnt", "declare void @llvm.amdgcn.s.wait.asynccnt(i16 immarg)"},
+    {"s.wait.tensorcnt", "declare void @llvm.amdgcn.s.wait.tensorcnt(i16 immarg)"},
+    {"s.barrier.signal", "declare void @llvm.amdgcn.s.barrier.signal(i32 immarg)"},
+    {"s.barrier.wait", "declare void @llvm.amdgcn.s.barrier.wait(i16 immarg)"},
+    {"s.barrier.init", "declare void @llvm.amdgcn.s.barrier.init(ptr addrspace(3) nocapture, i32)"},
+    {"s.barrier.signal.var",
+     "declare void @llvm.amdgcn.s.barrier.signal.var(ptr addrspace(3) nocapture, i32)"},
+    {"s.barrier.join", "declare void @llvm.amdgcn.s.barrier.join(ptr addrspace(3) nocapture)"},
+    {"s.wakeup.barrier", "declare void @llvm.amdgcn.s.wakeup.barrier(ptr addrspace(3) nocapture)"},
+    {"s.barrier.leave", "declare void @llvm.amdgcn.s.barrier.leave(i16 immarg)"},
     {"global.load.async.to.lds.b32",
      "declare void @llvm.amdgcn.global.load.async.to.lds.b32(ptr addrspace(1) nocapture, ptr "
      "addrspace(3) nocapture, i32 immarg, i32 immarg)"},
@@ -109,13 +120,36 @@ const rocke_ll_decl_t ROCKE_LL_INTRINSIC_DECLS[] = {
     {"global.load.async.to.lds.b128",
      "declare void @llvm.amdgcn.global.load.async.to.lds.b128(ptr addrspace(1) nocapture, ptr "
      "addrspace(3) nocapture, i32 immarg, i32 immarg)"},
+    {"global.store.async.from.lds.b8",
+     "declare void @llvm.amdgcn.global.store.async.from.lds.b8(ptr addrspace(1) nocapture, ptr "
+     "addrspace(3) nocapture, i32 immarg, i32 immarg)"},
+    {"global.store.async.from.lds.b32",
+     "declare void @llvm.amdgcn.global.store.async.from.lds.b32(ptr addrspace(1) nocapture, ptr "
+     "addrspace(3) nocapture, i32 immarg, i32 immarg)"},
+    {"global.store.async.from.lds.b64",
+     "declare void @llvm.amdgcn.global.store.async.from.lds.b64(ptr addrspace(1) nocapture, ptr "
+     "addrspace(3) nocapture, i32 immarg, i32 immarg)"},
+    {"global.store.async.from.lds.b128",
+     "declare void @llvm.amdgcn.global.store.async.from.lds.b128(ptr addrspace(1) nocapture, ptr "
+     "addrspace(3) nocapture, i32 immarg, i32 immarg)"},
+    {"global.load.tr.b128.v8f16",
+     "declare <8 x half> @llvm.amdgcn.global.load.tr.b128.v8f16(ptr addrspace(1) nocapture)"},
+    {"global.load.tr.b128.v8bf16",
+     "declare <8 x bfloat> @llvm.amdgcn.global.load.tr.b128.v8bf16(ptr addrspace(1) nocapture)"},
+    {"global.load.tr.b128.v8i16",
+     "declare <8 x i16> @llvm.amdgcn.global.load.tr.b128.v8i16(ptr addrspace(1) nocapture)"},
+    {"tensor.load.to.lds",
+     "declare void @llvm.amdgcn.tensor.load.to.lds(<4 x i32>, <8 x i32>, <4 x i32>, <4 x i32>, "
+     "<8 x i32>, i32 immarg)"},
+    {"tensor.store.from.lds",
+     "declare void @llvm.amdgcn.tensor.store.from.lds(<4 x i32>, <8 x i32>, <4 x i32>, <4 x i32>, "
+     "<8 x i32>, i32 immarg)"},
     {"exp2.f32", "declare float @llvm.exp2.f32(float)"},
     {"amdgcn.exp2.f32", "declare float @llvm.amdgcn.exp2.f32(float)"},
     {"log2.f32", "declare float @llvm.log2.f32(float)"},
     {"sqrt.f32", "declare float @llvm.sqrt.f32(float)"},
     {"rsqrt.f32", "declare float @llvm.amdgcn.rsq.f32(float)"},
     {"rcp.f32", "declare float @llvm.amdgcn.rcp.f32(float)"},
-    {"tanh.f32", "declare float @llvm.tanh.f32(float)"},
     {"maxnum.f32", "declare float @llvm.maxnum.f32(float, float)"},
     {"maxnum.f16", "declare half @llvm.maxnum.f16(half, half)"},
     {"maxnum.bf16", "declare bfloat @llvm.maxnum.bf16(bfloat, bfloat)"},
@@ -181,6 +215,14 @@ const rocke_ll_decl_t ROCKE_LL_INTRINSIC_DECLS[] = {
     {"wmma.gfx1250.f32.16x16x64.bf8.bf8",
      "declare <8 x float> @llvm.amdgcn.wmma.f32.16x16x64.bf8.bf8.v8f32.v8i32(<8 x i32>, <8 x i32>, "
      "i16 immarg, <8 x float>, i1 immarg, i1 immarg)"},
+    {"wmma.scale.block32.gfx1250.f32.16x16x128.f8f6f4.v8f32.v16i32.v16i32",
+     "declare <8 x float> @llvm.amdgcn.wmma.scale.f32.16x16x128.f8f6f4.v8f32.v16i32.v16i32(i32 "
+     "immarg, <16 x i32>, i32 immarg, <16 x i32>, i16 immarg, <8 x float>, i32 immarg, i32 immarg, "
+     "i32, i32 immarg, i32 immarg, i32, i1 immarg, i1 immarg)"},
+    {"wmma.scale.block16.gfx1250.f32.16x16x128.f8f6f4.v8f32.v16i32.v16i32",
+     "declare <8 x float> @llvm.amdgcn.wmma.scale16.f32.16x16x128.f8f6f4.v8f32.v16i32.v16i32(i32 "
+     "immarg, <16 x i32>, i32 immarg, <16 x i32>, i16 immarg, <8 x float>, i32 immarg, i32 immarg, "
+     "i64, i32 immarg, i32 immarg, i64, i1 immarg, i1 immarg)"},
     {"mfma.f32.16x16x16f16",
      "declare <4 x float> @llvm.amdgcn.mfma.f32.16x16x16f16(<4 x half>, <4 x half>, <4 x float>, "
      "i32 immarg, i32 immarg, i32 immarg)"},
@@ -201,6 +243,12 @@ const rocke_ll_decl_t ROCKE_LL_INTRINSIC_DECLS[] = {
      "float>, i32 immarg, i32 immarg, i32 immarg)"},
     {"mfma.f32.32x32x16.f16",
      "declare <16 x float> @llvm.amdgcn.mfma.f32.32x32x16.f16(<8 x half>, <8 x half>, <16 x "
+     "float>, i32 immarg, i32 immarg, i32 immarg)"},
+    {"mfma.f32.16x16x8.xf32",
+     "declare <4 x float> @llvm.amdgcn.mfma.f32.16x16x8.xf32(<2 x float>, <2 x float>, <4 x "
+     "float>, i32 immarg, i32 immarg, i32 immarg)"},
+    {"mfma.f32.32x32x4.xf32",
+     "declare <16 x float> @llvm.amdgcn.mfma.f32.32x32x4.xf32(<2 x float>, <2 x float>, <16 x "
      "float>, i32 immarg, i32 immarg, i32 immarg)"},
     {"mfma.f32.16x16x4f32",
      "declare <4 x float> @llvm.amdgcn.mfma.f32.16x16x4f32(float, float, <4 x float>, i32 immarg, "
@@ -230,9 +278,6 @@ const rocke_ll_decl_t ROCKE_LL_INTRINSIC_DECLS[] = {
     {"update.dpp.i32",
      "declare i32 @llvm.amdgcn.update.dpp.i32(i32, i32, i32 immarg, i32 immarg, i32 immarg, i1 "
      "immarg)"},
-    {"global.atomic.fadd.v2bf16",
-     "declare <2 x bfloat> @llvm.amdgcn.global.atomic.fadd.v2bf16.p1("
-     "ptr addrspace(1), <2 x bfloat>)"},
     {"global.atomic.fadd.v2f16",
      "declare <2 x half> @llvm.amdgcn.global.atomic.fadd.v2f16.p1("
      "ptr addrspace(1), <2 x half>)"},
@@ -297,10 +342,6 @@ const rocke_ll_decl_t ROCKE_LL_INTRINSIC_DECLS[] = {
      "declare <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.fp8(i32, float, i1)"},
     {"amdgcn.cvt.scalef32.pk.f32.bf8",
      "declare <2 x float> @llvm.amdgcn.cvt.scalef32.pk.f32.bf8(i32, float, i1)"},
-    {"amdgcn.cvt.scalef32.pk.fp8.f32",
-     "declare i32 @llvm.amdgcn.cvt.scalef32.pk.fp8.f32(i32, <2 x float>, float, i1)"},
-    {"amdgcn.cvt.scalef32.pk.bf8.f32",
-     "declare i32 @llvm.amdgcn.cvt.scalef32.pk.bf8.f32(i32, <2 x float>, float, i1)"},
     {"amdgcn.ds.swizzle", "declare i32 @llvm.amdgcn.ds.swizzle(i32, i32 immarg)"},
     /* Not overloaded, so no name suffix, but the flags are immarg like every
      * other permlane* flag pair. */
@@ -433,8 +474,7 @@ const int ROCKE_LL_INTRINSIC_DECLS_LLVM22_OVERRIDES_COUNT
 
 /* ---------------------------------------------------------------------- */
 /* LLVM23 overrides (Python _INTRINSIC_DECLS_LLVM23_OVERRIDES)            */
-/* Identical to the LLVM22 set for the declares rocke emits today; split  */
-/* entries here if an LLVM 23 host proves drift.                          */
+/* Inherits the LLVM22 entries plus declarations whose ABI changed again. */
 /* ---------------------------------------------------------------------- */
 
 const rocke_ll_decl_t ROCKE_LL_INTRINSIC_DECLS_LLVM23_OVERRIDES[] = {
@@ -453,6 +493,9 @@ const rocke_ll_decl_t ROCKE_LL_INTRINSIC_DECLS_LLVM23_OVERRIDES[] = {
     {"make.buffer.rsrc.p1",
      "declare ptr addrspace(8) @llvm.amdgcn.make.buffer.rsrc.p8.p1("
      "ptr addrspace(1) nocapture readnone, i16, i64, i32)"},
+    {"mfma.scale.f32.16x16x128.f8f6f4",
+     "declare <4 x float> @llvm.amdgcn.mfma.scale.f32.16x16x128.f8f6f4(<8 x i32>, <8 x i32>, <4 x "
+     "float>, i32 immarg, i32 immarg, i32 immarg, i32, i32 immarg, i32)"},
 };
 
 const int ROCKE_LL_INTRINSIC_DECLS_LLVM23_OVERRIDES_COUNT

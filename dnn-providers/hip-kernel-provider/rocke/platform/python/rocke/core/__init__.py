@@ -10,6 +10,7 @@ passes in this package.
 
 Modules:
 
+  - ``dtypes``     : target-independent dtype names and alias normalization.
   - ``ir``         : `IRBuilder`, `KernelDef`, `Value`, `Op`, `Region`,
                      plus type system (`F16`, `F32`, `I32`, `I64`,
                      `VectorType`, `PtrType`, `SmemType`).
@@ -57,15 +58,23 @@ from .debug_manifest import (
     debug_manifest,
     register_value_binding,
 )
+from .dtypes import DTypeCategory, DTypeInfo, dtype_info, normalize_dtype
 from .ir import (
     BF16,
     F16,
     F32,
     FP8E4M3,
+    FP4E2M1,
+    FP6E2M3,
+    FP6E3M2,
+    E8M0,
+    E5M3,
+    dtype_to_ir_type,
     I1,
     I8,
     I32,
     I64,
+    TF32,
     IRBuilder,
     KernelDef,
     Op,
@@ -104,6 +113,16 @@ from .passes import (
 from .verify import Diagnostic, verify, verify_or_raise
 
 __all__ = [
+    "normalize_dtype",
+    "DTypeCategory",
+    "DTypeInfo",
+    "dtype_info",
+    "dtype_to_ir_type",
+    "FP4E2M1",
+    "FP6E2M3",
+    "FP6E3M2",
+    "E8M0",
+    "E5M3",
     "CodegenPolicy",
     "SchedulerStrategy",
     "apply_codegen_policy",
@@ -121,6 +140,7 @@ __all__ = [
     "BackendError",
     "BackendMismatch",
     "Diagnostic",
+    "TF32",
     "IRBuilder",
     "KernelDef",
     "Op",

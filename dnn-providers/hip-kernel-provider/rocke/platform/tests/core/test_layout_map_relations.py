@@ -19,7 +19,13 @@ _AUDITED_ARCHES = (
     "gfx950",
 )
 
+_GFX1250_SCALED_OPS = {
+    f"wmma_gfx1250_f32_16x16x128_{dtype}_{dtype}_scale_e8m0_e8m0_k{block_k}"
+    for dtype in ("fp8", "bf8", "fp4", "fp6", "bf6")
+    for block_k in (16, 32)
+}
 _GFX1250_UNMAPPED_OPERANDS = {
+    *_GFX1250_SCALED_OPS,
     "wmma_gfx1250_f32_16x16x64_fp8_fp8",
     "wmma_gfx1250_f32_16x16x64_fp8_bf8",
     "wmma_gfx1250_f32_16x16x64_bf8_fp8",
@@ -52,6 +58,11 @@ _EXPECTED_REPLICATED = {
     for op_id in _GFX11_OPS
     for role in ("a", "b")
 }
+_EXPECTED_REPLICATED.update(
+    ("gfx1250", op_id, role)
+    for op_id in _GFX1250_SCALED_OPS
+    for role in ("a_scale", "b_scale")
+)
 _EXPECTED_PACKED = {
     (arch, op_id, role)
     for arch in ("gfx11-generic", "gfx1151")
@@ -65,6 +76,10 @@ def _role_layout_and_shape(op, role):
         return op.a_layout(), (op.m, op.k)
     if role == "b":
         return op.b_layout(), (op.k, op.n)
+    if role == "a_scale":
+        return op.a_scale_layout(), (op.m, op.k // op.scale_block_k)
+    if role == "b_scale":
+        return op.b_scale_layout(), (op.k // op.scale_block_k, op.n)
     return op.acc_layout(), (op.m, op.n)
 
 
@@ -85,7 +100,10 @@ def test_every_registered_layout_has_complete_declared_relation():
     packed = set()
     for arch in _AUDITED_ARCHES:
         for op in ArchTarget.from_gfx(arch).mma.ops:
-            for role in ("a", "b", "acc"):
+            roles = ("a", "b", "acc")
+            if op.scale_block_k is not None:
+                roles += ("a_scale", "b_scale")
+            for role in roles:
                 identity = (arch, op.op_id, role)
                 try:
                     layout, shape = _role_layout_and_shape(op, role)

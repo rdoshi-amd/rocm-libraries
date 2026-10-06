@@ -8,6 +8,7 @@
 #include <hip/hip_runtime_api.h>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace TensileLite
@@ -25,6 +26,8 @@ namespace hipblaslt_jit
         Build,
         Support,
         Load,
+        Lookup,
+        Publish,
     };
 
     struct Status
@@ -183,6 +186,31 @@ namespace hipblaslt_jit
             = 0;
     };
 
+    // Built entries, each with the local indices of its solutions that support
+    // a request, best first.
+    using SupportedSolutions = std::vector<std::pair<BuiltSolution, std::vector<int>>>;
+
+    class SolutionStore
+    {
+    public:
+        virtual ~SolutionStore() = default;
+        // Up to count indices of stored solutions for exactly this request that
+        // need at most maxWorkspaceBytes, best first, without excluded kernels.
+        virtual Status lookup(const OperationRequest&,
+                              const DeviceTarget&,
+                              size_t                          count,
+                              size_t                          maxWorkspaceBytes,
+                              const std::vector<std::string>& excludeKernels,
+                              std::vector<int32_t>&           indices) const
+            = 0;
+        // Returns one library index per supported solution, in order.
+        virtual Status publish(const OperationRequest&,
+                               const DeviceTarget&,
+                               const SupportedSolutions&,
+                               std::vector<int32_t>& indices) const
+            = 0;
+    };
+
     class Jit
     {
     public:
@@ -191,10 +219,12 @@ namespace hipblaslt_jit
             std::shared_ptr<const Backend>           backend;
             std::shared_ptr<const CodeObjectBuilder> builder;
             std::shared_ptr<const SolutionLoader>    loader;
+            std::shared_ptr<const SolutionStore>     store; // optional
         };
 
         struct Outcome
         {
+            std::vector<int32_t>                             indices; // published, best first
             std::vector<std::shared_ptr<const KernelBundle>> bundles; // loaded, best first
             std::vector<Status>                              failures; // in the order they happened
             std::string                                      summary; // the backend's success note
@@ -203,9 +233,10 @@ namespace hipblaslt_jit
         // Throws std::invalid_argument when a required component is missing.
         explicit Jit(Components components);
 
-        // Generate, build, check support and load. Returns a bundle for each of
-        // at most count solutions that support the request, best first.
-        // Thread-safe. Sets the stage of every failure it reports.
+        // Generate, build and check support, then publish, or load when there
+        // is no store or publishing failed. Returns at most count solutions
+        // that support the request, best first. Thread-safe. Sets the stage of
+        // every failure it reports.
         Outcome generate(const OperationRequest&         request,
                          const DeviceTarget&             target,
                          size_t                          count,

@@ -242,8 +242,8 @@ library of its solutions:
   `GeneratedSolution` (the library entry, the main kernel names of its
   solutions, each `sources/*.s` as an assembly unit, and each HIP source with
   the bundle's headers as a HIP unit) and the TensileLite library parsed from
-  that entry. A caller that needs the library keeps the one
-  `readTensileSourceBundle` returned.
+  that entry. `loadGemmLibrary` is that parse. A caller that needs the library
+  keeps the one `readTensileSourceBundle` returned.
 - `parseTensileBundle` reads a built solution's entry into a TensileLite
   `MasterSolutionLibrary` for the device's hardware. It requires local
   solutions 0 to N-1, each naming one of the built kernels and every built

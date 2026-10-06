@@ -21,6 +21,9 @@ namespace hipblaslt_jit
         std::vector<std::string>                           kernels; // every main kernel
     };
 
+    // Loads a GEMM library entry. Throws unless it holds local solutions 0 to N-1.
+    std::shared_ptr<TensileLibrary> loadGemmLibrary(const std::vector<uint8_t>& entry);
+
     // A source bundle and the library parsed from its entry. The library is the
     // parse of solution.entry, so a caller keeps it instead of reading those
     // bytes again.

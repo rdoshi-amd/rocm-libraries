@@ -100,12 +100,44 @@ hipblaslt_jit_test(jit-loader jit-gpu hipblaslt-jit-loader-test
     "${hipblaslt_jit_bundles}" "${hipblaslt_jit_scratch}/loader")
 set_tests_properties(jit-loader PROPERTIES FIXTURES_REQUIRED jit-bundles)
 
+# Compiles the JIT solution library directly. It reads the gfx950 plain entry
+# and loads no code, but TensileLite queries the current device when it reads
+# an entry.
+find_package(Threads REQUIRED)
+add_executable(hipblaslt-jit-library-test
+    jit_library_test.cpp
+    "${hipblaslt_jit_source}/hipblaslt-jit-code-object.cpp"
+    "${hipblaslt_jit_source}/hipblaslt-jit-fs.cpp"
+    "${hipblaslt_jit_source}/hipblaslt-jit-library.cpp"
+    "${hipblaslt_jit_source}/hipblaslt-jit-msgpack.cpp"
+    "${hipblaslt_jit_source}/hipblaslt-jit-problem-type.cpp")
+target_include_directories(hipblaslt-jit-library-test PRIVATE
+    "${hipblaslt_jit_source}" "${hipblaslt_jit_source}/rocblaslt/src/include")
+target_compile_definitions(hipblaslt-jit-library-test PRIVATE
+    HIPBLASLT_ENABLE_JIT HIPBLASLT_JIT_LIBRARY_TESTING)
+target_link_libraries(hipblaslt-jit-library-test PRIVATE
+    roc::hipblaslt roc::tensilelite-host ${hipblaslt_msgpack_target} amd_comgr
+    hip::device Threads::Threads)
+hipblaslt_jit_test(jit-library jit-gpu hipblaslt-jit-library-test
+    "${hipblaslt_jit_bundles}/gfx950/plain" "${hipblaslt_jit_scratch}/library")
+hipblaslt_jit_test(jit-library-concurrency jit-gpu hipblaslt-jit-library-test
+    "${hipblaslt_jit_bundles}/gfx950/plain" "${hipblaslt_jit_scratch}/library-concurrency"
+    --writers 8 --per-writer 4)
+set_tests_properties(jit-library jit-library-concurrency PROPERTIES
+    FIXTURES_REQUIRED jit-bundles)
+
 add_executable(hipblaslt-jit-end-to-end-test jit_end_to_end_test.cpp)
 target_include_directories(hipblaslt-jit-end-to-end-test PRIVATE "${hipblaslt_jit_source}")
 target_link_libraries(hipblaslt-jit-end-to-end-test PRIVATE roc::hipblaslt hip::device)
 hipblaslt_jit_test(jit-end-to-end jit-gpu hipblaslt-jit-end-to-end-test
     "${hipblaslt_jit_bundles}")
 set_tests_properties(jit-end-to-end PROPERTIES FIXTURES_REQUIRED jit-bundles)
+# Publishes the solutions in one process and runs their indices in a second.
+hipblaslt_jit_test(jit-end-to-end-library jit-gpu hipblaslt-jit-end-to-end-test
+    "${hipblaslt_jit_bundles}" --library)
+set_tests_properties(jit-end-to-end-library PROPERTIES
+    FIXTURES_REQUIRED jit-bundles
+    ENVIRONMENT HIPBLASLT_JIT_LIBRARY_PATH=${hipblaslt_jit_scratch}/end-to-end-library)
 
 # One process per mode: HIPBLASLT_JIT is read once. The test sets
 # HIPBLASLT_JIT_TEST_REPLAY to the device's plain-pair bundle.

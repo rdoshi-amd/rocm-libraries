@@ -34,17 +34,38 @@ from pathlib import Path
 FLYDSL_VERSION = "0.3.4"
 
 # The FlyDSL checkout the vendored kernel sources were taken from. Reproduced in
-# kernels/gfx1151/SOURCE.md; not importable here. tools/diff_upstream.py reads
+# each <op>/<arch>/SOURCE.md under CONTENT_DIR; not importable here. tools/diff_upstream.py reads
 # both of these -- it is the consumer that turns them from a claim into a check.
 FLYDSL_KERNELS_COMMIT = "89ad52fbbb9e252396829a8a44b12e18b7acd970"
 FLYDSL_KERNELS_DESCRIBE = "v0.3.4.1-19-g89ad52f"
+
+# The AITER checkout the attention source was taken from. AITER carries FlyDSL
+# kernels that upstream FlyDSL does not -- the RDNA4 flash-attention kernel the
+# gfx1151 port starts from among them -- so a vendored file names which of the
+# two it came from in its own header, and this pins the second.
+AITER_KERNELS_COMMIT = "8253efc4059516f492df597b80ce5311e9fda8bd"
 
 # --- Paths ------------------------------------------------------------------
 
 GENERATORS_DIR = Path(__file__).resolve().parent
 PROVIDER_DIR = GENERATORS_DIR.parent
 KERNELS_SRC_DIR = PROVIDER_DIR / "kernels_src"
-KERNELS_OUT_DIR = PROVIDER_DIR / "kernels"
+
+# Where the checked-in objects and their descriptors live: FlyDSL's producer
+# folder under the provider's production descriptor root, beside rocKE's. The
+# shared packer walks that root, packs each authored `hsaco` UKD's object into
+# the per-arch archive and installs it with everything else, so the objects have
+# to sit inside it -- the packer refuses an object path that leaves the root.
+# Laid out <op>/ (descriptors shared across arches) and <op>/<arch>/ (the KDP,
+# its UKDs, the objects, manifest.json and SOURCE.md).
+CONTENT_DIR = (
+    PROVIDER_DIR.parent
+    / "src"
+    / "engines"
+    / "kernel_ingestor_engine"
+    / "descriptors"
+    / "FlyDSL"
+)
 
 
 class FlydslEnvError(RuntimeError):
@@ -134,5 +155,6 @@ def provenance() -> dict:
         "flydsl_version": FLYDSL_VERSION,
         "flydsl_kernels_commit": FLYDSL_KERNELS_COMMIT,
         "flydsl_kernels_describe": FLYDSL_KERNELS_DESCRIBE,
+        "aiter_kernels_commit": AITER_KERNELS_COMMIT,
         "rocm_version": rocm_version(),
     }

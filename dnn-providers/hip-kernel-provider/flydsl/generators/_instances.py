@@ -73,7 +73,13 @@ class Instance:
         }
 
 
-_ABBREV = {"N": "n", "block_threads": "bt"}
+_ABBREV = {
+    "N": "n",
+    "block_threads": "bt",
+    "head_dim": "d",
+    "block_m": "bm",
+    "block_n": "bn",
+}
 
 
 def _abbrev(key: str) -> str:
@@ -140,6 +146,58 @@ def rmsnorm_instances() -> list[Instance]:
     return instances
 
 
+# --- SDPA forward ------------------------------------------------------------
+
+# The vendored kernel (kernels_src/kernels/attention/flash_attn_func_gfx1151.py)
+# bakes only head_dim, the causal flag, dtype and its tile. Batch, both sequence
+# lengths, both head counts (GQA/MQA), every stride, the softmax scale and the
+# causal offset are runtime arguments, so each row below serves every shape and
+# layout of its (dtype, head_dim, causal) class. That is what keeps this table
+# small: the axes it enumerates are model-determined, never request-determined.
+#
+# head_dim: 64 and 128 cover the large majority of current LLM and diffusion
+# attention; 96 is the Phi-family width. The kernel builds for any multiple of
+# 32 from 64 up, but 256 does not fit: its O accumulators and register-resident
+# Q operands alone fill the 256-VGPR ceiling and the object spills, so it needs
+# a schedule that stages Q through LDS (COVERAGE.md, what is missing).
+SDPA_HEAD_DIMS = (64, 96, 128)
+
+# Two variants of one kernel rather than a runtime flag: causal changes the KV
+# loop bound and skips fully-masked tiles, and the non-causal variant carries a
+# V prefetch across iterations that the causal one drops for register pressure.
+SDPA_CAUSAL = (0, 1)
+
+# The kernel's tile: upstream's RDNA4 defaults, unchanged. Launch geometry, not
+# correctness -- kept in the knob dict so a second tile is a row, and so the
+# dispatcher reads the grid's block_m from the selected object rather than
+# restating it.
+SDPA_BLOCK_M = 128
+SDPA_BLOCK_N = 32
+
+
+def sdpa_instances() -> list[Instance]:
+    """The SDPA-forward instance table: one row per (dtype, head_dim, causal)."""
+    instances: list[Instance] = []
+    for dtype in DTYPES:
+        for head_dim in SDPA_HEAD_DIMS:
+            for causal in SDPA_CAUSAL:
+                instances.append(
+                    Instance(
+                        op="sdpa",
+                        dtype=dtype,
+                        priority=PRIORITY_SPECIALIZED,
+                        knobs={
+                            "head_dim": head_dim,
+                            "causal": causal,
+                            "block_m": SDPA_BLOCK_M,
+                            "block_n": SDPA_BLOCK_N,
+                        },
+                    )
+                )
+    _assert_unique(instances)
+    return instances
+
+
 def _assert_unique(instances: list[Instance]) -> None:
     """Instance names are filenames and TOC keys; a collision silently drops one."""
     seen: dict[str, Instance] = {}
@@ -153,7 +211,7 @@ def _assert_unique(instances: list[Instance]) -> None:
         seen[instance.name] = instance
 
 
-OPS = {"rmsnorm": rmsnorm_instances}
+OPS = {"rmsnorm": rmsnorm_instances, "sdpa": sdpa_instances}
 
 
 def instances_for(op: str) -> list[Instance]:

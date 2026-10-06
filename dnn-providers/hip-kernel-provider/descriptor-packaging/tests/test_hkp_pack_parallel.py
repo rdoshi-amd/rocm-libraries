@@ -670,29 +670,18 @@ def hsaco_corpus(tmp_path):
 
 
 @pytest.mark.quick
-def test_prewarm_skips_hsaco_kind(hsaco_corpus, tmp_path):
-    """An hsaco UKD produces no job, and the walk stays the sole error reporter.
+def test_prewarm_skips_hsaco_kind(hsaco_corpus):
+    """A pre-built object produces no prewarm job; only its compiling sibling does.
 
-    `_variant_key_for` declines the kind, so the prewarm drops it and the walk
-    reaches it and raises the unsupported-kind error itself.
-
-    The raise is asserted first on purpose: with the job-list assertion ahead of
-    it, a stub job list ends the test before the walk is ever exercised.
+    The object is keyed like any variant, so the walk can file it, but there is
+    nothing to compile: the walk resolves the file itself
+    (test_hkp_pack_hsaco.py), and a job for it would hand the worker pool a kind
+    no worker has an arm for.
     """
     flat = load_flat_input(hsaco_corpus, log=_silent)
 
-    with pytest.raises(HkpPackError, match="unsupported kind 'hsaco'"):
-        pipeline.compile_intermediate(
-            flat,
-            hsaco_corpus,
-            TARGET_ARCH,
-            "hipcc",
-            tmp_path / "inter",
-            log=_silent,
-        )
-
     hsaco_ukd = flat.kdps()[0].doc["kernelDescriptors"][0]
-    assert pipeline._variant_key_for(hsaco_ukd, Path(".")) is None
+    assert pipeline._variant_key_for(hsaco_ukd, Path(".")) is not None
 
     sibling_vk = hip_variant_key(
         hip_source_relpath(Path("."), _HSACO_SOURCE),

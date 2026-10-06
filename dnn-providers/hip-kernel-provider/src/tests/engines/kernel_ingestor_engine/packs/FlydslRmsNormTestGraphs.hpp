@@ -7,10 +7,13 @@
 
 #include <cstdint>
 #include <optional>
+#include <string>
+#include <variant>
 #include <vector>
 
 #include <hipdnn_flatbuffers_sdk/data_objects/graph_generated.h>
 #include <hipdnn_flatbuffers_sdk/data_objects/rmsnorm_attributes_generated.h>
+#include <hipdnn_plugin_sdk/ingestor/Descriptors.hpp>
 
 #include "engines/kernel_ingestor_engine/packs/IngestorPackTestSupport.hpp"
 
@@ -61,6 +64,21 @@ constexpr int64_t FLYDSL_EPSILON_UID = 3;
 constexpr int64_t FLYDSL_Y_UID = 4;
 constexpr int64_t FLYDSL_BIAS_UID = 5;
 constexpr int64_t FLYDSL_INV_RMS_UID = 6;
+
+/// @p values[field] when it is present and holds a T, else nullptr.
+///
+/// Looked up rather than indexed: a kernel missing the field is a finding for the case
+/// that checks the field, not an out_of_range from a helper three frames away.
+///
+/// Shared rather than file-local because both FlyDSL test files read the same metadata
+/// triple -- the census over the staged shard and the suites that build kernels by hand.
+template <typename T>
+const T* tryGetMetadataField(const hipdnn_plugin_sdk::ingestor::MetadataValues& values,
+                             const char* field)
+{
+    const auto it = values.find(std::string(field));
+    return it == values.end() ? nullptr : std::get_if<T>(&it->second);
+}
 
 /// @brief Row-major packed strides for @p dims. The kernel takes one row stride and an
 /// implied innermost stride of 1, so a graph whose strides are not these is refused

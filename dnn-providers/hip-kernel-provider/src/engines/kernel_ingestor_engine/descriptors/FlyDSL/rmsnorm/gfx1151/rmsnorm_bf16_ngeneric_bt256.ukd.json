@@ -1,0 +1,39 @@
+{
+  "version": "1.0",
+  "id": "436e9033-e47b-5f11-8070-f20b0fb6b40d",
+  "name": "rmsnorm_bf16_ngeneric_bt256",
+  "arch": [
+    "gfx1151"
+  ],
+  "kernel_source": {
+    "kind": "hsaco",
+    "file": "rmsnorm_bf16_ngeneric_bt256.hsaco",
+    "symbol": "rmsnorm_kernel_0",
+    "sha256": "afef4c7a61ed4945be24327ddf6a907ad94b939e2def7427bf645ef472b3f55d"
+  },
+  "metadata": {
+    "dtype": "bf16",
+    "N": 0,
+    "block_threads": 256
+  },
+  "priority": 10,
+  "provenance": {
+    "specialization_contract": {
+      "schema_version": 1,
+      "consumers": [
+        {
+          "engine_id": "43c4a81e-f427-56ec-b01f-688019b91f85",
+          "kmd_id": "50b317c4-05a1-5d32-a5ba-08ce1d39ae62",
+          "metadata_fields": [],
+          "matcher_only_fields": [
+            "dtype",
+            "N",
+            "block_threads"
+          ],
+          "bindings": {},
+          "vocabulary": {}
+        }
+      ]
+    }
+  }
+}

@@ -3,11 +3,12 @@ Copyright © Advanced Micro Devices, Inc., or its affiliates.
 SPDX-License-Identifier:  MIT
 -->
 
-# What the FlyDSL pack covers
+# What the FlyDSL packs cover
 
-One op (RMSNorm forward), one architecture (gfx1151), 12 kernel objects. Every
-graph this pack accepts is computed by one of those 12; everything else is
-**declined**, so another engine gets the plan.
+Two packs, one architecture (gfx1151): **RMSNorm forward** (12 kernel objects,
+§1–§4) and **SDPA forward** (8 kernel objects, §5). Every graph a pack accepts is
+computed by one of its objects; everything else is **declined**, so another
+engine gets the plan.
 
 That last point is the design rule this whole file exists to document. The
 kernels are pre-built HSACO — [`FlydslRmsNormNative.cpp`](../src/engines/kernel_ingestor_engine/packs/FlydslRmsNormNative.cpp)
@@ -171,7 +172,7 @@ do not compute, declined rather than approximated.
 | **Rank < 2 on x or y** | No row to reduce over. |
 | **Broadcast gamma that is not the normalised axis** | Not a broadcast the kernel performs. |
 | **Multi-node graphs, fused add+RMSNorm** | One node per kernel. Fusion would be its own pack. |
-| **Architectures other than gfx1151** | `kernels/` holds one arch. With `GPU_TARGETS` naming no arch we ship kernels for, the integration reports dormant at configure time and stages nothing — it does not fail, and it does not silently produce an empty shard. Adding an arch is a regeneration ([REGEN.md](REGEN.md) §3), not a code change. |
+| **Architectures other than gfx1151** | Objects are checked in for one arch. With `GPU_TARGETS` naming no arch we ship kernels for, the integration reports dormant at configure time and stages nothing — it does not fail, and it does not silently produce an empty shard. Adding an arch is a regeneration ([REGEN.md](REGEN.md) §3), not a code change. |
 | **Ops other than RMSNorm** | `OPS` in `_instances.py` has one entry. |
 
 ---
@@ -182,7 +183,125 @@ do not compute, declined rather than approximated.
 |---|---|
 | The 12 objects are what the pinned toolchain produces | [REGEN.md](REGEN.md) §2 — SHA256 against `manifest.json`, currently 12/12 |
 | Descriptors agree with the objects they describe | `gen_descriptors.py --check`, run by the build before staging |
-| The archive agrees with the manifest | `pack.py` re-verifies each SHA256 against the bytes it writes |
+| The archive holds exactly the checked-in objects | The shared packer verifies each object against the SHA256 its descriptor records |
 | The vendored sources match upstream but for recorded modifications | `tools/diff_upstream.py` ([REGEN.md](REGEN.md) §5) |
-| The pack ships both tiers for both dtypes, and every kernel declares the 8-slot signature | `TestFlydslRmsNormPack` — and the shard census, which fails when the suite is green against an empty shard |
-| The accept/refuse rules above hold | The matcher-acceptance suites in the same file |
+| The pack ships both tiers for both dtypes, and every kernel declares the 8-slot signature | `TestFlydslRmsNormPacks` — and the shard census that runs it, which fails when the suite is green against an empty shard |
+| The accept/refuse rules above hold | The matcher-acceptance suites in `TestFlydslRmsNormEngine.cpp` |
+
+---
+
+## 5. SDPA forward — `hipkernel:flydsl_sdpa`
+
+The kernel is FlyDSL's RDNA4 flash-attention forward from AITER, ported to the
+gfx11 WMMA ABI and widened so a handful of objects cover many shapes
+([`kernels_src/kernels/attention/flash_attn_func_gfx1151.py`](kernels_src/kernels/attention/flash_attn_func_gfx1151.py),
+whose header lists every modification). The native half is
+[`FlydslSdpaNative.cpp`](../src/engines/kernel_ingestor_engine/packs/FlydslSdpaNative.cpp).
+
+### 5.1 What is baked, and what is not
+
+| Baked per object | Runtime kernel argument |
+|---|---|
+| dtype (`bf16`, `f16`) | batch |
+| `head_dim` | `seq_len_q`, `seq_len_kv` — independently, any value |
+| causal variant: a right bound is applied, or not | query heads, and the GQA/MQA group size |
+| tile (`block_m` 128, `block_n` 32) | every operand's (batch, sequence, head) stride |
+| | softmax scale |
+| | `right_bound`, `left_bound`, diagonal alignment |
+| | whether to write the LSE output, and its strides |
+
+So the instance key is `dtype × head_dim × causal`, and every axis it
+enumerates is **model-determined**, never request-determined. That is what
+keeps the table at 12 rows:
+
+| | `head_dim` 64 | `head_dim` 96 | `head_dim` 128 |
+|---|---|---|---|
+| bf16 | causal, non-causal | causal, non-causal | causal, non-causal |
+| f16 | causal, non-causal | causal, non-causal | causal, non-causal |
+
+The causal variant is the one that applies a right bound — top-left or
+bottom-right causal, and any band to the right of the diagonal. It is two
+objects rather than a runtime flag because it changes the loop: it bounds the
+KV loop at the diagonal and skips fully masked tiles, and the non-causal one
+carries a V prefetch across iterations that the causal one drops for register
+pressure. Everything else about the mask is a runtime argument, served by both.
+
+### 5.2 What a graph must be
+
+One SDPA-forward node, and:
+
+| Condition | Why |
+|---|---|
+| Q, K, V, O present, rank 4, device operands, **not ragged** | The kernel reads each through a pointer as a dense batch; a ragged (THD) operand would be read as one. |
+| One dtype for all four, `BFLOAT16` or `HALF` | One element type throughout; no fp32 WMMA operand form exists. |
+| Head-dim stride 1 on all four; other strides positive | Each lane reads a row's head-dim values as one contiguous vector. Every other stride is a kernel argument, so BSHD, BHSD and packed-QKV views are all served. |
+| K and V share every extent; O has Q's; V's head dim equals Q/K's | The kernel has one `head_dim` and does not broadcast. |
+| `Hq % Hkv == 0` | The kv head is the query head divided by the group size. |
+| Any `left_bound`/`right_bound` ≥ −1, either alignment, or the deprecated causal booleans (not both) | The kernel applies the reference's two-sided rule (`CpuFpReferenceSdpa` `isMasked`) directly. |
+| Scale: `attn_scale_value` (> 0), a pass-by-value scalar tensor, or absent | Absent is `1/√head_dim`, the reference's default. The running max is over unscaled scores, which orders them correctly only for a positive scale. |
+| Stats, if requested: a named f32 `[B, H, Sq, 1]` device tensor | The kernel writes the natural-log LSE of the scaled scores there. |
+| `Sq`, `Skv` < 2²⁹; one (batch, kv head) slice of K or V under 2 GiB; grid under 2³¹ | int32 mask arithmetic, and 32-bit bounds-checked buffer descriptors. |
+
+Any sequence length is correct: K and V reads past `seq_len_kv` return zero and
+every such score is masked, so nothing is padded and nothing pads the softmax.
+A row no key reaches — a narrow window, or bottom-right causal with more
+queries than keys — gets O = 0 and LSE = −inf, as the reference defines it.
+
+### 5.3 Against hipDNN's attention Tier 0 / Tier 1
+
+| # | Requirement | Status |
+|---|---|---|
+| 1 | fp16, bf16; fp32 accumulate | **served** |
+| 2 | BSHD, BHSD, general B/S/H strides, packed QKV | **served** |
+| 3 | MHA, MQA, GQA | **served** (`Hk == Hv`) |
+| 4 | attention scale | **served** (positive) |
+| 5 | causal, top-left | **served** |
+| 6 | causal, bottom-right, `Sq ≠ Skv` | **served** |
+| 7 | softmax stats / LSE | **served** |
+| 8 | arbitrary sequence lengths | **served** |
+| 9 | head dims 64, 128, 256 | **64, 128 served (and 96)**; 256 missing |
+| 10 | padding mask via `SEQ_LEN_Q`/`SEQ_LEN_KV` | missing |
+| 11 | sliding window (`left_bound`) | **served** (and right-side bands) |
+| 12 | varlen / THD | missing (declined) |
+| 13 | decode (`Sq == 1`) | **served**; idle waves skip the matrix work, but one query row still occupies a 128-row tile |
+| 14 | additive bias | missing |
+
+### 5.4 What is still missing, and what closing it takes
+
+Each is declined today, so the graph plans on another engine or fails cleanly
+at `check_support()`, never at `execute()`.
+
+| | Effort | What it takes |
+|---|---|---|
+| **`head_dim` 256** (Tier 0) | large | Its O accumulators and register-resident Q operands alone fill the 256-VGPR ceiling, and the object spills. Needs a schedule that stages Q through LDS, or splits O into two passes. |
+| **Additive bias** (Tier 1; `F.sdpa(attn_mask=)`) | medium | A bias pointer and four broadcast strides, two bounds-checked loads per tile, and an add before the mask. The d128 objects sit at 255–256 VGPRs, so it may need a baked `has_bias` variant rather than a runtime flag. |
+| **Padding mask** (Tier 1) | medium | Two per-batch length pointers read once per workgroup. The diagonal offset is already computed in-kernel from the lengths for exactly this. hipDNN's CPU reference does not implement padding yet, so its semantics must be defined there first. |
+| **Varlen / THD** (Tier 1) | medium, after padding | Ragged offsets replace the batch stride; the grid stays over the longest sequence and tiles past a sequence's end exit early. |
+| **Decode throughput** | medium / large | Pack the GQA group into the 128 query rows (medium), then split-KV with an LSE-combine pass (large). |
+| `head_dim` 80, 112 | small–medium | The kernel asserts `head_dim % 32`; 16 should suffice but the cooperative loads must be re-verified. 40/72/104 (`% 8`) need a WMMA K-tail. |
+| `Dv ≠ Dqk` (MLA) | medium–large | A second head dim for V's LDS tile, the O accumulators and the store. |
+| `Hk ≠ Hv` | small, low value | A second group size. |
+| fp32 I/O, FP8, dropout, paged KV, block masks, sinks, ALiBi, softcap | out of scope | As hipDNN's requirements state; ALiBi and softcap have no reference semantics. |
+| **Backward** | out of scope here | Inference-only, as for hipDNN's Tier 0/1. LSE is emitted so a backward can be added without an ABI break. |
+| **Other architectures** | see below | The objects are gfx1151 builds of a gfx11 kernel. |
+
+**Other gfx11 parts** need no kernel change: `gfx11-generic` objects compiled
+from this source were verified to load and compute correctly on gfx1151, at a
+cost inside measurement noise. Shipping them needs a FlyDSL change (its
+`convert-gpu-to-rocdl` chipset parse rejects generic names) and a hipDNN-side
+arch mapping (`gfx1151` never matches `gfx11-generic` today). The d128 objects
+tip into small spills as generic builds, since a generic target assumes the
+smaller register file. **gfx12** needs per-family WMMA codegen: its operand ABI
+differs, so one object cannot span both; the kernel source can, behind four
+small helpers.
+
+### 5.5 Where each claim is checked
+
+| Claim | Checked by |
+|---|---|
+| The 12 objects are what the pinned toolchain produces | [REGEN.md](REGEN.md) §2 — 12/12 byte-identical |
+| Each object has the declared 29-argument layout and spills no registers | `gen_sdpa.py`, before the object is written |
+| The vendored kernel matches AITER but for its recorded modifications | `tools/diff_upstream.py --aiter` ([REGEN.md](REGEN.md) §5) |
+| The shard ships exactly one object per `dtype × head_dim × causal` class, each with the 29-slot signature | `TestFlydslSdpaPacks`, and the shard census that runs it |
+| The accept/decline rules above, the bindings, and candidate selection | `TestFlydslSdpaGraphAccepts`, `TestFlydslSdpaGraphDeclines`, `TestFlydslSdpaBinding`, `TestFlydslSdpaKernelMatch` |
+| The staged objects compute attention and LSE — GQA, ragged lengths, cross-attention, both causal corners, windows, bands, keyless rows, decode, `head_dim` 96, runtime and default scale — against a double-precision reference | `TestGpuFlydslSdpaDispatch` |

@@ -16,7 +16,7 @@ dropping files in a folder.
 Two filters decide what a build packs, and both prune exactly as arch pruning does:
 
 - **Family folders.** A descriptor family lives in a top-level child folder of a root
-  (`rocKE/` today; `hip/` has no switch). `HKP_DESCRIPTOR_FAMILIES` in
+  (`rocKE/` and `FlyDSL/` today; `hip/` has no switch). `HKP_DESCRIPTOR_FAMILIES` in
   `HkpPackaging.cmake` maps each switchable folder to the option that enables it, and a
   family whose option is OFF is passed as `--exclude-folder <name>`: its files are
   never read, under every root. A new family is one entry in that table. A folder is
@@ -77,6 +77,19 @@ Two rules govern the walk:
 - **An `embedded_source` `source_file` must act as an identity.** It is never
   normalised, so `..` is rejected (one file would take two identities) and an absolute
   path is rejected (the emitted key must be the same on every machine).
+
+`hsaco` is the **pre-built** kind: the UKD names a code object that already exists,
+built ahead of time by a toolchain the packer does not run, with
+`{"kind": "hsaco", "file": <path>, "symbol": <name>}` and an optional `sha256`.
+`file` resolves relative to the descriptor's own folder and must stay inside the
+root, exactly as a `hip` source does. Producing it is resolving the file and, when
+`sha256` is given, verifying it -- a mismatch fails the pack, since it means the
+object changed without its descriptor. From there it takes the compiling producers'
+path unchanged: one archive entry keyed by the root-relative path, the signature read
+out of the object, and a shipped `kind: "kpack"` UKD whose provenance records
+`origin_kind: "hsaco"` and that path. No toolchain is recorded for it; the object's own
+provenance is the producer's to keep (FlyDSL's `manifest.json`). Its contract must be
+matcher-only, like every non-compiling kind.
 
 `embedded_source` is a **passthrough** kind: the descriptor is emitted as authored, no
 producer runs, and it contributes no code object and no archive entry — the packer only

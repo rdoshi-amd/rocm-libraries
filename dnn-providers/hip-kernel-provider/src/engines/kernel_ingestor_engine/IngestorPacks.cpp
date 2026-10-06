@@ -15,7 +15,12 @@ const std::vector<IngestorPack>& ingestorPacks()
     static const std::vector<IngestorPack> s_packs = {
         {"hipkernel:Pointwise", &registerPointwiseSymbols, &resetPointwiseModuleCache},
         {"hipkernel:ConvFwd", &registerConvFwdSymbols, &resetConvFwdModuleCache},
+#ifdef HIPDNN_ENGINE_FLYDSL
+        // Compiled only when FlyDSL staged a shard; see the gate in this directory's
+        // CMakeLists.txt.
         {"hipkernel:FlydslRmsNorm", &registerFlydslRmsNormSymbols, &resetFlydslRmsNormModuleCache},
+        {"hipkernel:FlydslSdpa", &registerFlydslSdpaSymbols, &resetFlydslSdpaModuleCache},
+#endif
         {"hipkernel:Gfx950AttentionDense",
          &registerGfx950AttentionDenseSymbols,
          &resetGfx950AttentionDenseModuleCache},

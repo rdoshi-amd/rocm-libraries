@@ -1,26 +1,22 @@
 # Copyright © Advanced Micro Devices, Inc., or its affiliates.
 # SPDX-License-Identifier:  MIT
 
-"""Per-arch provenance records for the checked-in code objects.
+"""Provenance records for the checked-in code objects of one op and one arch.
 
-Two artifacts, written by every generator run:
+Two artifacts, written by every generator run into the directory that holds the
+objects (``<content>/<op>/<arch>/``):
 
-* ``kernels/<arch>/<op>/manifest.json`` -- the machine-readable record for one
-  op: the toolchain it was built with, and one row per instance (knobs,
-  priority, symbol, kernarg layout, SHA256). Per-op rather than per-arch so
-  ``gen_layernorm.py`` cannot clobber what ``gen_rmsnorm.py`` wrote.
-* ``kernels/<arch>/SOURCE.md`` -- the human-readable roll-up over every op
-  manifest under that arch, following the convention
-  ``src/engines/asm_sdpa_engine/asm/asm_kernels/`` established for checked-in
-  ``.co``: upstream source, what was modified, and a full SHA256 manifest.
+* ``manifest.json`` -- the machine-readable record: the toolchain the objects
+  were built with, and one row per instance (knobs, priority, symbol, kernarg
+  layout, SHA256). The descriptor generator reads it; nothing else is a source
+  of truth for what an object is.
+* ``SOURCE.md`` -- the human-readable view of the same record, following the
+  convention ``src/engines/asm_sdpa_engine/asm/asm_kernels/`` established for
+  checked-in ``.co``: upstream source, toolchain, and a full SHA256 manifest.
 
 A binary in the tree is only reviewable through these files, so a *stale* one is
-worse than a missing one. ``refresh_source_md`` therefore rebuilds the whole
-document from the manifests on every run rather than patching a section, and
-reports a toolchain disagreement between ops instead of quietly printing one of
-them -- two ops built against different ROCm versions is a real condition (the
-Flash2 note measures ~1.4x from the ROCm version alone), and the reader has to
-see it to act on it.
+worse than a missing one. ``refresh_source_md`` therefore rebuilds the document
+from the manifest on every run rather than patching it.
 """
 
 from __future__ import annotations
@@ -38,9 +34,9 @@ def sha256(data: bytes) -> str:
 
 
 def write_op_manifest(
-    arch_dir: Path, arch: str, op: str, provenance: dict, records: list[dict]
+    op_dir: Path, arch: str, op: str, provenance: dict, records: list[dict]
 ) -> Path:
-    """Write ``<arch_dir>/<op>/manifest.json`` for one generator run."""
+    """Write ``<op_dir>/manifest.json`` for one generator run."""
     manifest = {
         "manifest_version": MANIFEST_VERSION,
         "arch": arch,
@@ -48,7 +44,7 @@ def write_op_manifest(
         "toolchain": dict(provenance),
         "instances": records,
     }
-    path = arch_dir / op / MANIFEST_NAME
+    path = op_dir / MANIFEST_NAME
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(manifest, indent=2, sort_keys=False) + "\n", encoding="utf-8"
@@ -56,57 +52,30 @@ def write_op_manifest(
     return path
 
 
-def _load_manifests(arch_dir: Path) -> list[dict]:
-    manifests = []
-    for path in sorted(arch_dir.glob(f"*/{MANIFEST_NAME}")):
-        manifests.append(json.loads(path.read_text(encoding="utf-8")))
-    return manifests
-
-
-def _toolchain_section(manifests: list[dict]) -> list[str]:
-    """The toolchain block, or a warning if the ops disagree about it."""
-    by_op = {m["op"]: m.get("toolchain", {}) for m in manifests}
-    distinct = {json.dumps(t, sort_keys=True) for t in by_op.values()}
-
-    if len(distinct) <= 1:
-        toolchain = next(iter(by_op.values()), {})
-        lines = ["| Component | Version |", "| --- | --- |"]
-        lines += [f"| {key} | `{value}` |" for key, value in toolchain.items()]
-        return lines
+def refresh_source_md(op_dir: Path) -> Path:
+    """Rebuild ``<op_dir>/SOURCE.md`` from the manifest beside it."""
+    manifest_path = op_dir / MANIFEST_NAME
+    if not manifest_path.is_file():
+        raise FileNotFoundError(f"no {MANIFEST_NAME} in {op_dir}; nothing to describe")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    op = manifest["op"]
+    arch = manifest["arch"]
 
     lines = [
-        "> **⚠️ The ops under this arch were not all built with the same toolchain.**",
-        "> Regenerate every op in one pass before publishing; a mixed tree makes the",
-        "> per-op rows below the only accurate record.",
-        "",
-        "| Op | " + " | ".join(sorted({k for t in by_op.values() for k in t})) + " |",
-    ]
-    keys = sorted({k for t in by_op.values() for k in t})
-    lines.append("| --- |" + " --- |" * len(keys))
-    for op in sorted(by_op):
-        cells = " | ".join(f"`{by_op[op].get(key, '')}`" for key in keys)
-        lines.append(f"| {op} | {cells} |")
-    return lines
-
-
-def refresh_source_md(arch_dir: Path, arch: str) -> Path:
-    """Rebuild ``<arch_dir>/SOURCE.md`` from every op manifest under `arch_dir`."""
-    manifests = _load_manifests(arch_dir)
-    if not manifests:
-        raise FileNotFoundError(
-            f"no {MANIFEST_NAME} under {arch_dir}; nothing to describe"
-        )
-
-    total = sum(len(m["instances"]) for m in manifests)
-    lines = [
-        f"# FlyDSL AOT kernel objects — `{arch}`",
+        f"# FlyDSL AOT kernel objects — `{op}`, `{arch}`",
         "",
         "<!-- Generated by flydsl/generators/. Do not edit by hand: every generator",
-        "     run rebuilds this file from the per-op manifest.json files. -->",
+        "     run rebuilds this file from manifest.json beside it. -->",
         "",
-        f"{total} checked-in code object(s) across {len(manifests)} op(s), compiled from the",
-        "vendored sources under `flydsl/kernels_src/`. Regenerate with the command in",
-        "each op section below; see `../../REGEN.md` for the environment.",
+        f"{len(manifest['instances'])} checked-in code object(s), compiled from the "
+        "vendored sources under",
+        "`flydsl/kernels_src/` in the hip-kernel-provider tree. Regenerate with:",
+        "",
+        "```",
+        f"python -m generators.gen_{op} --arch {arch}",
+        "```",
+        "",
+        "run from `flydsl/`; see `flydsl/REGEN.md` for the environment.",
         "",
         "## Toolchain",
         "",
@@ -114,38 +83,34 @@ def refresh_source_md(arch_dir: Path, arch: str) -> Path:
         "or ROCm version is a *change* to these binaries, not a refresh, even when the",
         "instance list is untouched.",
         "",
+        "| Component | Version |",
+        "| --- | --- |",
     ]
-    lines += _toolchain_section(manifests)
-
-    for manifest in sorted(manifests, key=lambda m: m["op"]):
-        op = manifest["op"]
-        lines += [
-            "",
-            f"## `{op}`",
-            "",
-            "```",
-            f"python -m generators.gen_{op} --arch {arch}",
-            "```",
-            "",
-            "| Instance | Tier | Priority | Knobs | Symbol | Bytes |",
-            "| --- | --- | ---: | --- | --- | ---: |",
-        ]
-        for record in manifest["instances"]:
-            knobs = ", ".join(
-                f"{key}={'runtime' if value is None else value}"
-                for key, value in record["knobs"].items()
-            )
-            lines.append(
-                f"| `{record['name']}` | {record['tier']} | {record['priority']} | "
-                f"{knobs} | `{record['symbol']}` | {record['bytes']} |"
-            )
+    lines += [
+        f"| {key} | `{value}` |" for key, value in manifest.get("toolchain", {}).items()
+    ]
+    lines += [
+        "",
+        "## Instances",
+        "",
+        "| Instance | Tier | Priority | Knobs | Symbol | Bytes |",
+        "| --- | --- | ---: | --- | --- | ---: |",
+    ]
+    for record in manifest["instances"]:
+        knobs = ", ".join(
+            f"{key}={'runtime' if value is None else value}"
+            for key, value in record["knobs"].items()
+        )
+        lines.append(
+            f"| `{record['name']}` | {record['tier']} | {record['priority']} | "
+            f"{knobs} | `{record['symbol']}` | {record['bytes']} |"
+        )
 
     lines += ["", "## SHA256 manifest", "", "```"]
-    for manifest in sorted(manifests, key=lambda m: m["op"]):
-        for record in manifest["instances"]:
-            lines.append(f"{record['sha256']}  {manifest['op']}/{record['file']}")
+    for record in manifest["instances"]:
+        lines.append(f"{record['sha256']}  {record['file']}")
     lines += ["```", ""]
 
-    path = arch_dir / "SOURCE.md"
+    path = op_dir / "SOURCE.md"
     path.write_text("\n".join(lines), encoding="utf-8")
     return path

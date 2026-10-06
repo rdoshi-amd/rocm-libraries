@@ -2,12 +2,20 @@
 
 This root holds the descriptors the provider **ships**. Its sibling `test_descriptors/`
 stages into the build tree for the unit and integration binaries and is installed only
-under `HIPKERNELPROVIDER_ENABLE_TESTS`. It holds one bundle,
-`rocKE/gfx950_attention_dense/`, whose KDP declares gfx950 only, so production packaging
-runs for a build whose GPU targets include gfx950 and that has rocKE enabled
-(`HIPKERNELPROVIDER_ENABLE_ROCKE=ON`, which keeps the `rocKE/` folder in the walk). For
-any other build the root has nothing to pack and production packaging is dormant, unless
-the cache variable below is pointed elsewhere.
+under `HIPKERNELPROVIDER_ENABLE_TESTS`. It holds two producers' bundles:
+
+- `rocKE/gfx950_attention_dense/`, whose KDP declares gfx950 only and whose kernels are
+  compiled at pack time; it packs for a build whose GPU targets include gfx950 and that
+  has rocKE enabled (`HIPKERNELPROVIDER_ENABLE_ROCKE=ON`, which keeps the `rocKE/`
+  folder in the walk).
+- `FlyDSL/<op>/`, one bundle per op, whose kernels are **pre-built** and checked in
+  beside their descriptors as `kind: "hsaco"` UKDs under `FlyDSL/<op>/<arch>/`; it packs
+  for a build whose GPU targets include an arch objects are checked in for and that has
+  FlyDSL enabled (`HIPKERNELPROVIDER_ENABLE_FLYDSL=ON`). The objects and descriptors are
+  generated, not hand-written: see `flydsl/REGEN.md` in the provider tree.
+
+For any other build the root has nothing to pack and production packaging is dormant,
+unless the cache variable below is pointed elsewhere.
 
 ## Authoring a bundle
 
@@ -24,8 +32,8 @@ Nothing here is registered in CMake: the packer walks this root recursively, so 
 bundle is dropping files in a folder. Kernel-source *embedding* is a separate mechanism,
 required only for `kernel_source.kind == "embedded_source"`.
 
-A bundle here is compiled at pack time, one comgr invocation per variant, on every build
-that has this root wired — CI included. Trim an authored variant set to a covering subset
+A compiled bundle here (`rocKE/`) is compiled at pack time, one comgr invocation per
+variant, on every build that has this root wired — CI included. Trim an authored variant set to a covering subset
 before it lands, and register the symbols its UKDs name in a native pack, or the loader
 refuses the engine at provider load and every lowered kernel is wasted build time.
 

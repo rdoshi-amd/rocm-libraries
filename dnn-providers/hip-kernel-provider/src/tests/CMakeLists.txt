@@ -197,12 +197,18 @@ if(HIPDNN_ENABLE_KERNEL_INGESTOR)
         endif()
     endforeach()
 
-    # FlyDSL stages its shard from a target of its own, for the same reason and with the
-    # same failure mode. Guarded on the target rather than on the flag so this reads the
-    # one fact it depends on -- that something stages that shard -- and stays correct if
-    # FlyDSL is dormant for the requested architectures.
-    if(TARGET flydsl_kernel_kpack)
-        add_dependencies(hip_kernel_provider_tests flydsl_kernel_kpack)
+    # FlyDSL's kernels ship in the production shard, which the unit root main()
+    # resolves does not reach, so FlyDSL's device cases would find no descriptor for
+    # their engine. The binary therefore names the production root as an ADDITIVE one,
+    # as the integration binary does, and is built after the pack that fills it.
+    #
+    # The ordinary binary only. A census addresses exactly one shard through an explicit
+    # HIPDNN_DESCRIPTOR_DIR, and a second root reachable from that process would put
+    # kernels in its inventory that the entry running it never named.
+    if(HIPKERNELPROVIDER_FLYDSL_ACTIVE)
+        add_dependencies(hip_kernel_provider_tests hkp_packaging_product)
+        target_compile_definitions(hip_kernel_provider_tests PRIVATE
+            HIPKERNELPROVIDER_FLYDSL_PRODUCT_DESCRIPTOR_RELDIR="${HIPKERNELPROVIDER_PLUGIN_ENGINE_RELDIR}/${HIPKERNELPROVIDER_DESCRIPTOR_SUBDIR}")
     endif()
 
     # The census binary additionally reads the production shard, which is wired only
@@ -248,25 +254,39 @@ if(HIPDNN_ENABLE_KERNEL_INGESTOR)
             SubtractsInTheRightDirection
     )
 
-    # The same census over FlyDSL's shard, which flydsl/ stages rather than lowers and
-    # registers into the same registry. ACTIVE rather than the option: with the option ON
-    # for an architecture no kernels are checked in for, FlyDSL stands down and there is
-    # no shard for an entry to address.
+    # FlyDSL's kernels ship in the production shard, so their census addresses that
+    # pack, narrowed to the architectures FlyDSL ships for: the product pack may be
+    # wired for an architecture FlyDSL has no objects for, where these suites would find
+    # no set. ACTIVE rather than the option: with the option ON for an architecture no
+    # kernels are checked in for, FlyDSL stands down and there is nothing to census.
     #
-    # TestFlydslRmsNormPack is the one suite in FlyDSL's file that qualifies. Its GPU
-    # suites skip, which a census entry treats as a failure; its matcher-acceptance suites
-    # are TEST_P; and its remaining host suites build graphs in-process instead of reading
-    # loadedSet(), so censusing one would stay green against an empty shard -- the exact
-    # miss the census exists to catch. Every case below opens by reading the staged set.
+    # TestFlydslRmsNormPacks and TestFlydslSdpaPacks are the FlyDSL suites that
+    # qualify, and they have files of their own in the census binary for that reason. FlyDSL's GPU suites skip, which a
+    # census entry treats as a failure; its matcher-acceptance suites are TEST_P; and its
+    # remaining host suites build graphs in-process instead of reading loadedSet(), so
+    # censusing one would stay green against an empty shard -- the exact miss the census
+    # exists to catch. Every case below opens by reading the staged set.
     if(HIPKERNELPROVIDER_FLYDSL_ACTIVE)
         hkp_register_census_tests(
-            TARGET hip_kernel_provider_tests
-            PACK_NAME flydsl
-            SUITES TestFlydslRmsNormPack
+            TARGET hip_kernel_provider_census_tests
+            PACK_NAME product
+            ARCHES ${HIPKERNELPROVIDER_FLYDSL_ARCHS}
+            SUITES TestFlydslRmsNormPacks
             EXPECTED_CASES
                 IsOnePackWithAGraphMatchAndOneKernelScopedMatcher
                 ShipsBothTiersForBothDtypes
                 EveryKernelDeclaresTheEightSlotSignature
+        )
+        # A second suite over the same shard: one EXPECTED_CASES list pins one suite.
+        hkp_register_census_tests(
+            TARGET hip_kernel_provider_census_tests
+            PACK_NAME product
+            ARCHES ${HIPKERNELPROVIDER_FLYDSL_ARCHS}
+            SUITES TestFlydslSdpaPacks
+            EXPECTED_CASES
+                IsOnePackWithAGraphMatchAndOneKernelScopedMatcher
+                ShipsEveryDtypeHeadDimAndCausalVariantOnce
+                EveryKernelDeclaresTheTwentyNineSlotSignature
         )
     endif()
 

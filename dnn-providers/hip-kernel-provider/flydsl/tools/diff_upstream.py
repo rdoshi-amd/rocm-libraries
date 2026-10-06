@@ -52,13 +52,45 @@ KERNELS_SRC_DIR = PROVIDER_DIR / "kernels_src"
 # upstream commit the checked-in objects were built from.
 sys.path.insert(0, str(PROVIDER_DIR))
 from generators._flydsl_env import (  # noqa: E402
+    AITER_KERNELS_COMMIT,
     FLYDSL_KERNELS_COMMIT,
     FLYDSL_KERNELS_DESCRIBE,
 )
 
+# The upstreams a vendored file can come from, keyed by a substring of the URL its
+# provenance header records. A file whose header names no URL is a FlyDSL file at its
+# own relative path -- the package `__init__` modules carry no provenance block.
+ORIGINS = {"aiter": "aiter", "FlyDSL": "flydsl"}
+_HEADER_LINES = 20
+
 
 class DiffError(RuntimeError):
     """The comparison could not be performed."""
+
+
+def origin_of(relative: Path) -> tuple[str, Path]:
+    """Which upstream @p relative was vendored from, and its path there.
+
+    Read from the file's own provenance header (``# Vendored from: <url>`` and
+    ``#   path: <path>``), so the record that justifies a modification is also the one
+    that says where to diff it.
+    """
+    lines = (KERNELS_SRC_DIR / relative).read_text(encoding="utf-8").splitlines()
+    url = path = None
+    for line in lines[:_HEADER_LINES]:
+        text = line.lstrip("#").strip()
+        if text.startswith("Vendored from:"):
+            url = text.split(":", 1)[1].strip()
+        elif text.startswith("path:") and url is not None:
+            path = text.split(":", 1)[1].strip()
+    if url is None:
+        return "flydsl", relative
+    for marker, origin in ORIGINS.items():
+        if marker in url:
+            return origin, Path(path) if path else relative
+    raise DiffError(
+        f"{relative}: vendored from {url}, which no --upstream option covers"
+    )
 
 
 def black_command(explicit: str | None) -> list[str]:
@@ -129,19 +161,19 @@ def upstream_head(upstream: Path) -> str | None:
     return result.stdout.strip() if result.returncode == 0 else None
 
 
-def check_commit(upstream: Path, require: bool) -> bool:
+def check_commit(upstream: Path, pinned: str, label: str, require: bool) -> bool:
     """Report the checkout's commit against the pin. True when it is safe to go on."""
     head = upstream_head(upstream)
     if head is None:
         message = f"{upstream} is not a git checkout, so its commit cannot be confirmed"
-    elif head == FLYDSL_KERNELS_COMMIT:
-        print(f"upstream at the pinned commit {FLYDSL_KERNELS_DESCRIBE} ({head[:12]})")
+    elif head == pinned:
+        print(f"{label} at the pinned commit {head[:12]}")
         return True
     else:
         message = (
-            f"upstream is at {head[:12]}, but the vendored sources were taken from "
-            f"{FLYDSL_KERNELS_COMMIT[:12]} ({FLYDSL_KERNELS_DESCRIBE}). Differences "
-            "below mix local modifications with upstream's own movement."
+            f"{label} is at {head[:12]}, but the vendored sources were taken from "
+            f"{pinned[:12]}. Differences below mix local modifications with "
+            "upstream's own movement."
         )
 
     if require:
@@ -151,14 +183,24 @@ def check_commit(upstream: Path, require: bool) -> bool:
 
 
 def compare(
-    upstream: Path, command: list[str], line_length: int, context: int
-) -> tuple[int, int]:
-    """Diff every vendored file against upstream. Returns (differing, missing)."""
-    differing = missing = 0
+    upstreams: dict[str, Path | None],
+    command: list[str],
+    line_length: int,
+    context: int,
+) -> tuple[int, int, int]:
+    """Diff every vendored file against its upstream. Returns (differing, missing,
+    skipped), where skipped counts files whose upstream checkout was not supplied."""
+    differing = missing = skipped = 0
 
     for relative in vendored_files():
         ours = KERNELS_SRC_DIR / relative
-        theirs = upstream / relative
+        origin, upstream_path = origin_of(relative)
+        upstream = upstreams.get(origin)
+        if upstream is None:
+            print(f"=== {relative}: from {origin}; pass --{origin} to compare it")
+            skipped += 1
+            continue
+        theirs = upstream / upstream_path
 
         if not theirs.is_file():
             print(f"=== {relative}: no upstream counterpart at {theirs}")
@@ -174,7 +216,7 @@ def compare(
         theirs_text = normalize(
             command,
             theirs.read_text(encoding="utf-8"),
-            f"upstream {relative}",
+            f"{origin} {upstream_path}",
             line_length,
         )
 
@@ -185,14 +227,14 @@ def compare(
         diff = difflib.unified_diff(
             theirs_text.splitlines(keepends=True),
             ours_text.splitlines(keepends=True),
-            fromfile=f"upstream/{relative}",
+            fromfile=f"{origin}/{upstream_path}",
             tofile=f"kernels_src/{relative}",
             n=context,
         )
         print(f"=== {relative}")
         sys.stdout.writelines(diff)
 
-    return differing, missing
+    return differing, missing, skipped
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -202,6 +244,13 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         required=True,
         help="FlyDSL checkout to compare against; its kernels/ must mirror kernels_src/",
+    )
+    parser.add_argument(
+        "--aiter",
+        type=Path,
+        default=None,
+        help="AITER checkout, for the files whose header records AITER as their origin "
+        "(default: report them as not compared)",
     )
     parser.add_argument(
         "--commit",
@@ -230,20 +279,33 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if not args.upstream.is_dir():
             raise DiffError(f"upstream checkout not found: {args.upstream}")
+        if args.aiter is not None and not args.aiter.is_dir():
+            raise DiffError(f"AITER checkout not found: {args.aiter}")
         command = black_command(args.black)
-        check_commit(args.upstream, args.commit)
-        differing, missing = compare(
-            args.upstream, command, args.line_length, args.context
+        check_commit(
+            args.upstream,
+            FLYDSL_KERNELS_COMMIT,
+            f"FlyDSL ({FLYDSL_KERNELS_DESCRIBE})",
+            args.commit,
+        )
+        if args.aiter is not None:
+            check_commit(args.aiter, AITER_KERNELS_COMMIT, "AITER", args.commit)
+        differing, missing, skipped = compare(
+            {"flydsl": args.upstream, "aiter": args.aiter},
+            command,
+            args.line_length,
+            args.context,
         )
     except DiffError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
     total = len(vendored_files())
-    identical = total - differing - missing
+    identical = total - differing - missing - skipped
     print(
         f"\n{identical}/{total} vendored files identical to upstream after "
-        f"normalization; {differing} differ, {missing} absent upstream"
+        f"normalization; {differing} differ, {missing} absent upstream, "
+        f"{skipped} not compared"
     )
     if differing:
         print(

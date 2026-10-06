@@ -1,0 +1,43 @@
+{
+  "version": "1.0",
+  "id": "7c8ffeb2-8121-55b0-95ca-31f86173dbf9",
+  "name": "sdpa_bf16_d96_causal1_bm128_bn32",
+  "arch": [
+    "gfx1151"
+  ],
+  "kernel_source": {
+    "kind": "hsaco",
+    "file": "sdpa_bf16_d96_causal1_bm128_bn32.hsaco",
+    "symbol": "flash_attn_func_gfx1151_kernel_0",
+    "sha256": "9f4998672d5a8f6791cb9f503b63c6be800a329d5d7e74b8ea2571a645dc90f6"
+  },
+  "metadata": {
+    "dtype": "bf16",
+    "head_dim": 96,
+    "causal": 1,
+    "block_m": 128,
+    "block_n": 32
+  },
+  "priority": 100,
+  "provenance": {
+    "specialization_contract": {
+      "schema_version": 1,
+      "consumers": [
+        {
+          "engine_id": "bd16d7b9-50d9-57d0-ad6e-49882df64021",
+          "kmd_id": "2a85df69-0618-5c61-ba87-0de0901f0a63",
+          "metadata_fields": [],
+          "matcher_only_fields": [
+            "dtype",
+            "head_dim",
+            "causal",
+            "block_m",
+            "block_n"
+          ],
+          "bindings": {},
+          "vocabulary": {}
+        }
+      ]
+    }
+  }
+}

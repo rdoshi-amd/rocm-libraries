@@ -5,9 +5,10 @@
 
     python -m generators.gen_rmsnorm --arch gfx1151
 
-Writes ``kernels/<arch>/rmsnorm/<instance>.hsaco`` for every row of
-``_instances.rmsnorm_instances()``, plus that op's ``manifest.json`` and a
-refreshed per-arch ``SOURCE.md``.
+Writes ``<content>/rmsnorm/<arch>/<instance>.hsaco`` for every row of
+``_instances.rmsnorm_instances()``, plus the ``manifest.json`` and
+``SOURCE.md`` beside them. ``<content>`` is FlyDSL's bundle folder under the
+provider's production descriptor root (``_flydsl_env.CONTENT_DIR``).
 
 Compilation needs no matching GPU. Under ``COMPILE_ONLY=1`` the launcher traces
 and lowers but never dispatches, so a gfx942 object builds on an RDNA laptop --
@@ -35,6 +36,7 @@ import tempfile
 from pathlib import Path
 
 from . import _flydsl_env as env
+from ._codeobject import GeneratorError, arg_records, describe, verify_arch
 from ._extract_hsaco import hsaco_from_dump
 from ._instances import RMSNORM_SMALL_N_THRESHOLD, Instance, instances_for
 from ._manifest import refresh_source_md, sha256, write_op_manifest
@@ -85,104 +87,9 @@ _SEMANTIC_ARG_NAMES = (
 _GRID_RULE = "one_block_per_row"
 
 
-class GeneratorError(RuntimeError):
-    """An instance could not be built, or the object built is not the one asked for."""
-
-
-def _hkp_pack_module():
-    """Import ``hkp_pack.kernel_signature`` from the sibling packaging tree.
-
-    We reach for two of its helpers rather than re-deriving them: ``amdgcn_object``
-    unwraps the clang offload bundle by *selecting on the ``-amdgcn-`` triple*
-    instead of by position, and ``_metadata_document`` walks the ELF's SHT_NOTE
-    sections for ``NT_AMDGPU_METADATA``. A second copy of either in this
-    directory would be a second thing to keep correct, and the packer this
-    generator feeds parses the very same note.
-    """
-    packaging = env.PROVIDER_DIR.parent / "descriptor-packaging" / "python"
-    if not (packaging / "hkp_pack").is_dir():
-        raise GeneratorError(f"hkp_pack not found under {packaging}")
-    if str(packaging) not in sys.path:
-        sys.path.insert(0, str(packaging))
-    from hkp_pack import kernel_signature as module  # noqa: PLC0415
-
-    return module
-
-
-def _describe(blob: bytes, where: str) -> dict:
-    """The AMDGPU metadata facts we verify and record, for one code object."""
-    hkp = _hkp_pack_module()
-    # `_metadata_document` is private to hkp_pack, but `kernel_signature()` -- its
-    # public entry point -- returns only the argument list, and we also need the
-    # kernarg segment size and the target triple to verify the object at all.
-    document = hkp._metadata_document(hkp.amdgcn_object(blob, where), where)
-
-    kernels = document.get("amdhsa.kernels") or []
-    if len(kernels) != 1:
-        names = ", ".join(str(k.get(".name")) for k in kernels)
-        raise GeneratorError(
-            f"{where}: expected exactly one kernel in the object, found "
-            f"{len(kernels)} [{names}]. The packer keys on (toc_key, symbol), so a "
-            "multi-kernel object needs a TOC entry per symbol, not one per file."
-        )
-    kernel = kernels[0]
-
-    args = [
-        arg
-        for arg in (kernel.get(".args") or [])
-        if not str(arg.get(".value_kind", "")).startswith(hkp._HIDDEN_KIND_PREFIX)
-    ]
-    return {
-        "symbol": kernel.get(".name"),
-        "kernarg_segment_size": kernel.get(".kernarg_segment_size"),
-        "targets": document.get("amdhsa.target"),
-        "signature": tuple(
-            (arg[".value_kind"], arg[".size"], arg[".offset"]) for arg in args
-        ),
-        "named_args": sum(1 for arg in args if arg.get(".name") is not None),
-    }
-
-
-def _target_arch(targets, where: str) -> str:
-    """The gfx name out of ``amdhsa.target``, ignoring feature suffixes.
-
-    Two spellings of the same triple are in circulation and both have to parse:
-    the AITER ASM objects carry an *empty* environment field,
-    ``amdgcn-amd-amdhsa--gfx950:sramecc+:xnack-``, and FlyDSL emits it as
-    ``unknown``, ``amdgcn-amd-amdhsa-unknown-gfx1151``. Splitting on ``--`` reads
-    only the first. So: drop the ``:feature`` suffixes, then take the last
-    ``-``-separated field. The suffixes come off *first* because a feature can
-    itself end in a dash (``xnack-``), which would otherwise swallow the arch.
-
-    We compare the arch alone -- feature flags describe how the object was built,
-    while the filename claims which device it runs on.
-    """
-    if isinstance(targets, (list, tuple)):
-        if len(targets) != 1:
-            raise GeneratorError(f"{where}: expected one target, got {targets!r}")
-        target = targets[0]
-    else:
-        target = targets
-    if not isinstance(target, str):
-        raise GeneratorError(f"{where}: unreadable amdhsa.target {target!r}")
-    arch = target.split(":", 1)[0].rsplit("-", 1)[-1]
-    if not arch.startswith("gfx"):
-        raise GeneratorError(
-            f"{where}: amdhsa.target {target!r} does not end in a gfx name"
-        )
-    return arch
-
-
 def _verify(described: dict, instance: Instance, arch: str, where: str) -> None:
     """Fail before writing, rather than shipping a mislabelled object."""
-    built_for = _target_arch(described["targets"], where)
-    if built_for != arch:
-        raise GeneratorError(
-            f"{where}: object targets {built_for!r} but is being filed under "
-            f"{arch!r}. FlyDSL reads ARCH from the environment at each compile, so "
-            "this means the env moved under the run -- not that the file is "
-            "misnamed. Regenerate one arch per invocation."
-        )
+    verify_arch(described, arch, where)
 
     if described["signature"] != _EXPECTED_SIGNATURE:
         raise GeneratorError(
@@ -262,8 +169,7 @@ def generate(arch: str, out_root: Path, keep_ir: Path | None = None) -> Path:
 
     _assert_threshold_mirror(rmsnorm_kernel)
 
-    arch_dir = out_root / arch
-    op_dir = arch_dir / OP
+    op_dir = out_root / OP / arch
     op_dir.mkdir(parents=True, exist_ok=True)
 
     instances = instances_for(OP)
@@ -280,7 +186,7 @@ def generate(arch: str, out_root: Path, keep_ir: Path | None = None) -> Path:
 
         filename = f"{instance.name}.hsaco"
         where = f"{arch}/{OP}/{filename}"
-        described = _describe(blob, where)
+        described = describe(blob, where)
         _verify(described, instance, arch, where)
 
         (op_dir / filename).write_bytes(blob)
@@ -299,18 +205,13 @@ def generate(arch: str, out_root: Path, keep_ir: Path | None = None) -> Path:
                 # if a future FlyDSL starts emitting names, this stops being 0 and
                 # the packer can hand real names to requireSignatureMatch.
                 "named_args": described["named_args"],
-                "args": [
-                    {"name": name, "kind": kind, "size": size, "offset": offset}
-                    for name, (kind, size, offset) in zip(
-                        _SEMANTIC_ARG_NAMES, described["signature"]
-                    )
-                ],
+                "args": arg_records(_SEMANTIC_ARG_NAMES, described["signature"]),
             }
         )
         records.append(record)
 
-    write_op_manifest(arch_dir, arch, OP, env.provenance(), records)
-    source_md = refresh_source_md(arch_dir, arch)
+    write_op_manifest(op_dir, arch, OP, env.provenance(), records)
+    source_md = refresh_source_md(op_dir)
     print(f"wrote {len(records)} object(s) to {op_dir}")
     print(f"refreshed {source_md}")
     return op_dir
@@ -328,8 +229,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--out-dir",
         type=Path,
-        default=env.KERNELS_OUT_DIR,
-        help=f"kernels/ root to write under (default: {env.KERNELS_OUT_DIR})",
+        default=env.CONTENT_DIR,
+        help="FlyDSL content root to write <op>/<arch>/ under "
+        f"(default: {env.CONTENT_DIR})",
     )
     parser.add_argument(
         "--keep-ir",

@@ -29,7 +29,9 @@ set(HKP_PACK_STAMP_NAME ".hkp-packed.stamp" CACHE INTERNAL
 # Descriptor families a build option switches on and off, as <folder>=<option>. A
 # family lives in a top-level child folder of any source root; with its option OFF
 # every root is packed with that folder excluded. A new family is one entry here.
-set(HKP_DESCRIPTOR_FAMILIES "rocKE=HIPKERNELPROVIDER_ENABLE_ROCKE")
+set(HKP_DESCRIPTOR_FAMILIES
+    "rocKE=HIPKERNELPROVIDER_ENABLE_ROCKE"
+    "FlyDSL=HIPKERNELPROVIDER_ENABLE_FLYDSL")
 
 include(KpackPython)
 
@@ -485,63 +487,6 @@ endfunction()
 # ---------------------------------------------------------------------------
 function(_hkp_record_dormant_pack name)
     set_property(GLOBAL APPEND PROPERTY HKP_PACK_DORMANT_LABELS "${name}")
-endfunction()
-
-# ---------------------------------------------------------------------------
-# hkp_register_external_pack(NAME <name> [DORMANT | OUT_ROOT <dir> ARCHES <list>])
-#   Record a shard this module did not stage, so hkp_register_census_tests() can
-#   address it.
-#
-#   A kernel set that ships PRE-BUILT objects cannot go through
-#   hkp_wire_pack_target(): that rule opens with `rm -rf ${OUT_ROOT}` and lowers
-#   authored descriptors, whereas such a set copies checked-in ones into a root it
-#   owns. The census asks neither of those questions -- only where the shards are
-#   and which arches they cover -- so the registry, not the packing rule, is the
-#   part such a set needs.
-#
-#   DORMANT records the name alone, for the configuration in which the set stages
-#   nothing: the census helper tells dormant from unknown, and a set that skipped
-#   its own staging must read as the former.
-#
-#   Deliberately no SOURCE_ROOT and no STAMP in either form. An externally staged
-#   set embeds no kernel source, so hkp_verify_embedded_sources() must contribute
-#   no --source-root for it; its per-label `if(_label_root)` guard is what makes
-#   that work, and its own comment states the rule.
-# ---------------------------------------------------------------------------
-function(hkp_register_external_pack)
-    cmake_parse_arguments(PARSE_ARGV 0 ARG "DORMANT" "NAME;OUT_ROOT" "ARCHES")
-    if(ARG_UNPARSED_ARGUMENTS)
-        message(FATAL_ERROR
-            "hkp_register_external_pack: unrecognised argument(s): "
-            "${ARG_UNPARSED_ARGUMENTS}")
-    endif()
-    if(NOT ARG_NAME)
-        message(FATAL_ERROR "hkp_register_external_pack: NAME is required.")
-    endif()
-
-    if(ARG_DORMANT)
-        if(ARG_OUT_ROOT OR ARG_ARCHES)
-            message(FATAL_ERROR
-                "hkp_register_external_pack: '${ARG_NAME}' is recorded DORMANT yet "
-                "carries an OUT_ROOT or ARCHES. A dormant set staged nothing, so "
-                "naming where its shards are describes a directory no rule writes.")
-        endif()
-        _hkp_record_dormant_pack("${ARG_NAME}")
-        return()
-    endif()
-
-    # Both are load-bearing: the census addresses a shard as <out_root>/<arch>, so
-    # either one missing yields an entry pointed at a path that cannot exist, which
-    # reads as a staging failure rather than as a malformed registration.
-    if(NOT ARG_OUT_ROOT OR NOT ARG_ARCHES)
-        message(FATAL_ERROR
-            "hkp_register_external_pack: '${ARG_NAME}' needs both OUT_ROOT and "
-            "ARCHES, or DORMANT if it staged nothing.")
-    endif()
-
-    set_property(GLOBAL PROPERTY HKP_PACK_OUT_ROOT_${ARG_NAME} "${ARG_OUT_ROOT}")
-    set_property(GLOBAL PROPERTY HKP_PACK_ARCHES_${ARG_NAME} "${ARG_ARCHES}")
-    set_property(GLOBAL APPEND PROPERTY HKP_PACK_LABELS "${ARG_NAME}")
 endfunction()
 
 # ---------------------------------------------------------------------------

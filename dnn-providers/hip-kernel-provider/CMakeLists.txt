@@ -456,12 +456,12 @@ endif()
 
 # What src/ and src/tests/ gate the FlyDSL engine and its suite on, rather than the
 # option above. The option states intent; this states outcome. flydsl/ raises it only
-# after the arch intersection succeeds, so an ON option with GPU_TARGETS naming an arch
-# no kernels are checked in for leaves it FALSE and nothing compiles against a shard
-# that was never staged. INTERNAL implies FORCE, so this resets on every configure and
-# a stale TRUE cannot survive a flag flip.
+# when the product pack ships FlyDSL kernels for a requested arch, so an ON option with
+# GPU_TARGETS naming an arch no kernels are checked in for leaves it FALSE and nothing
+# compiles against kernels that do not ship. INTERNAL implies FORCE, so this resets on
+# every configure and a stale TRUE cannot survive a flag flip.
 set(HIPKERNELPROVIDER_FLYDSL_ACTIVE FALSE CACHE INTERNAL
-    "FlyDSL staged a descriptor shard for at least one requested architecture")
+    "The product pack ships FlyDSL kernels for at least one requested architecture")
 
 if(HIPDNN_ENABLE_KERNEL_INGESTOR)
     if(NOT TARGET rocm::rocm_kpack)
@@ -479,11 +479,10 @@ if(HIPDNN_ENABLE_KERNEL_INGESTOR)
     include(HkpPackaging)
     add_subdirectory(descriptor-packaging)
 
-    # FlyDSL ships pre-built objects, so it needs the kpack writer but none of
-    # the lowering toolchain above. It stages into a root of its own -- see
-    # flydsl/CMakeLists.txt -- and so is deliberately ordered after the packer,
-    # whose dormant branch removes HIPKERNELPROVIDER_DESCRIPTOR_BUILD_DIR at
-    # configure time.
+    # FlyDSL's pre-built objects are a bundle of the production descriptor root,
+    # packed by the packer above as `hsaco` UKDs. flydsl/ only decides whether
+    # this build ships them, which it reads off the wired product pack -- hence
+    # after descriptor-packaging.
     if(HIPKERNELPROVIDER_ENABLE_FLYDSL)
         add_subdirectory(flydsl)
     endif()

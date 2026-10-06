@@ -5,16 +5,20 @@ SPDX-License-Identifier:  MIT
 
 # FlyDSL kernels in the hip-kernel-provider
 
-Ahead-of-time RMSNorm kernels written in [FlyDSL](https://github.com/ROCm/FlyDSL),
-compiled once and **checked in**, reaching hipDNN through the kernel ingestor.
+Ahead-of-time RMSNorm and attention kernels written in
+[FlyDSL](https://github.com/ROCm/FlyDSL), compiled once and **checked in**,
+reaching hipDNN through the kernel ingestor.
 
 This directory holds the kernels, the generators that produce them, and the
 descriptors that make them selectable. The matching C++ — the code that decides
-whether a graph may run on them and how to launch them — lives one level up, at
-[`src/engines/kernel_ingestor_engine/packs/FlydslRmsNormNative.cpp`](../src/engines/kernel_ingestor_engine/packs/FlydslRmsNormNative.cpp).
+whether a graph may run on them and how to launch them — lives one level up, one
+file per op:
+[`FlydslRmsNormNative.cpp`](../src/engines/kernel_ingestor_engine/packs/FlydslRmsNormNative.cpp)
+and
+[`FlydslSdpaNative.cpp`](../src/engines/kernel_ingestor_engine/packs/FlydslSdpaNative.cpp).
 
 **Nothing here is compiled by the build.** The `.hsaco` objects are committed
-artifacts; CMake packs and stages them. That is the central fact about this
+artifacts; the provider's shared packer packs and stages them. That is the central fact about this
 directory, and it is what the rest of this file is mostly about: an artifact
 whose build is not reproduced on every `ninja` has to carry its provenance and a
 way to check it, or it is just bytes someone once vouched for.
@@ -28,9 +32,10 @@ way to check it, or it is just bytes someone once vouched for.
 
 ## What ships
 
-One op, one architecture, 12 kernel objects:
+Two ops, one architecture (**gfx1151**), 24 kernel objects in one archive.
 
-- **RMSNorm forward**, bf16 and f16, on **gfx1151**
+**RMSNorm forward** (`hipkernel:flydsl_rmsnorm`), 12 objects, bf16 and f16:
+
 - a **specialized** tier with `N` baked in at 3072 / 3584 / 4096 / 5120 / 8192
 - a **generic** tier that reads `N` from the tensor descriptor at runtime, so
   every other width is served too — more slowly, but served
@@ -41,25 +46,54 @@ phase, bias, other dtypes, non-packed operands — are enumerated in
 [COVERAGE.md §3](COVERAGE.md), each with the reason the shipped objects cannot
 compute it.
 
+**SDPA forward** (`hipkernel:flydsl_sdpa`), 12 objects: bf16 and f16 ×
+`head_dim` 64, 96 and 128 × causal on and off. Batch, both sequence lengths,
+head counts (MHA, GQA, MQA), every stride, the scale, the mask bounds (causal at
+either corner, right-side bands, sliding windows) and the LSE output are runtime
+arguments, so each object serves every shape and layout of its class. Inference
+only; not yet served: `head_dim` 256, additive bias, padding / varlen. Status
+against hipDNN's Tier 0 / Tier 1 and every declined feature with its effort are
+in [COVERAGE.md §5](COVERAGE.md).
+
 ## How it reaches hipDNN
 
+The objects and their descriptors are a **bundle of the provider's production
+descriptor root**, beside rocKE's, and ship through the same packer:
+
 ```
-kernels/gfx1151/rmsnorm/*.hsaco   ──pack.py──>  …/gfx1151/kpack/*.kpack
-descriptors/gfx1151/*.json        ──copy────>  …/gfx1151/*.json
-                                                └─ flydsl_arch_content/hip-kernel-provider/
+src/engines/kernel_ingestor_engine/descriptors/
+  rocKE/…                         authored rocKE bundles (compiled at pack time)
+  FlyDSL/<op>/*.json              descriptors shared by every arch of the op
+  FlyDSL/<op>/<arch>/             the pack (KDP), one `hsaco` UKD per object,
+                                  the objects, manifest.json, SOURCE.md
+        │
+        │  shared packer (descriptor-packaging), product root
+        ▼
+lib/hipdnn_plugins/engines/arch_content/hip-kernel-provider/<arch>/
+  FlyDSL/…                        descriptors, rewritten to kind "kpack"
+  kpack/hip_kernel_provider_<arch>.kpack   every producer's objects, one archive
 ```
 
-The ingestor discovers the staged shard, reads the descriptors to learn what
-kernels exist and what they cost, and calls into the four native symbols the
-pack registers — `hipkernel.flydsl_rmsnorm.{graph_match,kernel_match,score,dispatch}` —
-to match, rank and launch. No FlyDSL, no Python and no compiler is present at
-runtime; by then these are ordinary code objects in an archive.
+Each authored UKD is `kind: "hsaco"` and names its object by file name and
+SHA256. The packer resolves the object, verifies that digest, packs it into the
+per-arch archive, reads the argument signature out of the object and rewrites
+the UKD to `kind: "kpack"` — the same path a rocKE kernel takes after it is
+compiled. The shard is installed with everything else under
+`arch_content/hip-kernel-provider/`, which the plugin finds beside its own
+module, so an installed plugin loads FlyDSL's kernels with **no environment
+variable** and nothing FlyDSL-specific at runtime.
+
+The ingestor reads the shard's descriptors to learn what kernels exist and what
+they cost, and calls into the four native symbols each pack registers —
+`hipkernel.flydsl_<op>.{graph_match,kernel_match,score,dispatch}` — to match,
+rank and launch. No FlyDSL, no Python and no compiler is present at runtime;
+by then these are ordinary code objects in an archive.
 
 The descriptors are **generated from the objects they describe**
-(`gen_descriptors.py`), so a descriptor cannot drift from its kernel. The packer
-packs from `manifest.json` rather than a directory glob and re-verifies each
-SHA256 against the bytes it writes, so a stray or half-written object cannot
-enter the archive.
+(`gen_descriptors.py`, from each `manifest.json`), so a descriptor cannot drift
+from its kernel; the build re-runs `gen_descriptors.py --check` before the pack,
+and the packer refuses an object whose bytes no longer match the SHA256 its
+descriptor records.
 
 ## Building it
 
@@ -69,24 +103,32 @@ Two flags, and the difference between them matters:
   `HIPDNN_ENABLE_KERNEL_INGESTOR=ON`; ON without it is a configure-time
   `FATAL_ERROR` rather than a silently inert build.
 - **`HIPKERNELPROVIDER_FLYDSL_ACTIVE`** — an internal cache variable. States
-  *outcome*, raised by `flydsl/CMakeLists.txt` only once an arch intersection
-  actually succeeded. Everything conditional keys on **this one**.
+  *outcome*, raised by `flydsl/CMakeLists.txt` only when the product pack
+  ships FlyDSL objects for a requested architecture. Everything conditional
+  keys on **this one**.
 
 The gap between them is real: with `GPU_TARGETS=gfx942` the option is ON and yet
-nothing stages, because no gfx942 kernels are checked in. That configuration
+nothing ships, because no gfx942 kernels are checked in. That configuration
 reports **dormant** and continues — it is not an error to build for an
-architecture this directory does not serve. Keying the engine TU, the test TU
+architecture this directory does not serve. Keying the engine TUs, the test TUs
 and the census on the outcome rather than the intent is what makes that
 configuration compile.
 
 ```bash
-cmake -B build -DHIPDNN_ENABLE_KERNEL_INGESTOR=ON -DHIPKERNELPROVIDER_ENABLE_FLYDSL=ON
+cmake -B build -DHIPDNN_ENABLE_KERNEL_INGESTOR=ON -DHIPKERNELPROVIDER_ENABLE_FLYDSL=ON \
+      -DHIPDNN_ENABLE_SDPA=ON
 cmake --build build -j
 ctest --test-dir build -R hip-kernel-provider
 ```
 
+`HIPDNN_ENABLE_SDPA` is hipDNN's own switch for attention, OFF by default; it
+gates `graph->sdpa()` in the frontend. The SDPA pack builds and stages without
+it, but no graph can then contain an SDPA node to reach it.
+
 `HIPKERNELPROVIDER_ENABLE_FLYDSL` shapes exactly this integration's surface —
-one engine TU, one test TU, one census pack. No other integration's flag changes
+one engine TU and one test TU per op, one census suite per op, and the `FlyDSL/`
+family folder, which the packer excludes with the option OFF
+(`HKP_DESCRIPTOR_FAMILIES`). No other integration's flag changes
 anything FlyDSL compiles, registers or asserts, and no FlyDSL suite names another
 engine. That isolation is a property to preserve, not an accident: it is checked
 by building with `ENABLE_HIP_MLOPS_ENGINE=OFF` and diffing the FlyDSL case list,
@@ -94,19 +136,23 @@ which must come out empty.
 
 ## File map
 
+`<content>` is `src/engines/kernel_ingestor_engine/descriptors/FlyDSL/` in the
+provider tree; everything else is relative to this directory.
+
 | Path | |
 |---|---|
-| `kernels/<arch>/rmsnorm/*.hsaco` | the committed code objects |
-| `kernels/<arch>/rmsnorm/manifest.json` | per-object SHA256 + knobs + the toolchain that built them |
-| `kernels/<arch>/SOURCE.md` | generated provenance record |
-| `descriptors/<arch>/*.json` | what the ingestor reads: kernels, matchers, dispatch, heuristics |
-| `kernels_src/kernels/**` | vendored FlyDSL kernel sources, pinned to one upstream commit |
-| `generators/_instances.py` | **the instance table** — one row per shipped object |
-| `generators/_flydsl_env.py` | the pins: wheel version, upstream commit, ROCm recording |
-| `generators/gen_rmsnorm.py` | compiles the table into objects + manifest + `SOURCE.md` |
+| `<content>/<op>/*.json` | descriptors shared by every arch of an op: schema, engine, heuristic, dispatch, matcher |
+| `<content>/<op>/<arch>/*.hsaco` | the committed code objects |
+| `<content>/<op>/<arch>/*.{kdp,ukd}.json` | the arch's pack and one `hsaco` UKD per object |
+| `<content>/<op>/<arch>/manifest.json` | per-object SHA256 + knobs + semantic argument names + the toolchain that built them |
+| `<content>/<op>/<arch>/SOURCE.md` | generated provenance record |
+| `kernels_src/kernels/**` | vendored kernel sources; each file's header names its upstream (FlyDSL or AITER), commit and path |
+| `generators/_instances.py` | **the instance table** — one row per shipped object, every op |
+| `generators/_flydsl_env.py` | the pins: wheel version, upstream commits, ROCm recording |
+| `generators/_codeobject.py` | reads and verifies a compiled object, shared by every generator |
+| `generators/gen_rmsnorm.py`, `gen_sdpa.py` | compile one op's rows into objects + manifest + `SOURCE.md` |
 | `gen_descriptors.py` | derives descriptors from the objects; `--check` re-verifies |
-| `pack.py` | build step: manifest → `.kpack`. Its output is not committed |
-| `tools/diff_upstream.py` | vendored sources vs. an upstream checkout, black-normalized |
+| `tools/diff_upstream.py` | vendored sources vs. their upstream checkouts, black-normalized |
 
 Adding an instance is a **row in `_instances.py`** plus a regeneration — the
 compiler, the packer and the descriptor emitter all read that table, so there is
@@ -117,16 +163,16 @@ no second place that can disagree with it.
 Each link is checkable by a command, and [REGEN.md](REGEN.md) gives each command:
 
 ```
-upstream FlyDSL @ 89ad52fbbb9e
+upstream FlyDSL @ 89ad52fbbb9e, AITER @ 8253efc40595
    │  tools/diff_upstream.py          — vendored copy == upstream, but for recorded modifications
 kernels_src/
-   │  gen_rmsnorm.py (flydsl 0.3.4)   — byte-reproducible: currently 12/12 identical
-kernels/<arch>/*.hsaco + manifest.json
+   │  gen_<op>.py (flydsl 0.3.4)      — byte-reproducible: currently 24/24 identical
+<content>/<op>/<arch>/*.hsaco + manifest.json
    │  gen_descriptors.py --check      — descriptors agree with the objects they name
-descriptors/<arch>/*.json
-   │  pack.py                         — archive re-verified against the manifest
-staged shard
-   │  TestFlydslRmsNormPack + census  — the shard is really there, and is what the suite read
+<content>/<op>/**/*.json (hsaco UKDs)
+   │  shared packer                   — each object re-verified against its descriptor's SHA256
+arch_content/hip-kernel-provider/<arch>/
+   │  TestFlydsl*Packs + census       — the shard is really there, and is what the suite read
 ```
 
 The last link is the one that is easy to leave out and expensive to be without:

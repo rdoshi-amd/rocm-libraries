@@ -44,9 +44,10 @@
  *        function that registers them.
  *
  * Unlike the other packs in this directory there is no embedded-source path: every kernel
- * this pack can select is a pre-built HSACO inside
- * `kpack/hip_kernel_provider_flydsl_<arch>.kpack`, produced ahead of time by the flyDSL
- * compiler (see `flydsl/NOTES.md` §4). The consequence is that this file cannot change what
+ * this pack can select is a pre-built HSACO, produced ahead of time by the flyDSL
+ * compiler (see `flydsl/REGEN.md`), checked in as an `hsaco` UKD of the production
+ * descriptor root and packed into the per-arch `hip_kernel_provider_<arch>.kpack` with
+ * every other producer's objects. The consequence is that this file cannot change what
  * the kernel does -- it can only decline graphs the kernel was not built for. Two facts
  * were baked at pack time and are therefore matcher obligations here:
  *
@@ -89,7 +90,7 @@ constexpr std::string_view COLUMNS_TOKEN = "flydsl_rmsnorm.columns";
 
 /// `N: 0` in a UKD's metadata means "this kernel takes N at runtime". A real graph never
 /// has a zero-width normalised axis, so the value is free to carry the sentinel; see
-/// `flydsl/NOTES.md` §14.2 for why null could not be used instead.
+/// `GENERIC_N` in `flydsl/gen_descriptors.py` for why null could not be used instead.
 constexpr int64_t GENERIC_N_SENTINEL = 0;
 
 /// `EPS` in `kernels_src/kernels/norm/rmsnorm_common.py`, baked into every instance.
@@ -421,7 +422,7 @@ bool flydslRmsNormKernelMatches(const MatchContext& context,
  * @brief Ranks the survivors. The descriptors already encode the intended order -- a
  *        specialized instance is `priority: 100`, the generic fallback `priority: 10` --
  *        so this reproduces that rather than inventing a second opinion. A measured cost
- *        model replaces it when there is data to fit one (`flydsl/NOTES.md` §8).
+ *        model replaces it when there is data to fit one.
  */
 double flydslRmsNormScore(const MatchContext& /*context*/,
                           const BoundTokens& /*bound*/,

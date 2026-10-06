@@ -13,6 +13,7 @@ from .hip_compile import (
     hip_source_relpath,
     hip_variant_key,
 )
+from .hsaco_input import hsaco_variant_key, resolve_hsaco_input
 from .rocke_compile import compile_rocke_variant, rocke_variant_key
 from .descriptors import (
     KPACK_DIR_NAME,
@@ -295,6 +296,27 @@ def _compile_ukd_variant(
             "observations": observations,
             "consumers": consumers,
         }
+    elif kind == "hsaco":
+        # A pre-built object: producing it is resolving and verifying the file.
+        # Keyed and recorded by its root-relative path, like a hip source, so the
+        # (source, build) collision guard in pack_arch covers it unchanged.
+        file = ks["file"]
+        rel_file = hip_source_relpath(rel_dir, file)
+        vk = _variant_key_for(ukd, rel_dir)
+        if vk not in variant_co:
+            variant_co[vk] = resolve_hsaco_input(
+                source_root, rel_dir, file, ks.get("sha256")
+            )
+            variant_symbol[vk] = ks["symbol"]
+        symbol = ks["symbol"]
+        fields = {
+            "origin_kind": "hsaco",
+            "source": rel_file,
+            "entry": None,
+            "build": None,
+            "builder": None,
+            "spec": None,
+        }
     else:
         raise HkpPackError(f"{where} kernel_source has unsupported kind '{kind}'")
     fields["provenance"] = copy.deepcopy(ukd.get("provenance", {}))
@@ -495,6 +517,9 @@ def _prewarm_jobs(flat, source_root, arch, observation_requests=None):
     seen = set()
     for kdp in flat.kdps():
         for sid, ukd, sdesc in _selected_entries(kdp.doc, arch, ukd_by_id):
+            # A pre-built object has nothing to compile; the walk resolves it.
+            if ukd["kernel_source"]["kind"] == "hsaco":
+                continue
             rel_dir = sdesc.rel_dir if sid is not None else kdp.rel_dir
             vk = _variant_key_for(ukd, rel_dir)
             if vk is None or vk in seen:
@@ -717,6 +742,8 @@ def _variant_key_for(ukd, rel_dir):
         return hip_variant_key(hip_source_relpath(rel_dir, ks["source"]), ks["build"])
     if kind == "rocke":
         return rocke_variant_key(ks["source"], ks["builder"], ks["spec"])
+    if kind == "hsaco":
+        return hsaco_variant_key(hip_source_relpath(rel_dir, ks["file"]))
     return None
 
 
@@ -1057,6 +1084,11 @@ def _rewrite_ukd_kpack(
             "builder": ukd.builder,
             "spec": ukd.spec,
         }
+    elif ukd.origin_kind == "hsaco":
+        provenance = {
+            "origin_kind": "hsaco",
+            "source": ukd.source,
+        }
     else:
         provenance = {
             "origin_kind": "hip",
@@ -1149,9 +1181,15 @@ def _rewrite_passthrough_ukd(passthrough, arch, source_label=None):
 
 
 def _toolchain_for(ukd, hipcc, rocke_wheel_stamp):
-    """Toolchain provenance for one UKD, dispatched on its producer."""
+    """Toolchain provenance for one UKD, dispatched on its producer.
+
+    None for a pre-built object: this packer ran no compiler for it, and the
+    toolchain that did is recorded where the object was generated, not here.
+    """
     if ukd.origin_kind == "rocke":
         return toolchain.rocke_provenance(rocke_wheel_stamp)
+    if ukd.origin_kind == "hsaco":
+        return None
     return toolchain.hip_provenance(hipcc)
 
 
@@ -1525,6 +1563,6 @@ def run_pipeline(
                         f"packing '{source_root}' wrote descriptors but no "
                         f"archive for {arch}, whose shard selected UKD "
                         f"'{sid or ukd.get('id')}' of a compiling kind "
-                        "('hip' or 'rocke')."
+                        "('hip', 'rocke' or 'hsaco')."
                     )
     return results

@@ -5,9 +5,13 @@ SPDX-License-Identifier:  MIT
 
 # Regenerating the checked-in FlyDSL kernels
 
-The `.hsaco` code objects under `kernels/<arch>/`, their `manifest.json`, the
-per-arch `SOURCE.md` and the `descriptors/<arch>/` JSON set are **generated and
-committed**. The build copies, packs and stages them; it never compiles them.
+The `.hsaco` code objects, their `manifest.json` and `SOURCE.md`, and the
+descriptor JSON beside them are **generated and committed**, as FlyDSL's bundle
+of the provider's production descriptor root:
+`src/engines/kernel_ingestor_engine/descriptors/FlyDSL/<op>/<arch>/` (and
+`FlyDSL/<op>/` for the descriptors shared across arches). Below, `$CONTENT`
+names that `FlyDSL/` folder. The build's shared packer packs and stages them
+like every other bundle in that root; it never compiles them.
 This file is how you reproduce them, and how you check that a tree you did not
 build still matches the toolchain it claims.
 
@@ -33,15 +37,14 @@ Everything below runs from the provider's `flydsl/` directory.
 | ROCm | 7.13.0 | read at runtime from `$ROCM_PATH/.info/version` |
 | `torch` | any ROCm build | imported by the vendored kernel sources |
 | `msgpack` | 1.2.2 | reads the AMDGPU metadata note out of each object |
-| `zstandard` | 0.25.0 (`>=0.20.0`) | `rocm_kpack` compression |
-| `rocm_kpack` | from source on `PYTHONPATH` | not pip-installed; see below |
 
-`torch`, `msgpack` and `zstandard` are **not** transitive dependencies of the
-`flydsl` wheel — install them explicitly.
+`torch` and `msgpack` are **not** transitive dependencies of the `flydsl`
+wheel — install them explicitly. Regeneration packs nothing: the archive is
+written by the build's shared packer, so `rocm_kpack` is not needed here.
 
 ```bash
-python3 -m venv ~/flydsl-regen-venv
-~/flydsl-regen-venv/bin/pip install 'flydsl==0.3.4' torch msgpack 'zstandard>=0.20.0'
+python3 -m venv /path/to/flydsl-regen-venv
+/path/to/flydsl-regen-venv/bin/pip install 'flydsl==0.3.4' torch msgpack
 ```
 
 On a box behind a TLS-intercepting proxy without the corporate CA installed, add
@@ -51,27 +54,21 @@ On a box behind a TLS-intercepting proxy without the corporate CA installed, add
 required** — `prepare()` sets `COMPILE_ONLY=1`, which is what lets a gfx942
 object be produced on an RDNA laptop.
 
-`rocm_kpack` is consumed from a source checkout rather than installed:
-
-```bash
-export PYTHONPATH=/path/to/rocm-systems/shared/kpack/python
-```
-
 ### The three settings every command below reads
 
 Set these once per shell. The rest of this file uses them verbatim, so a
 procedure you paste runs against your toolchain rather than someone else's:
 
 ```bash
-PY=${PY:-python3}                          # the interpreter holding the pinned flydsl wheel
-KPACK_PY=${KPACK_PY:?path to rocm-systems/shared/kpack/python}
+PY=${PY:?the interpreter holding the pinned flydsl wheel}
+CONTENT=../src/engines/kernel_ingestor_engine/descriptors/FlyDSL
 export ROCM_PATH=${ROCM_PATH:-/opt/rocm}
 export REGEN_OUT=${REGEN_OUT:-/tmp/flydsl-regen}
 ```
 
-`KPACK_PY` has no sensible default — `rocm_kpack` is consumed from a source
-checkout, so the `:?` makes an unset value fail at expansion rather than three
-steps later inside `pack.py`.
+`PY` has no default on purpose: the generators need the pinned `flydsl` wheel,
+and a bare `python3` without it would fail later, at the first import, rather
+than here. `assert_flydsl_version()` then refuses any wheel but the pinned one.
 
 The tree as committed was produced with Python 3.12.3, `flydsl` 0.3.4,
 `torch` 2.10.0+rocm7.13.0a20260513 and ROCm 7.13.0. Those versions are the
@@ -88,7 +85,7 @@ wrong one, because a wrong one reads as verified.
 `generators/gen_rmsnorm.py` opens `from . import _flydsl_env as env`, so running
 it as a script dies with `ImportError: attempted relative import with no known
 parent package`. Invoke it from `flydsl/` as `python -m generators.gen_rmsnorm`.
-`gen_descriptors.py` and `pack.py` are plain scripts and take either form.
+`gen_descriptors.py` is a plain script and takes either form.
 
 ---
 
@@ -103,40 +100,45 @@ cd dnn-providers/hip-kernel-provider/flydsl
 # Compile into a scratch directory -- must be empty or nonexistent, since the
 # generator writes files rather than clearing the directory, so an object left
 # by an earlier run with a different instance list would survive and be compared.
-PYTHONDONTWRITEBYTECODE=1 \
-  $PY -m generators.gen_rmsnorm --arch gfx1151 --out-dir "$REGEN_OUT"
+for op in rmsnorm sdpa; do
+  PYTHONDONTWRITEBYTECODE=1 \
+    $PY -m generators.gen_$op --arch gfx1151 --out-dir "$REGEN_OUT"
+done
 ```
 
-Then compare every object against the manifest the tree ships:
+Then compare every object against the manifests the tree ships:
 
 ```bash
-$PY - <<'PY'
+CONTENT=$CONTENT $PY - <<'PY'
 import hashlib, json, os, pathlib, sys
 
-manifest = json.loads(pathlib.Path("kernels/gfx1151/rmsnorm/manifest.json").read_text())
-regen = pathlib.Path(os.environ["REGEN_OUT"]) / "gfx1151/rmsnorm"
-
-bad = 0
-for instance in manifest["instances"]:
-    obj = regen / instance["file"]
-    digest = hashlib.sha256(obj.read_bytes()).hexdigest() if obj.is_file() else "<missing>"
-    if digest != instance["sha256"]:
-        print(f"DIFFERS {instance['name']}\n  manifest {instance['sha256']}\n  regen    {digest}")
-        bad += 1
-print(f"{len(manifest['instances']) - bad}/{len(manifest['instances'])} byte-identical")
+bad = total = 0
+for op in ("rmsnorm", "sdpa"):
+    manifest = json.loads((pathlib.Path(os.environ["CONTENT"]) / f"{op}/gfx1151/manifest.json").read_text())
+    regen = pathlib.Path(os.environ["REGEN_OUT"]) / f"{op}/gfx1151"
+    for instance in manifest["instances"]:
+        total += 1
+        obj = regen / instance["file"]
+        digest = hashlib.sha256(obj.read_bytes()).hexdigest() if obj.is_file() else "<missing>"
+        if digest != instance["sha256"]:
+            print(f"DIFFERS {op}/{instance['name']}\n  manifest {instance['sha256']}\n  regen    {digest}")
+            bad += 1
+print(f"{total - bad}/{total} byte-identical")
 sys.exit(1 if bad else 0)
 PY
 ```
 
-The manifest and the provenance record must also come out identical:
+The manifests and the provenance record must also come out identical:
 
 ```bash
-diff kernels/gfx1151/rmsnorm/manifest.json "$REGEN_OUT/gfx1151/rmsnorm/manifest.json"
-diff kernels/gfx1151/SOURCE.md             "$REGEN_OUT/gfx1151/SOURCE.md"
+for op in rmsnorm sdpa; do
+  diff "$CONTENT/$op/gfx1151/manifest.json" "$REGEN_OUT/$op/gfx1151/manifest.json"
+  diff "$CONTENT/$op/gfx1151/SOURCE.md"     "$REGEN_OUT/$op/gfx1151/SOURCE.md"
+done
 ```
 
-Expected, and the state of the tree as committed: **12/12 byte-identical**, both
-diffs empty.
+Expected, and the state of the tree as committed: **24/24 byte-identical** (12
+RMSNorm, 12 SDPA), all four diffs empty.
 
 `manifest.json` agreeing is the stronger of the two checks — it carries the
 `toolchain` block, so an identical manifest means the *recorded* toolchain and
@@ -160,16 +162,18 @@ a new arch, a deliberate toolchain bump.
 ```bash
 cd dnn-providers/hip-kernel-provider/flydsl
 
-# (1) Compile. Writes kernels/<arch>/rmsnorm/*.hsaco + manifest.json,
-#     and refreshes kernels/<arch>/SOURCE.md.
+# (1) Compile. Writes $CONTENT/<op>/<arch>/*.hsaco + manifest.json + SOURCE.md
+#     for each op. The SDPA kernel is gfx11-only (RDNA3 / RDNA3.5 WMMA ABI);
+#     gen_sdpa refuses any other arch.
 $PY -m generators.gen_rmsnorm --arch gfx1151
+$PY -m generators.gen_sdpa --arch gfx1151
 
 # (2) Descriptors. Every field is derived from the manifest and the objects it
-#     names, so a descriptor cannot disagree with the archive it describes.
-$PY gen_descriptors.py --kernel-dir kernels --descriptor-dir descriptors --arch gfx1151
+#     names, so a descriptor cannot disagree with the object it describes.
+$PY gen_descriptors.py --arch gfx1151
 
-# (3) Verify the set. This is the same invocation the build runs before staging.
-$PY gen_descriptors.py --kernel-dir kernels --descriptor-dir descriptors --arch gfx1151 --check
+# (3) Verify the set. This is the same invocation the build runs before packing.
+$PY gen_descriptors.py --arch gfx1151 --check
 ```
 
 Steps 1 and 2 are per-arch and **one arch per invocation** — FlyDSL reads `ARCH`
@@ -178,27 +182,26 @@ under a name it was not built for. The generator additionally re-reads each
 object's own `amdhsa.target` and refuses a mismatch.
 
 Commit the objects, the manifest, `SOURCE.md` and the descriptors **together**.
-They are one unit: `kernels/<arch>/` present without `descriptors/<arch>/` is a
-configure-time `FATAL_ERROR`, because a shard holding an archive no descriptor
-names is unreachable at runtime — nothing selects it, so the build passes and
-proves nothing.
+They are one unit: the build's `--check` fails on a descriptor that disagrees
+with its manifest, and the packer fails on an object whose bytes no longer match
+the SHA256 its descriptor records.
 
 ### Packing
 
-`pack.py` is a **build step**, not a regeneration step — CMake runs it into the
-build tree and the `.kpack` is not committed. Run it by hand only to check the
-archive is deterministic too:
+Packing is a **build step**, done by the provider's shared packer
+(`descriptor-packaging/`) over the whole production root, FlyDSL bundle
+included; the archive is not committed. To check it, build the product pack and
+look in the staged shard:
 
 ```bash
-PYTHONPATH=$KPACK_PY PYTHONDONTWRITEBYTECODE=1 \
-  $PY pack.py --kernel-dir kernels --arch gfx1151 --out-dir "${PACK_OUT:-/tmp/flydsl-pack}"
+cmake --build build --target hkp_packaging_product
+ls build/lib/hipdnn_plugins/engines/arch_content/hip-kernel-provider/gfx1151/kpack/
 ```
 
-It packs from `manifest.json`, not from a directory glob, and re-verifies each
-SHA256 against the bytes it actually writes — so descriptor and archive cannot
-disagree, and a stray or half-written object cannot silently enter the archive.
-Current expected output: `hip_kernel_provider_flydsl_gfx1151.kpack`, 29770 bytes,
-12 kernels.
+Every producer's objects for an arch share that one
+`hip_kernel_provider_<arch>.kpack`. The packer verifies each FlyDSL object
+against the SHA256 its descriptor records and reads the argument signature out
+of the object itself, so the descriptors never carry a hand-written one.
 
 ---
 
@@ -232,25 +235,34 @@ about which compiler built it.
 
 ## 5. Checking the vendored sources against upstream
 
-`kernels_src/` is a vendored copy of eight FlyDSL kernel modules, one of which
-carries three deliberate modifications recorded in its own header
-(`kernels_src/kernels/norm/rmsnorm_kernel.py`). To see what has drifted:
+`kernels_src/` is a vendored copy of ten kernel modules from two upstreams. Nine
+come from FlyDSL; the attention kernel comes from AITER, which carries FlyDSL
+kernels upstream FlyDSL does not. Two carry deliberate modifications recorded in
+their own headers: `kernels_src/kernels/norm/rmsnorm_kernel.py` (three) and
+`kernels_src/kernels/attention/flash_attn_func_gfx1151.py` (twelve — the gfx11
+port and the runtime arguments that let a few objects cover many shapes). Each
+file's header names the upstream and path it came from, and the tool reads that
+header to decide what to diff it against. To see what has drifted:
 
 ```bash
-python3 tools/diff_upstream.py --upstream /path/to/FlyDSL --commit
+python3 tools/diff_upstream.py --upstream /path/to/FlyDSL --aiter /path/to/aiter --commit
 ```
 
-Expected against the pinned checkout, and the state of the tree as committed:
+Expected against the pinned checkouts, and the state of the tree as committed:
 
 ```
-upstream at the pinned commit v0.3.4.1-19-g89ad52f (89ad52fbbb9e)
+FlyDSL (v0.3.4.1-19-g89ad52f) at the pinned commit 89ad52fbbb9e
+AITER at the pinned commit 8253efc40595
+=== kernels/attention/flash_attn_func_gfx1151.py
+  …
 === kernels/norm/rmsnorm_kernel.py
   …
-7/8 vendored files identical to upstream after normalization; 1 differ, 0 absent upstream
+8/10 vendored files identical to upstream after normalization; 2 differ, 0 absent upstream, 0 not compared
 ```
 
-The one differing file is the point of the tool, not a failure — read its hunks
-against the header's three recorded modifications. Anything that header does not
+Without `--aiter`, the attention file is reported as not compared rather than as
+absent. The two differing files are the point of the tool, not a failure — read
+each one's hunks against its header's recorded modifications. Anything that header does not
 account for is drift: either a local edit nobody wrote down, or an upstream
 re-vendor that did not update the pins in `generators/_flydsl_env.py`. Exit
 status reports whether the comparison held together, not whether files matched:

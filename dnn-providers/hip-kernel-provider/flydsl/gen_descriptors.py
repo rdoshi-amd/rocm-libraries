@@ -1,69 +1,68 @@
 # Copyright © Advanced Micro Devices, Inc., or its affiliates.
 # SPDX-License-Identifier:  MIT
 
-"""Generate (or verify) the ingestor descriptors for one arch's FlyDSL kernels.
+"""Generate (or verify) the authored descriptors for one arch's FlyDSL kernels.
 
 Usage:
-    python gen_descriptors.py --kernel-dir <flydsl/kernels> \\
-        --descriptor-dir <flydsl/descriptors> --arch gfx1151
-    python gen_descriptors.py ... --check     # verify, write nothing
+    python gen_descriptors.py --arch gfx1151
+    python gen_descriptors.py --arch gfx1151 --check     # verify, write nothing
 
-**Generated, not authored, and checked in.** Every field below is derived from
-``kernels/<arch>/<op>/manifest.json`` and from the code objects it names, so a
-descriptor cannot disagree with the archive it describes. The output is then
-committed alongside the ``.hsaco`` files, because the build must stay "copy the
-objects, pack them, stage the descriptors" -- generation is a regeneration step
-a human runs when the kernels change, not a build step.
+**Generated, not hand-written, and checked in.** Every field is derived from
+``<content>/<op>/<arch>/manifest.json`` and the code objects it names, so a
+descriptor cannot disagree with the object it describes. ``<content>`` is
+FlyDSL's producer folder under the provider's production descriptor root
+(``generators._flydsl_env.CONTENT_DIR``), the same root rocKE's bundles are
+authored in.
 
-**We author the shipped form, not the authored form.** The upstream pack
-pipeline takes ``kind: "hip"`` descriptors naming a source file and rewrites
-them into ``kind: "kpack"`` descriptors naming an archive entry
-(``pipeline.py:1040-1100``). Our objects are pre-built and our CMake stages
-descriptors verbatim with no rewrite, so there is no rewrite pass to produce
-the shipped form for us: this script emits it directly, matching that function
-field for field.
+**We author the input form; the shared packer produces the shipped form.** Each
+UKD is ``kind: "hsaco"`` and names its object, which sits beside it, by file
+name and SHA256. At build time the packer that packs every other bundle in the
+root resolves the object, verifies that SHA256, packs it into the per-arch
+``hip_kernel_provider_<arch>.kpack``, reads the argument signature out of the
+object, and rewrites the UKD to ``kind: "kpack"``. So the archive path, TOC key
+and signature are deliberately *not* written here: the packer derives all three
+from the object and is the single place they are computed, for FlyDSL as for
+every other producer.
 
-**The signature is read out of the object, never typed.** ``kernel_signature``
-parses the AMDGPU msgpack metadata note out of the code object itself; its own
-docstring is explicit that "a hand-authored arity restates the same assumption
-that drifted". Ours would have drifted on its first line -- ``manifest.json``
-records eight *named* arguments, and the objects FlyDSL emits carry no argument
-names at all (``named_args: 0``; clang omits ``.args[].name`` for HIP
-``extern "C" __global__``).
+Layout, per op:
 
-``--check`` deliberately does **not** re-derive signatures, so it needs no
-``msgpack`` and is cheap enough to run on every build. It cannot miss a
-signature drift regardless: a signature can only change if the object changed,
-which changes the SHA256 that ``--check`` does compare.
+* ``<content>/<op>/`` -- the descriptors shared by every arch: metadata schema,
+  engine, heuristic, dispatch and the kernel-scoped matcher. One copy, so the
+  authored root holds each id once.
+* ``<content>/<op>/<arch>/`` -- that arch's pack (KDP), one UKD per object, and
+  the objects themselves with ``manifest.json`` and ``SOURCE.md``.
+
+``--check`` re-derives the documents and compares them to what is checked in,
+then runs the packer's own authoring validator over the whole FlyDSL folder.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent / "descriptor-packaging" / "python"))
+sys.path.insert(0, str(_HERE))
 
-from hkp_pack.descriptors import HkpPackError, load_flat_input  # noqa: E402
+from hkp_pack.descriptors import (  # noqa: E402
+    HkpPackError,
+    load_flat_input,
+    type_from_filename,
+)
 
-from pack import KernelEntry, collect, kpack_name  # noqa: E402
+from generators._flydsl_env import CONTENT_DIR  # noqa: E402
 
 # Descriptor schema version, as the loader spells it: UKD_VERSION_MAJOR = 1,
 # UKD_VERSION_MINOR = 0 (DescriptorLoader.hpp:288-289).
 DESCRIPTOR_VERSION = "1.0"
 
-# The directory the packer writes the archive into, relative to the shard root.
-# It must agree with the staging layout in flydsl/CMakeLists.txt: our
-# descriptors sit flat at that root, so the `kernel_source.library` string is
-# this plus the filename with no climb. The loader resolves that string against
-# the descriptor file's own directory and rejects a result outside the
-# descriptor tree, so a climb would not merely be ugly -- it would not load.
-KPACK_DIR_NAME = "kpack"
+MANIFEST_NAME = "manifest.json"
 
 # `metadataValueFromJson` (DescriptorLoader.hpp:523) accepts bool/int/float/
 # string/int-list and *fails on null*, so "this kernel reads N at runtime"
@@ -80,11 +79,17 @@ SHAPE_KNOBS = {"N"}
 # but not in the engine's `knobs` list, which names what autotune may vary.
 # Offering the tuner a dtype or a row length it cannot legally change would
 # have it search a space where all but one point fails to match.
-GRAPH_DETERMINED_FIELDS = {"N", "dtype"}
+#
+# Per op: `N` is RMSNorm's row width; `head_dim` and `causal` are what an SDPA
+# graph asks for. The remaining knobs -- block_threads, block_m, block_n -- are
+# launch geometry the tuner may legitimately vary.
+GRAPH_DETERMINED_FIELDS = {"N", "dtype", "head_dim", "causal"}
 
 # uuid5 from a name, so ids are stable across regenerations and adding a
 # thirteenth instance cannot disturb the twelve already shipped. The namespace
-# is itself derived from a URL rather than being a magic constant.
+# is itself derived from a URL rather than being a magic constant. The names are
+# unchanged from when these descriptors were emitted in shipped form, so the ids
+# the runtime sees did not move with the switch to authoring them.
 _NAMESPACE = uuid.uuid5(
     uuid.NAMESPACE_URL,
     "https://github.com/ROCm/rocm-libraries/dnn-providers/hip-kernel-provider/flydsl",
@@ -93,6 +98,63 @@ _NAMESPACE = uuid.uuid5(
 
 def _uuid(name: str) -> str:
     return str(uuid.uuid5(_NAMESPACE, name))
+
+
+class KernelEntry(NamedTuple):
+    """One checked-in code object and its manifest record."""
+
+    op: str
+    path: Path
+    data: bytes
+    record: dict[str, Any]
+
+
+def collect(content_dir: Path, arch: str) -> list[KernelEntry]:
+    """Every object the manifests under ``<content>/*/<arch>/`` name.
+
+    Raises on a manifest that disagrees with its own location, on a named object
+    that is absent, and on one whose bytes do not hash to the recorded SHA256.
+    """
+    manifests = sorted(content_dir.glob(f"*/{arch}/{MANIFEST_NAME}"))
+    if not manifests:
+        raise FileNotFoundError(
+            f"no */{arch}/{MANIFEST_NAME} under {content_dir}; run the generators "
+            "for this arch first (see flydsl/REGEN.md)"
+        )
+
+    entries: list[KernelEntry] = []
+    for manifest_path in manifests:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        op = manifest["op"]
+        # The manifest records the arch it was built for and the op it holds; the
+        # directory claims both. A disagreement means an object is about to be
+        # described for hardware it was not compiled for.
+        if manifest.get("arch") != arch or manifest_path.parent.name != arch:
+            raise ValueError(
+                f"{manifest_path}: manifest records arch '{manifest.get('arch')}' "
+                f"but sits under '{manifest_path.parent.name}/'"
+            )
+        if manifest_path.parent.parent.name != op:
+            raise ValueError(
+                f"{manifest_path}: manifest records op '{op}' but sits in "
+                f"'{manifest_path.parent.parent.name}/'"
+            )
+        for record in manifest["instances"]:
+            path = manifest_path.parent / record["file"]
+            if not path.is_file():
+                raise FileNotFoundError(
+                    f"{manifest_path} names '{record['file']}' but {path} does not exist"
+                )
+            data = path.read_bytes()
+            actual = hashlib.sha256(data).hexdigest()
+            if actual != record["sha256"]:
+                raise ValueError(
+                    f"{path}: SHA256 {actual} does not match the {record['sha256']} "
+                    f"recorded in {manifest_path}. Regenerate the object rather than "
+                    "editing the manifest."
+                )
+            entries.append(KernelEntry(op, path, data, record))
+    return entries
 
 
 def _metadata_type(value: Any) -> str:
@@ -127,11 +189,11 @@ def _metadata_value(key: str, value: Any) -> Any:
 class OpDescriptors:
     """The one-per-op descriptors: schema, engine, heuristic, dispatch, matcher.
 
-    Shared by every instance of the op and identical in every arch's shard. The
-    ids are deliberately *not* arch-scoped: a machine installs only its own
-    shard, so each shard must carry its own copy, and two shards declaring the
-    same engine with the same id and the same bytes is how the catalog settles
-    them into one entry rather than two rival engines.
+    Shared by every arch's pack of the op and authored once, under ``<op>/``.
+    The packer copies them into each shard whose pack reaches them, so the ids
+    are deliberately *not* arch-scoped: two shards carrying the same engine with
+    the same id and the same bytes is how the catalog settles them into one
+    entry rather than two rival engines.
     """
 
     def __init__(self, op: str, fields: dict[str, str]) -> None:
@@ -201,9 +263,10 @@ class OpDescriptors:
 
         Nothing is compiled in from a binding: the objects arrive pre-built from
         FlyDSL's own generator, so every field exists only to pick which
-        pre-built object fits. `metadata_fields` empty and all three fields
-        matcher-only is the exact shape of that claim. Derived from the same
-        field list the KMD is built from, so the two cannot drift apart.
+        pre-built object fits. `metadata_fields` empty and every field
+        matcher-only is the exact shape of that claim, and the only shape the
+        packer accepts from a producer that does not compile. Derived from the
+        same field list the KMD is built from, so the two cannot drift apart.
         """
         return {
             "specialization_contract": {
@@ -246,26 +309,20 @@ def _fields_for_op(entries: list[KernelEntry]) -> dict[str, str]:
     return fields
 
 
-def _kernel_documents(
-    entries: list[KernelEntry], op: OpDescriptors, arch: str, *, derive_signature: bool
-) -> tuple[dict[str, dict[str, Any]], list[str]]:
-    """One UKD per code object, plus the id list the KDP names them by."""
-    library = f"{KPACK_DIR_NAME}/{kpack_name(arch)}"
+def _arch_documents(
+    entries: list[KernelEntry], op: OpDescriptors, arch: str
+) -> dict[str, dict[str, Any]]:
+    """One arch's pack of an op: its KDP and one ``hsaco`` UKD per object."""
     provenance = op.provenance()
-
     documents: dict[str, dict[str, Any]] = {}
     ids: list[str] = []
 
     for entry in entries:
         record = entry.record
-        ukd_id = _uuid(f"ukd/{arch}/{entry.toc_key}")
+        # Named as it was when these were emitted in shipped form, where the
+        # string was the archive key, so the id did not change with the form.
+        ukd_id = _uuid(f"ukd/{arch}/{entry.op}/{record['file']}")
         ids.append(ukd_id)
-
-        signature: list[dict[str, Any]] = []
-        if derive_signature:
-            from hkp_pack.kernel_signature import kernel_signature
-
-            signature = kernel_signature(entry.data, record["symbol"], str(entry.path))
 
         metadata = {"dtype": record["dtype"]}
         for key, value in record["knobs"].items():
@@ -277,136 +334,110 @@ def _kernel_documents(
             "name": record["name"],
             "arch": [arch],
             "kernel_source": {
-                "kind": "kpack",
-                "library": library,
-                "toc_key": entry.toc_key,
+                "kind": "hsaco",
+                # Beside the descriptor: the packer resolves it relative to the
+                # folder this file is in.
+                "file": record["file"],
                 "symbol": record["symbol"],
                 "sha256": record["sha256"],
-                "signature": signature,
             },
             "metadata": metadata,
             "priority": record["priority"],
             "provenance": provenance,
         }
 
-    return documents, ids
+    documents[f"{op.stem}.kdp.json"] = {
+        "version": DESCRIPTOR_VERSION,
+        "id": _uuid(f"kdp/{op.op}/{arch}"),
+        "name": f"flydsl {op.op} kernels ({arch})",
+        "arch": [arch],
+        "matchers": [op.umd_id],
+        "engine": op.ued_id,
+        "dispatch": op.udd_id,
+        "kernelDescriptors": ids,
+    }
+    return documents
 
 
 def build_documents(
-    entries: list[KernelEntry], arch: str, *, derive_signature: bool
-) -> dict[str, dict[str, Any]]:
-    """Every descriptor for `arch`, keyed by the filename it is written as."""
+    entries: list[KernelEntry], arch: str
+) -> dict[Path, dict[str, dict[str, Any]]]:
+    """Every document for `arch`, grouped by the folder (relative to the content
+    root) it is written into."""
     by_op: dict[str, list[KernelEntry]] = {}
     for entry in entries:
-        by_op.setdefault(entry.record["op"], []).append(entry)
+        by_op.setdefault(entry.op, []).append(entry)
 
-    documents: dict[str, dict[str, Any]] = {}
+    folders: dict[Path, dict[str, dict[str, Any]]] = {}
     for op_name, op_entries in sorted(by_op.items()):
         op = OpDescriptors(op_name, _fields_for_op(op_entries))
-        documents.update(op.documents())
-
-        kernels, ids = _kernel_documents(
-            op_entries, op, arch, derive_signature=derive_signature
-        )
-        documents.update(kernels)
-
-        documents[f"{op.stem}.kdp.json"] = {
-            "version": DESCRIPTOR_VERSION,
-            "id": _uuid(f"kdp/{op_name}/{arch}"),
-            "name": f"flydsl {op_name} kernels ({arch})",
-            "arch": [arch],
-            "matchers": [op.umd_id],
-            "engine": op.ued_id,
-            "dispatch": op.udd_id,
-            "kernelDescriptors": ids,
-        }
-
-    return documents
+        folders[Path(op_name)] = op.documents()
+        folders[Path(op_name) / arch] = _arch_documents(op_entries, op, arch)
+    return folders
 
 
 def _serialize(document: dict[str, Any]) -> str:
     return json.dumps(document, indent=2) + "\n"
 
 
-def _write(out_dir: Path, documents: dict[str, dict[str, Any]]) -> None:
-    out_dir.mkdir(parents=True, exist_ok=True)
-    for name, document in sorted(documents.items()):
-        (out_dir / name).write_text(_serialize(document), encoding="utf-8")
-
-    # A descriptor whose kernel no longer exists resolves to a TOC key the
-    # archive does not contain, so leaving one behind fails the load rather than
-    # the regeneration. Regeneration owns the directory.
-    for stale in sorted(out_dir.glob("*.json")):
-        if stale.name not in documents:
-            print(f"  removing stale descriptor: {stale.name}")
-            stale.unlink()
+def _descriptor_files(folder: Path) -> list[Path]:
+    """The descriptor files directly in `folder` -- never manifest.json."""
+    return sorted(
+        path for path in folder.glob("*.json") if type_from_filename(path) is not None
+    )
 
 
-def _check(out_dir: Path, entries: list[KernelEntry], arch: str) -> list[str]:
-    """Cross-check the checked-in descriptors against the objects they claim.
+def _write(content_dir: Path, folders: dict[Path, dict[str, dict[str, Any]]]) -> None:
+    for rel, documents in sorted(folders.items()):
+        folder = content_dir / rel
+        folder.mkdir(parents=True, exist_ok=True)
+        for name, document in sorted(documents.items()):
+            (folder / name).write_text(_serialize(document), encoding="utf-8")
 
-    Signature-free by design (see the module docstring), so this runs on every
-    build without `msgpack`.
-    """
+        # A descriptor whose object no longer exists names a file the packer
+        # cannot find, so leaving one behind fails the build rather than the
+        # regeneration. Regeneration owns the descriptors in these folders --
+        # and only those: the manifest and the objects beside them are the
+        # generators'.
+        for stale in _descriptor_files(folder):
+            if stale.name not in documents:
+                print(f"  removing stale descriptor: {rel / stale.name}")
+                stale.unlink()
+
+
+def _check(
+    content_dir: Path, folders: dict[Path, dict[str, dict[str, Any]]]
+) -> list[str]:
+    """Compare the checked-in descriptors against what the objects derive."""
     problems: list[str] = []
-    library = f"{KPACK_DIR_NAME}/{kpack_name(arch)}"
-
-    expected = {entry.toc_key: entry for entry in entries}
-    found: dict[str, Path] = {}
-
-    for path in sorted(out_dir.glob("*.ukd.json")):
-        document = json.loads(path.read_text(encoding="utf-8"))
-        source = document.get("kernel_source", {})
-        toc_key = source.get("toc_key")
-
-        if toc_key not in expected:
-            problems.append(f"{path.name}: toc_key '{toc_key}' names no packed object")
-            continue
-        if toc_key in found:
-            problems.append(
-                f"{path.name}: toc_key '{toc_key}' already claimed by {found[toc_key].name}"
-            )
-            continue
-        found[toc_key] = path
-
-        entry = expected[toc_key]
-        if source.get("sha256") != entry.record["sha256"]:
-            problems.append(
-                f"{path.name}: sha256 does not match {entry.path.name}; regenerate"
-            )
-        if source.get("symbol") != entry.record["symbol"]:
-            problems.append(f"{path.name}: symbol does not match the manifest")
-        if source.get("library") != library:
-            problems.append(
-                f"{path.name}: library '{source.get('library')}' is not '{library}'"
-            )
-        if not source.get("signature"):
-            problems.append(f"{path.name}: empty signature")
-
-    for toc_key in sorted(set(expected) - set(found)):
-        problems.append(f"packed object '{toc_key}' has no descriptor")
-
+    for rel, documents in sorted(folders.items()):
+        folder = content_dir / rel
+        present = {path.name for path in _descriptor_files(folder)}
+        for name, document in sorted(documents.items()):
+            path = folder / name
+            if not path.is_file():
+                problems.append(f"{rel / name}: missing")
+            elif path.read_text(encoding="utf-8") != _serialize(document):
+                problems.append(
+                    f"{rel / name}: differs from what the objects derive; regenerate"
+                )
+        for extra in sorted(present - set(documents)):
+            problems.append(f"{rel / extra}: names no object in the manifest")
     return problems
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Generate or verify ingestor descriptors for FlyDSL kernels"
-    )
-    parser.add_argument(
-        "--kernel-dir",
-        type=Path,
-        required=True,
-        help="Root containing <arch>/<op>/ subdirectories (flydsl/kernels)",
-    )
-    parser.add_argument(
-        "--descriptor-dir",
-        type=Path,
-        required=True,
-        help="Root to write <arch>/ descriptors into (flydsl/descriptors)",
+        description="Generate or verify the authored descriptors for FlyDSL kernels"
     )
     parser.add_argument(
         "--arch", type=str, required=True, help="GPU architecture (e.g. gfx1151)"
+    )
+    parser.add_argument(
+        "--content-dir",
+        type=Path,
+        default=CONTENT_DIR,
+        help=f"FlyDSL content root holding <op>/<arch>/ (default: {CONTENT_DIR})",
     )
     parser.add_argument(
         "--check",
@@ -415,64 +446,39 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    arch_dir: Path = args.kernel_dir / args.arch
-    if not arch_dir.is_dir():
-        print(f"Error: architecture directory not found: {arch_dir}", file=sys.stderr)
-        return 1
-
-    out_dir: Path = args.descriptor_dir / args.arch
-
     try:
-        entries = collect(arch_dir, args.arch)
-    except (FileNotFoundError, ValueError, KeyError) as exc:
+        entries = collect(args.content_dir, args.arch)
+        folders = build_documents(entries, args.arch)
+    except (FileNotFoundError, ValueError, KeyError, HkpPackError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 
     if not args.check:
-        try:
-            documents = build_documents(entries, args.arch, derive_signature=True)
-        except ImportError as exc:
-            print(
-                f"Error: failed to import msgpack: {exc}\n"
-                "Signature derivation reads the AMDGPU metadata note out of each "
-                "code object; install msgpack to regenerate descriptors.",
-                file=sys.stderr,
-            )
-            return 1
-        except HkpPackError as exc:
-            print(f"Error: {exc}", file=sys.stderr)
-            return 1
+        count = sum(len(documents) for documents in folders.values())
+        print(f"Writing {count} descriptor(s) for {args.arch}...")
+        _write(args.content_dir, folders)
 
-        print(f"Writing {len(documents)} descriptor(s) for {args.arch}...")
-        _write(out_dir, documents)
-
-    if not out_dir.is_dir():
-        print(f"Error: descriptor directory not found: {out_dir}", file=sys.stderr)
-        return 1
-
-    problems = _check(out_dir, entries, args.arch)
+    problems = _check(args.content_dir, folders)
     if problems:
         for problem in problems:
             print(f"  DESCRIPTOR FAIL: {problem}", file=sys.stderr)
         print(
-            f"Error: {len(problems)} descriptor(s) disagree with the packed "
-            f"objects under {arch_dir}",
+            f"Error: {len(problems)} descriptor(s) disagree with the objects under "
+            f"{args.content_dir}",
             file=sys.stderr,
         )
         return 1
 
-    # The authoring validator: shapes, enums, reserved names, and -- the reason
-    # it is worth running rather than trusting the generator -- that every id a
-    # KDP references actually resolves. One arch directory at a time, because
-    # one shard is one arch and the per-op descriptors are shared verbatim
-    # between shards, which a whole-tree load would read as duplicate ids.
+    # The packer's own authoring validator, over the whole FlyDSL folder: shapes,
+    # enums, reserved names, that every id a KDP references resolves, and that
+    # each hsaco UKD's recorded digest is well formed.
     try:
-        load_flat_input(out_dir, log=lambda *a, **k: None)
+        load_flat_input(args.content_dir, log=lambda *a, **k: None)
     except HkpPackError as exc:
         print(f"Error: descriptor validation failed: {exc}", file=sys.stderr)
         return 1
 
-    print(f"Validated {len(entries)} kernel descriptor(s) in {out_dir}")
+    print(f"Validated {len(entries)} kernel descriptor(s) for {args.arch}")
     return 0
 
 

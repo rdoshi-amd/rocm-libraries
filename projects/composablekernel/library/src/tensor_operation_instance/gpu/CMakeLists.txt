@@ -237,12 +237,14 @@ function(add_conv_layout_instances OP_NAME)
         set(target_name "device_${OP_NAME}_${layout}_instance")
         if(TARGET ${target_name})
             list(APPEND CK_DEVICE_CONV_INSTANCES $<TARGET_OBJECTS:${target_name}>)
+            list(APPEND CK_DEVICE_CONV_OBJ_TARGETS ${target_name})
             message(VERBOSE "Added ${target_name} to CK_DEVICE_CONV_INSTANCES")
         else()
             message(VERBOSE "Target ${target_name} does not exist (may be filtered by MIOPEN_REQ_LIBS_ONLY)")
         endif()
     endforeach()
     set(CK_DEVICE_CONV_INSTANCES ${CK_DEVICE_CONV_INSTANCES} PARENT_SCOPE)
+    set(CK_DEVICE_CONV_OBJ_TARGETS ${CK_DEVICE_CONV_OBJ_TARGETS} PARENT_SCOPE)
 endfunction()
 
 
@@ -250,6 +252,7 @@ file(GLOB dir_list LIST_DIRECTORIES true *)
 set(CK_DEVICE_OTHER_INSTANCES)
 set(CK_DEVICE_GEMM_INSTANCES)
 set(CK_DEVICE_CONV_INSTANCES)
+set(CK_DEVICE_CONV_OBJ_TARGETS)
 set(CK_DEVICE_MHA_INSTANCES)
 set(CK_DEVICE_CONTRACTION_INSTANCES)
 set(CK_DEVICE_REDUCTION_INSTANCES)
@@ -428,6 +431,7 @@ FOREACH(subdir_path ${dir_list})
                         list(APPEND CK_DEVICE_GEMM_INSTANCES $<TARGET_OBJECTS:device_${target_dir}_instance>)
                     elseif("${cmake_instance}" MATCHES "conv")
                         list(APPEND CK_DEVICE_CONV_INSTANCES $<TARGET_OBJECTS:device_${target_dir}_instance>)
+                        list(APPEND CK_DEVICE_CONV_OBJ_TARGETS device_${target_dir}_instance)
                     elseif("${cmake_instance}" MATCHES "mha")
                         list(APPEND CK_DEVICE_MHA_INSTANCES $<TARGET_OBJECTS:device_${target_dir}_instance>)
                     elseif("${cmake_instance}" MATCHES "contr")
@@ -677,42 +681,133 @@ endif()
 
 # Create device_conv_operations from CK_DEVICE_CONV_INSTANCES (like the old approach)
 if(CK_DEVICE_CONV_INSTANCES AND (NOT HIPTENSOR_REQ_LIBS_ONLY OR MIOPEN_REQ_LIBS_ONLY))
-  if(MIOPEN_REQ_LIBS_ONLY)
-    string(REPLACE ";" "_" gpuarchs "${GPU_TARGETS}")
-    set(libs "device_conv_operations" "device_conv_operations_${gpuarchs}")
-  else()
-    set(libs "device_conv_operations")
-  endif()
-  foreach(lib IN LISTS libs)
-    add_library("${lib}" ${CK_DEVICE_CONV_INSTANCES})
-    add_library("composablekernels::${lib}" ALIAS "${lib}")
-    target_compile_features("${lib}" PUBLIC)
-    set_target_properties("${lib}" PROPERTIES POSITION_INDEPENDENT_CODE ON)
-    set_target_properties("${lib}"
+    add_library(device_conv_operations ${CK_DEVICE_CONV_INSTANCES})
+    add_library("composablekernels::device_conv_operations" ALIAS device_conv_operations)
+    target_compile_features(device_conv_operations PUBLIC)
+    set_target_properties(device_conv_operations PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    set_target_properties(device_conv_operations
         PROPERTIES
         VERSION ${CMAKE_PROJECT_VERSION}
         SOVERSION ${CMAKE_PROJECT_VERSION_MAJOR}
     )
-    target_include_directories("${lib}" PUBLIC
+    target_include_directories(device_conv_operations PUBLIC
         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/ck/library/tensor_operation_instance/gpu>
         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/ck/library/tensor_operation_instance/gpu/conv_tensor_rearrange>
         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/ck/library/tensor_operation_instance/gpu/grouped_conv_bwd_data>
         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/ck/library/tensor_operation_instance/gpu/grouped_conv_bwd_weight>
         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/ck/library/tensor_operation_instance/gpu/grouped_conv_fwd>
     )
-    rocm_install(TARGETS "${lib}"
-        EXPORT "${lib}Targets")
-    rocm_install(EXPORT "${lib}Targets"
-        FILE "composable_kernel${lib}Targets.cmake"
+    rocm_install(TARGETS device_conv_operations
+        EXPORT device_conv_operationsTargets)
+    rocm_install(EXPORT device_conv_operationsTargets
+        FILE composable_kerneldevice_conv_operationsTargets.cmake
         NAMESPACE composable_kernel::
         DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/composable_kernel
     )
-  endforeach()
     if(MIOPEN_REQ_LIBS_ONLY)
         message(STATUS "Created device_conv_operations STATIC library (MIOpen-required layouts only)")
     else()
         message(STATUS "Created device_conv_operations STATIC library (all layouts)")
     endif()
+endif()
+
+# =============================================================================
+# Per-Architecture Convolution Libraries (STATIC, MIOPEN_REQ_LIBS_ONLY only)
+# =============================================================================
+# When MIOPEN_REQ_LIBS_ONLY=ON and multiple GPU targets are requested, build one
+# static library per architecture: device_conv_operations_<arch>.
+# Each library is compiled exclusively with --offload-arch=<arch> so that
+# consumers can link only the code for the target they actually ship.
+#
+# This recompiles the conv sources once per architecture; build time scales
+# linearly with the number of targets in GPU_TARGETS.
+#
+# Requires CMake >= 3.18 for TARGET_DIRECTORY support in
+# set_source_files_properties (satisfied by this project's cmake_minimum_required).
+
+if(MIOPEN_REQ_LIBS_ONLY AND CK_DEVICE_CONV_OBJ_TARGETS)
+    list(LENGTH GPU_TARGETS _ck_num_gpu_targets)
+    if(_ck_num_gpu_targets GREATER 1)
+        message(STATUS "Building per-architecture device_conv_operations_<arch> libraries for: ${GPU_TARGETS}")
+    endif()
+
+    foreach(_ck_arch IN LISTS GPU_TARGETS)
+        # Colons in xnack variants (e.g. gfx908:xnack+) are not valid in target names.
+        string(REPLACE ":" "_" _ck_arch_safe "${_ck_arch}")
+        set(_ck_per_arch_lib "device_conv_operations_${_ck_arch_safe}")
+
+        # For each existing conv OBJECT target, create a single-arch clone.
+        set(_ck_per_arch_obj_exprs)
+        foreach(_ck_obj_target IN LISTS CK_DEVICE_CONV_OBJ_TARGETS)
+            if(NOT TARGET ${_ck_obj_target})
+                continue()
+            endif()
+
+            set(_ck_clone "${_ck_obj_target}_${_ck_arch_safe}")
+            get_target_property(_ck_sources ${_ck_obj_target} SOURCES)
+            get_target_property(_ck_source_dir ${_ck_obj_target} SOURCE_DIR)
+
+            # SOURCES may be relative to the subdirectory where the target was defined.
+            # Make them absolute so they resolve correctly from this directory scope.
+            set(_ck_abs_sources)
+            foreach(_ck_src IN LISTS _ck_sources)
+                if(NOT IS_ABSOLUTE "${_ck_src}")
+                    set(_ck_src "${_ck_source_dir}/${_ck_src}")
+                endif()
+                list(APPEND _ck_abs_sources "${_ck_src}")
+            endforeach()
+
+            add_library("${_ck_clone}" OBJECT ${_ck_abs_sources})
+            target_compile_features("${_ck_clone}" PUBLIC)
+            set_target_properties("${_ck_clone}" PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+            # Override every source file's offload flags to target only this arch.
+            foreach(_ck_src IN LISTS _ck_abs_sources)
+                set_source_files_properties("${_ck_src}"
+                    TARGET_DIRECTORY "${_ck_clone}"
+                    PROPERTIES COMPILE_FLAGS "--offload-arch=${_ck_arch}")
+            endforeach()
+
+            if(NOT DISABLE_OFFLOAD_COMPRESS AND CXX_COMPILER_SUPPORTS_OFFLOAD_COMPRESS)
+                target_compile_options("${_ck_clone}" PRIVATE --offload-compress)
+            endif()
+            if(CMAKE_BUILD_TYPE STREQUAL "Debug" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
+                target_compile_options("${_ck_clone}" PRIVATE -gsplit-dwarf)
+            endif()
+
+            list(APPEND _ck_per_arch_obj_exprs $<TARGET_OBJECTS:${_ck_clone}>)
+        endforeach()
+
+        if(NOT _ck_per_arch_obj_exprs)
+            message(VERBOSE "No conv objects for arch ${_ck_arch}; skipping ${_ck_per_arch_lib}")
+            continue()
+        endif()
+
+        add_library("${_ck_per_arch_lib}" STATIC ${_ck_per_arch_obj_exprs})
+        add_library("composablekernels::${_ck_per_arch_lib}" ALIAS "${_ck_per_arch_lib}")
+        target_compile_features("${_ck_per_arch_lib}" PUBLIC)
+        set_target_properties("${_ck_per_arch_lib}" PROPERTIES POSITION_INDEPENDENT_CODE ON)
+        set_target_properties("${_ck_per_arch_lib}"
+            PROPERTIES
+            VERSION ${CMAKE_PROJECT_VERSION}
+            SOVERSION ${CMAKE_PROJECT_VERSION_MAJOR}
+        )
+        target_include_directories("${_ck_per_arch_lib}" PUBLIC
+            $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/ck/library/tensor_operation_instance/gpu>
+            $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/ck/library/tensor_operation_instance/gpu/conv_tensor_rearrange>
+            $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/ck/library/tensor_operation_instance/gpu/grouped_conv_bwd_data>
+            $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/ck/library/tensor_operation_instance/gpu/grouped_conv_bwd_weight>
+            $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/ck/library/tensor_operation_instance/gpu/grouped_conv_fwd>
+        )
+        rocm_install(TARGETS "${_ck_per_arch_lib}"
+            EXPORT "${_ck_per_arch_lib}Targets")
+        rocm_install(EXPORT "${_ck_per_arch_lib}Targets"
+            FILE "composable_kernel${_ck_per_arch_lib}Targets.cmake"
+            NAMESPACE composable_kernel::
+            DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/composable_kernel
+        )
+        message(STATUS "Created ${_ck_per_arch_lib} STATIC library")
+    endforeach()
 endif()
 
 # =============================================================================

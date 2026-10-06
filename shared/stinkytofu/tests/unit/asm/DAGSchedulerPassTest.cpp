@@ -1842,6 +1842,63 @@ TEST_F(DAGSchedulerPassTest, DsIssueCapPeriodic_NonDsSeparatesPeriods) {
     EXPECT_EQ(shape, "WddddWddddWddddW");
 }
 
+namespace {
+// Shape of the scheduled block: W per WMMA, d per ds_load.
+std::string wdShape(const std::vector<std::string>& seq) {
+    std::string shape;
+    for (const std::string& m : seq)
+        shape += m.find("wmma") != std::string::npos ? 'W' : (m == "ds_load_b128" ? 'd' : '?');
+    return shape;
+}
+void autoBatchFeatures(PassFeatureConfig& p) {
+    p.dagFeatures.wmmaBatchSize = -1;
+    p.dagFeatures.dsReadPerCap = 12;
+    p.dagFeatures.dsIssueCapSpanCycles = 32;
+    p.dagFeatures.dsReadQueueDepth = 16;
+    p.dagFeatures.dsReadThrottleLatency = 1;
+}
+}  // namespace
+
+// 12 pending at 12 per 32 cycles: one 4-WMMA (32-cycle) batch, its 12 ds_loads, then
+// the rest of the WMMAs as one batch since nothing is pending.
+TEST_F(DAGSchedulerPassTest, AutoWmmaBatch_SizesBatchFromPendingDs) {
+    for (int i = 0; i < 12; i++) createMovableDsLoad(i * 4, 80, i + 1);
+    for (int i = 0; i < 8; i++) createWmmaF32_16x16x16_bf16(200 + 8 * i, 300 + 8 * i);
+    runWithDsCapMode(PassFeatureConfig::DsIssueCapMode::Periodic, autoBatchFeatures);
+    EXPECT_EQ(wdShape(mnemonicSequence(*bb)), "WWWWddddddddddddWWWW");
+}
+
+// Same, but every ds_load shares one memory token, so LockDsReadOrder releases them one
+// at a time; the pending count follows the chain and sizes the batch the same way.
+TEST_F(DAGSchedulerPassTest, AutoWmmaBatch_PendingCountsTheDsOrderChain) {
+    for (int i = 0; i < 12; i++) createMovableDsLoad(i * 4, 80, /*ldsToken=*/1);
+    for (int i = 0; i < 8; i++) createWmmaF32_16x16x16_bf16(200 + 8 * i, 300 + 8 * i);
+    runWithDsCapMode(PassFeatureConfig::DsIssueCapMode::Periodic, autoBatchFeatures);
+    EXPECT_EQ(wdShape(mnemonicSequence(*bb)), "WWWWddddddddddddWWWW");
+}
+
+// 2 pending: one WMMA's window (8 cycles, 3 ds at 12/32) is enough.
+TEST_F(DAGSchedulerPassTest, AutoWmmaBatch_FewPendingGivesSmallBatch) {
+    for (int i = 0; i < 2; i++) createMovableDsLoad(i * 4, 80, i + 1);
+    for (int i = 0; i < 4; i++) createWmmaF32_16x16x16_bf16(200 + 8 * i, 300 + 8 * i);
+    runWithDsCapMode(PassFeatureConfig::DsIssueCapMode::Periodic, autoBatchFeatures);
+    EXPECT_EQ(wdShape(mnemonicSequence(*bb)), "WddWWW");
+}
+
+// Auto anchors the cap period to the batch window: only Periodic is accepted.
+TEST_F(DAGSchedulerPassTest, AutoWmmaBatch_RequiresPeriodicCap) {
+    createMovableDsLoad(0, 80, 1);
+    createWmmaF32_16x16x16_bf16(200, 300);
+    PassContext ctx;
+    ctx.setGemmTileConfig(config);
+    PassFeatureConfig pfc;
+    pfc.loopConfig.unrollGemm = true;
+    autoBatchFeatures(pfc);
+    pfc.dagFeatures.dsIssueCapMode = PassFeatureConfig::DsIssueCapMode::Sliding;
+    ctx.setPassFeatureConfig(pfc);
+    EXPECT_DEATH(pass->run(*func, ctx, am), "requires dsIssueCapMode = Periodic");
+}
+
 TEST_F(DAGSchedulerPassTest, DsIssueCapMode_BothModesBoundTheBurst) {
     for (auto mode : {PassFeatureConfig::DsIssueCapMode::Sliding,
                       PassFeatureConfig::DsIssueCapMode::Periodic}) {

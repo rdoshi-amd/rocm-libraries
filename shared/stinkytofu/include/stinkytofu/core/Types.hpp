@@ -131,7 +131,11 @@ struct PassFeatureConfig {
         /// gap. Mirrors ModuleOptions::TensorLoadDsLoadGapCycles.
         int tensorLoadDsLoadGapCycles = 64;
         /// Max independent WMMAs issued back-to-back as one batch; the window
-        /// after a batch of N is N*L cycles. 0 = per-arch default
+        /// after a batch of N is N*L cycles. -1 = auto (placeholder with an
+        /// initial formula): each batch is sized from the pending ds_loads at
+        /// rate dsReadPerCap / dsIssueCapSpanCycles (window at most the span) and
+        /// the ds cap period follows the batch window; requires dsIssueCapMode =
+        /// Periodic. 0 = per-arch default
         /// (CDNA5Config::wmmaBatchSize, 1 = no batching).
         int wmmaBatchSize = 0;
         /// Max cycle-distance between two adjacent barrier groups for

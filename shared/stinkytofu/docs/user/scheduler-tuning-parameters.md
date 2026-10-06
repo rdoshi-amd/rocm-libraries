@@ -51,7 +51,23 @@ Each parameter resolves independently, first match wins:
 
 | Module option | Default | CLI | Meaning |
 |---|---|---|---|
-| `WmmaBatchSize` | 0 → arch default 1 | `--wmma-batch-size=N` | Max independent, data-ready WMMAs issued back-to-back as one batch. A WMMA reading a batch member's D, or needing a different VGPR MSB bank (an `s_set_vgpr_msb` would split the batch), cannot join; any non-WMMA pick closes the batch. 1 = no batching. |
+| `WmmaBatchSize` | 0 → arch default 1 | `--wmma-batch-size=N` | Max independent, data-ready WMMAs issued back-to-back as one batch. A WMMA reading a batch member's D, or needing a different VGPR MSB bank (an `s_set_vgpr_msb` would split the batch), cannot join; any non-WMMA pick closes the batch. 1 = no batching; -1 = auto (below). |
+
+**Auto batch (`WmmaBatchSize = -1`).** A placeholder: -1 selects auto mode with an
+initial sizing formula, expected to be refined. It requires `DsIssueCapMode = 1`
+(Periodic); any other mode is rejected. `DsReadPerCap / DsIssueCapSpanCycles` is read
+as a rate, and the span as the longest batch window. Each batch is sized when it opens:
+
+```
+pending = ready ds_loads + ds_loads waiting only on them (LockDsReadOrder chain)
+N       = pending == 0 ? no limit : clamp(ceil(pending * span / (cap * L)), 1, span / L)
+```
+
+The ds cap period then follows that batch window and holds `cap * window / span`
+ds_loads, with the fractional remainder carried to the next window. Example, 12 per 32 and L = 8: 12 pending → `W4 d12`, 2 pending →
+`W d2`, none pending → the WMMAs run as one batch. With the span unset (one WMMA, L)
+every batch is a single WMMA. Static mechanisms that size by the batch (ds budget
+window, window counts) use N = 1 in auto mode.
 
 With N > 1, window-based mechanisms follow the batch window: the ds_load cap
 span, the ds budget window, the filler quota and co-issue slots, the

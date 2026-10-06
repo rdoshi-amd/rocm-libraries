@@ -49,7 +49,25 @@ class DsIssueCap {
         now_ += cycles;
     }
 
+    // Auto WMMA batch: the current period ends with the batch window, \p cyclesLeft
+    // from now, and holds \p depth ds_loads. Called as the batch opens and grows (no
+    // ds_load issues inside a batch, so the count restarts at 0).
+    void anchorPeriod(int cyclesLeft, int depth) {
+        anchored_ = true;
+        count_ = 0;
+        periodEnd_ = now_ + cyclesLeft;
+        anchorDepth_ = depth;
+    }
+
     void push(int span) {
+        if (anchored_) {
+            if (now_ < periodEnd_) {
+                ++count_;
+                return;
+            }
+            anchored_ = false;  // window over, no new batch: back to fixed periods
+            count_ = 0;
+        }
         if (mode_ == Mode::Sliding) {
             sliding_.push(span);
             return;
@@ -62,12 +80,14 @@ class DsIssueCap {
     }
 
     bool full() const {
+        if (anchored_) return now_ < periodEnd_ && count_ >= anchorDepth_;
         if (mode_ == Mode::Sliding) return sliding_.full();
         return depth_ > 0 && count_ >= depth_ && now_ < periodEnd_;
     }
 
     // Cycles until a slot frees (meaningful while full()).
     int minResidual() const {
+        if (anchored_) return std::max(0, periodEnd_ - now_);
         if (mode_ == Mode::Sliding) return sliding_.minResidual();
         return std::max(0, periodEnd_ - now_);
     }
@@ -87,6 +107,8 @@ class DsIssueCap {
     int now_ = 0;
     int count_ = 0;
     int periodEnd_ = 0;
+    bool anchored_ = false;
+    int anchorDepth_ = 0;
 };
 
 }  // namespace stinkytofu

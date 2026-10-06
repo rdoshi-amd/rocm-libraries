@@ -516,7 +516,13 @@ class CDNA5ReadyQueue : public ReadyQueue {
     }
     int wmmaBatchSize() const {
         const int cfg = getPassContext().getPassFeatureConfig().dagFeatures.wmmaBatchSize;
-        return std::max(1, cfg > 0 ? cfg : config_.wmmaBatchSize);
+        return std::max(1, cfg > 0 ? cfg : config_.wmmaBatchSize);  // auto: nominal 1
+    }
+    // wmmaBatchSize = -1: each batch is sized from the pending ds_loads, and the ds cap
+    // period follows the batch window (see autoWmmaBatchSize). Placeholder: -1 selects
+    // auto with an initial sizing formula, expected to be refined; requires Periodic.
+    bool autoWmmaBatch() const {
+        return getPassContext().getPassFeatureConfig().dagFeatures.wmmaBatchSize == -1;
     }
     // Whether to run the per-window hide-budget policy at the top of each region.
     // The gfx1250 production backend enables it; the standalone pass keeps an
@@ -598,6 +604,12 @@ class CDNA5ReadyQueue : public ReadyQueue {
     std::vector<DAGNode*> activeWmmaBatch_;
     // True while the last pick was a WMMA, so another may still join its batch.
     bool wmmaBatchOpen_ = false;
+    // Max WMMAs in the open batch: wmmaBatchSize(), or per batch in auto mode.
+    int batchLimit_ = 1;
+    // Auto batch: remainder of cap * window not yet turned into a whole ds_load,
+    // carried into the next window so the long-run rate is exactly cap / span.
+    int dsAllotCarry_ = 0;
+    int dsAllotCarryNext_ = 0;
 
     // Non-WMMA fills since the active WMMA opened its window. A dependent next
     // WMMA is held in Phase B until this reaches popcount(coIssueWindow)+1
@@ -967,6 +979,9 @@ class CDNA5ReadyQueue : public ReadyQueue {
     bool isBlockedCycle(int pos) const;
     void appendWindowSegment(const StinkyInstruction& wmma);
     bool canJoinWmmaBatch(const DAGNode* wmma) const;
+    int dsPendingForBatch() const;
+    int autoWmmaBatchSize(int latency) const;
+    void anchorAutoDsPeriod();
     DAGNode* findBatchableWMMA();
     void resetActiveWindow();
     int freeCoIssueSpace() const;
@@ -1058,12 +1073,58 @@ void CDNA5ReadyQueue::resetActiveWindow() {
 // an s_set_vgpr_msb between the two WMMAs, which ends the hardware batch.
 bool CDNA5ReadyQueue::canJoinWmmaBatch(const DAGNode* wmma) const {
     if (!wmmaBatchOpen_ || activeWmmaBatch_.empty()) return false;
-    if ((int)activeWmmaBatch_.size() >= wmmaBatchSize()) return false;
+    if ((int)activeWmmaBatch_.size() >= batchLimit_) return false;
     if (coIssueCyclePos_ >= activeWmmaLatency_) return false;
     if (wmma->requiredMsb != activeWmmaNode_->requiredMsb) return false;
     for (const DAGNode* member : activeWmmaBatch_)
         if (wmmaToWmmaCoexecOverlap(*member->inst, *wmma->inst)) return false;
     return true;
+}
+
+// ds_loads the next window can serve: the ready ones plus those waiting only on a
+// pending ds_load (the LockDsReadOrder chain releases them one at a time, so the
+// ready queue alone undercounts).
+int CDNA5ReadyQueue::dsPendingForBatch() const {
+    std::vector<const DAGNode*> work(localReadQueue.begin(), localReadQueue.end());
+    std::unordered_set<unsigned> seen;
+    for (const DAGNode* n : work) seen.insert(n->id);
+    int pending = 0;
+    while (!work.empty()) {
+        const DAGNode* n = work.back();
+        work.pop_back();
+        ++pending;
+        if (regionDag_ == nullptr || n->id >= regionDag_->graph.size()) continue;
+        for (unsigned succ : regionDag_->graph[n->id]) {
+            const DAGNode& s = regionDag_->nodes[succ];
+            if (s.inDegree == 1 && isDSRead(*s.inst) && seen.insert(succ).second)
+                work.push_back(&s);
+        }
+    }
+    return pending;
+}
+
+// Auto batch size (initial formula; wmmaBatchSize = -1 is a placeholder for it): the
+// smallest batch whose window serves the pending ds_loads at rate cap / span, with the
+// window at most span (so a window holds at most cap ds_loads). No pending ds_load: no
+// limit, the WMMAs run as one batch.
+int CDNA5ReadyQueue::autoWmmaBatchSize(int latency) const {
+    const int pending = dsPendingForBatch();
+    if (pending == 0) return INT_MAX;
+    const int cap = dsReadPerCap();
+    const int span = dsIssueCapSpan();
+    const int l = std::max(1, latency);
+    const int n = (pending * span + cap * l - 1) / (cap * l);
+    return std::clamp(n, 1, std::max(1, span / l));
+}
+
+// Auto batch: the ds cap period ends with the batch window and holds the window's
+// share of cap / span, carrying the fractional remainder into the next window.
+void CDNA5ReadyQueue::anchorAutoDsPeriod() {
+    const int cap = dsReadPerCap();
+    const int span = dsIssueCapSpan();
+    const int allot = dsAllotCarry_ + cap * activeWmmaLatency_;
+    dsAllotCarryNext_ = allot % span;
+    dsIssueCap_.anchorPeriod(activeWmmaLatency_ - coIssueCyclePos_, allot / span);
 }
 
 // Most-ready WMMA (smallest DAG id among data-ready ones) that can join the open
@@ -1503,11 +1564,15 @@ DAGNode* CDNA5ReadyQueue::pickOneFromWMMA(DAGNode* pick) {
         appendWindowSegment(*node->inst);
         activeWmmaNode_ = node;
         activeWmmaBatch_.push_back(node);
+        batchLimit_ =
+            autoWmmaBatch() ? autoWmmaBatchSize(node->inst->latencyCycles) : wmmaBatchSize();
+        dsAllotCarry_ = dsAllotCarryNext_;
         nonWmmaFillsSinceActiveWmma_ = 0;  // new window: restart WMMA->WMMA fill count
         fillsThisWindow_ = 0;
         dsSchedulingBudgetUsed_ = 0;
     }
     wmmaBatchOpen_ = true;
+    if (autoWmmaBatch()) anchorAutoDsPeriod();
     // Advance by WMMA issue cycles. This keeps coIssueCyclePos_ aligned with
     // elapsed cycles right after WMMA issue.
     advanceTime(node->inst->issueCycles);
@@ -2677,8 +2742,15 @@ void CDNA5ReadyQueue::onInit(IRList::iterator regionStart, IRList::iterator regi
     // scheduler's single RPO pass (a loop header is visited before its latch, so
     // sawLoopPred never goes true -- see restoreCrossBBStateFromLoop), so
     // carrying the cap window would be code with no effect until that is fixed.
-    dsIssueCap_ = DsIssueCap(getPassContext().getPassFeatureConfig().dagFeatures.dsIssueCapMode,
-                             dsReadPerCap());
+    // Auto batch anchors each ds cap period to its batch window, which only has a
+    // meaning for the Periodic cap; reject any other mode instead of guessing.
+    const auto capMode = getPassContext().getPassFeatureConfig().dagFeatures.dsIssueCapMode;
+    if (autoWmmaBatch() && capMode != PassFeatureConfig::DsIssueCapMode::Periodic) {
+        report_fatal_error(
+            "dagFeatures.wmmaBatchSize = -1 (auto) requires dsIssueCapMode = Periodic (1).");
+    }
+    dsIssueCap_ = DsIssueCap(capMode, dsReadPerCap());
+    dsAllotCarry_ = dsAllotCarryNext_ = 0;
     assert(dsIssueCap_.depth() > 0 && "rule (4) cap must have a positive depth");
     const int dsDepth = dsReadQueueDepth();
     const double dsThrottleInterval =

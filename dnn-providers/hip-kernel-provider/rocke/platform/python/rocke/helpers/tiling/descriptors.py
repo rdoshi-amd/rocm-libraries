@@ -236,6 +236,18 @@ class TensorWindow:
             raise ValueError(
                 f"window bounds rank {len(self.bounds)} != tensor rank {rank}"
             )
+        # A negative COMPILE-TIME origin places the tile before the buffer start, so an element at
+        # ``origin + coord`` can address memory ahead of the tensor -- and a tile-aligned negative
+        # origin (e.g. ``-tile_extent``) takes the clip's compare-free fast path, emitting that
+        # out-of-bounds address unmasked. Reject it here at the window boundary. Runtime (SSA) origins
+        # are trusted grid-aligned (the deferred mid-tile/sliding-window case) and are not checked.
+        for axis, origin in enumerate(self.origin):
+            if isinstance(origin, int) and origin < 0:
+                raise ValueError(
+                    f"negative window origin on axis {axis} (origin={origin}) -- a tile placed before "
+                    "the buffer start generates out-of-bounds addresses; window origins must be "
+                    "nonnegative"
+                )
 
     def at_index(self, axis: int, index: Any) -> "TensorWindow":
         """Pin a BATCH `axis` to one `index` and DROP it -- the rank-reducing slice toward the

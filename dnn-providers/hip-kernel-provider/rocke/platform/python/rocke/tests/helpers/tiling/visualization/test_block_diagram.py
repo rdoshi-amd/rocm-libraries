@@ -28,6 +28,24 @@ def _by_seq(blocks):
     return {b.seq: b for b in blocks}
 
 
+def test_visualization_star_export_has_no_unbound_names() -> None:
+    """Regression: ``block_diagram`` was listed in the package ``__all__`` but never bound, so
+    ``from ...visualization import *`` raised AttributeError. Every ``__all__`` entry must resolve.
+    """
+    import rocke.helpers.tiling.visualization as viz
+
+    unbound = [name for name in viz.__all__ if not hasattr(viz, name)]
+    assert unbound == [], f"__all__ names with no bound attribute: {unbound}"
+    exec("from rocke.helpers.tiling.visualization import *", {})  # must not raise
+
+
+def test_block_diagram_callable_reachable_at_submodule_home() -> None:
+    """The render callable is reached at its submodule home (keeps matplotlib lazy)."""
+    from rocke.helpers.tiling.visualization.block_diagram import block_diagram
+
+    assert callable(block_diagram)
+
+
 def test_extract_blocks_splits_prologue_loop_epilogue():
     """The K-loop body is exactly the IV-dependent nodes (prefetch load, cur read, MMA, oth store);
     everything before is prologue, everything after is epilogue."""

@@ -68,6 +68,28 @@ def test_window_bounds_rank_must_match_tensor() -> None:
     assert "bounds rank" in str(excinfo.value)
 
 
+def test_window_rejects_negative_compile_time_origin() -> None:
+    # A negative origin places the tile before the buffer start; a tile-aligned one (-16 here) would
+    # otherwise take the clip's compare-free fast path and emit that out-of-bounds address unmasked.
+    with pytest.raises(ValueError) as excinfo:
+        make_window(make_tensor_desc((16, 16), (16, 1), _DT("f16")), (-16, 0))
+    msg = str(excinfo.value)
+    assert "negative window origin" in msg and "axis 0" in msg
+
+
+def test_window_allows_nonnegative_and_runtime_origin() -> None:
+    # Zero/positive compile-time origins are fine, and a runtime (non-int) origin is trusted (the
+    # deferred mid-tile/sliding-window case), so the negative guard must not fire on it.
+    assert make_window(
+        make_tensor_desc((16, 16), (16, 1), _DT("f16")), (16, 0)
+    ).origin == (16, 0)
+    runtime_origin = object()  # stands in for an SSA Value
+    win = make_window(
+        make_tensor_desc((16, 16), (16, 1), _DT("f16")), (runtime_origin, 0)
+    )
+    assert win.origin[0] is runtime_origin
+
+
 # ---- N-D axis roles + rank-reducing slice (at_index / squeeze) ---------------------------------
 
 

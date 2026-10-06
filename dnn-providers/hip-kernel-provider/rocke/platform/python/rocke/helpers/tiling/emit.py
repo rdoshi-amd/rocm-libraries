@@ -161,7 +161,16 @@ def emit_tensor_coordinates(
 
 def fill_fragment(b: Any, fragment: Fragment, scalar: Any) -> None:
     """Set every register of `fragment` to `scalar`, element-wise (no layout, no addressing).
-    M1: scalar is 0."""
+
+    Only a compile-time zero fill is implemented today. A nonzero or runtime `scalar` is REJECTED
+    rather than silently zero-filled, so a caller asking for ones gets a loud failure instead of a
+    wrong fragment.
+    """
+    if not (isinstance(scalar, int) and scalar == 0):
+        raise NotImplementedError(
+            f"fill_fragment supports only a compile-time zero fill -- got scalar={scalar!r}; "
+            "nonzero/runtime scalar splat is not implemented"
+        )
     fragment.value = b.zero_vec(fragment.dtype, fragment.tile_desc.register_count)
 
 

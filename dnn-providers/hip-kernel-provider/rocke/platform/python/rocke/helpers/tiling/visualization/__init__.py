@@ -90,8 +90,11 @@ __all__ = [
     "render_views",
     "render_coalescing",
     "LabelMutationError",
-    # Level-0 block diagram (selection-flow entry point)
-    "block_diagram",
+    # NB: the Level-0 ``block_diagram`` RENDER callable is intentionally NOT star-exported here. The
+    # name ``block_diagram`` in this package resolves to the submodule (its internals are consumed as
+    # ``from . import block_diagram as _bd`` across the viz layer), so listing it in ``__all__`` only
+    # shadowed that and broke ``import *``. Reach the callable at its home: ``from
+    # rocke.helpers.tiling.visualization.block_diagram import block_diagram`` (matplotlib stays lazy).
     # primitive flow recipes
     "flow_mem_to_register",
     "flow_lds_to_register",

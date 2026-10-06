@@ -59,10 +59,8 @@ def test_out_of_range_lane_fails_fast() -> None:
 
 
 # --- direct numeric oracle vs rocke MfmaAtom.lane_to_output ---
-rocke_atoms = pytest.importorskip(
-    "rocke.helpers.atoms",
-    reason="rocke substrate not importable here; runs on the gfx90a host",
-)
+# The oracle below needs the optional rocke atom substrate; the skip is scoped INSIDE the oracle test
+# so the pure structural/coordinate tests above always run even when that substrate is absent.
 
 
 class _IntEvalBuilder:
@@ -99,6 +97,10 @@ class _IntEvalBuilder:
     [("f16_16x16x16", "mfma_f32_16x16x16f16"), ("f16_32x32x8", "mfma_f32_32x32x8f16")],
 )
 def test_c_forward_map_reproduces_lane_to_output(factory_name: str, op_id: str) -> None:
+    rocke_atoms = pytest.importorskip(
+        "rocke.helpers.atoms",
+        reason="rocke substrate not importable here; runs on the gfx90a host",
+    )
     factory = getattr(rocke_atoms.MfmaAtom, factory_name, None)
     if factory is None:
         pytest.skip(f"rocke MfmaAtom has no {factory_name} factory in this build")

@@ -195,8 +195,9 @@ jobs:
       - name: Run the JIT tests that need a GPU
         timeout-minutes: 30
         run: |
-          # Tests that need gfx950 code are registered only when GPU_TARGETS has gfx950.
-          ctest --test-dir "$JIT_BUILD_DIR/clients/tests/jit" -L jit-gpu --no-tests=ignore \
+          # Every architecture has GPU tests; those that need gfx950 code are
+          # registered only when GPU_TARGETS has gfx950.
+          ctest --test-dir "$JIT_BUILD_DIR/clients/tests/jit" -L jit-gpu --no-tests=error \
             --output-on-failure 2>&1 | tee jit-test-logs/ctest-gpu.log
       - name: Upload logs
         if: ${{ always() }}

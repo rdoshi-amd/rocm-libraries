@@ -113,9 +113,10 @@ The implementations are:
   bundles without a generator. A generation returns, in list order, up to the
   requested count of bundles whose predicates accept the device and problem,
   skipping excluded kernels; the comgr builder still builds them. Tests reach
-  it through `jit::replay::createBackend` in `hipblaslt-jit-replay.hpp`. Only
-  builds with `HIPBLASLT_JIT_TESTING=ON` compile it; it is not a production
-  backend.
+  it through `jit::replay::createBackend` in `hipblaslt-jit-replay.hpp`, whose
+  `Options::fault` makes generation fail and leave `replay.log` in the scratch
+  directory, or makes the main kernel's source fail to assemble. Only builds
+  with `HIPBLASLT_JIT_TESTING=ON` compile it; it is not a production backend.
 
 ### Build
 
@@ -147,7 +148,12 @@ workspace and follow the same handle, stream and workspace sharing rules as
 `hipblasLtMatmul` and `Gemm` calls using prebuilt algorithms. The algorithm
 resolves to its bundle's one-solution library and adapter, and then runs
 through the same launch path as a prebuilt algorithm, including its
-synchronization storage. Registry synchronization
+synchronization storage. The loader resolves only the main kernel, and a
+solution can also launch helper kernels, such as the split-K reduction. For a
+JIT algorithm, `hipblasLtMatmul` and `Gemm::initialize` resolve every kernel of
+the launch before any is submitted or kept. When the code object lacks one,
+the call returns `HIPBLAS_STATUS_EXECUTION_FAILED` without writing D or the
+workspace, and a `Gemm` keeps the launch it had prepared. Registry synchronization
 protects algorithm lookup; it does not protect application buffers or make
 simultaneous calls on one `Gemm` object safe.
 
@@ -240,8 +246,12 @@ Artifact paths must be relative and stay inside the bundle, including through
 symbolic links, and `sources/` may hold only regular files. The reader bounds
 the file count (1024), each file (64 MiB) and the sources in total (256 MiB).
 
-The JIT tests use gfx950 source bundles committed in `clients/tests/jit/data`.
-Each manifest records the kernel-argument and persistent-loop argument layout
-versions of the generator that wrote it, and
-[their README](clients/tests/jit/data/README.md) gives the command that
-generated each one.
+The JIT tests use gfx950 source bundles committed in `clients/tests/jit/data`:
+`plain`, with no helper kernels; `splitk`, whose split-K solution launches
+helper kernels from `Kernels.cpp`; and `streamk` and `amax`, a Stream-K
+solution and an output-amax solution. Each manifest records the
+kernel-argument and persistent-loop argument layout versions of the generator
+that wrote it, and [their README](clients/tests/jit/data/README.md) gives the
+commands that generated them. The `jit-bundle-freshness` test fails when those
+versions or the code-object version no longer match this tree, or when the
+host library or comgr can no longer read or build a bundle.

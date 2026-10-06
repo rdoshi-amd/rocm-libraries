@@ -4,11 +4,14 @@
 # JIT tests, staged in clients/staging. CTest labels them jit-cpu, which needs
 # no GPU, or jit-gpu. Each test empties its own scratch directory.
 enable_testing()
+find_package(Threads REQUIRED)
 
 set(hipblaslt_jit_source "${PROJECT_SOURCE_DIR}/library/src/amd_detail")
 set(hipblaslt_jit_scratch "${CMAKE_CURRENT_BINARY_DIR}/scratch")
-# The committed bundle; data/README.md lists how it was generated.
-set(hipblaslt_jit_bundle "${CMAKE_CURRENT_SOURCE_DIR}/data/gfx950/plain")
+# The committed bundles; data/README.md lists how they were generated.
+set(hipblaslt_jit_data "${CMAKE_CURRENT_SOURCE_DIR}/data")
+set(hipblaslt_jit_bundle "${hipblaslt_jit_data}/gfx950/plain")
+set(hipblaslt_jit_splitk "${hipblaslt_jit_data}/gfx950/splitk")
 string(REGEX MATCH "(^|;)gfx950(:[^;]*)?(;|$)" hipblaslt_jit_gfx950 "${GPU_TARGETS}")
 
 # hipblaslt_jit_test(name label target args...) stages target and runs it.
@@ -45,6 +48,61 @@ target_link_libraries(hipblaslt-jit-builder-test PRIVATE
 hipblaslt_jit_test(jit-builder jit-cpu hipblaslt-jit-builder-test
     "${hipblaslt_jit_bundle}" "${hipblaslt_jit_scratch}/builder")
 
+# Drives the Jit stages with fakes that break the stage contracts.
+add_executable(hipblaslt-jit-component-test
+    jit_component_test.cpp
+    "${hipblaslt_jit_source}/hipblaslt-jit-component.cpp")
+target_include_directories(hipblaslt-jit-component-test PRIVATE "${hipblaslt_jit_source}")
+target_link_libraries(hipblaslt-jit-component-test PRIVATE roc::hipblaslt hip::host)
+hipblaslt_jit_test(jit-component jit-cpu hipblaslt-jit-component-test
+    "${hipblaslt_jit_scratch}/component")
+
+# Builds and inspects code objects with comgr; --gpu also launches them on the
+# current device, which can run the gfx950 bundle only in a gfx950 build.
+add_executable(hipblaslt-jit-code-object-test
+    code_object_test.cpp
+    "${hipblaslt_jit_source}/hipblaslt-jit-code-object.cpp")
+target_include_directories(hipblaslt-jit-code-object-test PRIVATE
+    "${hipblaslt_jit_source}" "${hipblaslt_jit_source}/rocblaslt/src/include")
+target_link_libraries(hipblaslt-jit-code-object-test PRIVATE amd_comgr hip::host Threads::Threads)
+hipblaslt_jit_test(jit-code-object jit-cpu hipblaslt-jit-code-object-test
+    --target gfx950 --out "${hipblaslt_jit_scratch}/code-object" --bundle "${hipblaslt_jit_splitk}")
+set(gpu_bundle)
+if(hipblaslt_jit_gfx950)
+    set(gpu_bundle --bundle "${hipblaslt_jit_splitk}")
+endif()
+hipblaslt_jit_test(jit-code-object-gpu jit-gpu hipblaslt-jit-code-object-test
+    --gpu --out "${hipblaslt_jit_scratch}/code-object-gpu" ${gpu_bundle})
+
+# Fails when the committed bundles no longer match the layout versions in
+# GlobalParameters.py, the builder's code-object version or the host library.
+# The library entries are MsgPack, which a YAML build cannot read. TensileLite
+# queries the current device when it reads one, so the test needs a GPU.
+if(NOT HIPBLASLT_ENABLE_YAML)
+    set(parameters "${PROJECT_SOURCE_DIR}/tensilelite/Tensile/Common/GlobalParameters.py")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${parameters}")
+    file(READ "${parameters}" parameters)
+    foreach(key KernArgsVersion PersistentLoopArgsVersion)
+        if(NOT parameters MATCHES "\"${key}\": *([0-9]+)")
+            message(FATAL_ERROR "No ${key} in GlobalParameters.py")
+        endif()
+        set(${key} ${CMAKE_MATCH_1})
+    endforeach()
+    add_executable(hipblaslt-jit-bundle-freshness-test
+        jit_bundle_freshness_test.cpp
+        "${hipblaslt_jit_source}/hipblaslt-jit-builder.cpp"
+        "${hipblaslt_jit_source}/hipblaslt-jit-code-object.cpp")
+    target_include_directories(hipblaslt-jit-bundle-freshness-test PRIVATE
+        "${hipblaslt_jit_source}" "${hipblaslt_jit_source}/rocblaslt/src/include")
+    target_compile_definitions(hipblaslt-jit-bundle-freshness-test PRIVATE
+        HIPBLASLT_JIT_KERNARGS_VERSION=${KernArgsVersion}
+        HIPBLASLT_JIT_PERSISTENT_LOOP_ARGS_VERSION=${PersistentLoopArgsVersion})
+    target_link_libraries(hipblaslt-jit-bundle-freshness-test PRIVATE
+        roc::hipblaslt roc::tensilelite-host amd_comgr hip::device Threads::Threads)
+    hipblaslt_jit_test(jit-bundle-freshness jit-gpu hipblaslt-jit-bundle-freshness-test
+        "${hipblaslt_jit_data}" "${hipblaslt_jit_scratch}/bundle-freshness")
+endif()
+
 # The bundles hold gfx950 code and MsgPack library entries, which a YAML build
 # cannot read.
 if(NOT hipblaslt_jit_gfx950 OR HIPBLASLT_ENABLE_YAML)
@@ -70,6 +128,17 @@ if(HIPBLASLT_JIT_TESTING)
     target_link_libraries(hipblaslt-jit-end-to-end-test PRIVATE roc::hipblaslt hip::device)
     hipblaslt_jit_test(jit-end-to-end jit-gpu hipblaslt-jit-end-to-end-test
         "${hipblaslt_jit_bundle}")
+    hipblaslt_jit_test(jit-end-to-end-splitk jit-gpu hipblaslt-jit-end-to-end-test
+        "${hipblaslt_jit_splitk}")
+
+    # Failures of the real stages, on damaged copies of the bundles.
+    add_executable(hipblaslt-jit-failure-test
+        jit_failure_test.cpp
+        "${hipblaslt_jit_source}/hipblaslt-jit-component.cpp")
+    target_include_directories(hipblaslt-jit-failure-test PRIVATE "${hipblaslt_jit_source}")
+    target_link_libraries(hipblaslt-jit-failure-test PRIVATE roc::hipblaslt hip::device)
+    hipblaslt_jit_test(jit-failure jit-gpu hipblaslt-jit-failure-test
+        "${hipblaslt_jit_bundle}" "${hipblaslt_jit_splitk}" "${hipblaslt_jit_scratch}/failure")
 
     # The C and C++ GEMM APIs on replayed solutions; each case names its bundle.
     add_executable(hipblaslt-jit-api-test jit_api_test.cpp)

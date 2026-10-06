@@ -483,7 +483,7 @@ inline bool declineTheExplicitKernel(const MatchContext& context,
     return kernel.name != "kernel_gfx942" && acceptFloatKernels(context, bound, kernel);
 }
 
-/// S2: shadowing compares only entries a matcher admitted. A better-tier kernel the
+/// Shadowing compares only entries a matcher admitted. A better-tier kernel the
 /// matcher declined must not hide the lower-tier one that remains.
 TEST(TestKernelIngestorStateManager, ADeclinedBetterTierKernelDoesNotHideALowerTierOne)
 {

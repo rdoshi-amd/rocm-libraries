@@ -2,10 +2,11 @@
 
 A KDP whose `arch` names a table generic (`gfx11-generic`) is compiled and packed
 once, under the generic's spelling, and that one tree is copied into the folder of
-every selected member of the generic. The rules that keep that sound (S5 / S6 /
-reverse direction / unknown name / rocKE) are validation errors with stable
-substrings; the merge into a member folder is atomic and refuses two shards that
-would write one path with different bytes.
+every selected member of the generic. The rules that keep that sound (a generic and
+its member in one list, a UKD's arch under a generic KDP, the reverse direction, an
+unknown name, rocKE) are validation errors with stable substrings; the merge into a
+member folder is atomic and refuses two shards that would write one path with
+different bytes.
 
 The quick tier packs `embedded_source` and authored `hsaco` UKDs, which need no
 compiler. The hipcc tier at the end compiles for real and is not quick.
@@ -457,7 +458,7 @@ def test_hsaco_under_a_generic_packs_under_the_generic_key_into_every_member_fol
     assert _files(out / MEMBER_A) == _files(out / MEMBER_B)
 
 
-# --- S5 -----------------------------------------------------------------------
+# --- a generic and its member in one list -------------------------------------
 
 
 @pytest.mark.quick
@@ -503,7 +504,7 @@ def test_s5_two_generics_sharing_a_member_is_an_error(tmp_path, empty_arch_fixtu
     assert "share member gfx1101" in message
 
 
-# --- S6 -----------------------------------------------------------------------
+# --- UKD arch under a generic KDP ---------------------------------------------
 
 _S6_RULE = "must list every generic of the KDP"
 

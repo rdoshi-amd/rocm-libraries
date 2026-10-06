@@ -2085,7 +2085,7 @@ TEST(TestDescriptorLoader, RejectsAnInlineKernelReachingOutsideTheGenericsMember
         << recorder.getRecordedLogsAsString();
 }
 
-/// S1 is unchanged: a standalone kernel id defined for the generic and for one of its
+/// Unchanged loader rule: a standalone kernel id defined for the generic and for one of its
 /// members is two covered definitions under a generic pack, and nothing ranks them.
 TEST(TestDescriptorLoader, StillRejectsAStandaloneKernelDefinedForAGenericAndForOneOfItsMembers)
 {

@@ -1376,7 +1376,7 @@ def _generic_table() -> "gtmod.GenericTargets":
 def _check_arch_list_generics(archs: list, where: str, table) -> None:
     """Per-list generic rules: an unknown generic-shaped name is an error, and one
     list may not hold a generic with a member it contains or two generics sharing a
-    member (the packer's S5)."""
+    member, as the packer does."""
     for entry in archs:
         if gtmod.is_generic_shaped(entry) and not table.has(entry):
             raise ConfigError(

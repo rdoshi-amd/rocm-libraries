@@ -615,7 +615,7 @@ def _reject_unknown_generics(archs, file_name, table):
 
 
 def _reject_mixed_generic_list(archs, file_name, table):
-    """S5: one list may not hold a generic together with a member it contains, nor
+    """One list may not hold a generic together with a member it contains, nor
     two generics that share a member."""
     advice = (
         "list one, or author two KDPs (an explicit override plus a generic "
@@ -644,10 +644,10 @@ def validate_generic_arch(flat):
 
     Per list: names that look generic but are not in the table are errors, and a
     list may not mix a generic with a member it contains or two generics sharing
-    a member (S5). Per KDP holding a generic: a UKD with its own arch must list
-    every generic of the KDP and only entries the KDP lists (S6). Per KDP of any
+    a member. Per KDP holding a generic: a UKD with its own arch must list
+    every generic of the KDP and only entries the KDP lists. Per KDP of any
     shape: a standalone UKD with an empty `arch` (unrestricted) is valid only under
-    a KDP whose `arch` is empty too (S7; an inline UKD with none inherits the KDP's); a UKD may not
+    a KDP whose `arch` is empty too (an inline UKD with none inherits the KDP's); a UKD may not
     name a generic the KDP does not list. rocKE does not support generics yet.
     The loader accepts the lenient forms; this is the stricter packer-side layer.
     """

@@ -1548,7 +1548,7 @@ rocsparse_status rocsparse_spsort_descr_destroy(rocsparse_handle       handle,
  *
  *  \retval rocsparse_status_success the operation completed successfully.
  *  \retval rocsparse_status_invalid_pointer if \p descr or \p data is invalid.
- *  \retval rocsparse_status_invalid_value if \p input is invalid.
+ *  \retval rocsparse_status_invalid_value if \p input is invalid, or if the analysis stage has already been executed.
  *  \retval rocsparse_status_invalid_size if \p data_size_in_bytes is invalid.
  */
 ROCSPARSE_EXPORT

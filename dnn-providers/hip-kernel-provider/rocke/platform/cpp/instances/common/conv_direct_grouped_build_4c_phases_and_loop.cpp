@@ -41,11 +41,10 @@
  *  re-init the builder"). So this phase does NOT construct the builder; it only
  *  sets the kernel attr (line 839) and proceeds with param decls onward.
  * ===================================================================== */
-bool rocke_dconv4c_prologue(rocke_dconv_4c_ctx_t* ctx)
+bool rocke_dconv4c_check_spec(rocke_dconv_4c_ctx_t* ctx)
 {
     rocke_ir_builder_t* b = ctx->b;
     const rocke_direct_conv_4c_spec_t* spec = ctx->spec;
-    const rocke_direct_conv_problem_t* p = &ctx->p;
     char reason[ROCKE_ERR_MSG_CAP];
     rocke_status_t vst;
     bool ok;
@@ -69,6 +68,20 @@ bool rocke_dconv4c_prologue(rocke_dconv_4c_ctx_t* ctx)
                            ctx->arch ? ctx->arch : "gfx950",
                            reason);
         b->status = ROCKE_ERR_VALUE;
+        return false;
+    }
+    return true;
+}
+
+bool rocke_dconv4c_prologue(rocke_dconv_4c_ctx_t* ctx)
+{
+    rocke_ir_builder_t* b = ctx->b;
+    const rocke_direct_conv_4c_spec_t* spec = ctx->spec;
+    const rocke_direct_conv_problem_t* p = &ctx->p;
+
+    /* Lines 833-836: spec.validate(); is_valid_spec_4c gate. */
+    if(!rocke_dconv4c_check_spec(ctx))
+    {
         return false;
     }
 
@@ -608,6 +621,441 @@ rocke_kernel_def_t* rocke_dconv4c_stream_h_loop(rocke_dconv_4c_ctx_t* ctx)
     }
 
     /* Line 1033: return b.kernel. */
+    if(!rocke_ir_builder_ok(b))
+    {
+        return NULL;
+    }
+    return b->kernel;
+}
+
+/* ===================================================================== *
+ *  rocke_dconv4c_build_staged -- Python _build_direct_conv_4c_staged.
+ *
+ *  Row-staged 4c dgrad kernel (spec.stage_rows) with fused LDS weights. The
+ *  workgroup is (block_groups/16) channel waves x waves_q q waves. Per input
+ *  row every thread issues the next row's 16-byte loads, the waves run their
+ *  KH*KW 4x4x4 MFMAs from the current LDS row, then the next row is committed
+ *  to the other LDS buffer behind a barrier. Rows outside the image are
+ *  skipped. Every temporary is bound in Python evaluation order.
+ * ===================================================================== */
+
+/* The per-chunk loader state of one row-staging pass. */
+typedef struct rocke_dconv4c_row_chunk
+{
+    rocke_value_t* ok;
+    rocke_value_t* base_bytes;
+    rocke_value_t* lds_idx;
+} rocke_dconv4c_row_chunk_t;
+
+static void rocke_dconv4c_staged_load_vec(rocke_dconv_4c_ctx_t* ctx,
+                                          rocke_value_t* rsrc,
+                                          rocke_value_t* off,
+                                          rocke_value_t** out)
+{
+    if(ctx->is_bf16)
+        *out = rocke_b_buffer_load_vN_bf16(ctx->b, rsrc, off, ctx->c0, 4);
+    else
+        *out = rocke_b_buffer_load_vN_f16(ctx->b, rsrc, off, ctx->c0, 4);
+}
+
+/* issue_row(h): one 16-byte load per staging pass. */
+static void rocke_dconv4c_staged_issue_row(rocke_dconv_4c_ctx_t* ctx,
+                                           const rocke_dconv4c_row_chunk_t* chunks,
+                                           int passes,
+                                           int64_t row_off_bytes,
+                                           rocke_value_t** vecs)
+{
+    rocke_ir_builder_t* b = ctx->b;
+    int pi;
+    for(pi = 0; pi < passes; ++pi)
+    {
+        rocke_value_t* c_row = rocke_b_const_i32(b, row_off_bytes);
+        rocke_value_t* sum = rocke_b_add(b, chunks[pi].base_bytes, c_row);
+        rocke_value_t* off = rocke_b_select(b, chunks[pi].ok, sum, ctx->oob_sentinel);
+        rocke_dconv4c_staged_load_vec(ctx, ctx->a_rsrc, off, &vecs[pi]);
+    }
+}
+
+/* commit_row(loads, buf). */
+static void rocke_dconv4c_staged_commit_row(rocke_dconv_4c_ctx_t* ctx,
+                                            const rocke_dconv4c_row_chunk_t* chunks,
+                                            int passes,
+                                            rocke_value_t* const* vecs,
+                                            rocke_value_t* buf)
+{
+    int pi;
+    for(pi = 0; pi < passes; ++pi)
+    {
+        rocke_value_t* idx[2];
+        idx[0] = ctx->c0;
+        idx[1] = chunks[pi].lds_idx;
+        rocke_b_smem_store_vN(ctx->b, buf, idx, 2, vecs[pi], 8);
+    }
+}
+
+rocke_kernel_def_t* rocke_dconv4c_build_staged(rocke_dconv_4c_ctx_t* ctx)
+{
+    rocke_ir_builder_t* b = ctx->b;
+    const rocke_direct_conv_4c_spec_t* spec = ctx->spec;
+    const rocke_direct_conv_problem_t* p = &ctx->p;
+    rocke_dconv4c_staged_geo_t geo;
+    const int H = p->H;
+    const int W = p->W;
+    const int total_c = rocke_direct_conv_problem_total_c(p);
+    int NWC, THREADS, BC, VPC, ROW_STRIDE, NCHUNK, PASSES, ROW_ELEMS;
+    int wl_group, wl_vecs, wl_passes, n_iters, y_first, y, pi, r_const, s_const;
+    int64_t row_bytes;
+    rocke_value_t* wave_c;
+    rocke_value_t* wave_q;
+    rocke_value_t* q0;
+    rocke_value_t* wl_lds;
+    rocke_value_t* wl_base;
+    rocke_value_t* wl_vec[ROCKE_DCONV4C_MAX_WL_PASSES];
+    rocke_value_t* wl_idx[ROCKE_DCONV4C_MAX_WL_PASSES];
+    rocke_dconv4c_row_chunk_t chunks[ROCKE_DCONV4C_MAX_ROW_PASSES];
+    rocke_value_t* first_loads[ROCKE_DCONV4C_MAX_ROW_PASSES];
+    rocke_value_t* nxt_loads[ROCKE_DCONV4C_MAX_ROW_PASSES];
+    rocke_value_t* wl_grp;
+    rocke_value_t* wl_lane_base;
+    rocke_value_t* bufs[2];
+    rocke_value_t* x_col;
+    rocke_value_t* x_base;
+    rocke_value_t* out_q;
+    rocke_value_t* out_q_ok;
+    rocke_value_t* d_base;
+    rocke_value_t* accs[ROCKE_DCONV_MAX_ACC_SLOTS];
+
+    if(!rocke_dconv4c_check_spec(ctx))
+    {
+        return NULL;
+    }
+    ctx->io_type = rocke_b_io_ir_type(b, p->dtype ? p->dtype : "fp16");
+    if(ctx->io_type == NULL)
+    {
+        return NULL;
+    }
+    ctx->is_bf16 = (p->dtype != NULL && strcmp(p->dtype, "bf16") == 0) ? 1 : 0;
+
+    NWC = spec->block_groups / 16;
+    THREADS = rocke_direct_conv_4c_threads_per_block(spec);
+    rocke_dconv4c_staged_geometry(spec, &geo);
+    BC = geo.bc;
+    VPC = geo.vpc;
+    ROW_STRIDE = geo.row_stride;
+    NCHUNK = geo.nchunk;
+    PASSES = geo.passes;
+    ROW_ELEMS = geo.row_elems;
+    wl_group = p->cpg * p->KH * p->KW * p->kpg;
+    wl_vecs = spec->block_groups * wl_group / 8;
+    wl_passes = (wl_vecs + THREADS - 1) / THREADS;
+    if(wl_passes > ROCKE_DCONV4C_MAX_WL_PASSES || PASSES > ROCKE_DCONV4C_MAX_ROW_PASSES
+       || p->KH > ROCKE_DCONV_MAX_ACC_SLOTS)
+    {
+        snprintf(b->err,
+                 sizeof b->err,
+                 "direct_conv_4c stage_rows: %d weight / %d row passes or KH %d exceed the "
+                 "C++ bounds",
+                 wl_passes,
+                 PASSES,
+                 p->KH);
+        b->status = ROCKE_ERR_VALUE;
+        return NULL;
+    }
+
+    /* b.kernel.attrs["max_workgroup_size"] = THREADS */
+    rocke_attr_set_int(b, &b->kernel->attrs, "max_workgroup_size", THREADS);
+
+    /* Params A, B, D (+ byte sizes). */
+    {
+        rocke_param_opts_t po;
+        const rocke_type_t* io_global = rocke_ptr_type(b, ctx->io_type, "global");
+
+        po = (rocke_param_opts_t){0};
+        po.noalias = true;
+        po.noalias_set = true;
+        po.readonly = true;
+        po.readonly_set = true;
+        po.align = 16;
+        po.align_set = true;
+        ctx->A = rocke_b_param(b, "A", io_global, &po);
+
+        po = (rocke_param_opts_t){0};
+        po.noalias = true;
+        po.noalias_set = true;
+        po.readonly = true;
+        po.readonly_set = true;
+        po.align = 16;
+        po.align_set = true;
+        ctx->Bp = rocke_b_param(b, "B", io_global, &po);
+
+        po = (rocke_param_opts_t){0};
+        po.noalias = true;
+        po.noalias_set = true;
+        po.writeonly = true;
+        po.writeonly_set = true;
+        po.align = 16;
+        po.align_set = true;
+        ctx->D = rocke_b_param(b, "D", io_global, &po);
+
+        ctx->A_bytes = rocke_b_param(b, "A_bytes", rocke_i32(), NULL);
+        ctx->B_bytes = rocke_b_param(b, "B_bytes", rocke_i32(), NULL);
+        ctx->D_bytes = rocke_b_param(b, "D_bytes", rocke_i32(), NULL);
+    }
+
+    ctx->c0 = rocke_b_const_i32(b, 0);
+    ctx->c_half_bytes = rocke_b_const_i32(b, 2);
+    ctx->oob_sentinel = rocke_b_const_i32(b, ((int64_t)1 << 31) - 1);
+    ctx->tid = rocke_b_thread_id_x(b);
+    ctx->wave_id = rocke_b_div(b, ctx->tid, rocke_b_const_i32(b, spec->wave_size));
+    ctx->lane = rocke_b_mod(b, ctx->tid, rocke_b_const_i32(b, spec->wave_size));
+    ctx->batch = rocke_b_div(b, ctx->lane, rocke_b_const_i32(b, 4));
+    ctx->lane_q = rocke_b_mod(b, ctx->lane, rocke_b_const_i32(b, 4));
+    wave_c = rocke_b_mod(b, ctx->wave_id, rocke_b_const_i32(b, NWC));
+    wave_q = rocke_b_div(b, ctx->wave_id, rocke_b_const_i32(b, NWC));
+
+    ctx->bx = rocke_b_block_id_x(b);
+    ctx->by = rocke_b_block_id_y(b);
+    ctx->n = rocke_b_block_id_z(b);
+    q0 = rocke_b_mul(b, ctx->bx, rocke_b_const_i32(b, spec->block_q));
+    {
+        rocke_value_t* t = rocke_b_mul(b, wave_c, rocke_b_const_i32(b, 16));
+        ctx->group_in_wg = rocke_b_add(b, t, ctx->batch);
+    }
+    {
+        rocke_value_t* t = rocke_b_mul(b, ctx->by, rocke_b_const_i32(b, spec->block_groups));
+        ctx->g = rocke_b_add(b, t, ctx->group_in_wg);
+    }
+
+    ctx->a_rsrc = rocke_b_buffer_rsrc(b, ctx->A, ctx->A_bytes);
+    ctx->b_rsrc = rocke_b_buffer_rsrc(b, ctx->Bp, ctx->B_bytes);
+    ctx->d_rsrc = rocke_b_buffer_rsrc(b, ctx->D, ctx->D_bytes);
+    ctx->zero_acc = rocke_b_zero_vec_f32(b, 4);
+
+    /* ---- fused dgrad weights via LDS (wave's group block = wave_c). */
+    {
+        int shape[2];
+        shape[0] = 1;
+        shape[1] = wl_passes * THREADS * 8;
+        wl_lds = rocke_b_smem_alloc(b, ctx->io_type, shape, 2, "lds_w");
+    }
+    wl_base = rocke_b_mul(b, ctx->by, rocke_b_const_i32(b, spec->block_groups * wl_group));
+    for(pi = 0; pi < wl_passes; ++pi)
+    {
+        rocke_value_t* wl_v = rocke_b_add(b, ctx->tid, rocke_b_const_i32(b, pi * THREADS));
+        rocke_value_t* m8 = rocke_b_mul(b, wl_v, rocke_b_const_i32(b, 8));
+        rocke_value_t* sum = rocke_b_add(b, wl_base, m8);
+        rocke_value_t* wl_off = rocke_b_mul(b, sum, ctx->c_half_bytes);
+        if((pi + 1) * THREADS > wl_vecs)
+        {
+            rocke_value_t* lt = rocke_b_cmp_lt(b, wl_v, rocke_b_const_i32(b, wl_vecs));
+            wl_off = rocke_b_select(b, lt, wl_off, ctx->oob_sentinel);
+        }
+        rocke_dconv4c_staged_load_vec(ctx, ctx->b_rsrc, wl_off, &wl_vec[pi]);
+        wl_idx[pi] = rocke_b_mul(b, wl_v, rocke_b_const_i32(b, 8));
+    }
+
+    /* ---- input row loader: chunk -> (column, 16-byte channel vector). */
+    ctx->c_W = rocke_b_const_i32(b, W);
+    row_bytes = (int64_t)W * total_c * 2;
+    for(pi = 0; pi < PASSES; ++pi)
+    {
+        rocke_value_t* chunk = rocke_b_add(b, ctx->tid, rocke_b_const_i32(b, pi * THREADS));
+        rocke_value_t* col = rocke_b_div(b, chunk, rocke_b_const_i32(b, VPC));
+        rocke_value_t* cv = rocke_b_mod(b, chunk, rocke_b_const_i32(b, VPC));
+        rocke_value_t* w_in = rocke_b_add(b, q0, rocke_b_const_i32(b, -p->PAD));
+        rocke_value_t* ge;
+        rocke_value_t* lt;
+        rocke_value_t* ok;
+        rocke_value_t* e1;
+        rocke_value_t* e2;
+        rocke_value_t* e3;
+        rocke_value_t* e4;
+        rocke_value_t* e5;
+        rocke_value_t* e6;
+        rocke_value_t* elem;
+        w_in = rocke_b_add(b, w_in, col);
+        ge = rocke_b_cmp_ge(b, w_in, ctx->c0);
+        lt = rocke_b_cmp_lt(b, w_in, ctx->c_W);
+        ok = rocke_b_land(b, ge, lt);
+        if((pi + 1) * THREADS > NCHUNK)
+        {
+            rocke_value_t* lt2 = rocke_b_cmp_lt(b, chunk, rocke_b_const_i32(b, NCHUNK));
+            ok = rocke_b_land(b, ok, lt2);
+        }
+        /* elem = ((n*H*W + w_in) * total_c) + (by*BC + cv*8) */
+        e1 = rocke_b_mul(b, ctx->n, rocke_b_const_i32(b, (int64_t)H * W));
+        e2 = rocke_b_add(b, e1, w_in);
+        e3 = rocke_b_mul(b, e2, rocke_b_const_i32(b, total_c));
+        e4 = rocke_b_mul(b, ctx->by, rocke_b_const_i32(b, BC));
+        e5 = rocke_b_mul(b, cv, rocke_b_const_i32(b, 8));
+        e6 = rocke_b_add(b, e4, e5);
+        elem = rocke_b_add(b, e3, e6);
+        chunks[pi].ok = ok;
+        chunks[pi].base_bytes = rocke_b_mul(b, elem, ctx->c_half_bytes);
+        {
+            rocke_value_t* l1 = rocke_b_mul(b, col, rocke_b_const_i32(b, ROW_STRIDE));
+            rocke_value_t* l2 = rocke_b_mul(b, cv, rocke_b_const_i32(b, 8));
+            chunks[pi].lds_idx = rocke_b_add(b, l1, l2);
+        }
+    }
+
+    n_iters = H + p->KH - 1;
+    /* y_first: the first row with 0 <= y - PAD < H. */
+    y_first = -1;
+    for(y = 0; y < n_iters; ++y)
+    {
+        if(0 <= y - p->PAD && y - p->PAD < H)
+        {
+            y_first = y;
+            break;
+        }
+    }
+    if(y_first < 0)
+    {
+        snprintf(b->err, sizeof b->err, "direct_conv_4c stage_rows: no input row in range");
+        b->status = ROCKE_ERR_VALUE;
+        return NULL;
+    }
+    rocke_dconv4c_staged_issue_row(
+        ctx, chunks, PASSES, (int64_t)(y_first - p->PAD) * row_bytes, first_loads);
+    for(pi = 0; pi < wl_passes; ++pi)
+    {
+        rocke_value_t* idx[2];
+        idx[0] = ctx->c0;
+        idx[1] = wl_idx[pi];
+        rocke_b_smem_store_vN(b, wl_lds, idx, 2, wl_vec[pi], 8);
+    }
+    rocke_b_sync(b);
+    {
+        rocke_value_t* t1 = rocke_b_mul(b, wave_c, rocke_b_const_i32(b, 16));
+        rocke_value_t* t2 = rocke_b_div(b, ctx->lane, rocke_b_const_i32(b, 16));
+        rocke_value_t* t3 = rocke_b_mul(b, t2, rocke_b_const_i32(b, 4));
+        rocke_value_t* t4 = rocke_b_add(b, t1, t3);
+        rocke_value_t* t5 = rocke_b_mod(b, ctx->lane, rocke_b_const_i32(b, 4));
+        wl_grp = rocke_b_add(b, t4, t5);
+    }
+    {
+        rocke_value_t* u1 = rocke_b_mul(b, wl_grp, rocke_b_const_i32(b, wl_group));
+        rocke_value_t* u2 = rocke_b_div(b, ctx->lane, rocke_b_const_i32(b, 4));
+        rocke_value_t* u3 = rocke_b_mod(b, u2, rocke_b_const_i32(b, 4));
+        rocke_value_t* u4 = rocke_b_mul(b, u3, rocke_b_const_i32(b, p->KH * p->KW * p->kpg));
+        wl_lane_base = rocke_b_add(b, u1, u4);
+    }
+    ctx->n_weights = 0;
+    for(r_const = 0; r_const < p->KH; ++r_const)
+    {
+        for(s_const = 0; s_const < p->KW; ++s_const)
+        {
+            int tap = (p->KH - 1 - r_const) * p->KW + (p->KW - 1 - s_const);
+            rocke_value_t* idx[2];
+            idx[0] = ctx->c0;
+            idx[1] = rocke_b_add(b, wl_lane_base, rocke_b_const_i32(b, tap * p->kpg));
+            ctx->weights[ctx->n_weights++]
+                = rocke_b_ds_read_tr16_b64(b, wl_lds, idx, 2, ctx->io_type);
+        }
+    }
+    /* The transpose reads finish before the (pool-overlaid) row buffers are
+     * written. */
+    rocke_b_sync(b);
+    {
+        int shape[2];
+        shape[0] = 1;
+        shape[1] = ROW_ELEMS;
+        bufs[0] = rocke_b_smem_alloc(b, ctx->io_type, shape, 2, "lds_row_a");
+        bufs[1] = rocke_b_smem_alloc(b, ctx->io_type, shape, 2, "lds_row_b");
+    }
+    rocke_dconv4c_staged_commit_row(ctx, chunks, PASSES, first_loads, bufs[y_first % 2]);
+    rocke_b_sync(b);
+
+    /* Per-lane LDS fragment offset (column wave_q*4 + lane_q, + s per tap). */
+    {
+        rocke_value_t* t = rocke_b_mul(b, wave_q, rocke_b_const_i32(b, 4));
+        x_col = rocke_b_add(b, t, ctx->lane_q);
+    }
+    {
+        rocke_value_t* t1 = rocke_b_mul(b, x_col, rocke_b_const_i32(b, ROW_STRIDE));
+        rocke_value_t* t2 = rocke_b_mul(b, ctx->group_in_wg, rocke_b_const_i32(b, p->cpg));
+        x_base = rocke_b_add(b, t1, t2);
+    }
+    out_q = rocke_b_add(b, q0, x_col);
+    out_q_ok = rocke_b_cmp_lt(b, out_q, ctx->c_W);
+    {
+        rocke_value_t* d1 = rocke_b_mul(b, ctx->n, rocke_b_const_i32(b, (int64_t)H * W));
+        rocke_value_t* d2 = rocke_b_add(b, d1, out_q);
+        rocke_value_t* d3 = rocke_b_mul(b, d2, rocke_b_const_i32(b, total_c));
+        rocke_value_t* d4 = rocke_b_mul(b, ctx->g, rocke_b_const_i32(b, p->kpg));
+        rocke_value_t* d5 = rocke_b_add(b, d3, d4);
+        d_base = rocke_b_mul(b, d5, ctx->c_half_bytes);
+    }
+
+    for(y = 0; y < p->KH; ++y)
+    {
+        accs[y] = ctx->zero_acc;
+    }
+    for(y = 0; y < n_iters; ++y)
+    {
+        rocke_value_t* cur = bufs[y % 2];
+        const bool next_valid = (0 <= y + 1 - p->PAD && y + 1 - p->PAD < H);
+        const bool has_next = (y + 1 < n_iters) && next_valid && (y + 1 != y_first);
+        const int p_flush = y - (p->KH - 1);
+        const int P_FLUSH = ((p_flush % p->KH) + p->KH) % p->KH;
+
+        if(has_next)
+        {
+            rocke_dconv4c_staged_issue_row(
+                ctx, chunks, PASSES, (int64_t)(y + 1 - p->PAD) * row_bytes, nxt_loads);
+        }
+        if(0 <= y - p->PAD && y - p->PAD < H)
+        {
+            rocke_value_t* xs[ROCKE_DCONV4C_MAX_TAPS];
+            int s_c, r_c;
+            for(s_c = 0; s_c < p->KW; ++s_c)
+            {
+                rocke_value_t* idx[2];
+                rocke_value_t* c_s = rocke_b_const_i32(b, (int64_t)s_c * ROW_STRIDE);
+                idx[0] = ctx->c0;
+                idx[1] = rocke_b_add(b, x_base, c_s);
+                xs[s_c] = rocke_b_smem_load_vN(b, cur, idx, 2, ctx->io_type, 4);
+            }
+            for(s_c = 0; s_c < p->KW; ++s_c)
+            {
+                for(r_c = 0; r_c < p->KH; ++r_c)
+                {
+                    const int slot = ((y - r_c) % p->KH + p->KH) % p->KH;
+                    rocke_value_t* w = ctx->weights[r_c * p->KW + s_c];
+                    if(ctx->is_bf16)
+                        accs[slot] = rocke_b_mfma_f32_4x4x4_bf16(b, w, xs[s_c], accs[slot]);
+                    else
+                        accs[slot] = rocke_b_mfma_f32_4x4x4_f16(b, w, xs[s_c], accs[slot]);
+                }
+            }
+        }
+        if(has_next)
+        {
+            rocke_dconv4c_staged_commit_row(ctx, chunks, PASSES, nxt_loads, bufs[(y + 1) % 2]);
+            rocke_b_sync(b);
+        }
+        if(0 <= p_flush && p_flush < H)
+        {
+            rocke_value_t* acc_h;
+            rocke_value_t* row_off;
+            rocke_value_t* sum;
+            rocke_value_t* off;
+            if(ctx->is_bf16)
+                acc_h = rocke_b_vec_trunc_f32_to_bf16(b, accs[P_FLUSH]);
+            else
+                acc_h = rocke_b_vec_trunc_f32_to_f16(b, accs[P_FLUSH]);
+            row_off = rocke_b_const_i32(b, (int64_t)p_flush * W * total_c * 2);
+            sum = rocke_b_add(b, d_base, row_off);
+            off = rocke_b_select(b, out_q_ok, sum, ctx->oob_sentinel);
+            if(ctx->is_bf16)
+                rocke_b_buffer_store_vN_bf16(b, ctx->d_rsrc, off, ctx->c0, acc_h, 2);
+            else
+                rocke_b_buffer_store_vN_f16(b, ctx->d_rsrc, off, ctx->c0, acc_h, 2);
+        }
+        accs[P_FLUSH] = ctx->zero_acc;
+    }
+
     if(!rocke_ir_builder_ok(b))
     {
         return NULL;

@@ -98,6 +98,18 @@ def _dw_dgrad_windowed_combos(p, arch: str) -> list:
     ]
 
 
+def _dw_dgrad_mfma_combos(p, arch: str) -> list:
+    """Toeplitz MFMA windowed depthwise dgrad combinations (stride 1, gfx950,
+    groups % 8 == 0): waves 4/8, every w_fold, whole H or chunks of about 14
+    and 7 rows, prefetch_rows 2. Each tuple is (waves, w_fold, block_h, pf)."""
+    if arch != "gfx950" or p.groups % 8:
+        return []
+    bhs = [0] + sorted(
+        {math.ceil(p.H / math.ceil(p.H / r)) for r in (14, 7) if r < p.H}
+    )
+    return [(wv, f, bh, 2) for wv in (4, 8) for f in (1, 2, 4) for bh in bhs]
+
+
 # 4c dgrad (cpg == kpg == 4, batched 4x4x4 MFMA) sweep dimensions.
 # block_q <= 32 keeps q_tiles_per_wave inside the C++ engine's tile bound.
 _DGRAD_4C_BLOCK_Q = (4, 8, 16, 32)
@@ -107,6 +119,38 @@ _DGRAD_4C_BLOCK_GROUPS = (16, 32, 64)
 # dimensions for the generic direct-MFMA kernel (block_h as the pre-pass sweep).
 _DGRAD_FUSED_BLOCK_H = _DGRAD_BLOCK_H
 _DGRAD_FUSED_WAVES_PER_EU = (0, 4)
+
+
+def _with_row_stream_knobs(spec, arch: str):
+    """``spec`` plus the generic kernel's row-stream knobs, each kept only if
+    the spec still validates (the knob stack the grouped dgrad dispatch uses,
+    without its launch-rounds guard): two-row prefetch with the LDS-only row
+    barrier, two waves over the output tiles, the 16-byte column pad on even
+    16-byte strides, LDS-staged output stores and the XCD image order."""
+    from dataclasses import replace
+
+    from kernels.common.conv_direct_grouped import is_valid_spec
+
+    def ok(cand):
+        try:
+            cand.validate()
+        except ValueError:
+            return False
+        return is_valid_spec(cand, arch=arch)[0]
+
+    out = replace(spec, prefetch_rows=2, lds_only_sync=True)
+    if not ok(out):
+        return None
+    row_bytes = spec.block_groups * spec.problem.cpg * 2
+    for kw in (
+        {"waves_m": 2},
+        {"lds_pad": 8} if row_bytes % 32 == 0 else {},
+        {"stage_out": True},
+        {"xcd_tiles": True},
+    ):
+        if kw and ok(replace(out, **kw)):
+            out = replace(out, **kw)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1339,6 +1383,7 @@ def _run_dgrad_sweep(
         ]
         if p.stride == 1:
             combos_dw += [("win",) + c for c in _dw_dgrad_windowed_combos(p, arch)]
+            combos_dw += [("mwin",) + c for c in _dw_dgrad_mfma_combos(p, arch)]
         print(
             f"Sweeping {len(combos_dw)} depthwise dgrad combinations for {arch} {dtype} "
             f"{p.short()} (stride={p.stride}) ...",
@@ -1357,6 +1402,19 @@ def _run_dgrad_sweep(
                     ch_per_lane=cpl,
                     block_h=block_h,
                     dot2=dot2,
+                )
+                ok, _ = is_valid_depthwise_dgrad_win_spec(spec, arch=arch)
+                build = build_direct_depthwise_dgrad_windowed
+            elif combo[0] == "mwin":
+                _, block_waves, w_fold, block_h, pf = combo
+                spec = DirectDepthwiseDgradWindowedSpec(
+                    problem=p,
+                    name="rocke_bench_dw_dgrad_win",
+                    block_waves=block_waves,
+                    block_h=block_h,
+                    mfma=True,
+                    w_fold=w_fold,
+                    prefetch_rows=pf,
                 )
                 ok, _ = is_valid_depthwise_dgrad_win_spec(spec, arch=arch)
                 build = build_direct_depthwise_dgrad_windowed
@@ -1483,10 +1541,13 @@ def _run_dgrad_sweep(
             if dgrad_family in ("all", "4c", "fused") and ok4c:
                 # 4c forms: pre-pass pipeline (not in the "fused" family) and
                 # the single kernel with the fused weight transform (LDS-staged
-                # transpose reads where the target has them, gathers otherwise).
-                forms4c = [] if dgrad_family == "fused" else [(False, False)]
-                forms4c.append((True, bool(_has_tr)))
-                for (block_q, block_groups), (fw4c, wl4c) in itertools.product(
+                # transpose reads where the target has them, gathers otherwise)
+                # and, with LDS staging, the row-staged form (stage_rows).
+                forms4c = [] if dgrad_family == "fused" else [(False, False, False)]
+                forms4c.append((True, bool(_has_tr), False))
+                if _has_tr:
+                    forms4c.append((True, True, True))
+                for (block_q, block_groups), (fw4c, wl4c, sr4c) in itertools.product(
                     itertools.product(_DGRAD_4C_BLOCK_Q, _DGRAD_4C_BLOCK_GROUPS),
                     forms4c,
                 ):
@@ -1499,6 +1560,7 @@ def _run_dgrad_sweep(
                         block_groups=block_groups,
                         dgrad_fused_weights=fw4c,
                         dgrad_weights_lds=wl4c,
+                        stage_rows=sr4c,
                     )
                     ok, _ = is_valid_spec_4c(spec4c, arch=arch)
                     if not ok:
@@ -1514,6 +1576,8 @@ def _run_dgrad_sweep(
                         n_skipped += 1
                         continue
                     tag4c = ("fwl" if wl4c else "fw") if fw4c else ""
+                    if sr4c:
+                        tag4c += "+sr"
                     pending.append(
                         (
                             ("4c", block_q, block_groups, tag4c),
@@ -1567,6 +1631,7 @@ def _run_dgrad_sweep(
                         except ValueError:
                             n_skipped += 1
                             continue
+                        tag_fw = "fwl" if spec_fw.dgrad_weights_lds else "fw"
                         pending.append(
                             (
                                 (
@@ -1575,11 +1640,37 @@ def _run_dgrad_sweep(
                                     block_groups,
                                     block_h,
                                     use_k32,
-                                    "fwl" if spec_fw.dgrad_weights_lds else "fw",
+                                    tag_fw,
                                     wpe,
                                 ),
                                 spec_fw,
                                 _MfmaDgradPipeline(plan=plan, kernels=stage_kernels),
+                            )
+                        )
+                        # The same point with the row-stream knob stack.
+                        spec_st = _with_row_stream_knobs(spec_fw, arch)
+                        if spec_st is None:
+                            continue
+                        plan_st = plan_direct_mfma_dgrad(p, spec_st)
+                        pending.append(
+                            (
+                                (
+                                    "fused",
+                                    block_q,
+                                    block_groups,
+                                    block_h,
+                                    use_k32,
+                                    f"{tag_fw}+st",
+                                    wpe,
+                                ),
+                                spec_st,
+                                _MfmaDgradPipeline(
+                                    plan=plan_st,
+                                    kernels=tuple(
+                                        direct_mfma_dgrad_stage_kernel(st, arch=arch)
+                                        for st in plan_st.stages
+                                    ),
+                                ),
                             )
                         )
         else:
@@ -1687,6 +1778,13 @@ def _run_dgrad_sweep(
                     f"win bw={block_w:3d} waves={block_waves} cpl={cpl} "
                     f"bh={spec.rows_per_block if spec.h_tiles > 1 else 0}"
                     f"{' dot2' if dot2 else ''}"
+                )
+            elif combo[0] == "mwin":
+                _, block_waves, w_fold, _, pf = combo
+                grid = spec.grid()
+                label = (
+                    f"mfma waves={block_waves} fold={w_fold} "
+                    f"bh={spec.rows_per_block if spec.h_tiles > 1 else 0} pf={pf}"
                 )
             else:
                 _, block_w, block_waves = combo
@@ -1976,8 +2074,9 @@ def main() -> int:
         help=(
             "grouped stride-1 dgrad: sweep the generic direct-MFMA pre-pass "
             "pipeline, the 4c (cpg=kpg=4, batched 4x4x4 MFMA) forms, the "
-            "single-kernel forms with the fused weight transform (generic and "
-            "4c), or everything (default: all)"
+            "single-kernel forms with the fused weight transform (generic, "
+            "each point also with the row-stream knob stack '+st', and 4c), "
+            "or everything (default: all)"
         ),
     )
     parser.add_argument(

@@ -107,6 +107,45 @@ contiguous weight slice into LDS and one `ds_read_b64_tr_b16` per tap.
 `direct_4c_dgrad_launch` reports no transpose geometry and a zero workspace.
 Both forms are mirrored in the C++ engine (parity configs 45-48).
 
+**Row-staged 4c dgrad (`stage_rows`).** In the 4x4x4 B layout lane
+`group*4 + column` reads one 8-byte channel run, so the direct-load kernel's
+global loads put consecutive lanes on pixels a whole channel row apart (three
+loads and one store instruction per wave and row, each touching many cache
+lines). With `stage_rows=True` every thread instead copies 16-byte vectors of
+the workgroup's input row (`block_q + KW - 1` columns x `block_groups * cpg`
+channels) into a double-buffered LDS row padded by 64 bytes per column, one
+row ahead through registers, and each wave reads its fragments with
+`ds_read_b64`. Rows outside the image are skipped. `waves_q` waves split the
+`block_q` columns (four each, `block_q == 4 * waves_q`), so a workgroup is
+`block_groups / 16 * waves_q` waves (at most 1024 threads).
+
+- Needs the fused LDS weight form (`dgrad_fused_weights` and
+  `dgrad_weights_lds`, so gfx950), stride 1 and "same" padding
+  (`KH == KW == 2*PAD + 1`: the kernel streams output rows 1:1 with input rows
+  and stores `W` columns); the validator (`DirectConv4cSpec.validate`,
+  `is_valid_spec_4c`, and their C++ mirrors with the same reason text) rejects
+  every other combination, plus an LDS footprint over the target's capacity.
+- Kernel names carry `sr<waves_q>`; the fprop 4c spec never takes the knob.
+- `make_dgrad_4c_spec(..., stage_rows=True)` sets `waves_q = block_q // 4`;
+  `dgrad_4c_spec_for_problem` takes it by default wherever the fused LDS form
+  is used and the staged spec validates (`stage_rows=False` forces the
+  direct-load kernel).
+- Mirrored in the C++ engine (`rocke_dconv4c_build_staged`, parity configs
+  57-60) and forwarded by `conv_direct_grouped_spec_to_dict`.
+- Dispatch (`_select_direct_dgrad_4c_spec`): the 4c row takes the staged
+  kernel above its grid floor, except 1x1 filters on images shorter than 8
+  rows and 3x3 filters on images shorter than 4 rows
+  (`_DIRECT_DGRAD_4C_STAGED_MIN_H_1X1`, `_DIRECT_DGRAD_4C_STAGED_MIN_H_3X3`),
+  and for 3x3 filters also below the floor on images the generic
+  kernel streams whole (5 to 8 rows) and at least 4 columns wide, from a
+  smaller grid floor (see `_DIRECT_DGRAD_4C_STAGED_SHORT_MIN_H`,
+  `_DIRECT_DGRAD_4C_STAGED_SHORT_MAX_H`,
+  `_DIRECT_DGRAD_4C_STAGED_SHORT_MIN_W` and
+  `_DIRECT_DGRAD_4C_STAGED_SHORT_MIN_GRID`). Images of 1 to 4 rows or 1 to 3
+  columns there keep the previous pick (igemm or the generic kernel). Taller 3x3 images below the 4c
+  floor keep the generic kernel, whose 4-row H tiles give several times the
+  workgroups and hide DRAM latency better with cold caches.
+
 `benchmark_direct_conv.py --direction dgrad` sweeps this pipeline next to the
 generic direct-MFMA dgrad (`--dgrad-family {all,generic,4c,fused}`).
 
@@ -214,8 +253,34 @@ Tunable parameters common to all grouped specs:
 | `dgrad_fused_weights` | False   | Dgrad spec from `make_dgrad_fprop_spec`: B is the original `W` and the prologue reads it flipped / k<->c transposed — no transpose pre-pass, no workspace. Implies the preload; `waves_k == 1`, no `runtime_k_loop` / `persistent_grid` |
 | `dgrad_weights_lds`   | False   | With `dgrad_fused_weights`: stage the raw W slice in LDS and read fragments with `ds_read_b64_tr_b16` (needs transpose LDS reads, `kpg % 4 == 0`, slice <= `DGRAD_WEIGHTS_LDS_BUDGET`); the row buffers are allocated after it so the smem pool overlays them |
 | `waves_per_eu`        | 0       | > 0 emits `"amdgpu-waves-per-eu"="N,N"` |
+| `prefetch_rows`       | 0       | Input row `y + prefetch_rows` is loaded while row `y` is computed (0 and 1 = one row ahead); needs `double_buffer`, no persistent grid |
+| `lds_only_sync`       | False   | The row barrier drains LDS only, so prefetched loads and output stores stay in flight across it; needs `double_buffer`, no persistent grid |
+| `waves_m`             | 1       | Waves per group along the 16-wide output tiles; each keeps `ceil(kpg/16) / waves_m` tiles' weights and accumulators and all share the staged row. Needs `kpg % (16 * waves_m) == 0`, `waves_q == waves_k == 1`, preloaded or fused weights, no runtime K loop / persistent grid |
+| `lds_pad`             | 0       | Extra elements per staged input column (multiple of 8): an odd number of 16-byte units per column spreads a fragment read's 16 q-lanes over the LDS banks |
+| `stage_out`           | False   | Stage each finished output row in a double-buffered LDS tile and store it with 16-byte lanes over the workgroup's contiguous channel span; needs `kpg % 16 == 0`, `waves_q == waves_k == 1`, no persistent grid (H tiles are fine) |
+| `xcd_tiles`           | False   | Put every q tile and group tile of one image row band on one XCD (chunk `direct_conv_xcd_chunk` = `q_tiles * group_tiles`, derived from the grid); needs at least 8 row bands and no persistent grid |
 
-The preloaded fragments must fit `PRELOAD_WEIGHT_VGPR_BUDGET` VGPRs per lane.
+The preloaded fragments must fit `PRELOAD_WEIGHT_VGPR_BUDGET` VGPRs per lane,
+counted per wave (`waves_m` splits them). `direct_conv_lds_bytes` is the LDS
+the builder allocates, the pool packer's placement included: the staged weight
+slice of `dgrad_weights_lds` shares a slot with the first row buffer only, and
+the `stage_out` tiles come on top.
+
+**Row-stream knobs in the grouped dgrad dispatch.** Every fused-weight generic
+pick (`_direct_dgrad_stream_knobs` in `library/dispatch/grouped_convolution.py`)
+of square channel groups (`cpg == kpg`) on 16-column strips (`block_q` 16)
+whose output channels do not split into two 16-wide halves, inside the
+measured image box (`_direct_dgrad_stream_box_admits`: on untiled images,
+every channel group up to 64 output columns; on H-tiled images, 1x1 filters
+only from 12 channels per group) and whose grid has at least 8 row bands takes
+`prefetch_rows=2` with `lds_only_sync`, `xcd_tiles`, an 8-element `lds_pad` where the staged column is an even
+number of 16-byte units, and `stage_out` where the output channels are a
+multiple of 16. `lds_pad` and `stage_out` add LDS, so they are dropped
+(`stage_out` first) when they would need more launch rounds than the spec
+without them (`_direct_dgrad_lds_rounds`): a nearly empty extra round costs
+more than they gain. Every other pick keeps the previous spec; where the split
+(`waves_m=2`) is valid, `_DIRECT_DGRAD_STREAM_SPLIT_M` opts the pick into the stack
+on top of `waves_m=2`. The pre-pass pipeline is unchanged.
 
 **Single-kernel direct dgrad (dispatch hooks).**
 `direct_dgrad_spec_for_problem(problem, arch=...)` returns a single-kernel
@@ -226,8 +291,10 @@ domain (non-"same" padding `2*PAD != KH-1` or `!= KW-1`, `cpg` or `kpg` not a
 multiple of 4, stride > 1; `DirectConvSpec.validate` / `is_valid_spec` reject
 the same shapes for fprop and the pre-pass dgrad); `direct_dgrad_launch(spec)` gives grid /
 block (workspace 0) and `build_direct_dgrad(spec, arch=...)` the kernel. Launch
-with `A = dY`, `B = W`, `D = dX`. The generic `DirectConvSpec` kernel has no
-C++ builder mirror (its IR is lowered by either engine); the 4c kernel does.
+with `A = dY`, `B = W`, `D = dX`. Both kernels are mirrored in the C++ engine:
+the generic one as `rocke_build_direct_conv` (every path and knob; parity
+configs 61-72, `lower_conv_direct_grouped(spec, kind="generic")`), the 4c one
+as `rocke_build_direct_conv_4c`.
 
 For **depthwise** (`cpg = 1`) use `DirectDepthwiseSpec` and `build_direct_depthwise`:
 
@@ -486,6 +553,21 @@ For a backward-weights pass on gfx942 use the implicit-GEMM wgrad kernel
   (`make_dgrad_4c_spec`, `dgrad_4c_spec_for_problem`, `build_direct_4c_dgrad`).
 - Fused dgrad weight transform (`dgrad_fused_weights`, `dgrad_weights_lds`):
   single-kernel 4c dgrad, the default of `dgrad_4c_spec_for_problem`.
+- Row-staged 4c dgrad (`stage_rows`, `waves_q`): cooperative 16-byte row
+  copies into LDS and `ds_read_b64` fragments instead of per-lane 8-byte
+  global loads; the 4c dispatch default on gfx950.
+
+### Generic kernel row-stream knobs
+
+- `DirectConvSpec.prefetch_rows`, `lds_only_sync`, `waves_m`, `lds_pad`,
+  `stage_out`, `xcd_tiles` (`make_dgrad_fprop_spec` forwards them): deeper
+  row prefetch with an LDS-only row barrier, output tiles split over waves,
+  bank-spreading column pad, LDS-staged 16-byte output stores and the
+  XCD-contiguous image order; the default of every fused generic grouped dgrad
+  pick on gfx950 (see `_direct_dgrad_stream_knobs`).
+- `direct_conv_lds_bytes` counts the LDS pool packer's placement and the
+  `stage_out` tiles; the weight-preload budget counts per wave.
+- C++ mirror of the whole generic builder (`rocke_build_direct_conv`).
 
 ### cpg=8 variant
 

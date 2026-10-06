@@ -206,6 +206,37 @@ typedef struct rocke_dconv_16c_ctx
  * s_consts[] arrays; mirrors DCONV4C_MAX_TAPS in the Python emitter and is
  * enforced by rocke_direct_conv_4c_is_valid_spec. */
 #define ROCKE_DCONV4C_MAX_TAPS 16
+/* Most threads in one 4c workgroup (stage_rows with waves_q > 1); mirrors
+ * DCONV4C_MAX_THREADS in the Python emitter. */
+#define ROCKE_DCONV4C_MAX_THREADS 1024
+/* Upper bound on the stage_rows input-row staging passes; mirrors
+ * DCONV4C_MAX_ROW_PASSES and is enforced by rocke_direct_conv_4c_is_valid_spec. */
+#define ROCKE_DCONV4C_MAX_ROW_PASSES 8
+
+/* LDS geometry of the stage_rows 4c kernel (Python _staged_4c_geometry);
+ * element counts are in the io dtype. */
+typedef struct rocke_dconv4c_staged_geo
+{
+    int bc; /* block_groups * cpg                        */
+    int lds_w; /* block_q + KW - 1                          */
+    int vpc; /* bc / 8 (16-byte vectors per column)       */
+    int row_stride; /* bc + 32                                   */
+    int nchunk; /* lds_w * vpc                               */
+    int passes; /* ceil(nchunk / threads)                    */
+    int row_elems; /* ceil(passes*threads / vpc) * row_stride   */
+    long lds_bytes; /* (2*row_elems + weight slice) * 2          */
+} rocke_dconv4c_staged_geo_t;
+
+void rocke_dconv4c_staged_geometry(const rocke_direct_conv_4c_spec_t* spec,
+                                   rocke_dconv4c_staged_geo_t* geo);
+
+/* Python _stage_rows_reject_reason: true (reason written) when stage_rows /
+ * waves_q are illegal on `spec`; false when legal. Shared by
+ * rocke_direct_conv_4c_validate (prefixed "DirectConv4cSpec ") and
+ * rocke_direct_conv_4c_is_valid_spec. */
+bool rocke_dconv4c_stage_rows_reject(const rocke_direct_conv_4c_spec_t* spec,
+                                     char* reason,
+                                     size_t reason_cap);
 
 typedef struct rocke_dconv_4c_ctx
 {
@@ -375,6 +406,16 @@ void rocke_dconv4c_build_descriptors(rocke_dconv_4c_ctx_t* ctx);
  * unconditionally reset it. Reads/updates ctx->acc_tiles. Returns the kernel
  * (ctx->b->kernel) on success, NULL on error. */
 rocke_kernel_def_t* rocke_dconv4c_stream_h_loop(rocke_dconv_4c_ctx_t* ctx);
+
+/* spec.validate() + is_valid_spec_4c gate shared by both 4c builders: on a
+ * rejected spec sets the builder error (Python's ValueError text) and
+ * returns false. */
+bool rocke_dconv4c_check_spec(rocke_dconv_4c_ctx_t* ctx);
+
+/* The whole row-staged 4c kernel (Python _build_direct_conv_4c_staged), run
+ * after rocke_dconv4c_check_spec when spec.stage_rows. Returns the kernel or
+ * NULL on builder error. */
+rocke_kernel_def_t* rocke_dconv4c_build_staged(rocke_dconv_4c_ctx_t* ctx);
 
 /* ===================================================================== *
  *  rocke_dconv_8c_ctx_t  --  shared state for build_direct_conv_8c.

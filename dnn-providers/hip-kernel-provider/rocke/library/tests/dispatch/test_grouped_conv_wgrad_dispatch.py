@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import math
 import unittest
+from dataclasses import replace
 
 from dispatch.grouped_convolution import (
     ConvGroupedRequest,
@@ -81,7 +82,6 @@ def _expected_grid(req, spec):
 
 
 class TestGroupedWgradDispatch(unittest.TestCase):
-
     # ---- admittance + grid ---------------------------------------------------
 
     def test_grouped_admitted_grid_per_group(self):
@@ -348,7 +348,13 @@ class TestGroupedDgradDispatch(unittest.TestCase):
 
 
 class TestGfx950DgradTileTable(unittest.TestCase):
-    """Shape-keyed tile selection of the gfx950 dgrad candidate."""
+    """Shape-keyed tile selection of the gfx950 dgrad candidate.
+
+    The table (``_gfx950_dgrad_tile``) serves every problem the dY halo pick
+    does not take; stride-1 same-size multi-tap problems with kpg % 64 == 0
+    are checked against the table directly, since dispatch gives them the
+    halo pick (see TestGfx950DgradHaloPick).
+    """
 
     def _tile(self, **kw):
         req = _dgrad(dtype="bf16", **kw)
@@ -359,17 +365,32 @@ class TestGfx950DgradTileTable(unittest.TestCase):
         self.assertTrue(ok, why)
         return (s.tile_m, s.tile_n, s.tile_k, s.warp_m, s.warp_n, s.warp_tile_mn), inst
 
+    def _table(self, **kw):
+        from dispatch.grouped_convolution import _gfx950_dgrad_tile
+
+        return _gfx950_dgrad_tile(_dgrad(dtype="bf16", **kw))[:6]
+
     def test_large_grid_takes_the_128x128_tile(self):
         # N=8 C=640 K=768 32x32: 64 M tiles x 5 N tiles = 320 workgroups.
-        tile, inst = self._tile(N=8, C=640, K=768, Hi=32, Wi=32)
+        self.assertEqual(
+            self._table(N=8, C=640, K=768, Hi=32, Wi=32), (128, 128, 64, 2, 2, 16)
+        )
+        # Outside the halo pick dispatch takes the table: kpg % 64 != 0 (the
+        # flat folded loop), and a size-changing pad (the tap-outer loop).
+        tile, inst = self._tile(N=8, C=640, K=800, Hi=32, Wi=32)
+        self.assertEqual(tile, (128, 128, 64, 2, 2, 16))
+        self.assertEqual(inst.dy_halo, 0)
+        tile, inst = self._tile(N=8, C=640, K=768, Hi=32, Wi=32, pad_h=0, pad_w=0)
         self.assertEqual(tile, (128, 128, 64, 2, 2, 16))
         self.assertTrue(inst.uses_tap_outer_k)
+        self.assertEqual(inst.dy_halo, 0)
 
     def test_one_workgroup_per_cu_keeps_the_64x64_tile(self):
         # N=8 C=512 K=768 32x32: 64 M tiles x 4 N tiles = 256 workgroups,
         # one per CU: below the 128x128 floor.
-        tile, _ = self._tile(N=8, C=512, K=768, Hi=32, Wi=32)
-        self.assertEqual(tile, (64, 64, 64, 2, 2, 32))
+        self.assertEqual(
+            self._table(N=8, C=512, K=768, Hi=32, Wi=32), (64, 64, 64, 2, 2, 32)
+        )
 
     def test_small_grid_keeps_the_64x64_tile(self):
         # N=4 C=1024 16x16: the 128x128 tile would leave 64 workgroups.
@@ -378,8 +399,9 @@ class TestGfx950DgradTileTable(unittest.TestCase):
 
     def test_few_channels_keep_the_64x64_tile(self):
         # cpg = 64 < 128: a 128-wide N tile would be half empty.
-        tile, _ = self._tile(N=16, C=64, K=192, Hi=40, Wi=40)
-        self.assertEqual(tile, (64, 64, 64, 2, 2, 32))
+        self.assertEqual(
+            self._table(N=16, C=64, K=192, Hi=40, Wi=40), (64, 64, 64, 2, 2, 32)
+        )
 
     def test_kpg_odd_multiple_of_32_keeps_the_default_tile(self):
         # kpg % 64 == 32: tile_k 64 straddles taps (flat folded loop), but
@@ -493,6 +515,363 @@ def _dgrad_valid(inst):
     from kernels.common.conv_implicit_gemm_dgrad import is_valid_dgrad_spec
 
     return is_valid_dgrad_spec(inst, "gfx950")
+
+
+class TestGfx950DgradHaloPick(unittest.TestCase):
+    """dY halo reuse picks of the gfx950 dgrad candidate (_gfx950_dgrad_halo_pick).
+
+    Stride-1 problems with a same-size output, a multi-tap filter and kpg % 64
+    == 0 take the staged-halo loop (dy_halo=2) on a 64x64 (small grids),
+    128x64 or 256x64 (large grids) tile; everything else keeps the tile table.
+    """
+
+    def _pick(self, dtype="bf16", **kw):
+        req = _dgrad(dtype=dtype, **kw)
+        s = dispatch_conv_grouped(req).spec
+        inst = s.to_dgrad_spec(_problem(req))
+        ok, why = _dgrad_valid(inst)
+        self.assertTrue(ok, why)
+        return s, inst
+
+    def _assert_halo(self, s, inst, tile, setprio, kpad):
+        self.assertEqual((s.tile_m, s.tile_n, s.warp_m, s.warp_n), tile)
+        self.assertEqual(
+            (s.dy_halo, s.dy_halo_setprio, s.dy_halo_kouter_pad), (2, setprio, kpad)
+        )
+        # The dispatch spec forwards every knob and names every one it sets.
+        self.assertTrue(inst.uses_dy_halo)
+        self.assertEqual(
+            (
+                inst.dy_halo,
+                inst.dy_halo_setprio,
+                inst.dy_halo_kouter_pad,
+                inst.dy_halo_2d,
+            ),
+            (s.dy_halo, s.dy_halo_setprio, s.dy_halo_kouter_pad, s.dy_halo_2d),
+        )
+        name = s.kernel_name()
+        self.assertIn("halo2", name)
+        self.assertEqual("hprio" in name, setprio > 0)
+        self.assertEqual("hkp" in name, kpad > 0)
+
+    def test_small_grid_takes_the_64x64_tile(self):
+        # 8x14x14: 25 M tiles of 64 x 4 N tiles; below 192 128x64 workgroups.
+        s, inst = self._pick(N=8, C=256, K=256, Hi=14, Wi=14)
+        self._assert_halo(s, inst, (64, 64, 2, 2), 0, 0)
+
+    def test_mid_grid_takes_the_128x64_tile(self):
+        # 8x16x16 C1280: 16 M tiles x 20 N tiles = 320 128x64 workgroups. The
+        # 32-element B pad keeps three workgroups per CU in LDS, so it is set.
+        s, inst = self._pick(N=8, C=1280, K=1280, Hi=16, Wi=16)
+        self._assert_halo(s, inst, (128, 64, 4, 1), 1, 32)
+
+    def test_b_pad_only_where_it_keeps_the_occupancy(self):
+        # 8x32x32 C640: the pad would lift the 128x64 tile over 160 KB / 3,
+        # dropping a workgroup per CU.
+        s, inst = self._pick(N=8, C=640, K=1280, Hi=32, Wi=32)
+        self._assert_halo(s, inst, (128, 64, 4, 1), 1, 0)
+
+    def test_large_grid_takes_the_256x64_tile(self):
+        # 128x60x60: 1800 256x64 workgroups.
+        s, inst = self._pick(dtype="fp16", N=128, C=64, K=256, Hi=60, Wi=60)
+        self._assert_halo(s, inst, (256, 64, 4, 1), 1, 32)
+
+    def test_wide_halo_mid_grid_takes_the_256x64_tile(self):
+        # 2x64x64 C640: the 128x64 tile's halo is a whole tile of extra rows
+        # and the 256x64 tile keeps its LDS occupancy (two per CU).
+        s, inst = self._pick(N=2, C=640, K=640, Hi=64, Wi=64)
+        self._assert_halo(s, inst, (256, 64, 4, 1), 1, 0)
+
+    def test_grouped_takes_the_halo(self):
+        s, inst = self._pick(N=32, C=512, K=512, Hi=14, Wi=14, G=2)
+        self._assert_halo(s, inst, (128, 64, 4, 1), 1, 32)
+
+    def test_not_applied(self):
+        # 1x1, stride 2, a size-changing pad, kpg % 64 != 0: tile table.
+        for kw in (
+            {"N": 32, "C": 256, "K": 1024, "Y": 1, "X": 1, "pad_h": 0, "pad_w": 0},
+            {
+                "N": 16,
+                "C": 256,
+                "K": 256,
+                "Hi": 56,
+                "Wi": 56,
+                "stride_h": 2,
+                "stride_w": 2,
+            },
+            {"N": 8, "C": 256, "K": 256, "Hi": 28, "Wi": 28, "pad_h": 0, "pad_w": 0},
+            {"N": 1, "C": 64, "K": 96, "Hi": 13, "Wi": 17},
+        ):
+            with self.subTest(**kw):
+                s, inst = self._pick(**kw)
+                self.assertEqual(s.dy_halo, 0)
+                self.assertFalse(inst.uses_dy_halo)
+                self.assertNotIn("halo", s.kernel_name())
+
+    def test_wide_images_fall_back(self):
+        # A halo that leaves one workgroup per CU on a grid that needs more
+        # than one per CU: the 256x64 tile falls back to 128x64 when that
+        # keeps two per CU, otherwise to the tile table.
+        s, _ = self._pick(N=2, C=512, K=512, Hi=96, Wi=96)
+        self._assert_halo(s, _, (128, 64, 4, 1), 1, 32)
+        for kw in (
+            {"dtype": "fp16", "N": 2, "C": 128, "K": 128, "Hi": 192, "Wi": 192},
+            {"N": 1, "C": 128, "K": 256, "Hi": 300, "Wi": 300},
+        ):
+            with self.subTest(**kw):
+                s, inst = self._pick(**kw)
+                self.assertEqual(s.dy_halo, 0)
+        # A wide image on a grid that fits one workgroup per CU keeps it.
+        s, inst = self._pick(N=1, C=64, K=64, Hi=224, Wi=224)
+        self._assert_halo(s, inst, (256, 64, 4, 1), 1, 32)
+
+    def test_exact_128x128_table_pick_is_kept_on_wide_images(self):
+        # cpg 128 or 256 on 96..136-pixel rows: the halo pick would be the
+        # 128x64 tile at two workgroups per CU, and the tile table's 128x128
+        # tile covers the input channels exactly in one or two N tiles, so
+        # dispatch keeps it.
+        from dispatch.grouped_convolution import _gfx950_dgrad_tile
+
+        for kw in (
+            {"N": 4, "C": 128, "K": 128, "Hi": 128, "Wi": 128},
+            {"dtype": "fp16", "N": 4, "C": 128, "K": 128, "Hi": 136, "Wi": 136},
+            {"dtype": "fp16", "N": 8, "C": 128, "K": 128, "Hi": 120, "Wi": 120},
+            {"N": 4, "C": 128, "K": 256, "Hi": 128, "Wi": 128},
+            {"N": 4, "C": 256, "K": 256, "Hi": 128, "Wi": 128, "G": 2},
+            {"N": 4, "C": 256, "K": 256, "Hi": 96, "Wi": 128},
+            {"dtype": "fp16", "N": 4, "C": 256, "K": 128, "Hi": 96, "Wi": 128},
+        ):
+            with self.subTest(**kw):
+                s, inst = self._pick(**kw)
+                self.assertEqual(s.dy_halo, 0)
+                self.assertFalse(inst.uses_dy_halo)
+                table = _gfx950_dgrad_tile(_dgrad(**{"dtype": "bf16", **kw}))
+                self.assertEqual(table[:2], (128, 128))
+                self.assertEqual((s.tile_m, s.tile_n), (128, 128))
+        # Partly empty table N tiles (cpg 192) or more than two of them (cpg
+        # 384): the halo pick is taken.
+        s, inst = self._pick(N=4, C=192, K=192, Hi=128, Wi=128)
+        self._assert_halo(s, inst, (128, 64, 4, 1), 1, 0)
+        s, inst = self._pick(dtype="fp16", N=4, C=384, K=384, Hi=96, Wi=96)
+        self._assert_halo(s, inst, (128, 64, 4, 1), 1, 32)
+        # cpg = 128 where the table keeps the 64x64 tile: the halo pick stays.
+        s, inst = self._pick(N=2, C=128, K=128, Hi=128, Wi=128)
+        self._assert_halo(s, inst, (128, 64, 4, 1), 1, 0)
+        # cpg = 128 on the 256x64 tile (narrower image): the halo pick stays.
+        s, inst = self._pick(N=16, C=128, K=128, Hi=56, Wi=56)
+        self._assert_halo(s, inst, (256, 64, 4, 1), 1, 32)
+
+    def test_more_than_81_taps_keep_the_tile_table(self):
+        # 9x9 takes the halo; 11x11 and larger keep the tile table (the halo
+        # loop unrolls every tap).
+        s, inst = self._pick(N=2, C=64, K=64, Hi=32, Wi=32, Y=9, X=9, pad_h=4, pad_w=4)
+        self.assertEqual(s.dy_halo, 2)
+        for y, x in ((11, 11), (1, 83), (15, 15)):
+            with self.subTest(Y=y, X=x):
+                s, inst = self._pick(
+                    N=2, C=64, K=64, Hi=32, Wi=32, Y=y, X=x, pad_h=y // 2, pad_w=x // 2
+                )
+                self.assertEqual(s.dy_halo, 0)
+                self.assertFalse(inst.uses_dy_halo)
+
+    def test_4x1_tiles_take_at_most_7x7_filters(self):
+        # 9x9, 7x9 and 9x7 filters that would take a 4x1-wave tile (128x64)
+        # keep the tile table (large weights lost there with cold caches);
+        # 7x7 keeps the 128x64 halo tile and 9x9 keeps the 64x64 one.
+        import dispatch.grouped_convolution as gc
+
+        big = {"N": 16, "C": 4096, "K": 4096, "Hi": 3, "Wi": 30, "G": 64}
+        for y, x in ((9, 9), (7, 9), (9, 7)):
+            with self.subTest(Y=y, X=x):
+                kw = {**big, "Y": y, "X": x, "pad_h": y // 2, "pad_w": x // 2}
+                self._assert_table(kw)
+                saved = gc._GFX950_DGRAD_HALO_4X1_MAX_TAPS
+                gc._GFX950_DGRAD_HALO_4X1_MAX_TAPS = y * x
+                try:
+                    tile, _knobs = gc._gfx950_dgrad_halo_pick(_dgrad(**kw))
+                finally:
+                    gc._GFX950_DGRAD_HALO_4X1_MAX_TAPS = saved
+                self.assertEqual(tile[3:5], (4, 1))
+        kw = {"N": 8, "C": 2048, "K": 2048, "Hi": 7, "Wi": 30, "G": 16}
+        s, inst = self._pick(Y=7, X=7, pad_h=3, pad_w=3, **kw)
+        self._assert_halo(s, inst, (128, 64, 4, 1), 1, 32)
+        s, inst = self._pick(N=2, Hi=32, Wi=32, Y=9, X=9, pad_h=4, pad_w=4)
+        self._assert_halo(s, inst, (64, 64, 2, 2), 0, 0)
+
+    def test_non_square_filters_take_the_halo(self):
+        # One-dimensional filters (one row or one column) keep the tile table.
+        for y, x in ((7, 1), (3, 1), (1, 7), (1, 3), (1, 5)):
+            with self.subTest(Y=y, X=x):
+                kw = {"N": 8, "C": 256, "K": 256, "Hi": 14, "Wi": 14}
+                self._assert_table(
+                    {"Y": y, "X": x, "pad_h": y // 2, "pad_w": x // 2, **kw}
+                )
+        # 1x3 on a wide image (the 256x64 tile lost there) too.
+        self._assert_table(
+            {"N": 16, "C": 128, "K": 128, "Hi": 136, "Wi": 136, "Y": 1, "X": 3,
+             "pad_h": 0, "pad_w": 1, "dtype": "fp16"}
+        )  # fmt: skip
+        for y, x in ((3, 5), (5, 3)):
+            with self.subTest(Y=y, X=x):
+                s, inst = self._pick(
+                    N=8,
+                    C=256,
+                    K=256,
+                    Hi=14,
+                    Wi=14,
+                    Y=y,
+                    X=x,
+                    pad_h=y // 2,
+                    pad_w=x // 2,
+                )
+                self._assert_halo(s, inst, (64, 64, 2, 2), 0, 0)
+
+    def test_small_grid_256x64_needs_a_tall_halo(self):
+        # A grid of at most one 256x64 workgroup per CU: the 256x64 tile only
+        # when the per-tap halo spans two or more 128x64 tiles, else 128x64.
+        for kw in (
+            {"N": 8, "C": 64, "K": 64},
+            {"N": 4, "C": 128, "K": 128},
+        ):
+            with self.subTest(**kw):
+                s, inst = self._pick(dtype="fp16", Hi=64, Wi=64, **kw)
+                self.assertEqual((s.tile_m, s.tile_n), (128, 64))
+                self.assertEqual(s.dy_halo, 2)
+        # 3x3 on 200-pixel rows (402 halo rows): the 256x64 tile amortizes
+        # the halo better.
+        for kw in (
+            {"N": 1, "C": 128, "K": 128, "Hi": 128, "G": 2},
+            {"dtype": "fp16", "N": 2, "C": 256, "K": 128, "Hi": 32, "G": 2},
+        ):
+            with self.subTest(**kw):
+                s, inst = self._pick(Wi=200, **kw)
+                self._assert_halo(s, inst, (256, 64, 4, 1), 1, 32)
+
+    def test_low_dy_reuse_keeps_the_tile_table(self):
+        # dY reuse = taps * tile_m / (tile_m + (Y-1)*Wo + (X-1)). A 3x3 filter
+        # on a very wide image stages more dY rows than the tap-outer loop
+        # gathers: the 64x64 tile below 1.0 on more than one workgroup per CU
+        # keeps the tile table.
+        self._assert_table(
+            {"dtype": "fp16", "N": 4, "C": 64, "K": 64, "Hi": 16, "Wi": 600}
+        )
+        # Square filters keep plenty of reuse on ordinary images.
+        s, inst = self._pick(dtype="fp16", N=4, C=128, K=128, Hi=96, Wi=96)
+        self.assertEqual(s.dy_halo, 2)
+        s, inst = self._pick(N=4, C=64, K=64, Hi=48, Wi=80)
+        self._assert_halo(s, inst, (64, 64, 2, 2), 0, 0)
+
+    def _assert_table(self, kw):
+        from dispatch.grouped_convolution import _gfx950_dgrad_tile
+
+        s, inst = self._pick(**kw)
+        self.assertEqual(s.dy_halo, 0)
+        self.assertFalse(inst.uses_dy_halo)
+        self.assertNotIn("halo", s.kernel_name())
+        table = _gfx950_dgrad_tile(_dgrad(**{"dtype": "bf16", **kw}))
+        self.assertEqual((s.tile_m, s.tile_n), table[:2])
+
+    def test_small_grid_vertical_filters_keep_the_tile_table(self):
+        # Vertical-only filters whose 256x64 pick has at most one workgroup
+        # per CU keep the tile table (not the 128x64 tile), whatever the dY
+        # reuse or grid size.
+        for kw in (
+            {"N": 1, "C": 512, "K": 128, "Hi": 32, "Wi": 160, "Y": 3, "G": 2},
+            {"dtype": "fp16", "N": 4, "C": 128, "K": 256, "Hi": 32, "Wi": 152, "Y": 3},
+            {"N": 4, "C": 256, "K": 64, "Hi": 16, "Wi": 176, "Y": 5},
+            {"N": 4, "C": 128, "K": 256, "Hi": 32, "Wi": 144, "Y": 5},
+            {"dtype": "fp16", "N": 1, "C": 192, "K": 192, "Hi": 112, "Wi": 112, "Y": 5},
+            {"N": 2, "C": 64, "K": 64, "Hi": 168, "Wi": 168, "Y": 5},
+            {"dtype": "fp16", "N": 8, "C": 128, "K": 128, "Hi": 64, "Wi": 64, "Y": 7},
+            {"dtype": "fp16", "N": 2, "C": 128, "K": 128, "Hi": 112, "Wi": 104, "Y": 7},
+        ):
+            with self.subTest(**kw):
+                self._assert_table({"X": 1, "pad_h": kw["Y"] // 2, "pad_w": 0, **kw})
+
+    def test_small_grid_64x64_tile_reuse_floor(self):
+        # On grids of at most one workgroup per CU the 64x64 halo tile needs a
+        # dY reuse of _GFX950_DGRAD_HALO_MIN_REUSE_2X2_SMALL_GRID: 3x3 on
+        # 400- and 420-pixel rows (0.67, 0.63) keeps the tile table, on 320-
+        # and 256-pixel rows (0.82, 1.0) takes the halo.
+        for kw in (
+            {"N": 1, "C": 128, "K": 128, "Hi": 20, "Wi": 400},
+            {"N": 1, "C": 64, "K": 64, "Hi": 8, "Wi": 420},
+        ):
+            with self.subTest(**kw):
+                self._assert_table({"dtype": "fp16", **kw})
+        for kw in (
+            {"dtype": "fp16", "N": 1, "C": 64, "K": 64, "Hi": 16, "Wi": 320},
+            {"N": 1, "C": 64, "K": 256, "Hi": 24, "Wi": 256},
+        ):
+            with self.subTest(**kw):
+                s, inst = self._pick(**kw)
+                self._assert_halo(s, inst, (64, 64, 2, 2), 0, 0)
+
+    def test_pick_is_memoized_per_request(self):
+        from dispatch.grouped_convolution import _gfx950_dgrad_pick
+
+        req = _dgrad(dtype="bf16", N=8, C=256, K=256, Hi=14, Wi=14)
+        tile, knobs = _gfx950_dgrad_pick(req)
+        knobs["dy_halo"] = 0  # the caller's copy; the cached pick is unchanged
+        self.assertEqual(_gfx950_dgrad_pick(req), (tile, {"dy_halo": 2}))
+
+
+class TestConvGroupedSpecHaloFields(unittest.TestCase):
+    """The dY halo fields of ConvGroupedSpec: dgrad only, hashed only when set."""
+
+    def _spec(self, direction, **kw):
+        from dispatch.grouped_convolution import ConvGroupedSpec
+
+        return ConvGroupedSpec(
+            direction=direction,
+            tile_m=64,
+            tile_n=64,
+            tile_k=64,
+            warp_m=2,
+            warp_n=2,
+            warp_tile_mn=32,
+            warp_tile_k=16,
+            pipeline="mem",
+            epilogue="cshuffle",
+            dtype="bf16",
+            arch="gfx950",
+            **kw,
+        )
+
+    def test_rejected_outside_dgrad(self):
+        for direction in ("fwd", "wgrad"):
+            for knob, val in (
+                ("dy_halo", 2),
+                ("dy_halo_2d", True),
+                ("dy_halo_setprio", 1),
+                ("dy_halo_kouter_pad", 32),
+            ):
+                with (
+                    self.subTest(direction=direction, knob=knob),
+                    self.assertRaisesRegex(ValueError, f"{knob} only apply"),
+                ):
+                    self._spec(direction, **{knob: val})
+            self._spec(direction)  # all off: accepted
+        self._spec("dgrad", dy_halo=2, dy_halo_setprio=1)
+
+    def test_spec_hash_ignores_unset_halo_fields(self):
+        from dataclasses import asdict
+
+        from dispatch.grouped_convolution import _DGRAD_HALO_FIELDS, _kernel_id
+
+        req = _dgrad(dtype="bf16")
+        cand = conv_grouped_candidates("dgrad")[0]
+        spec = self._spec("dgrad")
+        legacy = {k: v for k, v in asdict(spec).items() if k not in _DGRAD_HALO_FIELDS}
+        from rocke.dispatch.core import stable_json_hash
+
+        self.assertEqual(
+            _kernel_id(req, cand, spec).spec_hash, stable_json_hash(legacy, n=16)
+        )
+        halo = self._spec("dgrad", dy_halo=2)
+        self.assertNotEqual(
+            _kernel_id(req, cand, halo).spec_hash, _kernel_id(req, cand, spec).spec_hash
+        )
 
 
 class TestGroupedDirectDgradDispatch(unittest.TestCase):
@@ -746,6 +1125,395 @@ class TestGroupedDirectDgradDispatch(unittest.TestCase):
         _name, r = self._pick(self._grouped(N=256, C=32, K=32, G=8))
         self.assertEqual(r.spec.variant, "generic")
 
+    def test_4c_row_stage_rows_policy(self):
+        import dispatch.grouped_convolution as gc
+
+        # (N, H, Y) at C = K = 128, G = 32 (grid = ceil(W/4) * 2 * N)
+        # -> (variant, stage_rows)
+        cases = {
+            "S1": ((128, 56, 3), ("4c", True)),
+            "1x1_h14_above_floor": ((64, 14, 1), ("4c", True)),
+            "1x1_h7_above_floor": ((128, 7, 1), ("4c", False)),
+            "1x1_h14_below_floor": ((16, 14, 1), ("generic", False)),
+            "3x3_h8_grid96": ((24, 8, 3), ("4c", True)),
+            "3x3_h8_grid64": ((16, 8, 3), ("generic", False)),
+            "3x3_h8_grid48": ((12, 8, 3), ("generic", False)),
+            "3x3_h14_grid192": ((24, 14, 3), ("generic", False)),
+            "3x3_h14_grid64": ((8, 14, 3), ("generic", False)),
+            "3x3_h9_grid288": ((48, 9, 3), ("generic", False)),
+            "3x3_h20_grid160": ((16, 20, 3), ("generic", False)),
+        }
+        for label, ((n, hw, y), want) in cases.items():
+            with self.subTest(case=label):
+                req = self._grouped(
+                    N=n, Hi=hw, Wi=hw, Y=y, X=y, pad_h=y // 2, pad_w=y // 2
+                )
+                name, r = self._pick(req)
+                self.assertEqual(name, self._DIRECT, label)
+                s = r.spec
+                self.assertEqual((s.variant, s.stage_rows), want, label)
+                if s.stage_rows:
+                    self.assertTrue(s.kernel_name().endswith("_sr"))
+                    main = r.spec.to_fprop_spec(gc._direct_dgrad_problem(req))
+                    self.assertTrue(main.stage_rows)
+                    self.assertEqual(main.waves_q, 1)
+                    self.assertTrue(main.kernel_name().endswith("_fwl_sr1"))
+                    self.assertEqual(r.block, (64, 1, 1))
+        # 3x3 above the floor: images shorter than 4 rows keep the direct-load
+        # 4c kernel (exactly the knob-off pick); from 4 rows on they take the
+        # staged kernel. 1x1 keeps its own 8-row edge.
+        # (N, C, H, W, G, Y, dtype) -> stage_rows
+        self.assertEqual(gc._DIRECT_DGRAD_4C_STAGED_MIN_H_3X3, 4)
+        self.assertEqual(gc._DIRECT_DGRAD_4C_STAGED_MIN_H_1X1, 8)
+        for (n, c, h, w, g, y, dt), want in (
+            ((80, 256, 3, 1, 64, 3, "fp16"), False),
+            ((19, 1024, 3, 1, 256, 3, "bf16"), False),
+            ((256, 128, 3, 2, 32, 3, "fp16"), False),
+            ((80, 256, 4, 1, 64, 3, "fp16"), True),
+            ((256, 128, 4, 2, 32, 3, "fp16"), True),
+            ((80, 256, 4, 1, 64, 1, "fp16"), False),
+            ((256, 128, 7, 2, 32, 1, "fp16"), False),
+            ((256, 128, 8, 2, 32, 1, "fp16"), True),
+        ):
+            with self.subTest(N=n, C=c, H=h, W=w, G=g, Y=y):
+                grid = -(-w // 4) * (g // 16) * n
+                self.assertGreaterEqual(grid, gc._DIRECT_DGRAD_4C_MIN_GRID)
+                req = self._grouped(
+                    N=n, C=c, K=c, Hi=h, Wi=w, G=g, Y=y, X=y,
+                    pad_h=y // 2, pad_w=y // 2, dtype=dt,
+                )  # fmt: skip
+                name, r = self._pick(req)
+                self.assertEqual(name, self._DIRECT)
+                self.assertEqual((r.spec.variant, r.spec.stage_rows), ("4c", want))
+                if not want:
+                    saved = gc._DIRECT_DGRAD_4C_STAGE_ROWS
+                    gc._DIRECT_DGRAD_4C_STAGE_ROWS = False
+                    try:
+                        self.assertEqual(self._pick(req)[1].spec, r.spec)
+                    finally:
+                        gc._DIRECT_DGRAD_4C_STAGE_ROWS = saved
+        # Knob off: the PR-branch pick (direct-load 4c above the floor only).
+        saved = gc._DIRECT_DGRAD_4C_STAGE_ROWS
+        gc._DIRECT_DGRAD_4C_STAGE_ROWS = False
+        try:
+            s = self._pick(self._grouped(N=128, Hi=56, Wi=56))[1].spec
+            self.assertEqual((s.variant, s.stage_rows), ("4c", False))
+            s = self._pick(self._grouped(N=16, Hi=8, Wi=8))[1].spec
+            self.assertEqual(s.variant, "generic")
+        finally:
+            gc._DIRECT_DGRAD_4C_STAGE_ROWS = saved
+
+    def test_4c_stage_rows_keeps_previous_pick_below_floor(self):
+        # 3x3 cpg = kpg = 4 shapes below the 4c grid floor where the row-staged
+        # 4c kernel lost to the previous pick with cold caches: images taller
+        # than the generic kernel's H tile (grids 192-256) keep the generic
+        # kernel with 4-row H tiles, and 5-row images on a 64-workgroup grid
+        # keep igemm. (N, C, H, W, G, dtype) -> (candidate, variant, block_h)
+        from dispatch.grouped_convolution import (
+            _DIRECT_DGRAD_4C_MIN_GRID,
+            _DIRECT_DGRAD_4C_STAGED_SHORT_MIN_GRID,
+        )
+
+        generic = (self._DIRECT, "generic", 4)
+        igemm = (self._IGEMM, None, None)
+        cases = {
+            "h16_g128_grid256": ((8, 512, 16, 16, 128, "bf16"), generic),
+            "h16_w9_g16_grid192": ((64, 64, 16, 9, 16, "fp16"), generic),
+            "h14_g48_grid192": ((16, 192, 14, 14, 48, "fp16"), generic),
+            "h13_g192_grid192": ((4, 768, 13, 13, 192, "bf16"), generic),
+            "h15_g64_grid256": ((16, 256, 15, 15, 64, "fp16"), generic),
+            "h12_g128_grid192": ((8, 512, 12, 12, 128, "bf16"), generic),
+            "h13_g16_grid256": ((64, 64, 13, 13, 16, "fp16"), generic),
+            "h12_w21_g32_grid192": ((16, 128, 12, 21, 32, "bf16"), generic),
+            "h5_g64_grid64": ((8, 256, 5, 5, 64, "fp16"), igemm),
+            "h5_g32_grid64": ((16, 128, 5, 5, 32, "fp16"), igemm),
+            "h5_g128_grid64": ((4, 512, 5, 5, 128, "fp16"), igemm),
+        }
+        for label, ((n, c, h, w, g, dt), want) in cases.items():
+            with self.subTest(case=label):
+                grid = -(-w // 4) * (g // 16) * n
+                self.assertLess(grid, _DIRECT_DGRAD_4C_MIN_GRID, label)
+                req = self._grouped(N=n, C=c, K=c, Hi=h, Wi=w, G=g, dtype=dt)
+                name, r = self._pick(req)
+                s = r.spec
+                got = (
+                    (name, s.variant, s.block_h)
+                    if name == self._DIRECT
+                    else (name, None, None)
+                )
+                self.assertEqual(got, want, label)
+        # Images of 1 to 3 columns keep the previous pick below the floor
+        # (igemm here); from 4 columns on they take the staged kernel.
+        from dispatch.grouped_convolution import _DIRECT_DGRAD_4C_STAGED_SHORT_MIN_W
+
+        self.assertEqual(_DIRECT_DGRAD_4C_STAGED_SHORT_MIN_W, 4)
+        for n, c, w, dt in ((32, 192, 1, "bf16"), (32, 192, 3, "bf16"),
+                            (96, 64, 3, "fp16"), (32, 256, 3, "bf16")):  # fmt: skip
+            with self.subTest(N=n, C=c, W=w):
+                req = self._grouped(N=n, C=c, K=c, Hi=8, Wi=w, G=c // 4, dtype=dt)
+                self.assertEqual(self._pick(req)[0], self._IGEMM)
+        for n, c, dt in ((32, 192, "bf16"), (96, 64, "fp16")):
+            with self.subTest(N=n, C=c, W=4):
+                req = self._grouped(N=n, C=c, K=c, Hi=8, Wi=4, G=c // 4, dtype=dt)
+                name, r = self._pick(req)
+                self.assertEqual(name, self._DIRECT)
+                self.assertEqual((r.spec.variant, r.spec.stage_rows), ("4c", True))
+        # The same 5-row images at the staged floor take the staged kernel.
+        req = self._grouped(N=8, C=512, K=512, Hi=5, Wi=5, G=128)
+        self.assertEqual(-(-5 // 4) * 8 * 8, 128)
+        self.assertGreaterEqual(128, _DIRECT_DGRAD_4C_STAGED_SHORT_MIN_GRID)
+        s = self._pick(req)[1].spec
+        self.assertEqual((s.variant, s.stage_rows), ("4c", True))
+        # Images of 1 to 4 rows keep the previous pick below the floor; from
+        # 5 rows on they take the staged kernel.
+        import dispatch.grouped_convolution as gc
+        from dispatch.grouped_convolution import _DIRECT_DGRAD_4C_STAGED_SHORT_MIN_H
+
+        self.assertEqual(_DIRECT_DGRAD_4C_STAGED_SHORT_MIN_H, 5)
+        saved = gc._DIRECT_DGRAD_4C_STAGE_ROWS
+        for n, c, h, w, dt in ((16, 192, 4, 5, "bf16"), (12, 256, 4, 5, "fp16"),
+                               (24, 256, 2, 4, "bf16"), (16, 256, 1, 8, "fp16"),
+                               (16, 192, 5, 5, "bf16"), (12, 256, 8, 5, "fp16")):  # fmt: skip
+            with self.subTest(N=n, C=c, H=h, W=w):
+                req = self._grouped(N=n, C=c, K=c, Hi=h, Wi=w, G=c // 4, dtype=dt)
+                grid = -(-w // 4) * (c // 64) * n
+                self.assertGreaterEqual(grid, _DIRECT_DGRAD_4C_STAGED_SHORT_MIN_GRID)
+                self.assertLess(grid, _DIRECT_DGRAD_4C_MIN_GRID)
+                name, r = self._pick(req)
+                if h >= 5:
+                    self.assertEqual(name, self._DIRECT)
+                    self.assertEqual((r.spec.variant, r.spec.stage_rows), ("4c", True))
+                    continue
+                gc._DIRECT_DGRAD_4C_STAGE_ROWS = False
+                try:
+                    prev = self._pick(req)
+                finally:
+                    gc._DIRECT_DGRAD_4C_STAGE_ROWS = saved
+                self.assertEqual(name, prev[0])
+                self.assertEqual(r.spec, prev[1].spec)
+
+    def test_generic_row_stream_knobs_policy(self):
+        import dispatch.grouped_convolution as gc
+
+        # (N, C, K, H, W, G, Y) -> (prefetch_rows, lds_only_sync, waves_m,
+        #                           lds_pad, stage_out, xcd_tiles)
+        cases = {
+            # 16-channel groups: the whole stack.
+            "S2": ((128, 512, 512, 14, 14, 32, 3), (2, True, 1, 8, True, True)),
+            # 4-channel output tiles: no 16-wide stage_out, padded rows.
+            "cpg4": ((8, 128, 128, 28, 28, 32, 3), (2, True, 1, 8, False, True)),
+            # A 48-byte staged column (odd 16-byte count): no pad; 12 output
+            # channels: no 16-wide stage_out.
+            "cpg12_7x7": ((8, 384, 384, 16, 16, 32, 7), (2, True, 1, 0, False, True)),
+        }
+        # Output channels that split into two 16-wide tile halves (waves_m = 2
+        # valid) keep the previous pick: no row-stream knobs by default. So do
+        # grids with fewer than 8 image row bands (no XCD remap): small
+        # batches of unsplit images, here 2, 3 and 4 images of 56 rows and 2
+        # of 12 rows; groups with cpg != kpg; and 32-column strips
+        # (block_q 32), here 8-, 12- and 20-channel groups.
+        for label, (n, c, k, hw, g, y) in {
+            "bq32_cpg12_7x7": (8, 384, 384, 24, 32, 7),
+            "bq32_cpg12_7x7_G384": (2, 4608, 4608, 18, 384, 7),
+            "bq32_cpg8_7x7": (1, 1024, 1024, 160, 128, 7),
+            "bq32_cpg20": (4, 2560, 2560, 18, 128, 3),
+            "cpg16_kpg4_7x7": (8, 512, 128, 24, 32, 7),
+            "cpg20_kpg8": (1, 10240, 4096, 28, 512, 3),
+            "cpg20_kpg16": (12, 1280, 1024, 24, 64, 3),
+            "cpg24_kpg16": (2, 1152, 768, 64, 48, 3),
+            "S4": (128, 512, 512, 14, 16, 3),
+            "cpg32_7x7img": (64, 1024, 1024, 7, 32, 3),
+            "cpg32_14x14img_N32": (32, 1024, 1024, 14, 32, 3),
+            "cpg32_kpg16_N1_G256": (1, 8192, 4096, 56, 256, 3),
+            "rows_N4_G192": (4, 3072, 3072, 56, 192, 3),
+            "rows_N3_G256": (3, 4096, 4096, 56, 256, 3),
+            "rows_N2_G512": (2, 4096, 4096, 56, 512, 3),
+            "rows_5x5_G300": (2, 7200, 4800, 12, 300, 5),
+        }.items():
+            with self.subTest(case=label):
+                req = self._grouped(
+                    N=n, C=c, K=k, Hi=hw, Wi=hw, G=g, Y=y, X=y,
+                    pad_h=y // 2, pad_w=y // 2,
+                )  # fmt: skip
+                name, r = self._pick(req)
+                self.assertEqual(name, self._DIRECT, label)
+                s = r.spec
+                self.assertEqual((s.variant, s.fused_weights), ("generic", True))
+                if label.startswith("bq32"):
+                    self.assertEqual(s.block_q, 32, label)
+                self.assertEqual(
+                    (s.prefetch_rows, s.lds_only_sync, s.waves_m, s.lds_pad),
+                    (0, False, 1, 0),
+                )
+                self.assertEqual((s.stage_out, s.xcd_tiles), (False, False))
+                p = gc._direct_dgrad_problem(req)
+                stream = replace(s, prefetch_rows=2, lds_only_sync=True)
+                split = replace(stream, waves_m=2)
+                xcd = replace(stream, xcd_tiles=True)
+                self.assertTrue(
+                    p.cpg != p.kpg
+                    or s.block_q != gc._DIRECT_DGRAD_BLOCK_Q
+                    or gc._direct_dgrad_main_is_valid(split, p)[0]
+                    or not gc._direct_dgrad_main_is_valid(xcd, p)[0]
+                )
+        for label, ((n, c, k, hw, _w, g, y), want) in cases.items():
+            with self.subTest(case=label):
+                req = self._grouped(
+                    N=n, C=c, K=k, Hi=hw, Wi=_w, G=g, Y=y, X=y,
+                    pad_h=y // 2, pad_w=y // 2,
+                )  # fmt: skip
+                name, r = self._pick(req)
+                self.assertEqual(name, self._DIRECT, label)
+                s = r.spec
+                self.assertEqual(s.variant, "generic")
+                self.assertTrue(s.fused_weights)
+                got = (
+                    s.prefetch_rows,
+                    s.lds_only_sync,
+                    s.waves_m,
+                    s.lds_pad,
+                    s.stage_out,
+                    s.xcd_tiles,
+                )
+                self.assertEqual(got, want, label)
+                p = gc._direct_dgrad_problem(req)
+                main = s.to_fprop_spec(p)
+                self.assertEqual(
+                    (
+                        main.prefetch_rows,
+                        main.lds_only_sync,
+                        main.waves_m,
+                        main.lds_pad,
+                        main.stage_out,
+                        main.xcd_tiles,
+                    ),
+                    want,
+                )
+                self.assertTrue(gc._direct_dgrad_main_is_valid(s, p)[0])
+                self.assertEqual(r.block, (main.threads_per_block, 1, 1))
+                # The pick never needs more launch rounds than the spec
+                # without the LDS-adding knobs.
+                bare = replace(s, lds_pad=0, stage_out=False)
+                self.assertLessEqual(
+                    gc._direct_dgrad_lds_rounds(s, p),
+                    gc._direct_dgrad_lds_rounds(bare, p),
+                )
+        # Opt-in waves_m = 2 stack (_DIRECT_DGRAD_STREAM_SPLIT_M): 32-channel
+        # groups split over two waves. On S4 the pad and the staged output
+        # tile would push 2048 single-round workgroups into a second round,
+        # so the rounds guard drops them; they stay where the round count
+        # does not change.
+        saved = gc._DIRECT_DGRAD_STREAM_SPLIT_M
+        gc._DIRECT_DGRAD_STREAM_SPLIT_M = True
+        try:
+            for (n, c, hw, g), want in (
+                ((128, 512, 14, 16), (2, True, 2, 0, False, True)),
+                ((64, 1024, 7, 32), (2, True, 2, 0, False, True)),
+                ((32, 1024, 14, 32), (2, True, 2, 8, True, True)),
+            ):
+                req = self._grouped(N=n, C=c, K=c, Hi=hw, Wi=hw, G=g)
+                s = self._pick(req)[1].spec
+                got = (
+                    s.prefetch_rows,
+                    s.lds_only_sync,
+                    s.waves_m,
+                    s.lds_pad,
+                    s.stage_out,
+                    s.xcd_tiles,
+                )
+                self.assertEqual(got, want, (n, c, hw, g))
+            # The rounds model: S4 fits one round without the pad / staged
+            # output tile and needs two with them.
+            req = self._grouped(N=128, C=512, K=512, Hi=14, Wi=14, G=16)
+            s = self._pick(req)[1].spec
+            p = gc._direct_dgrad_problem(req)
+            self.assertEqual(gc._direct_dgrad_lds_rounds(s, p), 1)
+            full = replace(s, lds_pad=8, stage_out=True)
+            self.assertTrue(gc._direct_dgrad_main_is_valid(full, p)[0])
+            self.assertEqual(gc._direct_dgrad_lds_rounds(full, p), 2)
+        finally:
+            gc._DIRECT_DGRAD_STREAM_SPLIT_M = saved
+        # The pre-pass pipeline (fused weights over budget) is unchanged.
+        r = dispatch_conv_grouped(self._req_from((16, 256, 256, 28, 28, 7, 8, "fp16")))
+        self.assertFalse(r.spec.fused_weights)
+        self.assertEqual(
+            (r.spec.prefetch_rows, r.spec.lds_only_sync, r.spec.waves_m),
+            (0, False, 1),
+        )
+        # Knob off: the PR-branch pick.
+        saved = gc._DIRECT_DGRAD_STREAM_KNOBS
+        gc._DIRECT_DGRAD_STREAM_KNOBS = False
+        try:
+            s = self._pick(self._grouped(N=128, C=512, K=512, Hi=14, Wi=14))[1].spec
+            self.assertEqual(
+                (s.prefetch_rows, s.lds_only_sync, s.waves_m, s.lds_pad),
+                (0, False, 1, 0),
+            )
+            self.assertEqual((s.stage_out, s.xcd_tiles), (False, False))
+            self.assertNotIn("_pf2", s.kernel_name())
+        finally:
+            gc._DIRECT_DGRAD_STREAM_KNOBS = saved
+
+    def test_generic_row_stream_box_edges(self):
+        import dispatch.grouped_convolution as gc
+
+        self.assertEqual(gc._DIRECT_DGRAD_STREAM_UNTILED_MAX_WO, 64)
+        self.assertFalse(hasattr(gc, "_DIRECT_DGRAD_STREAM_UNTILED_CPG16_MAX_WO"))
+        self.assertEqual(gc._DIRECT_DGRAD_STREAM_TILED_1X1_MIN_CPG, 12)
+        # (N, cpg, H, W, G, Y) -> (block_h, stack taken)
+        cases = {
+            # Untiled, non-power-of-two groups: up to 64 output columns.
+            "cpg20_untiled_W64": ((32, 20, 16, 64, 48, 1), (0, True)),
+            "cpg20_untiled_W80": ((32, 20, 16, 80, 48, 1), (0, False)),
+            "cpg28_untiled_3x3_W64": ((32, 28, 8, 64, 48, 3), (0, True)),
+            "cpg28_untiled_3x3_W96": ((32, 28, 8, 96, 48, 3), (0, False)),
+            "cpg12_untiled_W64": ((32, 12, 32, 64, 48, 1), (0, True)),
+            "cpg12_untiled_W256": ((32, 12, 32, 256, 48, 1), (0, False)),
+            # 8-channel groups: same cap.
+            "cpg8_untiled_W64": ((32, 8, 32, 64, 48, 1), (0, True)),
+            "cpg8_untiled_3x3_W80": ((32, 8, 32, 80, 48, 3), (0, False)),
+            "cpg8_untiled_W192": ((32, 8, 32, 192, 48, 1), (0, False)),
+            # Untiled 16-channel groups: the same 64-column cap (wider ones lost
+            # at 128 columns without the LDS pad and on 1-row 1x1 images).
+            "cpg16_untiled_W64": ((32, 16, 32, 64, 48, 1), (0, True)),
+            "cpg16_untiled_W65": ((32, 16, 32, 65, 48, 1), (0, False)),
+            "cpg16_untiled_3x3_W128": ((16, 16, 16, 128, 256, 3), (0, False)),
+            "cpg16_untiled_1row_W176": ((128, 16, 1, 176, 192, 1), (0, False)),
+            "cpg16_untiled_W192": ((32, 16, 32, 192, 48, 1), (0, False)),
+            # H-tiled 1x1: from 12 channels per group; 3x3 any group.
+            "cpg8_tiled_1x1": ((32, 8, 14, 64, 16, 1), (8, False)),
+            "cpg12_tiled_1x1": ((4, 12, 32, 64, 16, 1), (4, True)),
+            "cpg8_tiled_3x3": ((4, 8, 32, 64, 16, 3), (4, True)),
+        }
+        for label, ((n, cpg, h, w, g, y), (want_bh, want_stack)) in cases.items():
+            with self.subTest(case=label):
+                req = self._grouped(
+                    N=n, C=cpg * g, K=cpg * g, Hi=h, Wi=w, G=g, Y=y, X=y,
+                    pad_h=y // 2, pad_w=y // 2,
+                )  # fmt: skip
+                name, r = self._pick(req)
+                self.assertEqual(name, self._DIRECT, label)
+                s = r.spec
+                self.assertEqual((s.variant, s.fused_weights), ("generic", True))
+                self.assertEqual((s.block_q, s.block_h), (16, want_bh), label)
+                p = gc._direct_dgrad_problem(req)
+                self.assertEqual(
+                    gc._direct_dgrad_stream_box_admits(s, p), want_stack, label
+                )
+                stack = (s.prefetch_rows, s.lds_only_sync, s.xcd_tiles)
+                self.assertEqual(
+                    stack, (2, True, True) if want_stack else (0, False, False), label
+                )
+                if not want_stack:
+                    self.assertEqual((s.lds_pad, s.stage_out, s.waves_m), (0, False, 1))
+                    # Outside the box: exactly the spec without the stack.
+                    saved = gc._DIRECT_DGRAD_STREAM_KNOBS
+                    gc._DIRECT_DGRAD_STREAM_KNOBS = False
+                    try:
+                        self.assertEqual(self._pick(req)[1].spec, s, label)
+                    finally:
+                        gc._DIRECT_DGRAD_STREAM_KNOBS = saved
+
     def test_vec_size_c_is_ignored_and_reported(self):
         r = dispatch_conv_grouped(self._grouped(vec_size_c=8))
         self.assertEqual(r.candidate.name, self._DIRECT)
@@ -865,7 +1633,9 @@ class TestGroupedDirectDgradDispatch(unittest.TestCase):
                         p.N * h_tiles,
                     ),
                 )
-                self.assertEqual(r.block, (r.spec.block_groups * 64, 1, 1))
+                self.assertEqual(
+                    r.block, (r.spec.block_groups * r.spec.waves_m * 64, 1, 1)
+                )
 
     def test_plan_fused_path_is_one_kernel_without_workspace(self):
         req = self._grouped()
@@ -910,8 +1680,14 @@ class TestGroupedDirectDgradDispatch(unittest.TestCase):
             replace(spec, weights_lds=False).kernel_name(),
             replace(spec, waves_per_eu=spec.waves_per_eu + 2).kernel_name(),
             replace(spec, variant="4c").kernel_name(),
+            replace(spec, prefetch_rows=3).kernel_name(),
+            replace(spec, lds_only_sync=not spec.lds_only_sync).kernel_name(),
+            replace(spec, waves_m=spec.waves_m + 1).kernel_name(),
+            replace(spec, lds_pad=spec.lds_pad + 8).kernel_name(),
+            replace(spec, stage_out=not spec.stage_out).kernel_name(),
+            replace(spec, xcd_tiles=not spec.xcd_tiles).kernel_name(),
         }
-        self.assertEqual(len(names), 9)
+        self.assertEqual(len(names), 15)
 
     def test_rule_table_has_catch_all_last(self):
         from dispatch.grouped_convolution import GFX950_DIRECT_DGRAD_RULES

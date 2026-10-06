@@ -217,3 +217,133 @@ to fill the device: one wave is one workgroup and the kernel streams whole
 columns without H tiling, so on one or two images the generic kernel (which
 tiles H) is faster. The floor and how it was measured are in
 `grouped_direct_dgrad_dispatch_case_study.md`.
+
+## Row-staged form (`stage_rows`)
+
+**Diagnosis.** With the fused LDS weights in place, hardware counters on the
+4c kernel showed the MFMA count equal to the reference grouped kernel's, but
+the texture-address unit busy for most of the kernel and the memory unit
+stalled: in the 4x4x4 B layout lane `group*4 + column` reads one 8-byte channel
+run, so consecutive lanes of every `buffer_load_dwordx2` sit on different
+pixels a channel row apart, and each wave issues three loads and one store per
+input row.
+
+**Levers tried first (kept off).**
+
+- Register prefetch of the next row (`load_row(y + d)` before row `y`'s
+  MFMAs): the waits moved off the critical path in the ISA but the kernel did
+  not get faster; enough waves per SIMD already hid the latency.
+- An XCD-contiguous tile order (neighbouring q tiles share halo columns):
+  within noise.
+
+**Change.** `DirectConv4cSpec.stage_rows` (with `waves_q`): every thread copies
+16-byte vectors of the workgroup's input row (`block_q + KW - 1` columns x
+`block_groups * 4` channels) into one of two LDS row buffers padded by 64 bytes
+per column, one row ahead through registers; each wave then reads its
+`KW` fragments per row with `ds_read_b64` and runs the same `KH*KW` MFMAs.
+Rows outside the image are skipped, which also drops the MFMAs that only fed
+the out-of-image output rows. Per row the global side is one 16-byte load per
+thread instead of three strided 8-byte loads per lane.
+
+**Variants swept on the target shape and kept off.** LDS-staged 16-byte output
+stores, an LDS-only row barrier, the XCD tile order on top, two or four q
+waves per workgroup and 32 groups per workgroup: none beat one wave per
+workgroup with `block_q = 4`, `block_groups = 16`, so only `stage_rows` and
+`waves_q` were productionised.
+
+**Validation.** `validate()` / `is_valid_spec_4c` (and the C++ mirrors, same
+reason text) reject `stage_rows` without the fused LDS weight form,
+`block_q != 4 * waves_q`, `waves_q > 1` without `stage_rows`, stride > 1 or
+non-"same" padding (the kernel streams output rows 1:1 with input rows and
+stores `W` columns), more than 1024 threads, and an LDS footprint over the
+target's capacity.
+
+**Dispatch.** The rule in `_select_direct_dgrad_4c_spec` /
+`_direct_dgrad_4c_takes_stage_rows` was fitted on a same-session cohort of
+`cpg == kpg == 4` shapes (1x1 and 3x3, 16 to 128 groups, images 5 to 112,
+grids from a few to tens of thousands of workgroups; arms interleaved with the
+order alternated per repetition) against the previous pick, and checked on a
+disjoint hold-out draw around the floor. Every shape at or above the 4c grid
+floor takes the staged kernel except 1x1 filters on images shorter than 8
+rows (and, after the final review below, 3x3 filters on images shorter than 4
+rows), where the staged prologue's extra barriers do not pay for so few rows and
+the direct-load kernel stays. Below the floor the generic kernel still wins on
+images it splits into H tiles (more than 8 rows), and on 3x3 images of at
+most 8 rows, which it streams whole, the staged kernel wins down to
+`_DIRECT_DGRAD_4C_STAGED_SHORT_MIN_GRID` workgroups.
+
+The first version of the rule also took the staged kernel below the floor on
+9- to 16-row images from a slightly larger grid, and on 5-row images from a
+smaller one. Both won with warm caches, but a review re-timed them with the
+caches flushed before every launch, and there most of them lost to the
+previous pick. On 9- to 16-row images the generic kernel's 4-row H tiles give
+several times the workgroups of the one-wave 4c grid, and those extra waves
+hide DRAM latency once nothing is cached. On the smallest grids the previous
+pick is igemm, which also holds up better cold. Both regions were removed. A
+probe that forced the staged kernel on every 3x3 shape below the floor (3- to
+16-row images, grids from a few dozen to just under the floor, timed cold and
+warm) set the bounds: every image taller than 8 rows lost cold below the
+floor, except where the generic kernel's own grid crosses a wave-count cliff
+(that is a generic-kernel tuning gap, not a reason to route around it), and
+5-row images lost on 64-workgroup grids. A separate hold-out draw inside the
+new bounds, plus 4c shapes above the floor, did not regress cold or warm. The
+dispatch test pins the losing shapes to the previous pick. The measurements
+live outside the tree.
+
+A later review timed the short branch by the previous pick's family and image
+width: shapes 1 to 3 columns wide that came from igemm lost to it cold (warm
+they were level or slightly behind), while every wider shape and every shape
+that came from the generic kernel held up. The short branch now also needs
+images at least `_DIRECT_DGRAD_4C_STAGED_SHORT_MIN_W` (4) columns wide; a
+re-measured cohort of 4- and 5-column shapes from both previous families held
+up cold and warm. The 4c floor branch is unchanged.
+
+The next review, and a denser grid over the short branch (1 to 8 rows, 4 to 8
+columns, grids from the short floor to just under the 4c floor, both dtypes),
+found the staged kernel ahead warm everywhere but only level with the previous
+pick cold on images of 4 rows or fewer, and slightly behind cold on some 4-row,
+5-column images at the short floor. Those images gain nothing cold, so the
+short branch now also needs `_DIRECT_DGRAD_4C_STAGED_SHORT_MIN_H` (5) rows;
+1- to 4-row images keep the previous pick, and the dispatch test pins both
+sides of the edge.
+
+The final review found the same short-image effect above the floor: 3x3
+images of 3 rows and 1 or 2 columns, at grids of several hundred workgroups,
+were consistently slightly behind the direct-load 4c kernel warm (level cold),
+while 1- and 2-row images were level and images of 4 or more rows won. The
+floor branch now also needs `_DIRECT_DGRAD_4C_STAGED_MIN_H_3X3` (4) rows for
+3x3 filters; shorter images keep the direct-load 4c kernel, which is exactly
+the previous pick, and `test_4c_row_stage_rows_policy` pins both sides.
+
+**Gates.** `library/tests/test_conv_dgrad_4c.py` (`Test4cStageRowsSpec`: name,
+thread count, every reject, helper default, fprop unaffected, emitted ops;
+`Test4cStageRowsDgrad` and the `staged` mode of the existing grids: on-device
+fp16/bf16 with H = 1, W = 1, partial q tiles, 1x1, partial staging passes and
+up to four q waves x four channel waves, NaN-filled output);
+`test_direct_mfma_dgrad_correctness.py` (dispatched staged shapes below and
+above the floor, a taller image below the floor on the generic kernel, and the
+1x1 short-image fallback);
+`test_conv_direct_grouped_backend_parity.py` (`backend="both"` over staged
+specs, every spec field forwarded to the binding, identical reject reasons);
+`tests/dispatch/test_grouped_conv_wgrad_dispatch.py`
+(`test_4c_row_stage_rows_policy`,
+`test_4c_stage_rows_keeps_previous_pick_below_floor`); parity configs 57–60 and the
+`4c_dgrad_fwl_sr2_bf16_n2h9` representative-IR case.
+
+**Replay.**
+
+```bash
+cd rocke/library
+# staged vs direct-load 4c on one shape (the benchmark sweeps both forms)
+python benchmarks/common/benchmark_direct_conv.py --direction dgrad \
+    --N 128 --Hi 56 --Wi 56 --C 128 --K 128 --groups 32 --dtype bf16 \
+    --dgrad-family fused --verify --jobs 8
+python -m pytest tests/test_conv_dgrad_4c.py tests/test_conv_direct_grouped_backend_parity.py
+cd ../platform
+TMPDIR=<private dir> python tools/check_byte_identity.py \
+    --only conv_direct_grouped --build-root <private dir>
+```
+
+**Remaining gap.** Output stores are still 8-byte MFMA-layout stores, halo
+columns are fetched once per XCD, and the padded LDS row still has some bank
+conflicts; LDS-staged stores did not pay on the target shape.

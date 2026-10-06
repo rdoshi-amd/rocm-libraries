@@ -5,7 +5,7 @@
  * grouped convolution parity harness. Selects one of N sampled spec configs by
  * argv[1] (the config index), builds the rocke_direct_conv_16c_spec_t /
  * rocke_direct_conv_4c_spec_t / rocke_direct_conv_8c_spec_t /
- * rocke_direct_conv_32c_spec_t / rocke_direct_depthwise_spec_t /
+ * rocke_direct_conv_32c_spec_t / rocke_direct_conv_spec_t / rocke_direct_depthwise_spec_t /
  * rocke_direct_depthwise_dgrad_win_spec_t / rocke_direct_conv_wgrad_spec_t identically to
  * the Python emitter conv_direct_grouped_emit.py, builds the kernel via the
  * matching rocke_build_direct_conv_*_new function and lowers via
@@ -33,7 +33,8 @@ enum
     KIND_DGRAD = 6,
     KIND_DW_DGRAD = 7,
     KIND_WGRAD = 8,
-    KIND_DW_DGRAD_WIN = 9
+    KIND_DW_DGRAD_WIN = 9,
+    KIND_GENERIC = 10
 };
 
 /* Fill the config for index `idx`. Returns 0 on success, -1 if unknown.
@@ -50,6 +51,7 @@ static int make_cfg(int idx,
                     rocke_direct_depthwise_dgrad_spec_t* sdw_dgrad,
                     rocke_direct_conv_wgrad_spec_t* swg,
                     rocke_direct_depthwise_dgrad_win_spec_t* swin,
+                    rocke_direct_conv_spec_t* sgen,
                     const char** arch)
 {
     rocke_direct_conv_problem_t p = rocke_direct_conv_problem_default();
@@ -855,6 +857,239 @@ static int make_cfg(int idx,
         *arch = (idx == 46) ? "gfx942" : "gfx950";
         return 0;
     }
+    case 49:
+    case 50:
+    case 51:
+    case 52:
+    case 53:
+    case 54:
+    case 55:
+    case 56:
+    {
+        /* windowed depthwise dgrad, Toeplitz MFMA form (mfma): one-hot weights
+         * x 8 channels per 16x16x32 MFMA, LDS-staged dY windows and dX rows.
+         * 49 odd N with w_fold 2 (empty second image of the last tile);
+         * 50 ragged H split + 2 W tiles + a partial channel block, w_fold 1;
+         * 51 9x9 w_fold 4 even H split; 52 11x11 ragged split (3 passes);
+         * 53 gfx942 -> both reject; 54 3x3 pad 0 single pass, one wave;
+         * 55 groups % 8 != 0 -> both reject; 56 non-square 7x5. */
+        static const int cfg[8][12] = {
+            /* N, H, W, groups, KH, KW, PAD, bf16, block_waves, w_fold, prefetch_rows, block_h */
+            {3, 14, 14, 64, 7, 7, 3, 1, 8, 2, 2, 0},
+            {2, 13, 37, 40, 5, 5, 2, 0, 4, 1, 1, 4},
+            {2, 10, 11, 16, 9, 9, 4, 1, 2, 4, 3, 5},
+            {1, 13, 13, 64, 11, 11, 5, 0, 8, 2, 2, 4},
+            {2, 14, 14, 64, 7, 7, 3, 1, 8, 2, 2, 0},
+            {1, 9, 12, 8, 3, 3, 0, 0, 1, 2, 1, 0},
+            {2, 14, 14, 12, 7, 7, 3, 1, 1, 2, 2, 0},
+            {2, 11, 15, 32, 7, 5, 2, 1, 4, 2, 2, 0},
+        };
+        const int* c = cfg[idx - 49];
+        p.N = c[0];
+        p.H = c[1];
+        p.W = c[2];
+        p.groups = c[3];
+        p.cpg = 1;
+        p.kpg = 1;
+        p.KH = c[4];
+        p.KW = c[5];
+        p.PAD = c[6];
+        p.dtype = c[7] ? "bf16" : "fp16";
+        *swin = rocke_direct_depthwise_dgrad_win_spec_default();
+        swin->problem = p;
+        swin->block_waves = c[8];
+        swin->block_h = c[11];
+        swin->mfma = true;
+        swin->w_fold = c[9];
+        swin->prefetch_rows = c[10];
+        *kind = KIND_DW_DGRAD_WIN;
+        *arch = (idx == 53) ? "gfx942" : "gfx950";
+        return 0;
+    }
+    case 57:
+    case 58:
+    case 59:
+    case 60:
+    {
+        /* 4c row-staged dgrad (stage_rows, fused LDS weights): 57 bf16 3x3 odd
+         * W (partial q tile), 58 fp16 1x1 with a partial row-staging pass,
+         * 59 bf16 two q waves x two channel waves, 60 fp16 H=1 (the halo rows
+         * outside the image are skipped). */
+        static const int cfg[4][8] = {
+            /* N, H, W, groups, KH, block_q, block_groups, waves_q */
+            {2, 13, 13, 32, 3, 4, 16, 1},
+            {1, 7, 9, 64, 1, 4, 64, 1},
+            {2, 9, 21, 64, 3, 8, 32, 2},
+            {1, 1, 6, 16, 3, 4, 16, 1},
+        };
+        const int* c = cfg[idx - 57];
+        p.N = c[0];
+        p.H = c[1];
+        p.W = c[2];
+        p.groups = c[3];
+        p.cpg = 4;
+        p.kpg = 4;
+        p.KH = c[4];
+        p.KW = c[4];
+        p.PAD = (c[4] - 1) / 2;
+        p.dtype = (idx == 58 || idx == 60) ? "fp16" : "bf16";
+        *s4 = rocke_direct_conv_4c_spec_default();
+        s4->problem = p;
+        s4->name = "direct_conv_4c_dgrad";
+        s4->block_q = c[5];
+        s4->block_groups = c[6];
+        s4->dgrad_fused_weights = true;
+        s4->dgrad_weights_lds = true;
+        s4->stage_rows = true;
+        s4->waves_q = c[7];
+        *kind = KIND_4C;
+        *arch = "gfx950";
+        return 0;
+    }
+    case 61:
+    case 62:
+    case 63:
+    case 64:
+    case 65:
+    case 66:
+    case 67:
+    case 68:
+    case 69:
+    case 70:
+    case 71:
+    case 72:
+    {
+        /* Generic DirectConvSpec (build_direct_conv, the grouped direct-MFMA
+         * dgrad main kernel): 61-66 the default-knob paths, 67-70 the
+         * row-stream knobs, 71-72 preloaded weights / single buffer and the
+         * knobs on gfx942 (see the Python emitter for the per-config notes). */
+        static const int cfg[12][8] = {
+            /* N, H, W, groups, cpg, kpg, K, bf16 */
+            {2, 9, 17, 8, 16, 16, 3, 0},
+            {2, 10, 13, 32, 16, 16, 3, 1},
+            {2, 9, 14, 16, 32, 32, 3, 1},
+            {2, 9, 17, 4, 24, 12, 5, 0},
+            {2, 9, 17, 4, 16, 16, 3, 1},
+            {2, 7, 17, 4, 32, 16, 3, 0},
+            {9, 10, 13, 32, 16, 16, 3, 1},
+            {8, 11, 19, 32, 16, 16, 3, 0},
+            {8, 7, 14, 16, 32, 32, 3, 1},
+            {2, 9, 14, 8, 8, 32, 5, 0},
+            {2, 9, 17, 4, 16, 16, 3, 0},
+            {2, 9, 17, 8, 16, 16, 3, 1},
+        };
+        const int* c = cfg[idx - 61];
+        p.N = c[0];
+        p.H = c[1];
+        p.W = c[2];
+        p.groups = c[3];
+        p.cpg = c[4];
+        p.kpg = c[5];
+        p.KH = c[6];
+        p.KW = c[6];
+        p.PAD = (c[6] - 1) / 2;
+        p.dtype = c[7] ? "bf16" : "fp16";
+        *sgen = rocke_direct_conv_spec_default();
+        sgen->problem = p;
+        sgen->name = "direct_mfma_dgrad";
+        *arch = "gfx950";
+        switch(idx)
+        {
+        case 61:
+            sgen->block_groups = 2;
+            sgen->dgrad_fused_weights = true;
+            break;
+        case 62:
+            sgen->block_groups = 2;
+            sgen->dgrad_fused_weights = true;
+            sgen->dgrad_weights_lds = true;
+            sgen->waves_per_eu = 4;
+            break;
+        case 63:
+            sgen->block_groups = 1;
+            sgen->fold_k32 = true;
+            sgen->dgrad_fused_weights = true;
+            sgen->dgrad_weights_lds = true;
+            break;
+        case 64:
+            sgen->block_groups = 1;
+            sgen->block_h = 4;
+            break;
+        case 65:
+            sgen->block_groups = 1;
+            sgen->block_h = 4;
+            sgen->persistent_grid = true;
+            sgen->runtime_k_loop = true;
+            break;
+        case 66:
+            sgen->block_q = 32;
+            sgen->block_groups = 1;
+            sgen->waves_q = 2;
+            sgen->waves_k = 2;
+            break;
+        case 67:
+            sgen->block_groups = 2;
+            sgen->dgrad_fused_weights = true;
+            sgen->dgrad_weights_lds = true;
+            sgen->waves_per_eu = 4;
+            sgen->prefetch_rows = 2;
+            sgen->lds_only_sync = true;
+            sgen->lds_pad = 8;
+            sgen->stage_out = true;
+            sgen->xcd_tiles = true;
+            break;
+        case 68:
+            sgen->block_q = 32;
+            sgen->block_groups = 2;
+            sgen->block_h = 8;
+            sgen->dgrad_fused_weights = true;
+            sgen->dgrad_weights_lds = true;
+            sgen->prefetch_rows = 2;
+            sgen->lds_only_sync = true;
+            sgen->lds_pad = 8;
+            sgen->stage_out = true;
+            sgen->xcd_tiles = true;
+            break;
+        case 69:
+            sgen->block_groups = 1;
+            sgen->fold_k32 = true;
+            sgen->dgrad_fused_weights = true;
+            sgen->dgrad_weights_lds = true;
+            sgen->prefetch_rows = 2;
+            sgen->lds_only_sync = true;
+            sgen->waves_m = 2;
+            sgen->lds_pad = 8;
+            sgen->stage_out = true;
+            sgen->xcd_tiles = true;
+            break;
+        case 70:
+            sgen->block_groups = 1;
+            sgen->block_h = 4;
+            sgen->dgrad_fused_weights = true;
+            sgen->prefetch_rows = 3;
+            sgen->lds_only_sync = true;
+            sgen->waves_m = 2;
+            sgen->stage_out = true;
+            break;
+        case 71:
+            sgen->block_groups = 2;
+            sgen->preload_weights = true;
+            sgen->double_buffer = false;
+            *arch = "gfx942";
+            break;
+        default: /* 72 */
+            sgen->block_groups = 2;
+            sgen->block_h = 4;
+            sgen->dgrad_fused_weights = true;
+            sgen->prefetch_rows = 2;
+            sgen->lds_only_sync = true;
+            sgen->lds_pad = 8;
+            *arch = "gfx942";
+            break;
+        }
+        *kind = KIND_GENERIC;
+        return 0;
+    }
     default:
         return -1;
     }
@@ -881,8 +1116,22 @@ int main(int argc, char** argv)
     rocke_direct_depthwise_dgrad_spec_t sdw_dgrad;
     rocke_direct_conv_wgrad_spec_t swg;
     rocke_direct_depthwise_dgrad_win_spec_t swin;
+    rocke_direct_conv_spec_t sgen;
     const char* arch = "gfx950";
-    if(make_cfg(idx, &kind, &s16, &s4, &s8, &s32, &sdw, &ssp, &sdgrad, &sdw_dgrad, &swg, &swin, &arch)
+    if(make_cfg(idx,
+                &kind,
+                &s16,
+                &s4,
+                &s8,
+                &s32,
+                &sdw,
+                &ssp,
+                &sdgrad,
+                &sdw_dgrad,
+                &swg,
+                &swin,
+                &sgen,
+                &arch)
        != 0)
     {
         fprintf(stderr, "unknown config index %d\n", idx);
@@ -909,6 +1158,8 @@ int main(int argc, char** argv)
         kernel = rocke_build_direct_conv_wgrad_new(&b, &swg, arch);
     else if(kind == KIND_DW_DGRAD_WIN)
         kernel = rocke_build_direct_depthwise_dgrad_win_new(&b, &swin, arch);
+    else if(kind == KIND_GENERIC)
+        kernel = rocke_build_direct_conv_new(&b, &sgen, arch);
     else
         kernel = rocke_build_direct_depthwise_new(&b, &sdw, arch);
     if(kernel == NULL)

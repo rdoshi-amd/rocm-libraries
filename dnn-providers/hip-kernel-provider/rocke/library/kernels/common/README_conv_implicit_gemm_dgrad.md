@@ -100,6 +100,10 @@ All convolutions — stride=1 and strided — use a **single unified tiled kerne
   with a single N tile (`cpg <= tile_n`): there no dY row is shared between
   tiles, the order removes little traffic, and launch order was faster with
   cold caches. Python only (the C++ builder refuses grouped dgrad).
+- On the tap-outer path of a stride-1 problem whose output has the input's
+  size (`Ho == Hi`, `Wo == Wi`) and a multi-tap filter, `dy_halo` swaps the
+  loop to output-channel chunk outer, filter tap inner and reuses one staged
+  dY halo tile per chunk for every tap. See [dY halo reuse](#dy-halo-reuse-dy_halo).
 - **Epilogue dispatch** based on `needs_atomic`:
   - `False` (1 sub-GEMM, split_k=1): direct `buffer_store` into `dX`.
   - `True` (stride > 1 or split_k > 1): `global_atomic_fadd` into `dX`
@@ -250,6 +254,76 @@ counterparts — and additionally keys on `cpg`: the saving is proportional to t
 B load width, which collapses to 1 on an odd channel run, where `axis_b` is
 already `"col"` and there is no scatter to remove.
 
+## dY halo reuse (`dy_halo`)
+
+On a stride-1 problem whose output has the input's size, filter tap `(y, x)`
+reads dY pixel `m + (pH - y)*Wo + (pW - x)` for dX pixel `m` in the linear
+`(n, h, w)` order. Every tap of a tile of `tile_m` consecutive dX pixels
+therefore reads one contiguous dY range: the tile plus `(Y-1)*Wo + (X-1)`
+halo pixels. The tap-outer loop re-gathers dY for every `(tap, chunk)`; with
+`dy_halo` the K loop runs output-channel chunk outer and filter tap inner
+(unrolled), loads that range into LDS once per chunk, and serves each tap from
+it at a constant row shift.
+
+| Field | Default | Effect | Name tag |
+|-------|---------|--------|----------|
+| `dy_halo` | `0` | `1`: staged halo, B (W) loaded per `(chunk, tap)` with two barriers per tap. `2`: plus a double-buffered B tile whose next-tap global reads are issued before the current tap's MFMAs and stored after them, one barrier per tap. The prefetch is fenced with `sched_barrier` on both sides; without the fence the scheduler sinks the loads next to their LDS store and nothing overlaps. | `halo1` / `halo2` |
+| `dy_halo_2d` | `False` | Stage the halo 2-D with a zero border, `(tile_m/Wo + Y-1)` image rows of `(Wo + X-1)` pixels: the loader zero-fills out-of-image pixels and no tap needs a mask. Needs a tile of whole image rows of one image (`tile_m % Wo == 0`, `Hi % (tile_m/Wo) == 0`). | `h2d` |
+| `dy_halo_setprio` | `0` | `s_setprio` level (1..3) around each tap's MFMA block. | `hprio<n>` |
+| `dy_halo_kouter_pad` | `0` | Row pad of the K-outer B tile instead of `_KOUTER_PAD`, a multiple of 8 (16-byte rows for the wide LDS store and the transpose read; an unaligned pad gave wrong dX). A wider pad removes transpose-read bank conflicts but costs LDS. | `hkp<pad>` |
+
+In the 1-D layout a lane whose shifted pixel leaves the image (row wrap, image
+edge, batch edge) reads a trailing all-zero LDS row instead: one select on the
+LDS row index per fragment row. The halo tile is padded to whole loader passes
+(`dy_halo_lds_rows`); the LDS charge (`dgrad_lds_bytes`) and the allocation
+read the same shape. A non-default `lds_k_pad` is tagged `kp<pad>` in the
+kernel name, because it changes the A tile layout.
+
+The validator rejects every combination that would be ignored or is unsafe,
+with the same reason text in both engines: `dy_halo` without the tap-outer
+loop (stride 1, dilation 1, folded record, `kpg % tile_k == 0`, no split-K,
+wave64), without a same-size output or on a 1x1 filter; `dy_halo_2d` on an
+ineligible tile; the companion knobs without `dy_halo`; a pad that is not a
+multiple of 8, or without `lds_k_outer`; and a halo that outgrows the LDS (it
+grows by `(Y-1)*Wo` rows, so wide images and large filters can).
+
+**Dispatch.** gfx950 dispatch (`_gfx950_dgrad_halo_pick`) takes `dy_halo=2`
+on problems the validator admits it on, except where the rules below keep the
+tile table. One-dimensional filters (3x1, 5x1, 7x1, 1x3, 1x5, 1x7: `X == 1`
+or `Y == 1`) always keep it: on vertical-only ones the halo pick won on some
+problems and lost on others on every tile and grid size, with no pattern in
+dY reuse, grid size or channel counts, and 1x3 lost on wide images on the
+256x64 tile. It
+picks one of three tiles by grid size and LDS occupancy: 64x64
+`w2x2` for small grids, 128x64 `w4x1` for mid-size grids, 256x64 `w4x1` for
+large grids. On mid-size grids with at most 9 taps, 256x64 is also used when
+its LDS occupancy matches the 128x64 tile's and it either has more than one
+workgroup per CU or the per-tap halo `(Y-1)*Wo + (X-1)` covers at least two
+128x64 tiles. The 4x1-wave tiles add
+`dy_halo_setprio=1`, and `dy_halo_kouter_pad=32` only where the pad keeps the
+LDS-limited workgroups per CU. A pick that fits one workgroup per CU on a grid
+that needs more falls back (256x64 to 128x64, otherwise to the tile table).
+The tile table is also kept when the picked tile's dY reuse is too low. Reuse
+is `taps * tile_m / (tile_m + (Y-1)*Wo + (X-1))`, how often each staged dY
+row feeds an MFMA. A filter with a tall halo on a very wide image has a reuse
+near 1: the halo then stages about as many rows as the tap-outer loop gathers
+and only adds per-chunk staging. The floor is 1.3 on the 4x1-wave tiles; on
+the 64x64 tile it is 1.0 on grids of more than one workgroup per CU and 0.7
+on smaller grids.
+The tile table is also kept where it has the 128x128 tile, its N tiles cover
+the group's input channels exactly in one or two tiles (`cpg` 128 or 256), and
+the halo pick would be the 128x64 tile at two or fewer workgroups per CU: the
+128x64 tile reads each dY row twice as often, and on wide images it measured
+slower (at `cpg` 256 with cold caches). Filters with more than 81 taps keep the tile table too: the
+halo loop unrolls every tap, so code size and compile time grow with it. The
+4x1-wave tiles (128x64, 256x64) take at most 49 taps
+(`_GFX950_DGRAD_HALO_4X1_MAX_TAPS`): 9x9, 7x9 and 9x7 filters that would pick
+them keep the tile table (they lost with cold caches on large weights); the
+64x64 tile keeps them.
+`dy_halo_2d` is not selected by dispatch. The C++ builder mirrors the loop for
+the ungrouped layout; grouped halo builds are Python only, like every grouped
+dgrad build. See `platform/python/rocke/examples/gfx950/conv_dgrad/stride1_igemm_dgrad_case_study.md`.
+
 ## Key Files
 
 | File | Purpose |
@@ -262,8 +336,9 @@ already `"col"` and there is no scatter to remove.
 | `../../tests/parity/conv_implicit_gemm_dgrad_emit.{c,py}` | C-vs-Python parity emitters |
 
 Library dispatch reaches this kernel through the gfx950 candidate in
-`../../dispatch/grouped_convolution.py`, whose tile comes from the shape-keyed
-table `_gfx950_dgrad_tile`.
+`../../dispatch/grouped_convolution.py`: the dY halo pick
+`_gfx950_dgrad_halo_pick` where it applies, otherwise the shape-keyed table
+`_gfx950_dgrad_tile`.
 
 ## Differences from Wgrad
 

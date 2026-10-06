@@ -856,6 +856,25 @@ def _dgrad_run_inprocess(spec, dtype, seed=0, poison=False):
     return out
 
 
+def _dgrad_reference(problem, dtype, seed=0):
+    """fp32 torch reference dX (NHWC) for the inputs _dgrad_run_inprocess draws."""
+    import torch
+
+    td = {"fp16": torch.float16, "bf16": torch.bfloat16}[dtype]
+    p = problem
+    torch.manual_seed(seed)
+    # Same draw order as _dgrad_run_inprocess, so the inputs match.
+    dY = torch.empty(p.N, p.Ho, p.Wo, p.K).uniform_(-1.0, 1.0).to(td)
+    W = torch.empty(p.K, p.Y, p.X, p.cpg).uniform_(-1.0, 1.0).to(td)
+    return torch.nn.grad.conv2d_input(
+        (p.N, p.C, p.Hi, p.Wi),
+        W.float().permute(0, 3, 1, 2).contiguous(),
+        dY.float().permute(0, 3, 1, 2).contiguous(),
+        padding=(p.pH, p.pW),
+        groups=p.groups,
+    ).permute(0, 2, 3, 1)
+
+
 # The K-outer B tile runs in two lane-mapping regimes, and the A/B has to cover
 # both: gfx950 is wave64 MFMA reading through ``ds_read_b64_tr_b16`` (4 elements
 # per lane), gfx1250 is wave32 WMMA reading through ``ds_load_tr16_b128`` (8 per
@@ -1083,21 +1102,7 @@ class TestConvDgradStride1Specializations(unittest.TestCase):
         )
 
     def _reference(self, problem, dtype, seed=0):
-        import torch
-
-        td = {"fp16": torch.float16, "bf16": torch.bfloat16}[dtype]
-        p = problem
-        torch.manual_seed(seed)
-        # Same draw order as _dgrad_run_inprocess, so the inputs match.
-        dY = torch.empty(p.N, p.Ho, p.Wo, p.K).uniform_(-1.0, 1.0).to(td)
-        W = torch.empty(p.K, p.Y, p.X, p.cpg).uniform_(-1.0, 1.0).to(td)
-        return torch.nn.grad.conv2d_input(
-            (p.N, p.C, p.Hi, p.Wi),
-            W.float().permute(0, 3, 1, 2).contiguous(),
-            dY.float().permute(0, 3, 1, 2).contiguous(),
-            padding=(p.pH, p.pW),
-            groups=p.groups,
-        ).permute(0, 2, 3, 1)
+        return _dgrad_reference(problem, dtype, seed)
 
     def test_variants_bit_identical_and_match_reference(self):
         import torch
@@ -1169,6 +1174,167 @@ class TestConvDgradStride1Specializations(unittest.TestCase):
                 bad = (got - ref).abs() > 1e-2 + 1e-2 * ref.abs()
                 self.assertFalse(torch.isnan(got).any(), f"{label}: NaN in dX")
                 self.assertEqual(int(bad.sum()), 0, f"{label}: tolerance violations")
+
+
+# dY halo reuse (DgradConvSpec.dy_halo). Adversarial shapes for the staged
+# halo: N=1, odd and non-square images, a single-column image (W=1) and one
+# narrower than the filter (7x7 on W=2), a 1x1 image, M tiles that straddle
+# image boundaries, partial M and N tiles (C not a multiple of tile_n),
+# 5x5/7x7 filters, non-square filters (1x7, 7x1, 1x3, 3x1, 3x5: the halo row
+# map handles the vertical and horizontal tap offsets separately), a grouped
+# problem, a 2-D eligible image, and the M-outer B tile. Every case runs
+# against the reference with dX poisoned (NaN = bad).
+_HALO_CASES = (
+    # (label, dtype, N, Hi, Wi, C, K, Y, X, pH, pW, groups)
+    ("n1_odd_13x17", "fp16", 1, 13, 17, 64, 256, 3, 3, 1, 1, 1),
+    ("straddle_3x70", "fp16", 2, 3, 70, 64, 128, 3, 3, 1, 1, 1),
+    ("w1_column", "fp16", 2, 33, 1, 64, 192, 3, 3, 1, 1, 1),
+    ("1x1_image", "bf16", 1, 1, 1, 64, 64, 3, 3, 1, 1, 1),
+    ("partial_n_c96", "bf16", 3, 9, 31, 96, 128, 3, 3, 1, 1, 1),
+    ("partial_n_c200", "fp16", 5, 6, 32, 200, 320, 3, 3, 1, 1, 1),
+    ("5x5_pad2", "fp16", 2, 15, 13, 128, 64, 5, 5, 2, 2, 1),
+    ("7x7_w2", "bf16", 3, 9, 2, 64, 128, 7, 7, 3, 3, 1),
+    ("2d_eligible_16x16", "bf16", 2, 16, 16, 128, 128, 3, 3, 1, 1, 1),
+    ("2d_7x7_8x32", "fp16", 4, 8, 32, 64, 64, 7, 7, 3, 3, 1),
+    ("grouped_g2", "bf16", 2, 14, 14, 256, 256, 3, 3, 1, 1, 2),
+    ("1x7_12x20", "bf16", 2, 12, 20, 64, 128, 1, 7, 0, 3, 1),
+    ("7x1_21x9", "fp16", 1, 21, 9, 64, 64, 7, 1, 3, 0, 1),
+    ("1x3_2d_16x16", "fp16", 2, 16, 16, 64, 64, 1, 3, 0, 1, 1),
+    ("3x1_odd_11x5", "bf16", 3, 11, 5, 96, 128, 3, 1, 1, 0, 1),
+    ("3x5_10x14", "bf16", 1, 10, 14, 128, 64, 3, 5, 1, 2, 1),
+)
+# (label, spec overrides) per tiling; a tiling the validator rejects for a
+# case (2-D on an ineligible image, a wide halo over the LDS) is skipped.
+_HALO_TILINGS = (
+    ("halo1_64x64", {"dy_halo": 1}),
+    ("halo2_64x64", {"dy_halo": 2}),
+    (
+        "halo2_128x64_4x1_prio_kpad",
+        {
+            "dy_halo": 2,
+            "tile_m": 128,
+            "warp_m": 4,
+            "warp_n": 1,
+            "dy_halo_setprio": 1,
+            "dy_halo_kouter_pad": 32,
+        },
+    ),
+    ("halo2_256x64_4x1", {"dy_halo": 2, "tile_m": 256, "warp_m": 4, "warp_n": 1}),
+    ("halo2_128x64_2d", {"dy_halo": 2, "tile_m": 128, "dy_halo_2d": True}),
+    ("halo2_64x64_mouter", {"dy_halo": 2, "lds_k_outer": False}),
+)
+
+
+@unittest.skipUnless(
+    ARCH == "gfx950" and _HAS_TORCH,
+    "the dY halo dgrad loop is gfx950 wave64 MFMA + torch",
+)
+class TestConvDgradDyHalo(unittest.TestCase):
+    """The dY halo loop against the reference on adversarial shapes."""
+
+    def _spec(self, problem, dtype, **kw):
+        from kernels.common.conv_implicit_gemm import ConvDataSpec
+        from kernels.common.conv_implicit_gemm_dgrad import DgradConvSpec
+
+        base = {
+            "problem": problem,
+            "name": "rocke_test_dgrad_halo",
+            "data": ConvDataSpec(dtype_a=dtype, dtype_b=dtype, dtype_d=dtype),
+            "tile_m": 64,
+            "tile_n": 64,
+            "tile_k": 64,
+            "warp_m": 2,
+            "warp_n": 2,
+            "warp_tile_m": 32,
+            "warp_tile_n": 32,
+            "warp_tile_k": 16,
+            "pipeline": "mem",
+            "epilogue": "cshuffle",
+            "lds_k_outer": True,
+        }
+        base.update(kw)
+        return DgradConvSpec(**base)
+
+    def _check(self, label, spec, dtype):
+        import torch
+
+        out = _dgrad_run_inprocess(spec, dtype, poison=True).float()
+        ref = _dgrad_reference(spec.problem, dtype)
+        bad = ((out - ref).abs() > 1e-2 + 1e-2 * ref.abs()) | ~torch.isfinite(out)
+        self.assertEqual(int(bad.sum()), 0, f"{label}: bad elements (NaN/Inf = bad)")
+
+    def test_halo_tilings_match_reference(self):
+        from kernels.common._conv_implicit_gemm_common import ConvProblem
+        from kernels.common.conv_implicit_gemm_dgrad import is_valid_dgrad_spec
+
+        ran = 0
+        for label, dtype, N, Hi, Wi, C, K, Y, X, pH, pW, g in _HALO_CASES:
+            problem = ConvProblem(
+                N=N, Hi=Hi, Wi=Wi, C=C, K=K, Y=Y, X=X, pH=pH, pW=pW, groups=g
+            )
+            for tlabel, kw in _HALO_TILINGS:
+                with self.subTest(case=label, tiling=tlabel):
+                    spec = self._spec(problem, dtype, **kw)
+                    ok, why = is_valid_dgrad_spec(spec, ARCH)
+                    if not ok:
+                        self.assertTrue("dy_halo_2d" in why or "LDS budget" in why, why)
+                        continue
+                    self.assertTrue(spec.uses_dy_halo, label)
+                    self._check(f"{label}/{tlabel}", spec, dtype)
+                    ran += 1
+        self.assertGreater(ran, 4 * len(_HALO_CASES))
+
+    def test_dispatch_halo_picks_match_reference(self):
+        """The gfx950 dgrad dispatch pick, built as dispatch ships it."""
+        from dispatch.grouped_convolution import (
+            ConvGroupedRequest,
+            _problem,
+            dispatch_conv_grouped,
+        )
+
+        cases = (
+            # (N, C, K, Hi, Wi, Y, X, G, dtype): small, mid and large halo
+            # grids, 5x5, grouped, odd image, a non-square 2-D filter
+            (1, 128, 128, 13, 17, 3, 3, 1, "bf16"),
+            (8, 256, 256, 14, 14, 3, 3, 1, "fp16"),
+            (8, 128, 128, 28, 28, 3, 3, 1, "bf16"),
+            (16, 64, 64, 28, 28, 3, 3, 1, "bf16"),
+            (4, 64, 64, 20, 20, 5, 5, 1, "fp16"),
+            (8, 256, 256, 14, 14, 3, 3, 2, "bf16"),
+            (2, 192, 128, 19, 21, 3, 5, 1, "bf16"),
+            # 3x3 on a grid of one 256x64 workgroup per CU: 128x64
+            (4, 128, 128, 64, 64, 3, 3, 1, "fp16"),
+        )
+        # one-dimensional filters keep the tile table
+        table_cases = (
+            (4, 128, 128, 17, 23, 1, 7, 1, "bf16"),
+            (4, 128, 128, 32, 120, 1, 3, 1, "fp16"),
+            (4, 128, 128, 23, 17, 7, 1, 1, "fp16"),
+            (4, 128, 128, 80, 80, 3, 1, 1, "fp16"),
+            (4, 128, 128, 96, 96, 3, 1, 1, "fp16"),
+            (2, 64, 64, 96, 96, 3, 1, 1, "bf16"),
+        )
+        for N, C, K, Hi, Wi, y, x, G, dtype in cases + table_cases:
+            with self.subTest(N=N, C=C, K=K, Hi=Hi, Wi=Wi, Y=y, X=x, G=G, dtype=dtype):
+                req = ConvGroupedRequest(
+                    N=N,
+                    C=C,
+                    K=K,
+                    Hi=Hi,
+                    Wi=Wi,
+                    Y=y,
+                    X=x,
+                    G=G,
+                    pad_h=y // 2,
+                    pad_w=x // 2,
+                    dtype=dtype,
+                    arch=ARCH,
+                    direction="dgrad",
+                )
+                spec = dispatch_conv_grouped(req).spec.to_dgrad_spec(_problem(req))
+                halo = (N, C, K, Hi, Wi, y, x, G, dtype) in cases
+                self.assertEqual(spec.uses_dy_halo, halo, spec.kernel_name())
+                self._check(spec.kernel_name(), spec, dtype)
 
 
 if __name__ == "__main__":

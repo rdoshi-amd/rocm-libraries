@@ -68,13 +68,18 @@ What the candidate selects now (`_select_direct_dgrad_spec`):
 
 | Shape class | Main kernel | Launches |
 | --- | --- | --- |
-| `cpg == kpg == 4`, 1x1/3x3, `groups % 16 == 0`, 4c grid above its floor | `DirectConv4cSpec`, default `block_q`/`block_groups`, fused weights staged through LDS (`ds_read_b64_tr_b16`) | one |
-| other admitted shapes whose preloaded weight fragments fit the register budget | generic `DirectConvSpec`, the knob table below, fused weights (LDS-staged where the slice fits), `waves_per_eu = 4` for a small preload footprint | one |
+| `cpg == kpg == 4`, 1x1/3x3, `groups % 16 == 0`, 4c grid above its floor (3x3 on images of 5 to 8 rows and at least 4 columns: a lower floor) | `DirectConv4cSpec`, default `block_q`/`block_groups`, fused weights staged through LDS (`ds_read_b64_tr_b16`), row-staged input (`stage_rows`) on gfx950 except 1x1 filters on images under 8 rows and, above the floor, 3x3 filters on images under 4 rows | one |
+| other admitted shapes whose preloaded weight fragments fit the register budget | generic `DirectConvSpec`, the knob table below, fused weights (LDS-staged where the slice fits), `waves_per_eu = 4` for a small preload footprint, and the row-stream knobs (`_direct_dgrad_stream_knobs`, see `grouped_generic_row_stream_case_study.md`) | one |
 | admitted shapes past that budget (large filters with 32-wide channel groups on both sides) | the pre-pass pipeline described below | two |
 
 The 4c row has a grid floor because one wave is one workgroup and the kernel
 does not tile H: with one or two images its grid is a few dozen workgroups,
-and the generic kernel (whose H tiling fills the device) wins there.
+and the generic kernel (whose H tiling fills the device) wins there. The
+row-staged 4c kernel (`stage_rows`) also wins below that floor for 3x3
+filters on images of at most 8 rows, which the generic kernel does not split
+into H tiles; its bounds (`_DIRECT_DGRAD_4C_STAGED_SHORT_MAX_H`,
+`_DIRECT_DGRAD_4C_STAGED_SHORT_MIN_GRID`) and how they were measured, cold
+and warm, are described in `dgrad_4c_bf16_case_study.md`.
 
 The `waves_per_eu = 4` hint for small preload footprints and the kernel-level helper
 (`direct_dgrad_spec_for_problem`) were both compared against "A's knob table

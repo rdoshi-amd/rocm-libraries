@@ -121,7 +121,7 @@ leaves it off.
 | `block_h` split | KEEP for small grids (large H × small N·C); loses on the target shapes because a split block cannot prune padding rows at build time and re-reads the halo |
 | `block_waves` | 1–4, chosen so `block_ch` does not exceed C by a whole wave |
 | Unroll budget on large filters (31×31, 33×33) | KEEP balanced shrink — rows are first halved down to about one filter height; past that the larger of rows and `block_w` is halved (the first form halved rows only, down to 1, so each block re-read a whole filter-height halo for one output row). Faster on every large-filter shape tried, same unroll size, so no compile-time change |
-| Matrix-core (Toeplitz) formulation | not attempted here — the remaining 7×7 gap vs. a matrix-core reference is structural (VALU issue rate); see the synthesis plan item for a Toeplitz MFMA kernel |
+| Matrix-core (Toeplitz) formulation | KEEP — see Lever 5; the dispatch default inside a measured box of 7×7 layers |
 
 Open lever: with the odd-KW tail fixed, `dot2` on 3×3 (fp16, 1536 channels)
 measured slightly ahead of the selected `ch_per_lane = 2` form. Dispatch still
@@ -130,6 +130,179 @@ gates `dot2` on KW ≥ 5; widening it needs the 3×3 cohort re-swept first.
 Honest losses of the dispatch heuristic against the per-shape sweep optimum are
 recorded with the measurements outside the repo; the largest is a 3×3 shape with
 192 channels where `block_waves = 1` beats the selected `block_waves = 2`.
+
+## Lever 5 — Toeplitz MFMA form (KEEP; dispatch default inside a measured 7×7 box)
+
+Knobs: `mfma`, `w_fold`, `prefetch_rows` on `DirectDepthwiseDgradWindowedSpec`
+(builder `_build_dw_dgrad_win_mfma`, C++ `dw_win_build_mfma` in the same
+translation unit as the VALU form). gfx950 only, `groups % 8 == 0`.
+
+**Why.** After `dot2` the 7×7 kernel was still bound on the VALU issue rate
+with one wave per SIMD and no latency hiding. A VALU microbenchmark showed
+that `v_dot2c_f32_*` and `v_pk_fma_f32` issue at a lower rate than `v_fmac_f32`,
+so they save instructions but not multiply-add throughput: the arithmetic
+itself had to move to the matrix core.
+
+**Formulation.** Each wave owns 8 channels and one 16×16 fp32 tile per dX row
+in flight. Tile row `m = 8q + k` is channel `k` at column parity `q`; tile
+column `n` is a column pair of one of `w_fold` images (`32 / w_fold` columns
+each). A is a one-hot diagonal weight fragment (`W[k, r, KW-1-s]` at slot `k`
+of its 8-wide K group, zero elsewhere), B holds 8 channels × 4 window
+columns, so one `v_mfma_f32_16x16x32_{f16,bf16}` covers 4 taps of both column
+parities, and a filter row takes `ceil((KW + 1) / 4)` passes. Seven of every
+eight products are discarded work; the MFMA pipe still has ample headroom, so
+the kernel becomes a memory-access problem. The KH-slot accumulator ring, the
+row streaming and the two-sentinel addressing are those of the VALU form.
+
+**Memory path — what was tried** (each step verified, then measured
+same-session against the previous one):
+
+| Step | Outcome |
+| --- | --- |
+| B loaded per lane straight from global (16-byte loads), D stored as 8-byte writes per lane | REVERT — correct but slower than `dot2`: neighbouring lanes and passes re-load the same window columns (TA busy and TCP accesses well above the VALU kernel), and the 8-byte stores double the write requests |
+| `b_share`: one load per window column per wave, B fragments built with `ds_bpermute` | REVERT (superseded) — first form ahead of the VALU kernel; dropped once the LDS-staged loads below beat it |
+| `d_pack`: lane pairs exchange halves so half the lanes write 16 bytes | REVERT — neutral |
+| `xcd_chunk`: remap workgroups so neighbours sharing dY lines share an XCD | REVERT — helps only small workgroups; the selected shapes use large ones |
+| deeper prefetch / H split / 4-image fold on the per-lane-load form | REVERT — more dY re-reads; the load path was throughput-limited |
+| dX rows staged in an LDS double buffer (one barrier per row), drained as whole 16-byte channel runs per pixel | KEEP (hardwired) — a store-free diagnostic build showed the dX writes were the largest cost; staging turns them into full-line writes |
+| dY window rows loaded block-coalesced (16-byte chunks) into a second LDS double buffer written in the same barrier phase; B read with `ds_read_b128` | KEEP (hardwired) |
+| `prefetch_rows = 2` (two dY rows in flight) on the staged form | KEEP — ahead of 1 and 3 on the 7×7 shapes |
+
+Only the winning memory path ships: the trimmed knob set is `mfma`, `w_fold`
+and `prefetch_rows`; the LDS staging of both directions is implied by `mfma`.
+`block_w` and `ch_per_lane` do not apply (`ch_per_lane` must stay 1, `block_w`
+is left out of the kernel name, so specs that differ only there build one
+kernel), and `w_fold` / `prefetch_rows` are rejected on the VALU form.
+
+**Validator guards** (identical reason text in both engines):
+
+- unrolled MFMAs per wave (`rows_per_block × KH × passes`) at most
+  `DW_DGRAD_MFMA_MAX_UNROLL`: a tall image without `block_h` would otherwise
+  unroll thousands of MFMAs into one tiny grid;
+- `block_waves ≤ 8` (two waves per SIMD, so a wave keeps 256 VGPRs) and a
+  register estimate of the resident fragments (one-hot weights, accumulators,
+  one row of B, the prefetched rows) at most `DW_DGRAD_MFMA_MAX_FRAG_VGPRS`;
+  calibrated against the compiled VGPR count up to 12×11 filters with no
+  spills (a 16-wave block spilled at 11×11 before this guard);
+- LDS bytes (`mfma_lds_bytes`, equal to the compiled group segment size) at
+  most `DW_DGRAD_MFMA_LDS_BUDGET`;
+- `prefetch_rows ≤ 4`, `w_fold ∈ {1, 2, 4}`, `groups % 8 == 0`, gfx950.
+
+**Non-finite semantics (accepted).** Finite inputs give the VALU results up to
+fp32 summation order. A non-finite dY value does not stay in its channel: the
+zero off-diagonal weights give `0 * Inf = NaN` in the other 7 channels of its
+group, and the zero-weight taps of the passes widen the receptive field to
+`4 * ceil((KW + 1) / 4)` columns: one extra column for KW = 3, 7, 11, two
+for KW = 6, 10, three for KW = 5, 9 and four for KW = 4, 8, 12 (which side
+depends on the output column parity). Rows stay exact, and nothing spreads
+across images. This is inherent to the one-hot formulation, and gradient overflow
+checks treat NaN and Inf alike. `TestNonFiniteGradients` keeps the strict
+per-channel assertion for the VALU / `dot2` forms and asserts for the MFMA
+form that every out-of-tolerance element lies in the 8-channel group of a
+non-finite input, inside that widened field, and that no non-finite
+reference value comes out finite; a second test places one Inf per image and
+group (5×5 to 9×9, odd and even widths) and bounds each one's spread to its
+field rows, its group and `4 * ceil((KW + 1) / 4)` contiguous columns. A
+single-Inf probe over 3×3 to 11×11 (square and non-square, odd and even) and
+every `w_fold` confirmed the extent exactly.
+
+**ISA (7×7, W = 14, 8 waves, `w_fold = 2`).** One MFMA per tap row and pass of
+each live row; the multiply-add VALU work disappears; per dY row one barrier,
+a handful of `ds_write` / `ds_read_b128` and 16-byte global loads and stores;
+no spills, no scratch, about half the VGPRs of the `dot2` kernel; the
+instruction count per wave drops several-fold.
+
+**Admission box** (`_dw_dgrad_mfma_admits`). Dispatch gives a request the
+MFMA form only inside a box where it was measured ahead of the `dot2` kernel
+with warm and with cold caches; every other request keeps the `dot2` pick
+unchanged:
+
+- square 7×7 filters with 'same' padding (`pad = 3`), stride 1, dilation 1;
+- C a multiple of 64 (128-byte dY pixels), at most 2048;
+- N at most 256, and a dY tensor of at most 512 MiB;
+- H from 7 to 16 rows;
+- W of 7–8 columns (one 8-column fold-4 tile), 13–16 (one 16-column fold-2
+  tile) or 19–112.
+
+How the box was found. Earlier forms of the rule admitted every filter of at
+least 5 rows and 5 columns and added exceptions (narrow-filter size gates,
+channel-alignment gates, holds for one-block-per-CU filters on large grids
+and on padded tiles) after each review found cold losses in a corner the
+previous probes had not covered: 1×K and 3×K filters, 7×9 / 9×7 / 8×8 / 9×9
+layers on large grids, channel counts off a multiple of 64, images just past
+32 columns, grids past the launch limit. The rule was then inverted: a dense
+probe of 5×5 and 7×7 layers (W from 6 to 112, H from 3 to 112, N from 1 to
+256, C from 64 to 2048, fp16 and bf16, every width band with its corners)
+timed the MFMA form against the `dot2` pick warm and cold, and the box keeps
+only the region where it won throughout:
+
+- 5×5 is close to memory-bound in the `dot2` kernel; the MFMA form won on
+  small tensors but lost cold on large ones at most widths, so 5×5 stays on
+  the `dot2` kernel (a missed gain on small 5×5 problems);
+- images taller than 16 rows are split into row chunks that each re-read a
+  6-row dY halo; on large tensors that lost cold at 13–16 columns from 17
+  to 24 rows, and broke even on some other widths just past 16 rows, so the
+  box stops at 16 rows (a missed gain on tall, wide images such as 28- and
+  56-row layers, which won);
+- images shorter than the filter (3–6 rows) lost cold on large batches;
+- 9–12 columns fill a 16-column tile only partly and lost on large tensors;
+  17–18 columns fill a 32-column tile just over half and only broke even;
+- channel counts off a multiple of 64 and the other filters stay where the
+  earlier reviews put them, on the `dot2` kernel.
+
+A fresh hold-out sample inside the final box (box corners and edges, heavy
+tensors, every width from 13 to 29, random interior) then showed the MFMA form
+ahead on every shape, warm and cold; samples just outside each edge keep the
+previous pick name for name. The NaN / Inf semantics above are unchanged.
+
+**Knob rule** (`_dw_dgrad_mfma_spec`, for requests inside the box; it also
+builds the form for explicit requests outside it):
+
+- `w_fold` 4 up to 8 columns, 2 up to 16, 1 up to 32 (the tile columns are
+  then mostly real columns); wider images take the fold with the least work
+  (`_dw_dgrad_mfma_fold`, ties to the smaller fold): every block multiplies
+  a full 32-column tile, empty image slots and padded columns included
+  (`ceil(N / w_fold) * ceil(W / tile_w) * 32`), and every real image reads a
+  `tile_w + KW - 1` column window per column tile
+  (`N * ceil(W / tile_w) * (tile_w + KW - 1)`). A single 32-column tile
+  would leave up to half of the second tile empty on images just past 32
+  columns, so W = 33 to 48 takes 8- or 16-column tiles whenever there are
+  at least two images to fill them; a single image (whose empty image slots
+  would cost more), and W = 49 to 64 (two nearly full 32-column tiles), keep
+  one image per tile;
+- `block_waves = min(8, ceil(C / 8))`, but 4 where an 8-wave block fits only
+  once per CU and the 8-wave grid is not a whole number of 256-block rounds
+  (`_dw_dgrad_mfma_blocks_per_cu`, the VGPR estimate of the resident
+  fragments against the 512-VGPR SIMD file). 7×7 fits two 8-wave blocks per
+  CU, so inside the box this only matters for explicit specs of larger
+  filters;
+- images up to 16 rows stay whole, taller ones start from balanced chunks of
+  about 14 rows;
+- while the grid has fewer than 256 workgroups (about one per CU): first 4
+  waves, then balanced chunks of about 7 rows, and below 160 workgroups about
+  4 rows;
+- `prefetch_rows = 2`;
+- a grid whose y or z extent would pass 65535 keeps the VALU form (outside
+  the box anyway; the guard stays for explicit requests).
+
+Every comparison was run twice: warm (back-to-back launches) and cold (a
+large buffer cleared before every launch). The gain over the `dot2` kernel is
+smaller cold than warm, because the MFMA kernel is memory-bound and the `dot2`
+one at 7×7 is not.
+
+Honest losses against the per-shape sweep optimum are recorded with the
+measurements outside the repo; they are on mid-sized grids where 8 waves with
+a smaller H chunk and 4 waves with a larger one are close (rows-first would
+win some of them, waves-first others). A first form of the rule also stepped
+down to chunks of about 4 rows on grids that were already mid-sized; that
+lost to chunks of about 7 on every such shape re-measured, so the 4-row step
+is now limited to grids below 160 workgroups.
+
+**Parity gate:** configs 49-56 in
+`library/tests/parity/conv_direct_grouped_emit.{c,py}` (odd N under a 2-image
+fold, ragged H split with two W tiles and a partial channel block, 9×9 with a
+4-image fold, 11×11 split, 3×3 single pass, non-square 7×5, and a gfx942 and a
+`groups % 8 != 0` config both engines reject). No new IR op was needed.
 
 ## ISA evidence (per lane, 7×7, W = 14, before → after)
 
@@ -147,8 +320,8 @@ recorded with the measurements outside the repo; the largest is a 3×3 shape wit
 cd rocke/library
 export PYTHONPATH=<engine-build>/cpp/bindings:../platform/python:. ROCKE_CPP_STRICT=1
 
-# correctness (adversarial shapes, Inf propagation, dispatch end-to-end),
-# manifest rule bad == 0
+# correctness (adversarial shapes for the VALU and MFMA forms, Inf / NaN
+# propagation bounds, dispatch end-to-end), manifest rule bad == 0
 python -m pytest -q tests/test_conv_dgrad_depthwise_windowed.py
 python -m pytest -q tests/dispatch/test_grouped_conv_dgrad_depthwise_dispatch.py
 

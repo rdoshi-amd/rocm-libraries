@@ -142,6 +142,24 @@ typedef struct rocke_dgrad_conv_spec
      * x (output-channel chunk inner) where uses_tap_outer_k holds. false
      * keeps the flat k_dg loop and tags the kernel name "_flatk". */
     bool tap_outer_k; /* default true */
+
+    /* Mirrors DgradConvSpec.dy_halo: dY halo reuse on a stride-1 problem
+     * whose output has the input's size. 0 = off; 1 = one staged dY halo
+     * tile per output-channel chunk serving every filter tap; 2 = 1 plus a
+     * double-buffered B tile with a pinned register prefetch of the next
+     * tap's W tile. Tags "_halo1" / "_halo2". */
+    int dy_halo; /* default 0 */
+    /* Mirrors DgradConvSpec.dy_halo_2d: stage the halo 2-D with a zero
+     * border (needs tile_m % Wo == 0 and Hi % (tile_m / Wo) == 0). Tags
+     * "_h2d". */
+    bool dy_halo_2d; /* default false */
+    /* Mirrors DgradConvSpec.dy_halo_setprio: s_setprio level (1..3) around
+     * each tap's MFMA block; 0 = off. Tags "_hprio<level>". */
+    int dy_halo_setprio; /* default 0 */
+    /* Mirrors DgradConvSpec.dy_halo_kouter_pad: K-outer B row pad (a
+     * multiple of 8) instead of ROCKE_DGRAD_KOUTER_PAD; 0 = default. Tags
+     * "_hkp<pad>". */
+    int dy_halo_kouter_pad; /* default 0 */
 } rocke_dgrad_conv_spec_t;
 
 /* Default-constructed spec (every field == Python dataclass default). */

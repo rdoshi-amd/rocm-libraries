@@ -585,6 +585,223 @@ def _spec(idx: int):
             "gfx950",
         )
 
+    if idx == 26:
+        # dY halo reuse (dy_halo=1): one staged 1-D halo tile per output-channel
+        # chunk serving all nine taps, two barriers per tap. Odd image, N=2 so
+        # a 64-row tile straddles an image boundary, and a partial last M tile.
+        p = _cp(N=2, Hi=13, Wi=17, C=64, K=128, Y=3, X=3, pH=1, pW=1)
+        return (
+            DgradConvSpec(
+                problem=p,
+                pipeline="mem",
+                epilogue="cshuffle",
+                lds_k_outer=True,
+                dy_halo=1,
+            ),
+            "gfx950",
+        )
+
+    if idx == 27:
+        # dy_halo=2 on the 128x64 4x1-wave dispatch tile: double-buffered B
+        # with the pinned prefetch, s_setprio around each tap's MFMAs and the
+        # wider K-outer B row pad.
+        p = _cp(N=2, Hi=16, Wi=16, C=128, K=128, Y=3, X=3, pH=1, pW=1)
+        return (
+            DgradConvSpec(
+                problem=p,
+                tile_m=128,
+                tile_n=64,
+                tile_k=64,
+                warp_m=4,
+                warp_n=1,
+                warp_tile_m=32,
+                warp_tile_n=32,
+                warp_tile_k=16,
+                pipeline="mem",
+                epilogue="cshuffle",
+                lds_k_outer=True,
+                dy_halo=2,
+                dy_halo_setprio=1,
+                dy_halo_kouter_pad=32,
+            ),
+            "gfx950",
+        )
+
+    if idx == 28:
+        # dy_halo=2 with the 2-D zero-bordered halo (tile_m = 8 whole rows of
+        # a 16-wide image): no row masks, the loader zero-fills the border.
+        p = _cp(N=2, Hi=16, Wi=16, C=64, K=128, Y=3, X=3, pH=1, pW=1)
+        return (
+            DgradConvSpec(
+                problem=p,
+                tile_m=128,
+                tile_n=64,
+                tile_k=64,
+                warp_m=2,
+                warp_n=2,
+                warp_tile_m=32,
+                warp_tile_n=32,
+                warp_tile_k=16,
+                pipeline="mem",
+                epilogue="cshuffle",
+                lds_k_outer=True,
+                dy_halo=2,
+                dy_halo_2d=True,
+                dy_halo_setprio=2,
+            ),
+            "gfx950",
+        )
+
+    if idx == 29:
+        # dy_halo=2 with the M-outer B tile (no K-outer pad) on a 5x5 filter,
+        # pad 2, image narrower than a tile row (9x11, N=1).
+        p = _cp(N=1, Hi=9, Wi=11, C=64, K=64, Y=5, X=5, pH=2, pW=2)
+        return (
+            DgradConvSpec(
+                problem=p,
+                pipeline="mem",
+                epilogue="cshuffle",
+                dy_halo=2,
+            ),
+            "gfx950",
+        )
+
+    if idx == 30:
+        # dy_halo=2 on the 256x64 4x1-wave tile with a non-default A row pad
+        # (lds_k_pad=16, tagged kp16 in the kernel name) and the 1-D halo of
+        # a 20-wide image.
+        p = _cp(N=1, Hi=20, Wi=20, C=64, K=64, Y=3, X=3, pH=1, pW=1)
+        return (
+            DgradConvSpec(
+                problem=p,
+                tile_m=256,
+                tile_n=64,
+                tile_k=64,
+                warp_m=4,
+                warp_n=1,
+                warp_tile_m=32,
+                warp_tile_n=32,
+                warp_tile_k=16,
+                pipeline="mem",
+                epilogue="cshuffle",
+                lds_k_outer=True,
+                lds_k_pad=16,
+                dy_halo=2,
+            ),
+            "gfx950",
+        )
+
+    if idx == 31:
+        # dy_halo=2 on the 16x16x32 atom (4 fragment rows per lane group).
+        p = _cp(N=1, Hi=8, Wi=8, C=64, K=64, Y=3, X=3, pH=1, pW=1)
+        return (
+            DgradConvSpec(
+                problem=p,
+                tile_m=64,
+                tile_n=64,
+                tile_k=64,
+                warp_m=2,
+                warp_n=2,
+                warp_tile_m=16,
+                warp_tile_n=16,
+                warp_tile_k=32,
+                pipeline="mem",
+                epilogue="cshuffle",
+                lds_k_outer=True,
+                dy_halo=2,
+            ),
+            "gfx950",
+        )
+
+    if idx == 32:
+        # dy_halo=2 on a 1x7 filter (pad 0x3): a one-row halo per tile, the
+        # horizontal taps only, on the 128x64 4x1-wave tile with s_setprio and
+        # the K-outer B row pad.
+        p = _cp(N=2, Hi=12, Wi=20, C=64, K=128, Y=1, X=7, pH=0, pW=3)
+        return (
+            DgradConvSpec(
+                problem=p,
+                tile_m=128,
+                tile_n=64,
+                tile_k=64,
+                warp_m=4,
+                warp_n=1,
+                warp_tile_m=32,
+                warp_tile_n=32,
+                warp_tile_k=16,
+                pipeline="mem",
+                epilogue="cshuffle",
+                lds_k_outer=True,
+                dy_halo=2,
+                dy_halo_setprio=1,
+                dy_halo_kouter_pad=32,
+            ),
+            "gfx950",
+        )
+
+    if idx == 33:
+        # dy_halo=2 on a 7x1 filter (pad 3x0): vertical taps only, image
+        # narrower than the filter is tall (21x9, N=1), default epilogue.
+        p = _cp(N=1, Hi=21, Wi=9, C=64, K=64, Y=7, X=1, pH=3, pW=0)
+        return (
+            DgradConvSpec(
+                problem=p,
+                pipeline="mem",
+                epilogue="default",
+                lds_k_outer=True,
+                dy_halo=2,
+            ),
+            "gfx950",
+        )
+
+    if idx == 34:
+        # dy_halo=2 on a 3x5 filter (pad 1x2) on the 256x64 4x1-wave tile: row
+        # and column offsets of the taps differ in extent.
+        p = _cp(N=1, Hi=10, Wi=14, C=128, K=64, Y=3, X=5, pH=1, pW=2)
+        return (
+            DgradConvSpec(
+                problem=p,
+                tile_m=256,
+                tile_n=64,
+                tile_k=64,
+                warp_m=4,
+                warp_n=1,
+                warp_tile_m=32,
+                warp_tile_n=32,
+                warp_tile_k=16,
+                pipeline="mem",
+                epilogue="cshuffle",
+                lds_k_outer=True,
+                dy_halo=2,
+                dy_halo_setprio=1,
+            ),
+            "gfx950",
+        )
+
+    if idx == 35:
+        # dy_halo=2 with the 2-D zero-bordered halo on a 1x7 filter (tile_m =
+        # 8 whole rows of a 16-wide image).
+        p = _cp(N=2, Hi=16, Wi=16, C=64, K=64, Y=1, X=7, pH=0, pW=3)
+        return (
+            DgradConvSpec(
+                problem=p,
+                tile_m=128,
+                tile_n=64,
+                tile_k=64,
+                warp_m=2,
+                warp_n=2,
+                warp_tile_m=32,
+                warp_tile_n=32,
+                warp_tile_k=16,
+                pipeline="mem",
+                epilogue="cshuffle",
+                lds_k_outer=True,
+                dy_halo=2,
+                dy_halo_2d=True,
+            ),
+            "gfx950",
+        )
+
     raise SystemExit(f"unknown config index {idx}")
 
 

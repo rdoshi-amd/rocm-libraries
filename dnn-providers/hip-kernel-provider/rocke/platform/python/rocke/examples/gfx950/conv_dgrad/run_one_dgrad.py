@@ -58,8 +58,10 @@ def _parse_args(argv=None):
         help="override -u/-v in --miopen-cmd. stride > 1 takes the tilde "
         "sub-GEMM decomposition, which is a different kernel shape entirely.",
     )
-    # Defaults are the 64x64 entry of the shipped dispatch tile table -- see
-    # _gfx950_dgrad_tile in library/dispatch/grouped_convolution.py.
+    # Defaults are the 64x64 entry of the shipped dispatch tile table, with
+    # no dY halo knobs -- see _gfx950_dgrad_tile and _gfx950_dgrad_halo_pick
+    # (the halo pick dispatch takes on eligible stride-1 problems) in
+    # library/dispatch/grouped_convolution.py.
     ap.add_argument("--tile-m", type=int, default=64)
     ap.add_argument("--tile-n", type=int, default=64)
     ap.add_argument("--tile-k", type=int, default=64)

@@ -543,7 +543,10 @@ With `dgrad_fused_weights` (the hook's default) the 4c kernel reads the
 original `W` and forms the flipped, transposed fragments in its prologue
 (scalar gathers, or with `dgrad_weights_lds` an LDS copy of the workgroup's
 weight slice plus one `ds_read_b64_tr_b16` per tap on gfx950): one kernel, no
-workspace. The generic `DirectConvSpec` dgrad has the same knobs, and
+workspace. With the LDS form, `stage_rows` (the hook's default on gfx950)
+copies each input row into a padded, double-buffered LDS row with 16-byte
+loads and reads the B fragments with `ds_read_b64` instead of per-lane 8-byte
+global loads (`waves_q` waves split `block_q`; stride 1, "same" padding). The generic `DirectConvSpec` dgrad has the same knobs, and
 `direct_dgrad_spec_for_problem` picks the single-kernel form for a grouped
 stride-1 problem.
 
@@ -674,6 +677,9 @@ class DirectDepthwiseDgradWindowedSpec:
     ch_per_lane: int = 1    # 1/2/4/8 adjacent channels per lane (vector I/O)
     block_h: int = 0        # dX rows per block; 0 = whole H
     dot2: bool = False      # tap pairs on arith.fdot2 (gfx950 only)
+    mfma: bool = False      # Toeplitz MFMA form (gfx950, groups % 8 == 0)
+    w_fold: int = 1         # mfma: images per 16x16 tile (1, 2, 4)
+    prefetch_rows: int = 1  # mfma: dY rows in flight
     wave_size: int = 64
 ```
 
@@ -703,9 +709,57 @@ Constraints (`is_valid_depthwise_dgrad_win_spec` /
 Grid: `(ceil(W / block_w), ceil(groups / block_ch), N * h_tiles)` with
 `block_ch = block_waves * 64 * ch_per_lane`.
 
-Parity gate: configs 32-39 in `library/tests/parity/conv_direct_grouped_emit.{c,py}`
-(scalar FMA, dot2 with odd and even KW, channel vectors, ragged and even H split,
-and a gfx942 dot2 config both engines reject).
+**Toeplitz MFMA form (`mfma=True`, gfx950).** Each wave owns 8 channels and a
+16x16 fp32 tile per dX row in flight: rows are (channel, column parity),
+columns are column pairs of `w_fold` images (`tile_w = 32 / w_fold` columns
+each). A one-hot diagonal weight fragment (A) meets 8 channels x 4 window
+columns (B) in one `mfma_f32_16x16x32_{f16,bf16}`, so a filter row takes
+`ceil((KW + 1) / 4)` passes. dY window rows (16-byte coalesced loads,
+`prefetch_rows` rows in flight) and finished dX rows go through two LDS double
+buffers that share one barrier per row; the block writes whole 16-byte channel
+runs per pixel. `block_w` and `ch_per_lane` do not apply (`ch_per_lane` must be
+1; `block_w` stays out of the kernel name). `block_ch = 8 * block_waves`, grid
+`(ceil(W / tile_w), ceil(groups / block_ch), ceil(N / w_fold) * h_tiles)`.
+Extra constraints: `groups % 8 == 0`, `block_waves <= 8`, `w_fold in {1, 2, 4}`,
+`1 <= prefetch_rows <= 4`, at most `DW_DGRAD_MFMA_MAX_UNROLL` unrolled MFMAs
+(`rows_per_block * KH * passes`; set `block_h` for tall images), the resident
+fragment estimate `mfma_frag_vgprs()` within `DW_DGRAD_MFMA_MAX_FRAG_VGPRS`,
+and `mfma_lds_bytes()` within `DW_DGRAD_MFMA_LDS_BUDGET`. `w_fold` and
+`prefetch_rows` must stay 1 without `mfma`.
+
+Non-finite semantics differ between the forms. The VALU forms (including
+`dot2`) keep an Inf / NaN in dY inside its channel and receptive field. The
+MFMA form multiplies zero off-diagonal weights against the other 7 channels of
+the group, so a non-finite dY value reaches every channel of its 8-channel
+group, in its receptive field rows and over `4 * ceil((KW + 1) / 4)` columns
+(the zero-weight taps of the passes: one extra column for KW = 3, 7, 11, two
+for KW = 6, 10, three for KW = 5, 9, four for KW = 4, 8, 12; `0 * Inf = NaN`);
+finite
+inputs agree with the VALU form up to fp32 summation order.
+
+Dispatch (gfx950, `_dw_dgrad_mfma_admits`): the MFMA form is taken only
+inside a measured box where it beat the `dot2` VALU kernel warm and cold:
+square 7x7 filters with `pad = 3`, `C % 64 == 0` and `C <= 2048`, `N <= 256`,
+`7 <= H <= 16`, W in 7-8, 13-16 or 19-112, and dY at most 512 MiB.
+Everything else (5x5 and other filters, taller or shorter images, other
+widths and channel counts) keeps the VALU pick. Knob rule
+(`_dw_dgrad_mfma_spec`): `w_fold` 4 up to 8 columns, 2 up to 16, 1 up to 32,
+and for wider images the fold with the least `ceil(N / w_fold) * ceil(W /
+tile_w) * 32` (MFMA tile columns, empty image slots and padding included)
+plus `N * ceil(W / tile_w) * (tile_w + KW - 1)` (window columns read); ties
+to the smaller fold; `block_waves = min(8, ceil(C / 8))`, or 4 where the VGPR
+estimate (`mfma_frag_vgprs` plus a fixed overhead) fits only one 8-wave block
+per CU and the 8-wave grid is not a multiple of 256 blocks; images up to 16
+rows whole, taller ones in balanced chunks of about 14 rows; a grid below 256
+workgroups first drops to 4 waves, then to chunks of about 7 rows, and below
+160 workgroups to about 4; `prefetch_rows = 2`. Specs the MFMA validator
+declines and MFMA grids past the 65535 y/z launch limit keep the VALU pick.
+
+Parity gate: configs 32-41 (VALU form: scalar FMA, dot2 with odd and even KW,
+channel vectors, ragged and even H split, and a gfx942 dot2 config both
+engines reject) and 49-56 (MFMA form: w_fold 1/2/4, H splits, 3x3 to 11x11 and
+non-square filters, gfx942 and `groups % 8 != 0` rejects) in
+`library/tests/parity/conv_direct_grouped_emit.{c,py}`.
 
 ### MFMA Grouped Dgrad Pipeline (`plan_direct_mfma_dgrad`)
 
@@ -746,7 +800,14 @@ Validity (`DirectConvSpec.validate`, also run by `is_valid_spec`):
   flushes output rows `0..H-1` of its input height only.
 - `waves_k` must divide the K-atom count *at the atom width in use*
   (`cpg // 32` under `fold_k32`); otherwise a wave owns zero atoms.
-- `is_valid_spec` also checks the LDS footprint (`direct_conv_lds_bytes`).
+- `is_valid_spec` also checks the LDS footprint (`direct_conv_lds_bytes`, the
+  allocation after the LDS pool packer's placement).
+- Row-stream knobs: `prefetch_rows` in 0..3 and `lds_only_sync` need
+  `double_buffer` and no persistent grid; `waves_m > 1` needs
+  `kpg % (16 * waves_m) == 0`, `waves_q == waves_k == 1` and preloaded or
+  fused weights; `stage_out` needs `kpg % 16 == 0` and `waves_q == waves_k ==
+  1`; `lds_pad` is a non-negative multiple of 8; `xcd_tiles` needs at least 8
+  image row bands. Both engines reject with the same reason text.
 
 The reorganize pass indexes `W_T` with the per-group `k` (W_T's last dim is
 `kpg`) and stores every lane, zero where the source is out of range: the main
@@ -771,6 +832,25 @@ The main kernel (`_select_direct_dgrad_spec`):
   preloaded footprint (`_direct_dgrad_fused_waves_per_eu`); the pre-pass
   pipeline when the fused form exceeds its register budget (large filters with
   32-wide output and reduction channel groups).
+- fused generic picks of square channel groups (`cpg == kpg`) on 16-column
+  strips (`block_q` 16) whose output channels do not split into two 16-wide halves (`waves_m=2` not valid),
+  inside the measured image box (`_direct_dgrad_stream_box_admits`: untiled
+  images of every channel group up to `_DIRECT_DGRAD_STREAM_UNTILED_MAX_WO`
+  = 64 output columns; on H-tiled images 1x1 filters only from
+  `_DIRECT_DGRAD_STREAM_TILED_1X1_MIN_CPG` = 12 channels per group) and
+  whose grid has at least 8 row bands (`xcd_tiles` valid) then take the
+  row-stream knobs (`_direct_dgrad_stream_knobs`): `prefetch_rows=2` with
+  `lds_only_sync`, `xcd_tiles`, an 8-element `lds_pad` on staged columns of an even number of
+  16-byte units and `stage_out` for 16-multiple output channels. `lds_pad` and
+  `stage_out` are dropped (`stage_out` first) when they would add a launch
+  round (`_direct_dgrad_lds_rounds`: workgroups over CUs times the LDS- or
+  wave-limited workgroups per CU).
+  Every other pick keeps the spec without row-stream knobs (the stack lost
+  on non-square groups, without the XCD order, on some 32-column strips, on wide
+  untiled images and on 8-channel 1x1 H-tiled images); where `waves_m=2` is
+  valid, `_DIRECT_DGRAD_STREAM_SPLIT_M` opts the pick into the same stack on top of
+  `waves_m=2` (it lost on small-batch, many-group images, so it is off by
+  default; the `waves_m` spec knob itself stays available).
 
 The candidate then declines the corners where that kernel measured slower than
 the igemm candidate (`_direct_dgrad_policy_errors`; every reason starts with
@@ -803,9 +883,11 @@ hold-out draw:
   per-class size floor.
 
 Declined shapes run the igemm candidate unchanged. There is no C++ dispatch
-selector to mirror; the kernels themselves are dual-engine (4c and its fused
-forms) or Python-only (the generic `DirectConvSpec` kernel and its pre-pass
-kernels have no C++ mirror yet).
+selector to mirror; the main kernels are dual-engine (the 4c kernel and its
+fused / row-staged forms, and the generic `DirectConvSpec` kernel with every
+knob: `rocke_build_direct_conv`, `lower_conv_direct_grouped(spec,
+kind="generic")`), the transpose and reorganize pre-pass kernels are
+Python-only.
 
 The spec (`ConvGroupedDirectDgradSpec`) carries the knobs and
 `launch_plan(req)`. `block_groups` comes from the `GFX950_DIRECT_DGRAD_RULES`

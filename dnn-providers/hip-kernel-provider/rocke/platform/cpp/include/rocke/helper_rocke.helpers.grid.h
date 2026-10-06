@@ -5,8 +5,10 @@
  *
  * Grid / workgroup-id remapping helpers for chiplet locality.
  *
- * This phase ports ONLY:
+ * This phase ports:
  *   chiplet_aware_super_tile_dynamic
+ *   chiplet_aware_super_tile
+ *   chiplet_transform_chunked          (public wrapper of the file-local port)
  *
  * which is the runtime composition of:
  *   chiplet_transform_chunked_dynamic  (helper, ported here as a file-local
@@ -81,6 +83,18 @@ rocke_super_tile_swizzle_result_t rocke_chiplet_aware_super_tile(rocke_ir_builde
                                                                  int wgm,
                                                                  int num_xcds,
                                                                  int chunk_size);
+
+/* Compile-time chiplet remap alone.
+ *
+ * Python signature:
+ *   chiplet_transform_chunked(b, wgid, *, num_wgs, num_xcds=NUM_XCDS_MI300X,
+ *                             chunk_size=64)
+ *
+ * wgid is an i32 SSA Value; num_wgs / num_xcds / chunk_size are compile-time
+ * ints. Emits the same op stream as the Python helper. On invalid args the
+ * builder's sticky error is set and NULL is returned. */
+rocke_value_t* rocke_chiplet_transform_chunked(
+    rocke_ir_builder_t* b, rocke_value_t* wgid, int num_wgs, int num_xcds, int chunk_size);
 
 #ifdef __cplusplus
 } /* extern "C" */

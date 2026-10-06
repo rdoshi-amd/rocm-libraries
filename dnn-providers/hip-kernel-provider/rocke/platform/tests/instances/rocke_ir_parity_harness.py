@@ -762,7 +762,8 @@ def build_deep(kind, arch, **kw):
 # conv_direct_grouped family in tests/instances/differential/golden/llvm_gfx_all.json).
 # The existing direct-conv variants occupy configs 0-24; the wgrad variant is
 # configs 25-31 (25 mfma_k=32, 26 mfma_k=16, 27 multi-wave K/C/Q, 28-29 the two
-# gfx942 rejection paths, 30-31 bf16 at mfma_k=32 / 16).
+# gfx942 rejection paths, 30-31 bf16 at mfma_k=32 / 16); the generic
+# DirectConvSpec kernel (build_direct_conv) is configs 61-72.
 # If you add new direct-conv variants, add matching configs to both emitters and
 # re-bless the golden.
 # ---------------------------------------------------------------------------
@@ -831,6 +832,8 @@ def build_direct_4c(
     dtype="fp16",
     dgrad_fused_weights=False,
     dgrad_weights_lds=False,
+    stage_rows=False,
+    waves_q=1,
 ):
     def _build():
         from kernels.common.conv_direct_grouped import (
@@ -858,6 +861,8 @@ def build_direct_4c(
             block_groups=block_groups,
             dgrad_fused_weights=dgrad_fused_weights,
             dgrad_weights_lds=dgrad_weights_lds,
+            stage_rows=stage_rows,
+            waves_q=waves_q,
         )
         return build_direct_conv_4c(spec, arch=arch)
 
@@ -865,9 +870,22 @@ def build_direct_4c(
 
 
 def build_direct_mfma_dgrad_fused(
-    arch, N, H, W, groups, cpg, kpg, *, dtype, fold_k32, weights_lds, block_groups=2
+    arch,
+    N,
+    H,
+    W,
+    groups,
+    cpg,
+    kpg,
+    *,
+    dtype,
+    fold_k32,
+    weights_lds,
+    block_groups=2,
+    knobs=None,
 ):
-    """Single-kernel direct-MFMA dgrad (DirectConvSpec, fused weights)."""
+    """Single-kernel direct-MFMA dgrad (DirectConvSpec, fused weights);
+    ``knobs`` adds row-stream fields (prefetch_rows, lds_pad, ...)."""
 
     def _build():
         from kernels.common.conv_direct_grouped import (
@@ -886,6 +904,7 @@ def build_direct_mfma_dgrad_fused(
             fold_k32=fold_k32,
             dgrad_fused_weights=True,
             dgrad_weights_lds=weights_lds,
+            **(knobs or {}),
         )
         return build_direct_conv(spec, arch=arch)
 
@@ -2963,6 +2982,27 @@ def cases():
             dgrad_weights_lds=True,
         ),
     )
+    # Row-staged 4c dgrad (stage_rows; matches parity emit idx=59).
+    add(
+        "conv_direct",
+        "conv_direct/gfx950/4c_dgrad_fwl_sr2_bf16_n2h9",
+        "gfx950",
+        build_direct_4c(
+            "irhash_direct4c_950_dgrad_fwl_sr2",
+            "gfx950",
+            N=2,
+            H=9,
+            W=21,
+            groups=64,
+            block_q=8,
+            block_groups=32,
+            dtype="bf16",
+            dgrad_fused_weights=True,
+            dgrad_weights_lds=True,
+            stage_rows=True,
+            waves_q=2,
+        ),
+    )
     add(
         "conv_direct",
         "conv_direct/gfx942/4c_dgrad_fw_fp16_n1h8",
@@ -3012,6 +3052,55 @@ def cases():
             dtype="bf16",
             fold_k32=True,
             weights_lds=True,
+        ),
+    )
+    # Row-stream knobs (the dispatch's stack; matches parity emit idx=67/69).
+    add(
+        "conv_direct",
+        "conv_direct/gfx950/mfma_dgrad_fwl_c16_stream_bf16",
+        "gfx950",
+        build_direct_mfma_dgrad_fused(
+            "gfx950",
+            N=8,
+            H=7,
+            W=13,
+            groups=32,
+            cpg=16,
+            kpg=16,
+            dtype="bf16",
+            fold_k32=False,
+            weights_lds=True,
+            knobs={
+                "prefetch_rows": 2,
+                "lds_only_sync": True,
+                "lds_pad": 8,
+                "stage_out": True,
+                "xcd_tiles": True,
+            },
+        ),
+    )
+    add(
+        "conv_direct",
+        "conv_direct/gfx950/mfma_dgrad_fwl_c32_k32_wm2_bf16",
+        "gfx950",
+        build_direct_mfma_dgrad_fused(
+            "gfx950",
+            N=8,
+            H=7,
+            W=13,
+            groups=16,
+            cpg=32,
+            kpg=32,
+            dtype="bf16",
+            fold_k32=True,
+            weights_lds=True,
+            block_groups=1,
+            knobs={
+                "prefetch_rows": 2,
+                "lds_only_sync": True,
+                "waves_m": 2,
+                "xcd_tiles": True,
+            },
         ),
     )
     add(

@@ -15,6 +15,12 @@ replaced silently-ignored knobs:
     ~1000 VGPRs and returned wrong dX on a large dense bf16 3x3 problem);
   - compv4 is a schedule policy here and is no longer charged a second LDS
     buffer.
+
+It also covers the dY halo reuse knobs (``dy_halo``, ``dy_halo_2d``,
+``dy_halo_setprio``, ``dy_halo_kouter_pad``): the validator rejects every
+combination that would be ignored or is unsafe, the kernel name tags only the
+knobs that are set (and a non-default ``lds_k_pad``), the LDS charge equals
+the allocation, and the emitted K loop has the documented shape.
 """
 
 from __future__ import annotations
@@ -27,6 +33,7 @@ from kernels.common.conv_implicit_gemm import ConvDataSpec
 from kernels.common.conv_implicit_gemm_dgrad import (
     DgradConvSpec,
     build_implicit_gemm_conv_dgrad,
+    dgrad_lds_bytes,
     is_valid_dgrad_spec,
     xcd_contiguous_tile_order,
 )
@@ -515,6 +522,182 @@ class TestValidatorRules(unittest.TestCase):
         )
         ok, why = is_valid_dgrad_spec(spec, _ARCH)
         self.assertTrue(ok, why)
+
+
+def _k_loop_ops(spec, arch=_ARCH):
+    """Op names, in order, of the body of the kernel's innermost K loop."""
+    k = build_implicit_gemm_conv_dgrad(spec, arch=arch)
+    loops = []
+
+    def walk(ops):
+        for op in ops:
+            if op.name == "scf.for" and not any(
+                o.name == "scf.for" for r in op.regions for o in r.ops
+            ):
+                loops.append(op)
+            for region in getattr(op, "regions", ()) or ():
+                walk(region.ops)
+
+    walk(k.body.ops if hasattr(k, "body") else k.ops)
+    assert len(loops) == 1, [op.name for op in loops]
+    names = []
+
+    def flat(ops):
+        for op in ops:
+            names.append(op.name)
+            for region in getattr(op, "regions", ()) or ():
+                flat(region.ops)
+
+    for region in loops[0].regions:
+        flat(region.ops)
+    return names
+
+
+_HALO_TILE_4X1 = {"tile_m": 128, "warp_m": 4, "warp_n": 1}
+
+
+class TestDyHalo(unittest.TestCase):
+    """dY halo reuse knobs (DgradConvSpec.dy_halo and companions)."""
+
+    def test_default_off_and_name_tags(self):
+        name = _spec().kernel_name()
+        for tag in ("halo", "h2d", "hprio", "hkp", "_kp"):
+            self.assertNotIn(tag, name)
+        name = _spec(
+            problem=_problem(Hi=16, Wi=16),
+            dy_halo=2,
+            dy_halo_2d=True,
+            dy_halo_setprio=1,
+            dy_halo_kouter_pad=32,
+        ).kernel_name()
+        self.assertTrue(name.endswith("_kouter_halo2_h2d_hprio1_hkp32"), name)
+        self.assertTrue(_spec(dy_halo=1).kernel_name().endswith("_halo1"))
+
+    def test_lds_k_pad_reaches_the_name(self):
+        # A non-default A row pad is a different LDS layout and must not
+        # collide with the default build; the default pad spelled out is the
+        # same kernel and keeps the default name.
+        self.assertIn("_kp16", _spec(lds_k_pad=16).kernel_name())
+        self.assertEqual(_spec(lds_k_pad=8).kernel_name(), _spec().kernel_name())
+
+    def test_valid_configs(self):
+        p16 = _problem(Hi=16, Wi=16, C=128, K=128)
+        for kw in (
+            {"dy_halo": 1},
+            {"dy_halo": 2},
+            {"dy_halo": 2, "dy_halo_setprio": 3},
+            {"dy_halo": 2, "dy_halo_kouter_pad": 32, **_HALO_TILE_4X1},
+            {"dy_halo": 2, "dy_halo_2d": True},
+            {"dy_halo": 2, "lds_k_outer": False},
+            {"dy_halo": 2, "tile_m": 256, "warp_m": 4, "warp_n": 1},
+        ):
+            with self.subTest(**kw):
+                ok, why = is_valid_dgrad_spec(_spec(problem=p16, **kw), _ARCH)
+                self.assertTrue(ok, why)
+
+    def test_validator_rejects_ignored_or_unsafe_knobs(self):
+        p16 = _problem(Hi=16, Wi=16)
+        cases = (
+            ({"dy_halo": 3}, p16, "dy_halo must be 0"),
+            ({"dy_halo": 2, "dy_halo_setprio": 4}, p16, "dy_halo_setprio must be"),
+            # A pad that breaks the 16-byte row alignment of the K-outer tile
+            # produced wrong dX; only multiples of 8 are accepted.
+            ({"dy_halo": 2, "dy_halo_kouter_pad": 3}, p16, "multiple of 8"),
+            ({"dy_halo": 2, "dy_halo_kouter_pad": 4}, p16, "multiple of 8"),
+            ({"dy_halo": 2, "dy_halo_kouter_pad": 12}, p16, "multiple of 8"),
+            ({"dy_halo_2d": True}, p16, "dy_halo_2d needs dy_halo > 0"),
+            ({"dy_halo_setprio": 1}, p16, "dy_halo_setprio needs dy_halo"),
+            ({"dy_halo_kouter_pad": 32}, p16, "needs dy_halo > 0 and lds_k_outer"),
+            (
+                {"dy_halo": 2, "dy_halo_kouter_pad": 32, "lds_k_outer": False},
+                p16,
+                "needs dy_halo > 0 and lds_k_outer",
+            ),
+            ({"dy_halo": 2}, _problem(sH=2, sW=2), "tap-outer K loop"),
+            ({"dy_halo": 2}, _problem(K=96), "tap-outer K loop"),
+            ({"dy_halo": 2, "split_k": 2}, p16, "tap-outer K loop"),
+            ({"dy_halo": 2}, _problem(pH=0, pW=0), "the size of the input"),
+            (
+                {"dy_halo": 2},
+                _problem(Y=1, X=1, pH=0, pW=0, groups=2, C=128, K=128),
+                "more than one tap",
+            ),
+            (
+                {"dy_halo": 2, "dy_halo_2d": True},
+                _problem(Hi=13, Wi=17),
+                "whole image rows",
+            ),
+            # The halo grows by (Y-1)*Wo rows: a wide image outgrows the LDS.
+            (
+                {"dy_halo": 2, "tile_m": 256, "warp_m": 4, "warp_n": 1},
+                _problem(N=1, Hi=300, Wi=300, Y=7, X=7, pH=3, pW=3),
+                "LDS budget",
+            ),
+        )
+        for kw, problem, needle in cases:
+            with self.subTest(needle=needle, **kw):
+                ok, why = is_valid_dgrad_spec(_spec(problem=problem, **kw), _ARCH)
+                self.assertFalse(ok)
+                self.assertIn(needle, why)
+
+    def test_lds_charge_equals_the_allocation(self):
+        p16 = _problem(Hi=16, Wi=16, C=128, K=128)
+        for kw in (
+            {},
+            {"dy_halo": 1},
+            {"dy_halo": 2},
+            {"dy_halo": 2, "dy_halo_2d": True},
+            {"dy_halo": 2, "dy_halo_kouter_pad": 32, **_HALO_TILE_4X1},
+            {"dy_halo": 2, "lds_k_outer": False, "lds_k_pad": 16},
+        ):
+            with self.subTest(**kw):
+                spec = _spec(problem=p16, **kw)
+                k = build_implicit_gemm_conv_dgrad(spec, arch=_ARCH)
+                ab = 0
+                for op in k.body.ops:
+                    t = op.results[0].type if op.name == "tile.smem_alloc" else None
+                    if t is not None and t.shape[1] != spec.tile_n:  # skip C tile
+                        ab += t.shape[0] * t.shape[1] * 2
+                c = spec.tile_m * spec.tile_n * 2
+                self.assertEqual(dgrad_lds_bytes(spec), max(ab, c))
+
+    def test_halo_rows(self):
+        # 1-D: tile_m + (Y-1)*Wo + (X-1) pixels, padded to a whole loader
+        # pass (256 threads x 8 elements / tile_k 64 = 32 rows), plus the
+        # zero row. 2-D: (tile_m/Wo + Y-1) * (Wo + X-1) pixels, padded.
+        self.assertEqual(_spec(dy_halo=2).dy_halo_lds_rows, 96 + 1)
+        two_d = _spec(problem=_problem(Hi=16, Wi=16), dy_halo=2, dy_halo_2d=True)
+        self.assertEqual(two_d.dy_halo_lds_rows, 6 * 18 + 20)
+
+    def test_halo2_loop_shape(self):
+        # One chunk loop; per chunk one halo load, a pinned B prefetch for
+        # taps 1..8 (fenced on both sides), one barrier per tap plus the
+        # prologue's, and s_setprio on/off around each tap's MFMAs.
+        ops = _k_loop_ops(_spec(dy_halo=2, dy_halo_setprio=1))
+        self.assertEqual(ops.count("tile.sched_barrier"), 2 * 8)
+        self.assertEqual(ops.count("tile.sync"), 9 + 1)
+        self.assertEqual(ops.count("tile.s_setprio"), 2 * 9)
+        self.assertNotIn("scf.for", ops)
+        first_mfma = next(i for i, n in enumerate(ops) if "mfma" in n or "mma" in n)
+        fence = ops.index("tile.sched_barrier")
+        self.assertLess(fence, first_mfma, "the prefetch must be pinned ahead")
+
+    def test_halo1_loop_shape(self):
+        ops = _k_loop_ops(_spec(dy_halo=1))
+        self.assertEqual(ops.count("tile.sync"), 2 * 9)
+        self.assertNotIn("tile.sched_barrier", ops)
+        self.assertNotIn("tile.s_setprio", ops)
+
+    def test_halo_reads_dy_once_per_chunk(self):
+        # Tap-outer: an A and a B tile per (tap, chunk) -- the inner loop
+        # body runs nine times per chunk. Halo: one halo tile per chunk plus
+        # a B tile per tap, in one body.
+        tap_outer = _k_loop_ops(_spec())
+        halo = _k_loop_ops(_spec(dy_halo=2))
+        self.assertLess(
+            halo.count("tile.buffer_load_vN"),
+            9 * tap_outer.count("tile.buffer_load_vN"),
+        )
 
 
 if __name__ == "__main__":

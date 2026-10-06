@@ -18,7 +18,8 @@ Two layers:
   zero. Covers the dispatcher's own picks on adversarial shapes above its size
   gate, the candidate's knob policy on small adversarial shapes below it (odd
   H/W, N=1, partial W tiles, partial H tiles, cpg != kpg, partial K-atoms, 5x5
-  and 7x7) and regressions for the coalesced-weight path
+  and 7x7), the generic kernel's row-stream knobs alone and stacked, and
+  regressions for the coalesced-weight path
   (``runtime_k_loop`` / ``waves_k > 1``), which read the reorganized workspace
   and were wrong for every grouped problem.
 
@@ -236,6 +237,109 @@ class TestDirectMfmaDgradPlanAndValidation(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("LDS", why)
 
+    # ---- row-stream knobs (prefetch_rows, lds_only_sync, waves_m, lds_pad,
+    # stage_out, xcd_tiles) ----------------------------------------------
+
+    def test_lds_bytes_match_the_lowered_pool(self):
+        # direct_conv_lds_bytes is the allocation the LDS pool packer makes
+        # (the staged weight slice shares a slot with the first row buffer,
+        # never with the second; the stage_out tiles come on top).
+        import re
+
+        from kernels.common.conv_direct_grouped import direct_conv_lds_bytes
+        from rocke.core.backend import lower_conv_direct_grouped
+
+        cases = [
+            (_problem(9, 512, 512, 10, 13, 32), {"block_groups": 2, "dgrad_fused_weights": True, "dgrad_weights_lds": True}),
+            (_problem(9, 512, 512, 10, 13, 32), {"block_groups": 2, "dgrad_fused_weights": True, "dgrad_weights_lds": True, "lds_pad": 8, "stage_out": True}),
+            (_problem(8, 512, 512, 7, 14, 16), {"block_groups": 1, "fold_k32": True, "dgrad_fused_weights": True, "dgrad_weights_lds": True, "waves_m": 2, "lds_pad": 8, "stage_out": True}),
+            (_problem(2, 32, 32, 9, 17, 4, dtype="fp16"), {"block_groups": 2, "double_buffer": False, "lds_pad": 8}),
+            (_problem(2, 64, 128, 9, 17, 4, dtype="fp16"), {"block_q": 32, "block_groups": 1, "waves_q": 2, "waves_k": 2}),
+            (_problem(8, 128, 128, 11, 19, 32), {"block_q": 32, "block_groups": 4, "block_h": 8, "dgrad_fused_weights": True, "dgrad_weights_lds": True, "lds_pad": 8}),
+        ]  # fmt: skip
+        for p, kw in cases:
+            spec = _fprop(p, **kw)
+            with self.subTest(spec=spec.kernel_name()):
+                ll = lower_conv_direct_grouped(
+                    spec, kind="generic", arch="gfx950", backend="python"
+                ).llvm_text
+                m = re.search(r"@smem_pool\.\S+ = .*global \[(\d+) x i8\]", ll)
+                self.assertIsNotNone(m)
+                self.assertEqual(direct_conv_lds_bytes(spec), int(m.group(1)))
+
+    def test_row_stream_knobs_validate_and_name(self):
+        from kernels.common.conv_direct_grouped import (
+            direct_conv_xcd_chunk,
+            is_valid_spec,
+        )
+
+        p = _problem(9, 512, 512, 10, 13, 32)
+        base = _fprop(
+            p, block_groups=2, dgrad_fused_weights=True, dgrad_weights_lds=True
+        )
+        tags = {
+            "prefetch_rows": (3, "_pf3"),
+            "lds_only_sync": (True, "_lso"),
+            "lds_pad": (8, "_lp8"),
+            "stage_out": (True, "_so"),
+            "xcd_tiles": (True, "_xc"),
+        }
+        for field, (value, tag) in tags.items():
+            with self.subTest(field=field):
+                spec = replace(base, **{field: value})
+                ok, why = is_valid_spec(spec)
+                self.assertTrue(ok, why)
+                self.assertIn(tag, spec.kernel_name())
+                self.assertNotIn(tag, base.kernel_name())
+        # prefetch_rows 0 and 1 are the same one-row-ahead kernel: one name.
+        self.assertEqual(
+            replace(base, prefetch_rows=1).kernel_name(), base.kernel_name()
+        )
+        # The xcd chunk is one image row band: every q tile and group tile.
+        spec = replace(base, xcd_tiles=True)
+        self.assertEqual(direct_conv_xcd_chunk(spec), 1 * 16)
+        bh = replace(spec, block_h=4, block_q=32)
+        self.assertEqual(direct_conv_xcd_chunk(bh), 1 * 16)
+        rejects = {
+            "prefetch_rows must be in 0..3": replace(base, prefetch_rows=4),
+            "stage_out needs kpg % 16": replace(
+                base, stage_out=True, problem=replace(base.problem, kpg=8)
+            ),
+            "lds_pad must be a multiple of 8": replace(base, lds_pad=12),
+            "waves_m > 1 needs": replace(base, waves_m=2),
+            "need double_buffer=True": replace(
+                base, lds_only_sync=True, double_buffer=False
+            ),
+            "xcd_tiles needs at least 8 image row bands": replace(
+                base, xcd_tiles=True, problem=replace(base.problem, N=4)
+            ),
+        }  # fmt: skip
+        for frag, spec in rejects.items():
+            with self.subTest(reject=frag):
+                ok, why = is_valid_spec(spec)
+                self.assertFalse(ok)
+                self.assertIn(frag, why)
+
+    def test_waves_m_splits_the_weight_register_budget(self):
+        # Each of the waves_m waves keeps only its share of the output tiles'
+        # weight fragments, so a 64-channel output (4 tiles) fits the preload
+        # budget with waves_m = 4 and not with one wave.
+        from kernels.common.conv_direct_grouped import (
+            PRELOAD_WEIGHT_VGPR_BUDGET,
+            is_valid_spec,
+            preload_weight_vgprs,
+        )
+
+        p = _problem(2, 256, 128, 9, 9, 4)  # transposed: cpg' 32, kpg' 64
+        one = _fprop(p, block_groups=1, fold_k32=True, dgrad_fused_weights=True)
+        four = replace(one, waves_m=4)
+        self.assertGreater(preload_weight_vgprs(one), PRELOAD_WEIGHT_VGPR_BUDGET)
+        self.assertEqual(preload_weight_vgprs(four), preload_weight_vgprs(one) // 4)
+        self.assertFalse(is_valid_spec(one)[0])
+        ok, why = is_valid_spec(four)
+        self.assertTrue(ok, why)
+        self.assertEqual(four.threads_per_block, 4 * 64)
+
 
 # ---------------------------------------------------------------------------
 # GPU numeric
@@ -386,8 +490,28 @@ _DISPATCHED = [
     # 32-column strip and 4-row H tiles: odd and partial strips / tiles.
     ("4c_cpg4_29x31_N24", (24, 128, 128, 29, 31, 32, 3, 1, "bf16")),
     ("4c_1x1_15x17_fp16", (64, 64, 64, 15, 17, 16, 1, 0, "fp16")),
+    # The 4c row's row-staged kernel (stage_rows): below the 4c grid floor on
+    # a short image and above it (odd H/W, partial q tile), the generic
+    # kernel's H tiles that taller images keep below the floor, and the
+    # direct-load 4c kernel kept for 1x1 filters on images under 8 rows.
+    ("4c_sr_short_7x9_N16", (16, 128, 128, 7, 9, 32, 3, 1, "bf16")),
+    ("4c_sr_13x15_N24_fp16", (24, 256, 256, 13, 15, 64, 3, 1, "fp16")),
+    ("4c_below_floor_13x13_generic", (4, 768, 768, 13, 13, 192, 3, 1, "bf16")),
+    ("4c_1x1_short_7x7_N128", (128, 128, 128, 7, 7, 32, 1, 0, "bf16")),
     ("5x5_cpg16_kpg4_31x30_fp16", (8, 512, 128, 31, 30, 32, 5, 2, "fp16")),
     ("3x3_cpg32_kpg8_30x30_N4", (4, 1024, 256, 30, 30, 32, 3, 1, "bf16")),
+    # The generic kernel's row-stream knobs as dispatch picks them: the
+    # LDS-staged output tile on odd / partial H tiles and q strips, the XCD
+    # remap on a partial last block of row bands, and a 5x5 fused-gather
+    # form. The stream_wm2_* shapes keep the previous pick by default; the
+    # square-group ones take the opt-in waves_m = 2 stack (with and without
+    # the rounds guard) in test_dispatched_split_m_opt_in.
+    ("stream_so_13x11_N9", (9, 512, 512, 13, 11, 32, 3, 1, "bf16")),
+    ("stream_so_bq32_27x19_fp16", (8, 512, 512, 27, 19, 32, 3, 1, "fp16")),
+    ("stream_wm2_so_13x11", (8, 1024, 1024, 13, 11, 32, 3, 1, "bf16")),
+    ("stream_wm2_guard_7x7_N9", (9, 1536, 1536, 7, 7, 48, 3, 1, "bf16")),
+    ("stream_wm2_5x5_15x13_fp16", (9, 1024, 512, 15, 13, 32, 5, 2, "fp16")),
+    ("stream_lp8_cpg4_20x19", (8, 128, 128, 20, 19, 32, 3, 1, "bf16")),
 ]
 
 # Explicit main-kernel knobs that read the coalesced workspace (the paths the
@@ -558,6 +682,26 @@ class TestDirectMfmaDgradNumeric(unittest.TestCase):
                 self.assertEqual(r.candidate.name, "direct_mfma_conv_dgrad", label)
                 self._check(r.spec.launch_plan(req), label)
 
+    def test_dispatched_split_m_opt_in(self):
+        # The opt-in waves_m = 2 row-stream stack, as dispatch picks it with
+        # _DIRECT_DGRAD_STREAM_SPLIT_M set.
+        import dispatch.grouped_convolution as gc
+
+        saved = gc._DIRECT_DGRAD_STREAM_SPLIT_M
+        gc._DIRECT_DGRAD_STREAM_SPLIT_M = True
+        try:
+            for label, shape in _DISPATCHED:
+                # (N, C, K, ...): the stack needs square channel groups.
+                if not label.startswith("stream_wm2") or shape[1] != shape[2]:
+                    continue
+                with self.subTest(case=label):
+                    req = self._request(*shape)
+                    r = gc.dispatch_conv_grouped(req)
+                    self.assertEqual(r.spec.waves_m, 2, label)
+                    self._check(r.spec.launch_plan(req), label)
+        finally:
+            gc._DIRECT_DGRAD_STREAM_SPLIT_M = saved
+
     def test_pre_pass_fallback_on_dispatched_shapes(self):
         # The same shapes on the pre-pass pipeline (transpose + main reading
         # W_T), which the candidate falls back to past the fused form's
@@ -572,8 +716,14 @@ class TestDirectMfmaDgradNumeric(unittest.TestCase):
             if spec.variant != "generic":
                 continue
             with self.subTest(case=label):
+                # waves_m needs preloaded weights; the other row-stream
+                # knobs carry over to the pre-pass main kernel.
                 pre = replace(
-                    spec, fused_weights=False, weights_lds=False, waves_per_eu=0
+                    spec,
+                    fused_weights=False,
+                    weights_lds=False,
+                    waves_per_eu=0,
+                    waves_m=1,
                 )
                 plan = pre.launch_plan(req)
                 self.assertEqual(plan.stages[0].role, "transpose")
@@ -586,6 +736,41 @@ class TestDirectMfmaDgradNumeric(unittest.TestCase):
             with self.subTest(case=label):
                 req = self._request(*shape)
                 self._check(_select_direct_dgrad_spec(req).launch_plan(req), label)
+
+    def test_row_stream_knob_grid(self):
+        # Each row-stream knob alone and stacked, on small adversarial
+        # problems (odd H / W, partial q strips and H tiles, partial K atoms,
+        # 5x5, fused gathers and LDS-staged weights, fp16 / bf16), straight
+        # from the main-kernel spec rather than the dispatch policy.
+        from kernels.common.conv_direct_grouped import (
+            is_valid_spec,
+            plan_direct_mfma_dgrad,
+        )
+
+        knobs = [
+            {"prefetch_rows": 2},
+            {"prefetch_rows": 3, "lds_only_sync": True},
+            {"lds_pad": 8},
+            {"stage_out": True},
+            {"xcd_tiles": True},
+            {"prefetch_rows": 2, "lds_only_sync": True, "lds_pad": 8, "stage_out": True, "xcd_tiles": True},
+            {"waves_m": 2, "prefetch_rows": 2, "lds_only_sync": True, "stage_out": True, "xcd_tiles": True},
+        ]  # fmt: skip
+        problems = [
+            ("c16_9x13_N8", (8, 128, 128, 9, 13, 8, 3, 1, "bf16"), {"block_groups": 2, "dgrad_fused_weights": True, "dgrad_weights_lds": True}),
+            ("c16_bh4_bq32_11x37_fp16", (8, 128, 128, 11, 37, 8, 3, 1, "fp16"), {"block_q": 32, "block_groups": 2, "block_h": 4, "dgrad_fused_weights": True, "dgrad_weights_lds": True}),
+            ("c32k32_7x9_N9", (9, 256, 256, 7, 9, 8, 3, 1, "bf16"), {"block_groups": 1, "fold_k32": True, "dgrad_fused_weights": True, "dgrad_weights_lds": True}),
+            ("c32_kpg8_5x5_bh4_fp16", (8, 256, 64, 9, 11, 8, 5, 2, "fp16"), {"block_groups": 1, "block_h": 4, "dgrad_fused_weights": True}),
+            ("prepass_c16_bh4", (8, 64, 64, 10, 13, 4, 3, 1, "bf16"), {"block_groups": 1, "block_h": 4}),
+        ]  # fmt: skip
+        for plabel, shape, base_kw in problems:
+            p = _problem(*shape[:6], KH=shape[6], PAD=shape[7], dtype=shape[8])
+            for kw in knobs:
+                spec = _fprop(p, **base_kw, **kw)
+                if not is_valid_spec(spec, arch=GPU_ARCH)[0]:
+                    continue  # e.g. waves_m on a 16-channel output
+                with self.subTest(case=plabel, spec=spec.kernel_name()):
+                    self._check(plan_direct_mfma_dgrad(p, spec), plabel)
 
     def test_coalesced_weight_paths(self):
         from kernels.common.conv_direct_grouped import plan_direct_mfma_dgrad

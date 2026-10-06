@@ -332,3 +332,9 @@ rocke_super_tile_swizzle_result_t rocke_chiplet_aware_super_tile(rocke_ir_builde
         = rocke_i_chiplet_transform_chunked(b, wgid, num_wgs, num_xcds, chunk_size);
     return rocke_i_super_tile_swizzle(b, remapped, num_pid_m, num_pid_n, wgm);
 }
+
+rocke_value_t* rocke_chiplet_transform_chunked(
+    rocke_ir_builder_t* b, rocke_value_t* wgid, int num_wgs, int num_xcds, int chunk_size)
+{
+    return rocke_i_chiplet_transform_chunked(b, wgid, num_wgs, num_xcds, chunk_size);
+}

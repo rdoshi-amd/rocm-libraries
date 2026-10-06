@@ -13,6 +13,17 @@ The GPU shapes are adversarial for this kernel: widths that no block_w
 divides (7, 13, 15, 17), odd heights, N = 1, channel counts that are not a
 multiple of the 64-lane block, padding wider than half the filter, ragged and
 even H splits, non-square filters, 1x1, and every ch_per_lane / dot2 path.
+The Toeplitz MFMA form (``mfma``, gfx950) gets its own adversarial set: odd N
+under w_fold (a half-empty last tile), images narrower than the tile, two W
+tiles, partial channel blocks, ragged H splits, pad 0 and pad > K/2, filters
+larger than the image, 3x3 to 11x11 and non-square filters, fp16 and bf16.
+
+Non-finite inputs: the VALU forms keep an Inf / NaN in dY inside its
+receptive field and channel exactly. The MFMA form multiplies one-hot
+weights against 8 channels at once, so a non-finite dY value may reach every
+channel of its 8-channel group, in its receptive field widened to
+4 * ceil((KW + 1) / 4) columns (the zero-weight taps of its passes);
+TestNonFiniteGradients asserts that bound for it.
 
 Run:
     PYTHONPATH=rocke/platform/python:rocke/library <python> -m pytest \\
@@ -23,6 +34,7 @@ from __future__ import annotations
 
 import ctypes
 import unittest
+import unittest.mock
 from dataclasses import dataclass
 
 import numpy as np
@@ -38,6 +50,7 @@ except ImportError:
 from rocke.runtime.hip_module import get_device_arch
 
 from kernels.common.conv_direct_grouped import (
+    DW_DGRAD_MFMA_CH,
     DW_DGRAD_WIN_MAX_UNROLL,
     DirectConvProblem,
     DirectDepthwiseDgradWindowedSpec,
@@ -165,6 +178,103 @@ class TestWindowedSpec(unittest.TestCase):
             self.assertIn(f"@llvm.amdgcn.{intrin}", ll)
 
 
+class TestMfmaSpec(unittest.TestCase):
+    """Host-only checks of the Toeplitz MFMA form (``mfma``)."""
+
+    def _ok(self, spec, arch="gfx950"):
+        return is_valid_depthwise_dgrad_win_spec(spec, arch=arch)
+
+    def _mfma(self, problem=None, **kw):
+        base = {"block_waves": 8, "mfma": True, "w_fold": 2, "prefetch_rows": 2}
+        base.update(kw)
+        return DirectDepthwiseDgradWindowedSpec(
+            problem=problem or _problem(4, 14, 14, 64, 7, 7, 3, "bf16"), **base
+        )
+
+    def test_rejections(self):
+        cases = [
+            ({"problem": _problem(2, 14, 14, 12, 7, 7, 3)}, "groups % 8"),
+            ({"dot2": True}, "mfma excludes dot2"),
+            ({"ch_per_lane": 2}, "mfma excludes dot2"),
+            ({"w_fold": 3}, "w_fold must be 1, 2 or 4"),
+            ({"prefetch_rows": 0}, "prefetch_rows must be >= 1"),
+            ({"prefetch_rows": 5}, "prefetch_rows must be <= 4"),
+            ({"block_waves": 16}, "block_waves <= 8"),
+            ({"problem": _problem(1, 24, 24, 64, 15, 15, 7)}, "VGPRs"),
+            ({"problem": _problem(1, 224, 16, 64, 7, 7, 3)}, "MFMAs"),
+        ]
+        for kw, needle in cases:
+            with self.subTest(kw=kw):
+                ok, why = self._ok(self._mfma(**kw))
+                self.assertFalse(ok)
+                self.assertIn(needle, why)
+                with self.assertRaises(ValueError):
+                    build_direct_depthwise_dgrad_windowed(self._mfma(**kw))
+        ok, why = self._ok(self._mfma(), "gfx942")
+        self.assertFalse(ok)
+        self.assertIn("mfma needs one of", why)
+        # A tall image fits once block_h bounds the unrolled body.
+        tall = self._mfma(_problem(1, 224, 16, 64, 7, 7, 3), block_h=14)
+        self.assertTrue(self._ok(tall)[0])
+
+    def test_mfma_only_knobs_need_mfma(self):
+        p = _problem(2, 8, 8, 64, 3, 3, 1)
+        for kw in ({"w_fold": 2}, {"prefetch_rows": 2}):
+            ok, why = self._ok(DirectDepthwiseDgradWindowedSpec(problem=p, **kw))
+            self.assertFalse(ok, kw)
+            self.assertIn("require mfma", why)
+
+    def test_lds_bytes_and_budget(self):
+        # Two double buffers of (block_ch + 8)-channel pixels: 64 staged dY
+        # window columns and 32 dX columns at 8 waves / w_fold 2.
+        self.assertEqual(self._mfma().mfma_lds_bytes(), 2 * (64 + 32) * 72 * 2)
+        self.assertEqual(
+            self._mfma(block_waves=4).mfma_lds_bytes(), 2 * (64 + 32) * 40 * 2
+        )
+        budget = "kernels.common.conv_direct_grouped.DW_DGRAD_MFMA_LDS_BUDGET"
+        with unittest.mock.patch(budget, 16 * 1024):
+            ok, why = self._ok(self._mfma())
+        self.assertFalse(ok)
+        self.assertIn("LDS bytes", why)
+
+    def test_grid_and_name(self):
+        p = _problem(3, 13, 17, 136, 5, 5, 2, "bf16")
+        spec = self._mfma(p, block_waves=4, w_fold=2, block_h=4)
+        self.assertEqual(spec.block_ch, 4 * DW_DGRAD_MFMA_CH)
+        self.assertEqual(spec.tile_w, 16)
+        # W tiles of 16 columns, channel blocks of 32, ceil(3 / 2) image
+        # tiles of 4 H chunks each.
+        self.assertEqual(spec.grid(), (2, 5, 8))
+        name = spec.kernel_name()
+        for part in ("r5s5p2", "wv4", "bh4", "f2", "pf2", "mfma", "bf16"):
+            self.assertIn(part, name)
+        # block_w / ch_per_lane do not apply: neither reaches the name, and
+        # specs that differ only there name (and build) the same kernel.
+        self.assertNotIn("_bw", name)
+        self.assertNotIn("_cpl", name)
+        other = self._mfma(p, block_waves=4, w_fold=2, block_h=4, block_w=3)
+        self.assertEqual(name, other.kernel_name())
+        for kw in ({"w_fold": 4}, {"prefetch_rows": 1}, {"block_waves": 8}):
+            args = {"block_waves": 4, "w_fold": 2, "block_h": 4}
+            args.update(kw)
+            self.assertNotEqual(name, self._mfma(p, **args).kernel_name(), kw)
+        # The VALU name does not grow MFMA tags.
+        valu = DirectDepthwiseDgradWindowedSpec(problem=p, block_w=9)
+        self.assertNotIn("_f1", valu.kernel_name())
+        self.assertNotIn("_pf", valu.kernel_name())
+
+    def test_lowers_to_mfma_with_lds_staging(self):
+        from rocke.core.lower_llvm import _lower_kernel_to_llvm_python
+
+        for dtype, intrin in (("bf16", "16x16x32.bf16"), ("fp16", "16x16x32.f16")):
+            spec = self._mfma(_problem(2, 7, 9, 16, 5, 5, 2, dtype), block_waves=2)
+            ll = _lower_kernel_to_llvm_python(
+                build_direct_depthwise_dgrad_windowed(spec), arch="gfx950"
+            )
+            self.assertIn(f"@llvm.amdgcn.mfma.f32.{intrin}", ll)
+            self.assertIn("addrspace(3)", ll)
+
+
 # ---------------------------------------------------------------------------
 # GPU numerics
 # ---------------------------------------------------------------------------
@@ -202,18 +312,18 @@ def _reference(dy: np.ndarray, w: np.ndarray, p: DirectConvProblem) -> np.ndarra
     return dx
 
 
-def run_windowed(
+def _launch(
     spec: DirectDepthwiseDgradWindowedSpec,
     arch: str,
     grid=None,
     block=None,
     inf_at=(),
+    nan_at=(),
 ):
-    """Compile and launch ``spec``; return ``(bad, max_err)`` vs the reference.
+    """Compile and launch ``spec`` on a NaN-filled dX; return ``(dx, ref)``.
 
-    ``inf_at`` lists ``(n, ho, wo, c)`` dY entries set to +Inf; a dX element
-    then counts as bad unless it is finite exactly where the reference is (and
-    within tolerance there) and equals the reference's Inf elsewhere.
+    ``inf_at`` / ``nan_at`` list ``(n, ho, wo, c)`` dY entries set to +Inf /
+    NaN before the 16-bit rounding (both survive it).
     """
     from rocke import compile_kernel
     from rocke.helpers.manifest import conv_args_signature
@@ -227,6 +337,8 @@ def run_windowed(
     w32 = rng.uniform(-1, 1, (p.groups, p.KH, p.KW)).astype(np.float32)
     for idx in inf_at:
         dy32[idx] = np.inf
+    for idx in nan_at:
+        dy32[idx] = np.nan
     if p.dtype == "bf16":
         dy_b, w_b = _to_bf16_bits(dy32), _to_bf16_bits(w32)
     else:
@@ -271,13 +383,35 @@ def run_windowed(
         rt.free(W_d)
         rt.free(dX_d)
         synchronize_and_release(0)
-    o = _bits_to_f32(out, p.dtype).reshape(ref.shape)
+    return _bits_to_f32(out, p.dtype).reshape(ref.shape), ref
+
+
+def _elementwise_ok(o: np.ndarray, ref: np.ndarray):
+    """Per element: within tolerance where ``ref`` is finite, equal to the
+    reference's Inf where it is not. Returns ``(ok_mask, abs_err)``."""
     with np.errstate(invalid="ignore"):
         fin = np.isfinite(ref)
         err = np.where(fin, np.abs(o - ref), 0.0)
         ok = np.where(fin, err <= _TOL + _TOL * np.abs(ref), o == ref)
-    bad = int(np.count_nonzero(~ok))
-    return bad, float(np.nanmax(err))
+    return ok, err
+
+
+def run_windowed(
+    spec: DirectDepthwiseDgradWindowedSpec,
+    arch: str,
+    grid=None,
+    block=None,
+    inf_at=(),
+):
+    """Compile and launch ``spec``; return ``(bad, max_err)`` vs the reference.
+
+    ``inf_at`` lists ``(n, ho, wo, c)`` dY entries set to +Inf; a dX element
+    then counts as bad unless it is finite exactly where the reference is (and
+    within tolerance there) and equals the reference's Inf elsewhere.
+    """
+    o, ref = _launch(spec, arch, grid=grid, block=block, inf_at=inf_at)
+    ok, err = _elementwise_ok(o, ref)
+    return int(np.count_nonzero(~ok)), float(np.nanmax(err))
 
 
 @dataclass(frozen=True)
@@ -355,6 +489,83 @@ class TestWindowedNumerics(unittest.TestCase):
         self.assertGreater(ran, 0)
 
 
+@dataclass(frozen=True)
+class _MfmaCase:
+    id: str
+    N: int
+    H: int
+    W: int
+    C: int
+    KH: int
+    KW: int
+    PAD: int
+    dtype: str
+    block_waves: int
+    w_fold: int
+    prefetch_rows: int
+    block_h: int = 0
+
+
+_MFMA_CASES = (
+    _MfmaCase("7x7_odd_n_fold2", 3, 14, 14, 64, 7, 7, 3, "bf16", 8, 2, 2),
+    _MfmaCase("7x7_n1_fold4_w7", 1, 7, 7, 64, 7, 7, 3, "bf16", 4, 4, 2),
+    _MfmaCase(
+        "7x7_partial_ch_ragged_split", 5, 13, 15, 40, 7, 7, 3, "fp16", 4, 2, 2, 4
+    ),
+    _MfmaCase("5x5_two_w_tiles_fold1", 2, 9, 37, 24, 5, 5, 2, "fp16", 2, 1, 1),
+    _MfmaCase("7x7_pad0", 2, 10, 12, 16, 7, 7, 0, "bf16", 2, 2, 2),
+    _MfmaCase("7x7_pad5_split", 2, 9, 9, 24, 7, 7, 5, "fp16", 1, 2, 3, 3),
+    _MfmaCase("7x7_image_smaller_than_k", 2, 5, 3, 16, 7, 7, 3, "fp16", 2, 4, 1),
+    _MfmaCase("9x9_fold2", 2, 9, 11, 64, 9, 9, 4, "fp16", 8, 2, 2),
+    _MfmaCase("11x11_fold4_split", 2, 13, 13, 64, 11, 11, 5, "bf16", 8, 4, 2, 4),
+    _MfmaCase("7x5_nonsquare", 2, 11, 15, 32, 7, 5, 2, "bf16", 4, 2, 2),
+    _MfmaCase("5x7_nonsquare_split_pf4", 1, 12, 10, 16, 5, 7, 3, "fp16", 2, 2, 4, 5),
+    _MfmaCase("1x5_single_row_taps", 2, 6, 10, 8, 1, 5, 2, "bf16", 1, 2, 2),
+    _MfmaCase("3x3_one_pass", 2, 12, 12, 64, 3, 3, 1, "fp16", 4, 2, 1),
+    _MfmaCase("7x7_tall_split_fold1", 1, 40, 20, 64, 7, 7, 3, "bf16", 8, 1, 2, 14),
+)
+
+
+def _mfma_spec(c: _MfmaCase) -> DirectDepthwiseDgradWindowedSpec:
+    return DirectDepthwiseDgradWindowedSpec(
+        problem=_problem(c.N, c.H, c.W, c.C, c.KH, c.KW, c.PAD, c.dtype),
+        block_waves=c.block_waves,
+        block_h=c.block_h,
+        mfma=True,
+        w_fold=c.w_fold,
+        prefetch_rows=c.prefetch_rows,
+    )
+
+
+@unittest.skipUnless(GPU_ARCH == "gfx950", f"needs gfx950, got {GPU_ARCH!r}")
+class TestMfmaNumerics(unittest.TestCase):
+    def test_adversarial_shapes(self):
+        for c in _MFMA_CASES:
+            spec = _mfma_spec(c)
+            with self.subTest(case=c.id):
+                bad, max_err = run_windowed(spec, GPU_ARCH)
+                self.assertEqual(bad, 0, f"{c.id}: bad={bad} max_err={max_err:.3e}")
+
+
+def _mfma_spread_zone(p: DirectConvProblem, bad_inputs) -> np.ndarray:
+    """dX elements a non-finite dY value may reach in the MFMA form: its
+    receptive field rows, its columns widened by the ``4 * passes - KW``
+    zero-weight taps on either side (where they fall depends on the column
+    parity), in every channel of its 8-channel group."""
+    zone = np.zeros((p.N, p.H, p.W, p.groups), bool)
+    extra = 4 * ((p.KW + 4) // 4) - p.KW
+    for n, ho, wo, c in bad_inputs:
+        h0, w0 = ho - p.PAD, wo - p.PAD
+        g0 = c - c % DW_DGRAD_MFMA_CH
+        zone[
+            n,
+            max(0, h0) : max(0, h0 + p.KH),
+            max(0, w0 - extra) : max(0, w0 + p.KW + extra),
+            g0 : g0 + DW_DGRAD_MFMA_CH,
+        ] = True
+    return zone
+
+
 @unittest.skipUnless(GPU_ARCH == "gfx950", f"needs gfx950, got {GPU_ARCH!r}")
 class TestNonFiniteGradients(unittest.TestCase):
     """An Inf in dY reaches only the dX columns in its receptive field.
@@ -388,6 +599,91 @@ class TestNonFiniteGradients(unittest.TestCase):
             with self.subTest(case=f"{KH}x{KW}_{dt}_bw{bw}_bh{bh}_dot2{int(dot2)}"):
                 bad, _ = run_windowed(spec, GPU_ARCH, inf_at=inf_at)
                 self.assertEqual(bad, 0)
+
+    def test_mfma_spread_stays_group_local(self):
+        """MFMA form: a non-finite dY value stays inside its 8-channel group
+        and its receptive field widened by the zero-weight taps of its
+        passes; everything else is exact, and no reference Inf / NaN turns
+        finite."""
+        cases = (
+            # (N, H, W, C, KH, KW, PAD, dtype, block_waves, w_fold, pf, block_h)
+            (2, 9, 13, 16, 7, 7, 3, "bf16", 2, 2, 2, 0),
+            (1, 11, 21, 24, 5, 5, 2, "fp16", 1, 1, 1, 4),
+            (3, 8, 7, 16, 7, 5, 2, "bf16", 2, 4, 2, 0),
+            (1, 9, 13, 16, 9, 9, 4, "fp16", 2, 2, 3, 0),
+        )
+        for N, H, W, C, KH, KW, PAD, dt, wv, fold, pf, bh in cases:
+            p = _problem(N, H, W, C, KH, KW, PAD, dt)
+            inf_at = (
+                (0, p.Ho // 2, 0, 1),
+                (0, p.Ho // 2, p.Wo // 2, 3),
+                (N - 1, 0, p.Wo - 1, 9),
+            )
+            nan_at = ((N - 1, p.Ho - 1, p.Wo // 3, C - 1),)
+            spec = DirectDepthwiseDgradWindowedSpec(
+                problem=p,
+                block_waves=wv,
+                block_h=bh,
+                mfma=True,
+                w_fold=fold,
+                prefetch_rows=pf,
+            )
+            with self.subTest(case=spec.kernel_name()):
+                o, ref = _launch(spec, GPU_ARCH, inf_at=inf_at, nan_at=nan_at)
+                zone = _mfma_spread_zone(p, inf_at + nan_at)
+                ok, _ = _elementwise_ok(o, ref)
+                outside_bad = int(np.count_nonzero(~ok & ~zone))
+                self.assertEqual(outside_bad, 0, "non-finite spread past the bound")
+                lost = int(np.count_nonzero(~np.isfinite(ref) & np.isfinite(o)))
+                self.assertEqual(
+                    lost, 0, "a non-finite reference value came out finite"
+                )
+
+    def test_mfma_single_inf_spread_width(self):
+        """MFMA form, one Inf per (image, 8-channel group): its bad dX
+        elements stay in its receptive field rows, its image and group, and
+        span at most ``4 * ceil((KW + 1) / 4)`` contiguous columns (odd and
+        even filter widths alike)."""
+        N, H, W, C = 2, 9, 21, 32
+        for KH, KW, fold in ((5, 5, 2), (6, 6, 1), (7, 7, 2), (8, 8, 4), (9, 9, 1)):
+            pad = KH // 2
+            p = _problem(N, H, W, C, KH, KW, pad, "bf16")
+            # One Inf per (n, group) on the first, an odd, an even inner and
+            # the last dY column.
+            cols = (0, 3, p.Wo // 2 + (p.Wo // 2) % 2, p.Wo - 1)
+            inf_at = tuple(
+                (n, p.Ho // 2, cols[(2 * n + g) % len(cols)], 8 * g + (2 * g + n) % 8)
+                for n in range(N)
+                for g in range(C // DW_DGRAD_MFMA_CH)
+            )
+            spec = DirectDepthwiseDgradWindowedSpec(
+                problem=p, block_waves=4, mfma=True, w_fold=fold, prefetch_rows=2
+            )
+            span = 4 * ((KW + 4) // 4)
+            with self.subTest(case=spec.kernel_name()):
+                o, ref = _launch(spec, GPU_ARCH, inf_at=inf_at)
+                ok, _ = _elementwise_ok(o, ref)
+                lost = int(np.count_nonzero(~np.isfinite(ref) & np.isfinite(o)))
+                self.assertEqual(lost, 0)
+                for n, ho, wo, c in inf_at:
+                    g0 = c - c % DW_DGRAD_MFMA_CH
+                    bad = ~ok[n, :, :, g0 : g0 + DW_DGRAD_MFMA_CH]
+                    rows = np.flatnonzero(bad.any(axis=(1, 2)))
+                    h0 = ho - pad
+                    self.assertTrue(
+                        set(rows.tolist()) <= set(range(max(0, h0), h0 + KH)),
+                        f"rows {rows} past the field of {(n, ho, wo, c)}",
+                    )
+                    bcols = np.flatnonzero(bad.any(axis=(0, 2)))
+                    if bcols.size:
+                        self.assertLessEqual(
+                            int(bcols.max() - bcols.min() + 1),
+                            span,
+                            f"columns {bcols} of {(n, ho, wo, c)}",
+                        )
+                    ok[n, :, :, g0 : g0 + DW_DGRAD_MFMA_CH] = True
+                # Every other image / group is exact.
+                self.assertEqual(int(np.count_nonzero(~ok)), 0)
 
 
 @unittest.skipUnless(GPU_ARCH == "gfx950", f"needs gfx950, got {GPU_ARCH!r}")
@@ -451,6 +747,65 @@ class TestDispatchEndToEnd(unittest.TestCase):
                 "pad": 1,
                 "dtype": "fp16",
             },
+            # Wide non-square filters outside the MFMA admission box (VALU
+            # picks): an odd N and a partial channel block (7x9), and a
+            # 12-column 8x9 layer.
+            {
+                "N": 13,
+                "C": 200,
+                "Hi": 36,
+                "Wi": 36,
+                "Y": 7,
+                "X": 9,
+                "pad": 4,
+                "dtype": "fp16",
+            },
+            {
+                "N": 50,
+                "C": 776,
+                "Hi": 12,
+                "Wi": 12,
+                "Y": 8,
+                "X": 9,
+                "pad": 4,
+                "dtype": "bf16",
+            },
+            # Inside the MFMA admission box: an odd N under a 2-image fold
+            # (13 columns), a 4-image fold on 8 columns with a partial last
+            # fold, and a one-image 32-column tile on 19 columns.
+            {
+                "N": 5,
+                "C": 64,
+                "Hi": 16,
+                "Wi": 13,
+                "Y": 7,
+                "X": 7,
+                "pad": 3,
+                "dtype": "fp16",
+                "mfma": True,
+            },
+            {
+                "N": 6,
+                "C": 192,
+                "Hi": 9,
+                "Wi": 8,
+                "Y": 7,
+                "X": 7,
+                "pad": 3,
+                "dtype": "bf16",
+                "mfma": True,
+            },
+            {
+                "N": 3,
+                "C": 128,
+                "Hi": 7,
+                "Wi": 19,
+                "Y": 7,
+                "X": 7,
+                "pad": 3,
+                "dtype": "bf16",
+                "mfma": True,
+            },
         )
         for r in reqs:
             req = ConvGroupedRequest(
@@ -470,6 +825,7 @@ class TestDispatchEndToEnd(unittest.TestCase):
             )
             res = dispatch_conv_grouped(req)
             with self.subTest(req=r, kernel=res.spec.kernel_name()):
+                self.assertEqual(res.spec.instance.mfma, r.get("mfma", False))
                 bad, max_err = run_windowed(
                     res.spec.instance, "gfx950", grid=res.grid, block=res.block
                 )

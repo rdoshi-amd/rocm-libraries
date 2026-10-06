@@ -303,6 +303,125 @@ static int make_cfg(int idx, rocke_dgrad_conv_spec_t* spec, const char** arch)
         spec->lds_k_outer = true;
         *arch = "gfx950";
         return 0;
+    case 26:
+        /* dY halo reuse (dy_halo=1): one staged 1-D halo tile per
+         * output-channel chunk serving all nine taps, two barriers per tap.
+         * Odd image, N=2 so a 64-row tile straddles an image boundary, and a
+         * partial last M tile. */
+        spec->problem = rocke_conv_problem_make(2, 13, 17, 64, 128, 3, 3, 1, 1, 1, 1, 1, 1);
+        spec->epilogue = "cshuffle";
+        spec->lds_k_outer = true;
+        spec->dy_halo = 1;
+        *arch = "gfx950";
+        return 0;
+    case 27:
+        /* dy_halo=2 on the 128x64 4x1-wave dispatch tile: double-buffered B
+         * with the pinned prefetch, s_setprio around each tap's MFMAs and the
+         * wider K-outer B row pad. */
+        spec->problem = rocke_conv_problem_make(2, 16, 16, 128, 128, 3, 3, 1, 1, 1, 1, 1, 1);
+        spec->tile_m = 128;
+        spec->warp_m = 4;
+        spec->warp_n = 1;
+        spec->epilogue = "cshuffle";
+        spec->lds_k_outer = true;
+        spec->dy_halo = 2;
+        spec->dy_halo_setprio = 1;
+        spec->dy_halo_kouter_pad = 32;
+        *arch = "gfx950";
+        return 0;
+    case 28:
+        /* dy_halo=2 with the 2-D zero-bordered halo (tile_m = 8 whole rows of
+         * a 16-wide image): no row masks, the loader zero-fills the border. */
+        spec->problem = rocke_conv_problem_make(2, 16, 16, 64, 128, 3, 3, 1, 1, 1, 1, 1, 1);
+        spec->tile_m = 128;
+        spec->epilogue = "cshuffle";
+        spec->lds_k_outer = true;
+        spec->dy_halo = 2;
+        spec->dy_halo_2d = true;
+        spec->dy_halo_setprio = 2;
+        *arch = "gfx950";
+        return 0;
+    case 29:
+        /* dy_halo=2 with the M-outer B tile (no K-outer pad) on a 5x5 filter,
+         * pad 2, image narrower than a tile row (9x11, N=1). */
+        spec->problem = rocke_conv_problem_make(1, 9, 11, 64, 64, 5, 5, 1, 1, 2, 2, 1, 1);
+        spec->epilogue = "cshuffle";
+        spec->dy_halo = 2;
+        *arch = "gfx950";
+        return 0;
+    case 30:
+        /* dy_halo=2 on the 256x64 4x1-wave tile with a non-default A row pad
+         * (lds_k_pad=16, tagged kp16 in the kernel name) and the 1-D halo of
+         * a 20-wide image. */
+        spec->problem = rocke_conv_problem_make(1, 20, 20, 64, 64, 3, 3, 1, 1, 1, 1, 1, 1);
+        spec->tile_m = 256;
+        spec->warp_m = 4;
+        spec->warp_n = 1;
+        spec->epilogue = "cshuffle";
+        spec->lds_k_outer = true;
+        spec->has_lds_k_pad = true;
+        spec->lds_k_pad = 16;
+        spec->dy_halo = 2;
+        *arch = "gfx950";
+        return 0;
+    case 31:
+        /* dy_halo=2 on the 16x16x32 atom (4 fragment rows per lane group). */
+        spec->problem = rocke_conv_problem_make(1, 8, 8, 64, 64, 3, 3, 1, 1, 1, 1, 1, 1);
+        spec->warp_tile_m = 16;
+        spec->warp_tile_n = 16;
+        spec->warp_tile_k = 32;
+        spec->epilogue = "cshuffle";
+        spec->lds_k_outer = true;
+        spec->dy_halo = 2;
+        *arch = "gfx950";
+        return 0;
+    case 32:
+        /* dy_halo=2 on a 1x7 filter (pad 0x3): a one-row halo per tile, the
+         * horizontal taps only, on the 128x64 4x1-wave tile with s_setprio
+         * and the K-outer B row pad. */
+        spec->problem = rocke_conv_problem_make(2, 12, 20, 64, 128, 1, 7, 1, 1, 0, 3, 1, 1);
+        spec->tile_m = 128;
+        spec->warp_m = 4;
+        spec->warp_n = 1;
+        spec->epilogue = "cshuffle";
+        spec->lds_k_outer = true;
+        spec->dy_halo = 2;
+        spec->dy_halo_setprio = 1;
+        spec->dy_halo_kouter_pad = 32;
+        *arch = "gfx950";
+        return 0;
+    case 33:
+        /* dy_halo=2 on a 7x1 filter (pad 3x0): vertical taps only, image
+         * narrower than the filter is tall (21x9, N=1), default epilogue. */
+        spec->problem = rocke_conv_problem_make(1, 21, 9, 64, 64, 7, 1, 1, 1, 3, 0, 1, 1);
+        spec->lds_k_outer = true;
+        spec->dy_halo = 2;
+        *arch = "gfx950";
+        return 0;
+    case 34:
+        /* dy_halo=2 on a 3x5 filter (pad 1x2) on the 256x64 4x1-wave tile:
+         * row and column offsets of the taps differ in extent. */
+        spec->problem = rocke_conv_problem_make(1, 10, 14, 128, 64, 3, 5, 1, 1, 1, 2, 1, 1);
+        spec->tile_m = 256;
+        spec->warp_m = 4;
+        spec->warp_n = 1;
+        spec->epilogue = "cshuffle";
+        spec->lds_k_outer = true;
+        spec->dy_halo = 2;
+        spec->dy_halo_setprio = 1;
+        *arch = "gfx950";
+        return 0;
+    case 35:
+        /* dy_halo=2 with the 2-D zero-bordered halo on a 1x7 filter (tile_m =
+         * 8 whole rows of a 16-wide image). */
+        spec->problem = rocke_conv_problem_make(2, 16, 16, 64, 64, 1, 7, 1, 1, 0, 3, 1, 1);
+        spec->tile_m = 128;
+        spec->epilogue = "cshuffle";
+        spec->lds_k_outer = true;
+        spec->dy_halo = 2;
+        spec->dy_halo_2d = true;
+        *arch = "gfx950";
+        return 0;
     default:
         return -1;
     }

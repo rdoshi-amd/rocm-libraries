@@ -9,7 +9,8 @@
  * prefetched before the current row's FMAs (sched_barrier pinned), and every
  * buffer offset is a row-invariant lane part plus a block-uniform row part with
  * out-of-range sentinels instead of per-tap selects. Optional knobs: channel
- * packing (ch_per_lane), H split (block_h) and fdot2 tap pairing (dot2).
+ * packing (ch_per_lane), H split (block_h), fdot2 tap pairing (dot2) and the
+ * Toeplitz MFMA form (mfma, with w_fold and prefetch_rows).
  *
  * IMPORTANT: every call that has side effects on the IR builder (rocke_b_*) is
  * issued as a separate statement in Python's left-to-right evaluation order, so
@@ -127,6 +128,521 @@ static rocke_value_t* dw_win_widen(const dw_win_ctx* cx, rocke_value_t* v)
     return rocke_b_vec_pack(cx->b, comps, cx->CPL, rocke_f32());
 }
 
+/* ===================================================================== *
+ *  Toeplitz MFMA form (spec->mfma): C port of _build_dw_dgrad_win_mfma.
+ *
+ *  Each wave owns 8 channels and one 16x16 fp32 tile per in-flight dX row;
+ *  one-hot weights (A) meet 8 channels x 4 window columns (B) per 16x16x32
+ *  MFMA. dY window rows and finished dX rows are staged through two LDS
+ *  double buffers that share one barrier per row. Every builder call is a
+ *  separate statement in Python evaluation order.
+ * ===================================================================== */
+
+typedef struct dw_mfma_plan
+{
+    rocke_value_t* px;
+    rocke_value_t* ch8;
+    rocke_value_t* g_off;
+} dw_mfma_plan;
+
+typedef struct dw_mfma_ctx
+{
+    rocke_ir_builder_t* b;
+    int is_bf16;
+    int KH, PAD, Ho, Wo, G, ROWS, W;
+    bool split_h;
+    rocke_value_t* c0;
+    rocke_value_t* oob_uniform;
+    rocke_value_t* h0;
+    rocke_value_t* c_Ho;
+    rocke_value_t* c_H;
+    rocke_value_t* a_rsrc;
+    rocke_value_t* d_rsrc;
+    rocke_value_t* o_smem;
+    rocke_value_t* c_dy_row_bytes;
+    rocke_value_t* c_dx_row_bytes;
+    const rocke_type_t* io_type;
+    const dw_mfma_plan* in_plan;
+    int in_passes;
+    const dw_mfma_plan* drain;
+    int n_drain;
+} dw_mfma_ctx;
+
+/* Python load_row(y) of the MFMA form: fills vals[0..in_passes). */
+static void dw_mfma_load_row(const dw_mfma_ctx* cx, int y, rocke_value_t** vals)
+{
+    rocke_ir_builder_t* b = cx->b;
+    const int rel_ho = y + cx->PAD - (cx->KH - 1);
+    rocke_value_t* dy_row;
+    if(cx->split_h)
+    {
+        rocke_value_t* c_rel = rocke_b_const_i32(b, rel_ho);
+        rocke_value_t* ho = rocke_b_add(b, cx->h0, c_rel);
+        rocke_value_t* ge = rocke_b_cmp_ge(b, ho, cx->c0);
+        rocke_value_t* lt = rocke_b_cmp_lt(b, ho, cx->c_Ho);
+        rocke_value_t* row_ok = rocke_b_land(b, ge, lt);
+        rocke_value_t* part = rocke_b_mul(b, ho, cx->c_dy_row_bytes);
+        dy_row = rocke_b_select(b, row_ok, part, cx->oob_uniform);
+    }
+    else
+    {
+        dy_row = rocke_b_const_i32(b, rel_ho * cx->Wo * cx->G * 2);
+    }
+    for(int i = 0; i < cx->in_passes; i++)
+    {
+        rocke_value_t* off = rocke_b_add(b, cx->in_plan[i].g_off, dy_row);
+        vals[i] = cx->is_bf16 ? rocke_b_buffer_load_vN_bf16(b, cx->a_rsrc, off, cx->c0, 4)
+                              : rocke_b_buffer_load_vN_f16(b, cx->a_rsrc, off, cx->c0, 4);
+    }
+    rocke_b_sched_barrier(b, 0);
+}
+
+/* Python dx_row_part(hi_local). */
+static rocke_value_t* dw_mfma_dx_row_part(const dw_mfma_ctx* cx, int hi_local)
+{
+    rocke_ir_builder_t* b = cx->b;
+    if(!cx->split_h)
+        return rocke_b_const_i32(b, hi_local * cx->W * cx->G * 2);
+    rocke_value_t* c_hl = rocke_b_const_i32(b, hi_local);
+    rocke_value_t* hi = rocke_b_add(b, cx->h0, c_hl);
+    rocke_value_t* part = rocke_b_mul(b, hi, cx->c_dx_row_bytes);
+    if(cx->c_H == NULL)
+        return part;
+    rocke_value_t* lt = rocke_b_cmp_lt(b, hi, cx->c_H);
+    return rocke_b_select(b, lt, part, cx->oob_uniform);
+}
+
+/* Python drain_out(buf, dx_row). */
+static void dw_mfma_drain_out(const dw_mfma_ctx* cx, rocke_value_t* buf, rocke_value_t* dx_row)
+{
+    rocke_ir_builder_t* b = cx->b;
+    for(int i = 0; i < cx->n_drain; i++)
+    {
+        rocke_value_t* idx[3] = {buf, cx->drain[i].px, cx->drain[i].ch8};
+        rocke_value_t* v = rocke_b_smem_load_vN(b, cx->o_smem, idx, 3, cx->io_type, 8);
+        rocke_value_t* off = rocke_b_add(b, cx->drain[i].g_off, dx_row);
+        if(cx->is_bf16)
+            rocke_b_buffer_store_vN_bf16(b, cx->d_rsrc, off, cx->c0, v, 4);
+        else
+            rocke_b_buffer_store_vN_f16(b, cx->d_rsrc, off, cx->c0, v, 4);
+    }
+}
+
+static rocke_kernel_def_t* dw_win_build_mfma(rocke_ir_builder_t* b,
+                                             const rocke_direct_depthwise_dgrad_win_spec_t* spec)
+{
+    const rocke_direct_conv_problem_t* p = &spec->problem;
+    const int KH = p->KH;
+    const int KW = p->KW;
+    const int PAD = p->PAD;
+    const int Ho = p->H + 2 * PAD - KH + 1; /* stride 1 (validated) */
+    const int Wo = p->W + 2 * PAD - KW + 1;
+    const int G = p->groups;
+    const int F = spec->w_fold;
+    const int SUB = 16 / F;
+    const int TW = rocke_direct_depthwise_dgrad_win_tile_w(spec);
+    const int KWP = (KW + 4) / 4;
+    const int U = TW + 4 * KWP - 2;
+    const int ROWS = rocke_direct_depthwise_dgrad_win_rows_per_block(spec);
+    const int H_TILES = rocke_direct_depthwise_dgrad_win_h_tiles(spec);
+    const int THREADS = rocke_direct_depthwise_dgrad_win_threads_per_block(spec);
+    const int BLOCK_CH = rocke_direct_depthwise_dgrad_win_block_ch(spec);
+    const int PER_PX = BLOCK_CH / ROCKE_DW_DGRAD_MFMA_CH;
+    const int CH_PAD = BLOCK_CH + ROCKE_DW_DGRAD_MFMA_CH;
+    const int PF = spec->prefetch_rows;
+    const bool split_h = H_TILES > 1;
+    const int is_bf16 = (p->dtype && strcmp(p->dtype, "bf16") == 0);
+    const int n_out = F * TW * PER_PX;
+    const int n_drain = (n_out + THREADS - 1) / THREADS;
+    const int n_in = F * U * PER_PX;
+    const int in_passes = (n_in + THREADS - 1) / THREADS;
+    const int in_px = (in_passes * THREADS + PER_PX - 1) / PER_PX;
+    const int n_rows = ROWS + KH - 1;
+
+    rocke_attr_set_int(b, &b->kernel->attrs, "max_workgroup_size", THREADS);
+
+    const rocke_type_t* io_type = rocke_b_io_ir_type(b, p->dtype ? p->dtype : "fp16");
+    const rocke_type_t* ioptr = rocke_ptr_type(b, io_type, "global");
+    rocke_param_opts_t ro = {0};
+    ro.noalias = true;
+    ro.noalias_set = true;
+    ro.readonly = true;
+    ro.readonly_set = true;
+    ro.align = 16;
+    ro.align_set = true;
+    rocke_param_opts_t wo_opts = {0};
+    wo_opts.noalias = true;
+    wo_opts.noalias_set = true;
+    wo_opts.writeonly = true;
+    wo_opts.writeonly_set = true;
+    wo_opts.align = 16;
+    wo_opts.align_set = true;
+    rocke_param_opts_t none = {0};
+
+    rocke_value_t* A = rocke_b_param(b, "A", ioptr, &ro);
+    rocke_value_t* Bp = rocke_b_param(b, "B", ioptr, &ro);
+    rocke_value_t* D = rocke_b_param(b, "D", ioptr, &wo_opts);
+    rocke_value_t* A_bytes = rocke_b_param(b, "A_bytes", rocke_i32(), &none);
+    rocke_value_t* B_bytes = rocke_b_param(b, "B_bytes", rocke_i32(), &none);
+    rocke_value_t* D_bytes = rocke_b_param(b, "D_bytes", rocke_i32(), &none);
+
+    /* Scratch arrays (freed before every return below). */
+    rocke_value_t** weights = (rocke_value_t**)calloc((size_t)(KH * KWP), sizeof(rocke_value_t*));
+    dw_mfma_plan* drain = (dw_mfma_plan*)calloc((size_t)n_drain, sizeof(dw_mfma_plan));
+    dw_mfma_plan* in_plan = (dw_mfma_plan*)calloc((size_t)in_passes, sizeof(dw_mfma_plan));
+    rocke_value_t** b_px = (rocke_value_t**)calloc((size_t)KWP, sizeof(rocke_value_t*));
+    rocke_value_t** xs = (rocke_value_t**)calloc((size_t)KWP, sizeof(rocke_value_t*));
+    rocke_value_t** pending
+        = (rocke_value_t**)calloc((size_t)(PF * in_passes), sizeof(rocke_value_t*));
+    rocke_value_t** acc = (rocke_value_t**)calloc((size_t)KH, sizeof(rocke_value_t*));
+    int* rs = (int*)calloc((size_t)KH, sizeof(int));
+    int* live_rows = (int*)calloc((size_t)n_rows, sizeof(int));
+    rocke_kernel_def_t* result = NULL;
+    if(!weights || !drain || !in_plan || !b_px || !xs || !pending || !acc || !rs || !live_rows)
+    {
+        if(b->status == ROCKE_OK)
+            b->status = ROCKE_ERR_OOM;
+        goto done;
+    }
+
+    {
+        rocke_value_t* c0 = rocke_b_const_i32(b, 0);
+        rocke_value_t* oob_lane = rocke_b_const_i32(b, ROCKE_DW_DGRAD_WIN_OOB_LANE);
+        rocke_value_t* oob_uniform = rocke_b_const_i32(b, ROCKE_DW_DGRAD_WIN_OOB_UNIFORM);
+        rocke_value_t* zero_acc = rocke_b_zero_vec_f32(b, 4);
+        rocke_value_t* zero_f32 = rocke_b_const_f32(b, 0.0f);
+        rocke_value_t* zero_half = is_bf16 ? rocke_b_trunc_f32_to_bf16(b, zero_f32)
+                                           : rocke_b_trunc_f32_to_f16(b, zero_f32);
+
+        rocke_value_t* tid = rocke_b_thread_id_x(b);
+        rocke_value_t* bx = rocke_b_block_id_x(b);
+        rocke_value_t* by = rocke_b_block_id_y(b);
+        rocke_value_t* bz = rocke_b_block_id_z(b);
+        rocke_value_t* n_tile;
+        rocke_value_t* h0 = NULL;
+        if(split_h)
+        {
+            rocke_value_t* c_h_tiles = rocke_b_const_i32(b, H_TILES);
+            n_tile = rocke_b_div(b, bz, c_h_tiles);
+            rocke_value_t* tile = rocke_b_mod(b, bz, c_h_tiles);
+            rocke_value_t* c_rows = rocke_b_const_i32(b, ROWS);
+            h0 = rocke_b_mul(b, tile, c_rows);
+        }
+        else
+        {
+            n_tile = bz;
+        }
+        rocke_value_t* c64 = rocke_b_const_i32(b, 64);
+        rocke_value_t* lane = rocke_b_mod(b, tid, c64);
+        rocke_value_t* wave = rocke_b_div(b, tid, c64);
+        rocke_value_t* c_tw0 = rocke_b_const_i32(b, TW);
+        rocke_value_t* x0 = rocke_b_mul(b, bx, c_tw0);
+        rocke_value_t* c_f = rocke_b_const_i32(b, F);
+        rocke_value_t* img0 = rocke_b_mul(b, n_tile, c_f);
+        rocke_value_t* c_block_ch = rocke_b_const_i32(b, BLOCK_CH);
+        rocke_value_t* ch_blk = rocke_b_mul(b, by, c_block_ch);
+        rocke_value_t* c_mch = rocke_b_const_i32(b, ROCKE_DW_DGRAD_MFMA_CH);
+        rocke_value_t* wave_ch = rocke_b_mul(b, wave, c_mch);
+        rocke_value_t* c_wave = rocke_b_add(b, ch_blk, wave_ch);
+        rocke_value_t* c_G = rocke_b_const_i32(b, G);
+        rocke_value_t* ch_ok = rocke_b_cmp_lt(b, c_wave, c_G);
+        rocke_value_t* c16 = rocke_b_const_i32(b, 16);
+        rocke_value_t* c8 = rocke_b_const_i32(b, 8);
+        rocke_value_t* col16 = rocke_b_mod(b, lane, c16);
+        rocke_value_t* t = rocke_b_div(b, lane, c16);
+        rocke_value_t* k = rocke_b_mod(b, col16, c8);
+        rocke_value_t* q = rocke_b_div(b, col16, c8);
+
+        rocke_value_t* a_rsrc = rocke_b_buffer_rsrc(b, A, A_bytes);
+        rocke_value_t* b_rsrc = rocke_b_buffer_rsrc(b, Bp, B_bytes);
+        rocke_value_t* d_rsrc = rocke_b_buffer_rsrc(b, D, D_bytes);
+
+        /* One-hot A fragments weights[r][ph]: W[k, r, KW - 1 - s] at slot k. */
+        rocke_value_t* wk = rocke_b_add(b, c_wave, k);
+        rocke_value_t* c_tap_bytes = rocke_b_const_i32(b, KH * KW * 2);
+        rocke_value_t* w_base = rocke_b_mul(b, wk, c_tap_bytes);
+        rocke_value_t* c_KW = rocke_b_const_i32(b, KW);
+        rocke_value_t* is_k[ROCKE_DW_DGRAD_MFMA_CH];
+        for(int j = 0; j < ROCKE_DW_DGRAD_MFMA_CH; j++)
+        {
+            rocke_value_t* c_j = rocke_b_const_i32(b, j);
+            is_k[j] = rocke_b_cmp_eq(b, k, c_j);
+        }
+        for(int r = 0; r < KH; r++)
+        {
+            for(int ph = 0; ph < KWP; ph++)
+            {
+                rocke_value_t* c_4ph = rocke_b_const_i32(b, 4 * ph);
+                rocke_value_t* t4 = rocke_b_add(b, t, c_4ph);
+                rocke_value_t* s = rocke_b_sub(b, t4, q);
+                rocke_value_t* ge = rocke_b_cmp_ge(b, s, c0);
+                rocke_value_t* lt = rocke_b_cmp_lt(b, s, c_KW);
+                rocke_value_t* in_row = rocke_b_land(b, ge, lt);
+                rocke_value_t* ok = rocke_b_land(b, ch_ok, in_row);
+                rocke_value_t* c_tap = rocke_b_const_i32(b, r * KW + KW - 1);
+                rocke_value_t* tap = rocke_b_sub(b, c_tap, s);
+                rocke_value_t* c2 = rocke_b_const_i32(b, 2);
+                rocke_value_t* tap_bytes = rocke_b_mul(b, tap, c2);
+                rocke_value_t* w_off = rocke_b_add(b, w_base, tap_bytes);
+                rocke_value_t* off = rocke_b_select(b, ok, w_off, oob_lane);
+                rocke_value_t* w = is_bf16 ? rocke_b_buffer_load_bf16(b, b_rsrc, off, c0)
+                                           : rocke_b_buffer_load_f16(b, b_rsrc, off, c0);
+                rocke_value_t* comps[ROCKE_DW_DGRAD_MFMA_CH];
+                for(int j = 0; j < ROCKE_DW_DGRAD_MFMA_CH; j++)
+                    comps[j] = rocke_b_select(b, is_k[j], w, zero_half);
+                weights[r * KWP + ph] = rocke_b_vec_pack(b, comps, ROCKE_DW_DGRAD_MFMA_CH, io_type);
+            }
+        }
+
+        /* Lane parts shared by the B reads and the D staging. */
+        rocke_value_t* c_sub = rocke_b_const_i32(b, SUB);
+        rocke_value_t* f = rocke_b_div(b, col16, c_sub);
+        rocke_value_t* pair = rocke_b_mod(b, col16, c_sub);
+        rocke_value_t* c2p = rocke_b_const_i32(b, 2);
+        rocke_value_t* pair2 = rocke_b_mul(b, pair, c2p);
+        rocke_value_t* c_px_bytes = rocke_b_const_i32(b, G * 2);
+        rocke_value_t* c_dy_img_bytes = rocke_b_const_i32(b, Ho * Wo * G * 2);
+        rocke_value_t* c_dx_img_bytes = rocke_b_const_i32(b, p->H * p->W * G * 2);
+        rocke_value_t* c_N = rocke_b_const_i32(b, p->N);
+        rocke_value_t* c_W = rocke_b_const_i32(b, p->W);
+        rocke_value_t* c_Wo = rocke_b_const_i32(b, Wo);
+        rocke_value_t* c_per_px = rocke_b_const_i32(b, PER_PX);
+
+        /* dX staging [buffer, image column, channel] and its drain plan. */
+        const int o_shape[3] = {2, F * TW, CH_PAD};
+        rocke_value_t* o_smem = rocke_b_smem_alloc(b, io_type, o_shape, 3, "dx_stage");
+        rocke_value_t* c_tw1 = rocke_b_const_i32(b, TW);
+        rocke_value_t* f_tw = rocke_b_mul(b, f, c_tw1);
+        rocke_value_t* c2q = rocke_b_const_i32(b, 2);
+        rocke_value_t* t_half = rocke_b_div(b, t, c2q);
+        rocke_value_t* col_in = rocke_b_add(b, pair2, t_half);
+        rocke_value_t* o_col = rocke_b_add(b, f_tw, col_in);
+        rocke_value_t* c2r = rocke_b_const_i32(b, 2);
+        rocke_value_t* t_par = rocke_b_mod(b, t, c2r);
+        rocke_value_t* c4 = rocke_b_const_i32(b, 4);
+        rocke_value_t* k0 = rocke_b_mul(b, t_par, c4);
+        rocke_value_t* o_ch = rocke_b_add(b, wave_ch, k0);
+        rocke_value_t* c_TW = rocke_b_const_i32(b, TW);
+        for(int i = 0; i < n_drain; i++)
+        {
+            rocke_value_t* c_base = rocke_b_const_i32(b, i * THREADS);
+            rocke_value_t* idx = rocke_b_add(b, tid, c_base);
+            rocke_value_t* px = rocke_b_div(b, idx, c_per_px);
+            rocke_value_t* chunk = rocke_b_mod(b, idx, c_per_px);
+            rocke_value_t* ch8 = rocke_b_mul(b, chunk, c8);
+            rocke_value_t* f_o = rocke_b_div(b, px, c_TW);
+            rocke_value_t* img_o = rocke_b_add(b, img0, f_o);
+            rocke_value_t* col_o = rocke_b_mod(b, px, c_TW);
+            rocke_value_t* wi_o = rocke_b_add(b, x0, col_o);
+            rocke_value_t* ch_o = rocke_b_add(b, ch_blk, ch8);
+            rocke_value_t* c_n_out = rocke_b_const_i32(b, n_out);
+            rocke_value_t* ok0 = rocke_b_cmp_lt(b, idx, c_n_out);
+            rocke_value_t* ok1 = rocke_b_cmp_lt(b, img_o, c_N);
+            rocke_value_t* ok01 = rocke_b_land(b, ok0, ok1);
+            rocke_value_t* ok2 = rocke_b_cmp_lt(b, wi_o, c_W);
+            rocke_value_t* ok3 = rocke_b_cmp_lt(b, ch_o, c_G);
+            rocke_value_t* ok23 = rocke_b_land(b, ok2, ok3);
+            rocke_value_t* ok = rocke_b_land(b, ok01, ok23);
+            rocke_value_t* img_b = rocke_b_mul(b, img_o, c_dx_img_bytes);
+            rocke_value_t* col_b = rocke_b_mul(b, wi_o, c_px_bytes);
+            rocke_value_t* c2s = rocke_b_const_i32(b, 2);
+            rocke_value_t* ch_b = rocke_b_mul(b, ch_o, c2s);
+            rocke_value_t* lane_b = rocke_b_add(b, col_b, ch_b);
+            rocke_value_t* g_off = rocke_b_add(b, img_b, lane_b);
+            drain[i].px = px;
+            drain[i].ch8 = ch8;
+            drain[i].g_off = rocke_b_select(b, ok, g_off, oob_lane);
+        }
+
+        /* dY staging [buffer, window column, channel] and its load plan. */
+        const int i_shape[3] = {2, in_px, CH_PAD};
+        rocke_value_t* i_smem = rocke_b_smem_alloc(b, io_type, i_shape, 3, "dy_stage");
+        rocke_value_t* c_U = rocke_b_const_i32(b, U);
+        for(int i = 0; i < in_passes; i++)
+        {
+            rocke_value_t* c_base = rocke_b_const_i32(b, i * THREADS);
+            rocke_value_t* idx = rocke_b_add(b, tid, c_base);
+            rocke_value_t* px = rocke_b_div(b, idx, c_per_px);
+            rocke_value_t* chunk = rocke_b_mod(b, idx, c_per_px);
+            rocke_value_t* ch8 = rocke_b_mul(b, chunk, c8);
+            rocke_value_t* f_i = rocke_b_div(b, px, c_U);
+            rocke_value_t* img_i = rocke_b_add(b, img0, f_i);
+            rocke_value_t* col_i = rocke_b_mod(b, px, c_U);
+            rocke_value_t* c_shift = rocke_b_const_i32(b, PAD - (KW - 1));
+            rocke_value_t* col_s = rocke_b_add(b, col_i, c_shift);
+            rocke_value_t* wo = rocke_b_add(b, x0, col_s);
+            rocke_value_t* ch_i = rocke_b_add(b, ch_blk, ch8);
+            rocke_value_t* c_n_in = rocke_b_const_i32(b, n_in);
+            rocke_value_t* ok0 = rocke_b_cmp_lt(b, idx, c_n_in);
+            rocke_value_t* ok1 = rocke_b_cmp_lt(b, img_i, c_N);
+            rocke_value_t* ok01 = rocke_b_land(b, ok0, ok1);
+            rocke_value_t* ge = rocke_b_cmp_ge(b, wo, c0);
+            rocke_value_t* lt = rocke_b_cmp_lt(b, wo, c_Wo);
+            rocke_value_t* in_row = rocke_b_land(b, ge, lt);
+            rocke_value_t* ok3 = rocke_b_cmp_lt(b, ch_i, c_G);
+            rocke_value_t* ok23 = rocke_b_land(b, in_row, ok3);
+            rocke_value_t* ok = rocke_b_land(b, ok01, ok23);
+            rocke_value_t* img_b = rocke_b_mul(b, img_i, c_dy_img_bytes);
+            rocke_value_t* col_b = rocke_b_mul(b, wo, c_px_bytes);
+            rocke_value_t* c2s = rocke_b_const_i32(b, 2);
+            rocke_value_t* ch_b = rocke_b_mul(b, ch_i, c2s);
+            rocke_value_t* lane_b = rocke_b_add(b, col_b, ch_b);
+            rocke_value_t* g_off = rocke_b_add(b, img_b, lane_b);
+            in_plan[i].px = px;
+            in_plan[i].ch8 = ch8;
+            in_plan[i].g_off = rocke_b_select(b, ok, g_off, oob_lane);
+        }
+        rocke_value_t* f_u = rocke_b_mul(b, f, c_U);
+        for(int ph = 0; ph < KWP; ph++)
+        {
+            rocke_value_t* c_4ph = rocke_b_const_i32(b, 4 * ph);
+            rocke_value_t* t4 = rocke_b_add(b, t, c_4ph);
+            rocke_value_t* col = rocke_b_add(b, pair2, t4);
+            b_px[ph] = rocke_b_add(b, f_u, col);
+        }
+
+        dw_mfma_ctx cx;
+        memset(&cx, 0, sizeof cx);
+        cx.b = b;
+        cx.is_bf16 = is_bf16;
+        cx.KH = KH;
+        cx.PAD = PAD;
+        cx.Ho = Ho;
+        cx.Wo = Wo;
+        cx.G = G;
+        cx.ROWS = ROWS;
+        cx.W = p->W;
+        cx.split_h = split_h;
+        cx.c0 = c0;
+        cx.oob_uniform = oob_uniform;
+        cx.h0 = h0;
+        cx.a_rsrc = a_rsrc;
+        cx.d_rsrc = d_rsrc;
+        cx.o_smem = o_smem;
+        cx.io_type = io_type;
+        cx.in_plan = in_plan;
+        cx.in_passes = in_passes;
+        cx.drain = drain;
+        cx.n_drain = n_drain;
+        cx.c_dy_row_bytes = rocke_b_const_i32(b, Wo * G * 2);
+        cx.c_dx_row_bytes = rocke_b_const_i32(b, p->W * G * 2);
+        cx.c_Ho = split_h ? rocke_b_const_i32(b, Ho) : NULL;
+        cx.c_H = (split_h && p->H % ROWS != 0) ? rocke_b_const_i32(b, p->H) : NULL;
+
+        /* Live dY rows (Python row_taps: same rule as the VALU form). */
+        dw_win_ctx tc;
+        memset(&tc, 0, sizeof tc);
+        tc.KH = KH;
+        tc.PAD = PAD;
+        tc.Ho = Ho;
+        tc.ROWS = ROWS;
+        tc.split_h = split_h;
+        int n_live = 0;
+        for(int y = 0; y < n_rows; y++)
+        {
+            if(dw_win_row_taps(&tc, y, rs) > 0)
+                live_rows[n_live++] = y;
+        }
+        /* pending rows live in a ring of PF slots: live row li in slot li % PF.
+         * Row li is consumed (stored to LDS) before row li + PF is loaded. */
+        for(int li = 0; li < n_live && li < PF; li++)
+            dw_mfma_load_row(&cx, live_rows[li], &pending[(li % PF) * in_passes]);
+
+        int phase = 0;
+        int live_idx = 0;
+        rocke_value_t* pend_val = NULL;
+        rocke_value_t* pend_row = NULL;
+        for(int i = 0; i < KH; i++)
+            acc[i] = zero_acc;
+        for(int y = 0; y < n_rows; y++)
+        {
+            const int n_rs = dw_win_row_taps(&tc, y, rs);
+            rocke_value_t** raw = (n_rs > 0) ? &pending[(live_idx % PF) * in_passes] : NULL;
+            if(raw != NULL || pend_val != NULL)
+            {
+                rocke_value_t* buf = rocke_b_const_i32(b, phase % 2);
+                phase++;
+                if(raw != NULL)
+                {
+                    for(int i = 0; i < in_passes; i++)
+                    {
+                        rocke_value_t* idx[3] = {buf, in_plan[i].px, in_plan[i].ch8};
+                        rocke_b_smem_store_vN(b, i_smem, idx, 3, raw[i], 8);
+                    }
+                }
+                if(pend_val != NULL)
+                {
+                    rocke_value_t* idx[3] = {buf, o_col, o_ch};
+                    rocke_b_smem_store_vN(b, o_smem, idx, 3, pend_val, 4);
+                }
+                rocke_b_sync_lds_only(b);
+                if(raw != NULL)
+                {
+                    for(int ph = 0; ph < KWP; ph++)
+                    {
+                        rocke_value_t* idx[3] = {buf, b_px[ph], wave_ch};
+                        xs[ph] = rocke_b_smem_load_vN(b, i_smem, idx, 3, io_type, 8);
+                    }
+                }
+                if(pend_val != NULL)
+                {
+                    dw_mfma_drain_out(&cx, buf, pend_row);
+                    pend_val = NULL;
+                    pend_row = NULL;
+                }
+            }
+            if(n_rs > 0)
+            {
+                const int k_next = live_idx + PF;
+                if(k_next < n_live)
+                    dw_mfma_load_row(&cx, live_rows[k_next], &pending[(k_next % PF) * in_passes]);
+                for(int ph = 0; ph < KWP; ph++)
+                {
+                    for(int ri = 0; ri < n_rs; ri++)
+                    {
+                        const int r = rs[ri];
+                        const int slot = (y + r - (KH - 1)) % KH;
+                        acc[slot] = is_bf16 ? rocke_b_mfma_f32_16x16x32_bf16(
+                                                  b, weights[r * KWP + ph], xs[ph], acc[slot])
+                                            : rocke_b_mfma_f32_16x16x32_f16(
+                                                  b, weights[r * KWP + ph], xs[ph], acc[slot]);
+                    }
+                }
+                live_idx++;
+            }
+            const int hi_local = y - (KH - 1);
+            if(hi_local < 0 || hi_local >= ROWS)
+                continue;
+            const int slot = hi_local % KH;
+            pend_val = is_bf16 ? rocke_b_vec_trunc_f32_to_bf16(b, acc[slot])
+                               : rocke_b_vec_trunc_f32_to_f16(b, acc[slot]);
+            pend_row = dw_mfma_dx_row_part(&cx, hi_local);
+            acc[slot] = zero_acc;
+        }
+        if(pend_val != NULL)
+        {
+            rocke_value_t* buf = rocke_b_const_i32(b, phase % 2);
+            rocke_value_t* idx[3] = {buf, o_col, o_ch};
+            rocke_b_smem_store_vN(b, o_smem, idx, 3, pend_val, 4);
+            rocke_b_sync_lds_only(b);
+            dw_mfma_drain_out(&cx, buf, pend_row);
+        }
+    }
+    result = rocke_ir_builder_kernel(b);
+
+done:
+    free(weights);
+    free(drain);
+    free(in_plan);
+    free(b_px);
+    free(xs);
+    free(pending);
+    free(acc);
+    free(rs);
+    free(live_rows);
+    return result;
+}
+
 rocke_kernel_def_t* rocke_build_direct_depthwise_dgrad_win(
     rocke_ir_builder_t* b, const rocke_direct_depthwise_dgrad_win_spec_t* spec, const char* arch)
 {
@@ -144,6 +660,8 @@ rocke_kernel_def_t* rocke_build_direct_depthwise_dgrad_win(
             b->status = ROCKE_ERR_VALUE;
         return NULL;
     }
+    if(spec->mfma)
+        return dw_win_build_mfma(b, spec);
 
     const rocke_direct_conv_problem_t* p = &spec->problem;
     const int BW = spec->block_w;

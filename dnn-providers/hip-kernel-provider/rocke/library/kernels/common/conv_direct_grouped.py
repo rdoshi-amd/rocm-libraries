@@ -68,7 +68,7 @@ I/O) which emits 16 independent 4x4x4 matmuls per wave — letting one wave proc
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import List, Tuple
 
 from rocke.core.ir import (
@@ -957,10 +957,22 @@ class DirectConv4cSpec:
     # 16-byte loads and build each tap's fragment with one ds_read_b64_tr_b16
     # instead of four scalar gathers. Needs transpose LDS reads (gfx950).
     dgrad_weights_lds: bool = False
+    # Row-staged dgrad form (needs dgrad_fused_weights + dgrad_weights_lds and
+    # a stride-1 'same'-padded filter, Ho == H and Wo == W). Once per input
+    # row every thread copies 16-byte vectors of the workgroup's row
+    # (block_q + KW - 1 columns x block_groups*cpg channels) into a
+    # double-buffered, padded LDS row, one row ahead through registers; each
+    # wave then reads its MFMA B fragments with ds_read_b64. This replaces the
+    # direct 8-byte per-lane global loads, whose lanes sit on pixels a whole
+    # channel row apart. Rows outside the image are skipped.
+    stage_rows: bool = False
+    # stage_rows only: waves per workgroup along q (4 columns each), so
+    # block_q == 4 * waves_q. Every wave reads the shared staged row.
+    waves_q: int = 1
 
     @property
     def threads_per_block(self) -> int:
-        return (self.block_groups // 16) * self.wave_size
+        return (self.block_groups // 16) * self.waves_q * self.wave_size
 
     def kernel_name(self) -> str:
         from rocke.helpers.spec import kernel_name_join
@@ -975,6 +987,7 @@ class DirectConv4cSpec:
                 "bf16": p.dtype == "bf16",
                 "fw": self.dgrad_fused_weights and not self.dgrad_weights_lds,
                 "fwl": self.dgrad_fused_weights and self.dgrad_weights_lds,
+                f"sr{self.waves_q}": self.stage_rows,
             },
         )
 
@@ -998,6 +1011,48 @@ class DirectConv4cSpec:
             raise ValueError(
                 "DirectConv4cSpec dgrad_weights_lds requires dgrad_fused_weights"
             )
+        why = _stage_rows_reject_reason(self)
+        if why:
+            raise ValueError(f"DirectConv4cSpec {why}")
+
+
+#: Most threads in one 4c workgroup (``stage_rows`` with ``waves_q > 1``).
+DCONV4C_MAX_THREADS = 1024
+
+
+def _stage_rows_reject_reason(spec: DirectConv4cSpec) -> str:
+    """Why ``stage_rows`` / ``waves_q`` are illegal on ``spec`` ("" = legal).
+
+    Shared by :meth:`DirectConv4cSpec.validate` and :func:`is_valid_spec_4c`;
+    the C++ engine mirrors it (``rocke_dconv4c_stage_rows_reject``) with the
+    same reason text.
+    """
+    p = spec.problem
+    if spec.waves_q < 1:
+        return f"waves_q must be >= 1 (got {spec.waves_q})"
+    if not spec.stage_rows:
+        if spec.waves_q != 1:
+            return f"waves_q > 1 needs stage_rows (got waves_q={spec.waves_q})"
+        return ""
+    if not (spec.dgrad_fused_weights and spec.dgrad_weights_lds):
+        return "stage_rows needs dgrad_fused_weights and dgrad_weights_lds"
+    if spec.block_q != 4 * spec.waves_q:
+        return (
+            f"stage_rows needs block_q == 4*waves_q "
+            f"(got block_q={spec.block_q}, waves_q={spec.waves_q})"
+        )
+    if p.stride != 1 or p.KH != 2 * p.PAD + 1 or p.KW != 2 * p.PAD + 1:
+        return (
+            "stage_rows needs stride 1 and 'same' padding (Ho == H, Wo == W: "
+            f"KH == KW == 2*PAD+1; got stride={p.stride}, KH={p.KH}, "
+            f"KW={p.KW}, PAD={p.PAD})"
+        )
+    if spec.threads_per_block > DCONV4C_MAX_THREADS:
+        return (
+            f"stage_rows needs threads_per_block <= {DCONV4C_MAX_THREADS} "
+            f"(got {spec.threads_per_block})"
+        )
+    return ""
 
 
 #: Upper bound on the 4c fused-dgrad LDS staging passes
@@ -1050,6 +1105,9 @@ def is_valid_spec_4c(spec: DirectConv4cSpec, arch: str = "gfx950") -> Tuple[bool
             f"DirectConv4cSpec supports KH*KW <= {DCONV4C_MAX_TAPS} "
             f"(got {p.KH * p.KW})"
         )
+    why = _stage_rows_reject_reason(spec)
+    if why:
+        return False, why
     if spec.dgrad_weights_lds:
         if not spec.dgrad_fused_weights:
             return False, "dgrad_weights_lds requires dgrad_fused_weights"
@@ -1065,7 +1123,269 @@ def is_valid_spec_4c(spec: DirectConv4cSpec, arch: str = "gfx950") -> Tuple[bool
                 f"dgrad_weights_lds needs {wl_passes} staging passes "
                 f"(max {DCONV4C_MAX_WL_PASSES})"
             )
+    if spec.stage_rows:
+        geo = _staged_4c_geometry(spec)
+        if geo["passes"] > DCONV4C_MAX_ROW_PASSES:
+            return False, (
+                f"stage_rows needs {geo['passes']} row staging passes "
+                f"(max {DCONV4C_MAX_ROW_PASSES})"
+            )
+        cap = ArchTarget.from_gfx(arch).lds_capacity_bytes
+        if geo["lds_bytes"] > cap:
+            return False, (
+                f"stage_rows needs {geo['lds_bytes']} bytes of LDS "
+                f"(more than {cap} on {arch})"
+            )
     return True, "ok"
+
+
+#: Upper bound on the ``stage_rows`` input-row staging passes
+#: ``ceil((block_q + KW - 1) * block_groups*cpg/8 / threads)`` (3x3 needs 1);
+#: mirrors ``ROCKE_DCONV4C_MAX_ROW_PASSES`` in the C++ engine.
+DCONV4C_MAX_ROW_PASSES = 8
+
+
+def _staged_4c_geometry(spec: DirectConv4cSpec) -> dict:
+    """LDS geometry of the ``stage_rows`` 4c kernel (element counts in io dtype).
+
+    ``row_stride`` pads every staged column by 32 elements (64 bytes), so the
+    4 q columns one fragment read touches fall in different bank quarters.
+    ``lds_bytes`` is the sum of the weight slice and both row buffers (an
+    upper bound: the pool may overlay the weight slice, which is dead once
+    the fragments are in registers).
+    """
+    p = spec.problem
+    threads = spec.threads_per_block
+    bc = spec.block_groups * p.cpg
+    lds_w = spec.block_q + p.KW - 1
+    vpc = bc // 8
+    row_stride = bc + 32
+    nchunk = lds_w * vpc
+    passes = -(-nchunk // threads)
+    row_elems = (-(-(passes * threads) // vpc)) * row_stride
+    wl_vecs = spec.block_groups * p.cpg * p.KH * p.KW * p.kpg // 8
+    wl_elems = -(-wl_vecs // threads) * threads * 8
+    return {
+        "bc": bc,
+        "lds_w": lds_w,
+        "vpc": vpc,
+        "row_stride": row_stride,
+        "nchunk": nchunk,
+        "passes": passes,
+        "row_elems": row_elems,
+        "lds_bytes": (2 * row_elems + wl_elems) * 2,
+    }
+
+
+def _build_direct_conv_4c_staged(spec: DirectConv4cSpec) -> KernelDef:
+    """Row-staged 4c dgrad kernel (``stage_rows``) with fused LDS weights.
+
+    Workgroup = ``block_groups/16`` channel waves x ``waves_q`` q waves. Per
+    input row every thread issues the next row's 16-byte loads (registers),
+    the waves run their KH*KW 4x4x4 MFMAs from the current LDS row, then the
+    next row is committed to the other LDS buffer and a barrier publishes
+    it. Rows outside the image are skipped (no loads, no MFMAs). The caller
+    (:func:`build_direct_conv_4c`) has validated the spec; the C++ engine
+    mirrors this builder op for op (``rocke_dconv4c_build_staged``).
+    """
+    p = spec.problem
+    io_type = _io_type(p.dtype)
+    H, W = p.H, p.W
+    NWC = spec.block_groups // 16
+    THREADS = spec.threads_per_block
+    geo = _staged_4c_geometry(spec)
+    BC = geo["bc"]
+    VPC = geo["vpc"]
+    ROW_STRIDE = geo["row_stride"]
+    NCHUNK = geo["nchunk"]
+    PASSES = geo["passes"]
+    ROW_ELEMS = geo["row_elems"]
+
+    b = IRBuilder(spec.kernel_name())
+    b.kernel.attrs["max_workgroup_size"] = THREADS
+    A = b.param("A", PtrType(io_type, "global"), noalias=True, readonly=True, align=16)
+    Bp = b.param("B", PtrType(io_type, "global"), noalias=True, readonly=True, align=16)
+    D = b.param("D", PtrType(io_type, "global"), noalias=True, writeonly=True, align=16)
+    A_bytes = b.param("A_bytes", I32)
+    B_bytes = b.param("B_bytes", I32)
+    D_bytes = b.param("D_bytes", I32)
+
+    c0 = b.const_i32(0)
+    c_half_bytes = b.const_i32(2)
+    oob_sentinel = b.const_i32((1 << 31) - 1)
+    tid = b.thread_id_x()
+    wave_id = b.div(tid, b.const_i32(spec.wave_size))
+    lane = b.mod(tid, b.const_i32(spec.wave_size))
+    batch = b.div(lane, b.const_i32(4))
+    lane_q = b.mod(lane, b.const_i32(4))
+    wave_c = b.mod(wave_id, b.const_i32(NWC))
+    wave_q = b.div(wave_id, b.const_i32(NWC))
+
+    bx = b.block_id_x()
+    by = b.block_id_y()
+    n = b.block_id_z()
+    q0 = b.mul(bx, b.const_i32(spec.block_q))
+    group_in_wg = b.add(b.mul(wave_c, b.const_i32(16)), batch)
+    g = b.add(b.mul(by, b.const_i32(spec.block_groups)), group_in_wg)
+
+    a_rsrc = b.buffer_rsrc(A, A_bytes)
+    b_rsrc = b.buffer_rsrc(Bp, B_bytes)
+    d_rsrc = b.buffer_rsrc(D, D_bytes)
+    zero_acc = b.zero_vec_f32(4)
+
+    # ---- fused dgrad weights via LDS: the 4c kernel's transpose read, with
+    # the wave's group block given by its channel wave ``wave_c``.
+    wl_group = p.cpg * p.KH * p.KW * p.kpg
+    wl_vecs = spec.block_groups * wl_group // 8
+    wl_passes = (wl_vecs + THREADS - 1) // THREADS
+    wl_lds = b.smem_alloc(io_type, [1, wl_passes * THREADS * 8], name_hint="lds_w")
+    wl_base = b.mul(by, b.const_i32(spec.block_groups * wl_group))
+    wl_loads = []
+    for pi in range(wl_passes):
+        wl_v = b.add(tid, b.const_i32(pi * THREADS))
+        wl_off = b.mul(b.add(wl_base, b.mul(wl_v, b.const_i32(8))), c_half_bytes)
+        if (pi + 1) * THREADS > wl_vecs:
+            wl_off = b.select(
+                b.cmp_lt(wl_v, b.const_i32(wl_vecs)), wl_off, oob_sentinel
+            )
+        wl_vec = _buf_load_vN(b, p.dtype, b_rsrc, wl_off, c0, 4)
+        wl_loads.append((wl_vec, b.mul(wl_v, b.const_i32(8))))
+
+    # ---- input row loader: chunk -> (column, 16-byte channel vector).
+    c_W = b.const_i32(W)
+    row_bytes = W * p.total_c * 2
+    chunk_meta = []
+    for pi in range(PASSES):
+        chunk = b.add(tid, b.const_i32(pi * THREADS))
+        col = b.div(chunk, b.const_i32(VPC))
+        cv = b.mod(chunk, b.const_i32(VPC))
+        w_in = b.add(q0, b.const_i32(-p.PAD))
+        w_in = b.add(w_in, col)
+        ok = b.land(b.cmp_ge(w_in, c0), b.cmp_lt(w_in, c_W))
+        if (pi + 1) * THREADS > NCHUNK:
+            ok = b.land(ok, b.cmp_lt(chunk, b.const_i32(NCHUNK)))
+        elem = b.add(
+            b.mul(b.add(b.mul(n, b.const_i32(H * W)), w_in), b.const_i32(p.total_c)),
+            b.add(b.mul(by, b.const_i32(BC)), b.mul(cv, b.const_i32(8))),
+        )
+        base_bytes = b.mul(elem, c_half_bytes)
+        lds_idx = b.add(b.mul(col, b.const_i32(ROW_STRIDE)), b.mul(cv, b.const_i32(8)))
+        chunk_meta.append((ok, base_bytes, lds_idx))
+
+    def issue_row(h: int):
+        out = []
+        for ok, base_bytes, lds_idx in chunk_meta:
+            off = b.select(
+                ok, b.add(base_bytes, b.const_i32(h * row_bytes)), oob_sentinel
+            )
+            out.append((_buf_load_vN(b, p.dtype, a_rsrc, off, c0, 4), lds_idx))
+        return out
+
+    def commit_row(loads, buf):
+        for vec, lds_idx in loads:
+            b.smem_store_vN(buf, [c0, lds_idx], vec, 8)
+
+    n_iters = H + p.KH - 1
+
+    def row_valid(y: int) -> bool:
+        return 0 <= y - p.PAD < H
+
+    y_first = next(y for y in range(n_iters) if row_valid(y))
+    first_loads = issue_row(y_first - p.PAD)
+    for wl_vec, wl_idx in wl_loads:
+        b.smem_store_vN(wl_lds, [c0, wl_idx], wl_vec, 8)
+    b.sync()
+    wl_grp = b.add(
+        b.add(
+            b.mul(wave_c, b.const_i32(16)),
+            b.mul(b.div(lane, b.const_i32(16)), b.const_i32(4)),
+        ),
+        b.mod(lane, b.const_i32(4)),
+    )
+    wl_lane_base = b.add(
+        b.mul(wl_grp, b.const_i32(wl_group)),
+        b.mul(
+            b.mod(b.div(lane, b.const_i32(4)), b.const_i32(4)),
+            b.const_i32(p.KH * p.KW * p.kpg),
+        ),
+    )
+    weights: list[Value] = []
+    for r_const in range(p.KH):
+        for s_const in range(p.KW):
+            tap = (p.KH - 1 - r_const) * p.KW + (p.KW - 1 - s_const)
+            weights.append(
+                b.ds_read_tr16_b64(
+                    wl_lds,
+                    c0,
+                    b.add(wl_lane_base, b.const_i32(tap * p.kpg)),
+                    dtype=io_type,
+                )
+            )
+    # The transpose reads finish before the (pool-overlaid) row buffers are
+    # written.
+    b.sync()
+    bufs = [
+        b.smem_alloc(io_type, [1, ROW_ELEMS], name_hint="lds_row_a"),
+        b.smem_alloc(io_type, [1, ROW_ELEMS], name_hint="lds_row_b"),
+    ]
+    commit_row(first_loads, bufs[y_first % 2])
+    b.sync()
+
+    # Per-lane LDS fragment offset (column wave_q*4 + lane_q, + s per tap).
+    x_col = b.add(b.mul(wave_q, b.const_i32(4)), lane_q)
+    x_base = b.add(
+        b.mul(x_col, b.const_i32(ROW_STRIDE)), b.mul(group_in_wg, b.const_i32(p.cpg))
+    )
+    out_q = b.add(q0, x_col)
+    out_q_ok = b.cmp_lt(out_q, c_W)
+    d_base = b.mul(
+        b.add(
+            b.mul(b.add(b.mul(n, b.const_i32(H * W)), out_q), b.const_i32(p.total_c)),
+            b.mul(g, b.const_i32(p.kpg)),
+        ),
+        c_half_bytes,
+    )
+
+    accs = [zero_acc] * p.KH
+    for y in range(n_iters):
+        cur = bufs[y % 2]
+        nxt_loads = None
+        if y + 1 < n_iters and row_valid(y + 1) and y + 1 != y_first:
+            nxt_loads = issue_row(y + 1 - p.PAD)
+        if row_valid(y):
+            xs = [
+                b.smem_load_vN(
+                    cur,
+                    c0,
+                    b.add(x_base, b.const_i32(s_c * ROW_STRIDE)),
+                    dtype=io_type,
+                    n=4,
+                )
+                for s_c in range(p.KW)
+            ]
+            for s_c in range(p.KW):
+                for r_c in range(p.KH):
+                    slot = (y - r_c) % p.KH
+                    accs[slot] = _mfma(
+                        b,
+                        p.dtype,
+                        "4x4x4",
+                        weights[r_c * p.KW + s_c],
+                        xs[s_c],
+                        accs[slot],
+                    )
+        if nxt_loads is not None:
+            commit_row(nxt_loads, bufs[(y + 1) % 2])
+            b.sync()
+        p_flush = y - (p.KH - 1)
+        P_FLUSH = p_flush % p.KH
+        if 0 <= p_flush < H:
+            acc_h = _trunc_f32(b, p.dtype, accs[P_FLUSH])
+            row_off = b.const_i32(p_flush * W * p.total_c * 2)
+            off = b.select(out_q_ok, b.add(d_base, row_off), oob_sentinel)
+            _buf_store_vN(b, p.dtype, d_rsrc, off, c0, acc_h, 2)
+        accs[P_FLUSH] = zero_acc
+    return b.kernel
 
 
 def build_direct_conv_4c(spec: DirectConv4cSpec, *, arch: str = "gfx950") -> KernelDef:
@@ -1087,6 +1407,8 @@ def build_direct_conv_4c(spec: DirectConv4cSpec, *, arch: str = "gfx950") -> Ker
     ok, why = is_valid_spec_4c(spec, arch=arch)
     if not ok:
         raise ValueError(f"invalid direct_conv_4c spec for {arch}: {why}")
+    if spec.stage_rows:
+        return _build_direct_conv_4c_staged(spec)
     p = spec.problem
     io_type = _io_type(p.dtype)
     Ho = p.Ho
@@ -2308,7 +2630,8 @@ def _preload_weight_vgprs(spec: DirectConvSpec) -> int:
     p = spec.problem
     k_atom = 32 if spec.fold_k32 else 16
     n_k_atoms = p.cpg // k_atom if spec.fold_k32 else -(-p.cpg // k_atom)
-    n_m_tiles = -(-p.kpg // 16)
+    # Each of the ``waves_m`` waves of a group keeps only its own M-tiles.
+    n_m_tiles = -(-p.kpg // 16) // spec.waves_m
     return p.KH * p.KW * n_k_atoms * n_m_tiles * (k_atom // 4) // 2
 
 
@@ -2384,10 +2707,39 @@ class DirectConvSpec:
     # registers down to that occupancy (e.g. to keep the next-row input loads
     # in flight together) instead of serializing them to protect occupancy.
     waves_per_eu: int = 0
+    # Input-row prefetch distance of the row stream: row ``y + prefetch_rows``
+    # is loaded (into registers) while row ``y`` is computed and committed to
+    # LDS at the end of row ``y + prefetch_rows - 1``. 0 and 1 are the
+    # original one-row-ahead schedule.
+    prefetch_rows: int = 0
+    # Row barrier drains LDS only (no vmcnt(0)): prefetched loads and the
+    # row's output stores stay in flight across it. The compiler still waits
+    # on each load before its LDS commit.
+    lds_only_sync: bool = False
+    # Waves per group along the output-channel M-tiles: each wave keeps only
+    # its ``ceil(kpg/16) / waves_m`` M-tiles' weights and accumulators and all
+    # waves share the staged input row. Preloaded / fused weights only.
+    waves_m: int = 1
+    # Remap the launch-order workgroup id (q-tile fastest, then group-tile,
+    # then image / h-tile) so all ``q_tiles * group_tiles`` workgroups of one
+    # image row band run on one XCD (the chunk is derived from the grid, see
+    # :func:`direct_conv_xcd_chunk`): workgroups that share cache lines
+    # (neighbouring group tiles of one pixel, halo columns) then share one L2.
+    xcd_tiles: bool = False
+    # Extra elements per staged input column in the LDS row buffer (column
+    # stride block_groups*cpg + lds_pad). A stride of an odd multiple of 4
+    # dwords spreads the 16 q-lanes of a fragment read over distinct banks.
+    lds_pad: int = 0
+    # Stage each finished output row through a double-buffered LDS tile and
+    # store it with 16-byte lanes over the workgroup's contiguous channel span
+    # (instead of 8-byte MFMA-layout stores, 16 pixels per instruction).
+    stage_out: bool = False
 
     @property
     def threads_per_block(self) -> int:
-        return self.block_groups * self.waves_q * self.waves_k * self.wave_size
+        return (
+            self.block_groups * self.waves_q * self.waves_k * self.waves_m
+        ) * self.wave_size
 
     @property
     def preloads_weights(self) -> bool:
@@ -2425,6 +2777,12 @@ class DirectConvSpec:
             pw_flag,
             fw_flag,
             f"we{self.waves_per_eu}" if self.waves_per_eu > 0 else "",
+            f"pf{self.prefetch_rows}" if self.prefetch_rows > 1 else "",
+            "lso" if self.lds_only_sync else "",
+            f"wm{self.waves_m}" if self.waves_m > 1 else "",
+            "xc" if self.xcd_tiles else "",
+            f"lp{self.lds_pad}" if self.lds_pad > 0 else "",
+            "so" if self.stage_out else "",
         )
 
     def validate(self) -> None:
@@ -2439,6 +2797,10 @@ class DirectConvSpec:
         shape_why = _direct_conv_shape_reason(p)
         if shape_why:
             raise ValueError(f"DirectConvSpec {shape_why}")
+        if self.block_groups < 1 or self.waves_q < 1 or self.waves_m < 1:
+            raise ValueError(
+                "DirectConvSpec block_groups, waves_q and waves_m must be >= 1"
+            )
         if p.groups % self.block_groups != 0:
             raise ValueError(
                 f"groups {p.groups} not divisible by block_groups {self.block_groups}"
@@ -2457,6 +2819,8 @@ class DirectConvSpec:
             raise ValueError("DirectConvSpec block_q must be a multiple of 16")
         if self.block_h < 0:
             raise ValueError("DirectConvSpec block_h must be >= 0")
+        if self.persistent_grid and self.block_h == 0:
+            raise ValueError("DirectConvSpec persistent_grid requires block_h > 0")
         if self.fold_k32 and p.cpg % 32 != 0:
             raise ValueError(
                 f"DirectConvSpec fold_k32 requires cpg to be a multiple of 32 (got {p.cpg})"
@@ -2514,15 +2878,61 @@ class DirectConvSpec:
                 f"DirectConvSpec dgrad_weights_lds stages {_dgrad_weights_lds_bytes(self)} "
                 f"bytes per workgroup (budget {DGRAD_WEIGHTS_LDS_BUDGET})"
             )
+        # Row-stream knobs.
+        if not 0 <= self.prefetch_rows <= 3:
+            raise ValueError("DirectConvSpec prefetch_rows must be in 0..3")
+        if self.stage_out and (
+            p.kpg % 16 != 0
+            or self.waves_q != 1
+            or self.waves_k != 1
+            or self.persistent_grid
+        ):
+            raise ValueError(
+                "DirectConvSpec stage_out needs kpg % 16 == 0, waves_q == "
+                "waves_k == 1 and no persistent grid"
+            )
+        if self.lds_pad < 0 or self.lds_pad % 8 != 0:
+            raise ValueError("DirectConvSpec lds_pad must be a multiple of 8 >= 0")
+        if self.waves_m > 1 and (
+            p.kpg % (16 * self.waves_m) != 0
+            or self.waves_q != 1
+            or self.waves_k != 1
+            or self.runtime_k_loop
+            or self.persistent_grid
+            or not (self.preload_weights or self.dgrad_fused_weights)
+        ):
+            raise ValueError(
+                "DirectConvSpec waves_m > 1 needs kpg % (16*waves_m) == 0, "
+                "waves_q == waves_k == 1, preloaded or fused weights and no "
+                "runtime K loop / persistent grid"
+            )
+        if (self.prefetch_rows > 1 or self.lds_only_sync) and (
+            not self.double_buffer or self.persistent_grid
+        ):
+            raise ValueError(
+                "DirectConvSpec prefetch_rows > 1 / lds_only_sync need "
+                "double_buffer=True and persistent_grid=False"
+            )
+        if self.xcd_tiles:
+            if self.persistent_grid:
+                raise ValueError("DirectConvSpec xcd_tiles needs persistent_grid=False")
+            gz = direct_conv_grid(self)[2]
+            if gz < XCD_TILES_NUM_XCDS:
+                raise ValueError(
+                    f"DirectConvSpec xcd_tiles needs at least {XCD_TILES_NUM_XCDS} "
+                    f"image row bands (got {gz}); the remap would be the identity"
+                )
 
 
 def direct_conv_lds_bytes(spec: DirectConvSpec) -> int:
     """LDS bytes :func:`build_direct_conv` allocates for ``spec``.
 
-    Mirrors the builder's sizing: one (or two, double-buffered) input-row
-    staging buffers of ``PASSES * THREADS * LOAD_VEC`` 16-bit elements, plus
-    the f32 cross-wave reduction buffer when ``waves_k > 1``, and the
-    ``dgrad_weights_lds`` weight slice rounded up to whole load passes.
+    Mirrors the builder's sizing and the LDS pool packer's placement: one (or
+    two, double-buffered) input-row staging buffers of ``PASSES * THREADS *
+    ROW_VEC`` 16-bit elements (plus ``lds_pad`` elements per staged column),
+    the f32 cross-wave reduction buffer when ``waves_k > 1``, the
+    ``dgrad_weights_lds`` weight slice rounded up to whole load passes, and
+    the two ``stage_out`` output-row tiles.
     """
     p = spec.problem
     load_vec = 8 if spec.fold_k32 else 4
@@ -2531,19 +2941,56 @@ def direct_conv_lds_bytes(spec: DirectConvSpec) -> int:
     num_chunks = lds_w * spec.block_groups * (p.cpg // load_vec)
     passes = (num_chunks + threads - 1) // threads
     stage = passes * threads * load_vec * 2
-    total = stage * (2 if spec.double_buffer else 1)
-    if spec.waves_k > 1:
-        total += spec.waves_q * spec.waves_k * spec.wave_size * 4 * 4
+    if spec.lds_pad:
+        cols = -(-(passes * threads) // (spec.block_groups * (p.cpg // load_vec))) + 1
+        stage += cols * spec.lds_pad * 2
     if spec.dgrad_weights_lds:
-        # The raw weight slice is pool-overlaid with the row buffers, so the
-        # footprint is the larger of the two rather than their sum. The builder
-        # allocates it in whole 16-byte-per-thread passes (WL_PASSES * THREADS
-        # * 8 elements), so size from that rounded allocation rather than the
-        # exact slice the budget check uses.
+        # The raw weight slice (allocated in whole 16-byte-per-thread passes,
+        # WL_PASSES * THREADS * 8 elements) dies before the row buffers are
+        # first written, so the pool packer places the first row buffer in
+        # its slot; the second (double-buffered) row buffer opens a new slot
+        # after it.
         wl_vecs = _dgrad_weights_lds_bytes(spec) // 16
         wl_passes = (wl_vecs + threads - 1) // threads
-        total = max(total, wl_passes * threads * 16)
+        total = max(stage, wl_passes * threads * 16)
+        if spec.double_buffer:
+            total += stage
+    else:
+        total = stage * (2 if spec.double_buffer else 1)
+    if spec.waves_k > 1:
+        total += spec.waves_q * spec.waves_k * spec.wave_size * 4 * 4
+    if spec.stage_out:
+        # Two output-row tiles (double-buffered), live across the whole row
+        # loop: block_q columns of the workgroup's block_groups * kpg channels
+        # plus the 16-byte column pad.
+        total += 2 * spec.block_q * direct_conv_stage_out_stride(spec) * 2
     return total
+
+
+#: XCD count the ``xcd_tiles`` remap assumes (gfx942 / gfx950).
+XCD_TILES_NUM_XCDS = 8
+
+
+def direct_conv_grid(spec: DirectConvSpec) -> tuple[int, int, int]:
+    """Launch grid ``(q_tiles, group_tiles, N * h_tiles)`` of a non-persistent spec."""
+    p = spec.problem
+    n_h = -(-p.H // spec.block_h) if spec.block_h > 0 else 1
+    return (-(-p.Wo // spec.block_q), p.groups // spec.block_groups, p.N * n_h)
+
+
+def direct_conv_xcd_chunk(spec: DirectConvSpec) -> int:
+    """Workgroups per XCD chunk of the ``xcd_tiles`` remap: one image row band.
+
+    Every q tile and group tile of one ``(n, h_tile)`` (``q_tiles *
+    group_tiles`` consecutive launch-order workgroups) lands on one XCD.
+    """
+    gx, gy, _ = direct_conv_grid(spec)
+    return gx * gy
+
+
+def direct_conv_stage_out_stride(spec: DirectConvSpec) -> int:
+    """Elements per column of the ``stage_out`` LDS tile (channels + 16 B pad)."""
+    return spec.block_groups * spec.problem.kpg + 8
 
 
 def is_valid_spec(spec: "DirectConvSpec", arch: str = "gfx950") -> Tuple[bool, str]:
@@ -2674,6 +3121,8 @@ def build_direct_conv(spec: "DirectConvSpec", arch: str = "gfx950") -> KernelDef
         ) // K_ATOM_SIZE  # ceil — restores original behaviour
     N_K_LOCAL = N_K_ATOMS // WAVES_K  # K-atoms per wave (each wave preloads this slice)
     N_M_TILES = (p.kpg + 15) // 16  # M-tiles per q_subtile
+    WAVES_M = spec.waves_m
+    M_LOCAL = N_M_TILES // WAVES_M  # M-tiles owned by one wave
     N_CH_PER_VEC = LOAD_VEC  # channels per LDS vec load (4 or 8)
     # For LDS chunk loading: use exact chunks (cpg must be divisible by LOAD_VEC).
     # LOAD_VEC=4 always divides standard cpg values; LOAD_VEC=8 requires cpg%8==0.
@@ -2688,6 +3137,11 @@ def build_direct_conv(spec: "DirectConvSpec", arch: str = "gfx950") -> KernelDef
     NUM_CHUNKS = LDS_W * BLOCK_GROUPS * N_VECS
     PASSES = (NUM_CHUNKS + THREADS - 1) // THREADS
     lds_total_fp16 = PASSES * THREADS * LOAD_VEC
+    LDS_PAD = spec.lds_pad
+    if LDS_PAD:
+        lds_total_fp16 += (
+            -(-(PASSES * THREADS) // (BLOCK_GROUPS * N_VECS)) + 1
+        ) * LDS_PAD
 
     b = IRBuilder(spec.kernel_name())
     b.kernel.attrs["max_workgroup_size"] = THREADS
@@ -2712,7 +3166,7 @@ def build_direct_conv(spec: "DirectConvSpec", arch: str = "gfx950") -> KernelDef
     c_KW = b.const_i32(p.KW)
     # Runtime K-atom loop now runs only N_K_LOCAL iterations per wave (its slice).
     c_N_K_LOCAL = b.const_i32(N_K_LOCAL)
-    c_BG_cpg = b.const_i32(BLOCK_GROUPS * p.cpg)
+    c_BG_cpg = b.const_i32(BLOCK_GROUPS * p.cpg + spec.lds_pad)
     c_half_bytes = b.const_i32(2)
     oob_sentinel = b.const_i32((1 << 31) - 1)
 
@@ -2731,6 +3185,14 @@ def build_direct_conv(spec: "DirectConvSpec", arch: str = "gfx950") -> KernelDef
     # Q-wave index and K-wave index within the group's wave block.
     wave_id_q = b.div(wave_id_in_group, b.const_i32(WAVES_K))
     wave_id_k = b.mod(wave_id_in_group, b.const_i32(WAVES_K))
+    wm_base16 = None
+    if WAVES_M > 1:
+        # waves_q == waves_k == 1: the in-group wave index is the M-wave.
+        wave_group_idx = b.div(wave_id_full, b.const_i32(WAVES_M))
+        wave_id_m = b.mod(wave_id_full, b.const_i32(WAVES_M))
+        wave_id_q = c0
+        wave_id_k = c0
+        wm_base16 = b.mul(wave_id_m, b.const_i32(M_LOCAL * 16))
     # K-atom base for this wave's slice: wave_id_k * N_K_LOCAL K-atoms.
     k_atom_base = b.mul(wave_id_k, b.const_i32(N_K_LOCAL))
 
@@ -2744,6 +3206,23 @@ def build_direct_conv(spec: "DirectConvSpec", arch: str = "gfx950") -> KernelDef
     bx = b.block_id_x()
     by = b.block_id_y()
     bz = b.block_id_z()
+    if spec.xcd_tiles:
+        from rocke.helpers.grid import chiplet_transform_chunked
+
+        _gx, _gy, _gz = direct_conv_grid(spec)
+        _c_gx = b.const_i32(_gx)
+        _c_gxy = b.const_i32(_gx * _gy)
+        _lin = b.add(bx, b.add(b.mul(by, _c_gx), b.mul(bz, _c_gxy)))
+        _lin = chiplet_transform_chunked(
+            b,
+            _lin,
+            num_wgs=_gx * _gy * _gz,
+            num_xcds=XCD_TILES_NUM_XCDS,
+            chunk_size=direct_conv_xcd_chunk(spec),
+        )
+        bx = b.mod(_lin, _c_gx)
+        by = b.mod(b.div(_lin, _c_gx), b.const_i32(_gy))
+        bz = b.div(_lin, _c_gxy)
 
     BLOCK_H = spec.block_h
     PERSISTENT = spec.persistent_grid
@@ -2934,6 +3413,8 @@ def build_direct_conv(spec: "DirectConvSpec", arch: str = "gfx950") -> KernelDef
             _zero_vec = b.zero_vec(io_type, LOAD_VEC)
             a_vec = b.select(valid, a_vec, _zero_vec)
             lds_idx = b.mul(cm["chunk_idx"], b.const_i32(LOAD_VEC))
+            if LDS_PAD:
+                lds_idx = b.add(lds_idx, b.mul(cm["W_lds"], b.const_i32(LDS_PAD)))
             out.append((a_vec, lds_idx))
         return out
 
@@ -3036,7 +3517,7 @@ def build_direct_conv(spec: "DirectConvSpec", arch: str = "gfx950") -> KernelDef
 
     # acc_tiles[qt][m][slot]: <4 x f32> per (q_subtile, M-tile, pipeline slot).
     acc_tiles: List[List[List[Value]]] = [
-        [[zero_acc] * p.KH for _ in range(N_M_TILES)] for _ in range(q_subtiles)
+        [[zero_acc] * p.KH for _ in range(M_LOCAL)] for _ in range(q_subtiles)
     ]
 
     # ---- Weight preloading (WAVES_K > 1 path) --------------------------------
@@ -3137,7 +3618,7 @@ def build_direct_conv(spec: "DirectConvSpec", arch: str = "gfx950") -> KernelDef
                             b.mul(c4, b.const_i32(_c4_step_pl)),
                         ),
                     )
-                    for m in range(N_M_TILES):
+                    for m in range(M_LOCAL):
                         if m * 16 >= p.kpg:
                             preloaded_w[(r_const, s_const, local_atom, m)] = None
                             continue
@@ -3162,6 +3643,8 @@ def build_direct_conv(spec: "DirectConvSpec", arch: str = "gfx950") -> KernelDef
                                     wl_lane_col,
                                 ),
                             )
+                            if wm_base16 is not None:
+                                wl_idx = b.add(wl_idx, wm_base16)
                             w_frag_pl = b.ds_read_tr16_b64(
                                 wl_lds, c0, wl_idx, dtype=io_type
                             )
@@ -3190,7 +3673,11 @@ def build_direct_conv(spec: "DirectConvSpec", arch: str = "gfx950") -> KernelDef
                                 k=b.add(b.mul(g, c_cpg), ch_off_pl),
                                 r=b.const_i32(p.KH - 1 - r_const),
                                 s=b.const_i32(p.KW - 1 - s_const),
-                                c=b.add(b.const_i32(m * 16), q_in_lane),
+                                c=b.add(b.const_i32(m * 16), q_in_lane)
+                                if wm_base16 is None
+                                else b.add(
+                                    b.add(wm_base16, b.const_i32(m * 16)), q_in_lane
+                                ),
                             )
                             elems = []
                             for e in range(LOAD_VEC):
@@ -3213,6 +3700,8 @@ def build_direct_conv(spec: "DirectConvSpec", arch: str = "gfx950") -> KernelDef
                                 b.mul(g, c_kpg),
                                 b.add(b.const_i32(m * 16), q_in_lane),
                             )
+                            if wm_base16 is not None:
+                                k_out_pl = b.add(k_out_pl, wm_base16)
                             w_off_pl, _ = b_desc.offset(
                                 b,
                                 k_out=k_out_pl,
@@ -3248,6 +3737,51 @@ def build_direct_conv(spec: "DirectConvSpec", arch: str = "gfx950") -> KernelDef
     # With H-tiling: iterate BLOCK_H+KH-1 rows for this tile (OOB → embed zeros).
     n_iters = (BLOCK_H + p.KH - 1) if BLOCK_H > 0 else (p.H + p.KH - 1)
 
+    PF = max(1, spec.prefetch_rows)
+    if spec.stage_out:
+        SO_CH = BLOCK_GROUPS * p.kpg  # output channels per workgroup
+        SO_STRIDE = SO_CH + 8  # + 16 bytes per column
+        SO_VPC = SO_CH // 8
+        SO_VECS = BLOCK_Q * SO_VPC
+        so_bufs = [
+            b.smem_alloc(io_type, [1, BLOCK_Q * SO_STRIDE], name_hint=f"lds_out{i}")
+            for i in range(2)
+        ]
+        c_so_stride = b.const_i32(SO_STRIDE)
+        so_meta = []
+        for _pi in range((SO_VECS + THREADS - 1) // THREADS):
+            _t = b.add(tid, b.const_i32(_pi * THREADS))
+            _q = b.div(_t, b.const_i32(SO_VPC))
+            _v = b.mod(_t, b.const_i32(SO_VPC))
+            _qg = b.add(block_q_start, _q)
+            _ok = b.cmp_lt(_qg, c_W)
+            if (_pi + 1) * THREADS > SO_VECS:
+                _ok = b.land(_ok, b.cmp_lt(_t, b.const_i32(SO_VECS)))
+            _gel = b.add(
+                b.mul(
+                    b.add(b.mul(n, b.const_i32(Ho * Wo)), _qg), b.const_i32(p.total_k)
+                ),
+                b.add(b.mul(g_tile, b.const_i32(SO_CH)), b.mul(_v, b.const_i32(8))),
+            )
+            so_meta.append(
+                (
+                    _ok,
+                    b.mul(_gel, c_half_bytes),
+                    b.add(b.mul(_q, c_so_stride), b.mul(_v, b.const_i32(8))),
+                )
+            )
+
+    def _row_y(y_l: int) -> Value:
+        if BLOCK_H > 0:
+            return b.add(h_tile_start, b.const_i32(y_l))
+        return b.const_i32(y_l)
+
+    # Rows 1 .. PF-1 are in flight before the loop when PF > 1.
+    pending_rows = {
+        y_l: issue_dram_load(_row_y(y_l), g_tile_val=_load_g_tile)
+        for y_l in range(1, min(PF, n_iters))
+    }
+
     for y_local in range(n_iters):
         # Global y index for this iteration.
         if BLOCK_H > 0:
@@ -3260,7 +3794,13 @@ def build_direct_conv(spec: "DirectConvSpec", arch: str = "gfx950") -> KernelDef
         nxt = B_smem if (y_local % 2 == 0 or not spec.double_buffer) else A_smem
 
         loads_next = None
-        if y_local + 1 < n_iters:
+        if PF > 1:
+            if y_local + PF < n_iters:
+                pending_rows[y_local + PF] = issue_dram_load(
+                    _row_y(y_local + PF), g_tile_val=_load_g_tile
+                )
+            loads_next = pending_rows.pop(y_local + 1, None)
+        elif y_local + 1 < n_iters:
             if BLOCK_H > 0:
                 next_y = b.add(h_tile_start, b.const_i32(y_local + 1))
             else:
@@ -3321,7 +3861,7 @@ def build_direct_conv(spec: "DirectConvSpec", arch: str = "gfx950") -> KernelDef
                                 _zero_pw = b.zero_vec(io_type, LOAD_VEC)
                                 x_frag_pw = b.select(c4_oob_pw, _zero_pw, x_frag_pw)
 
-                            for m in range(N_M_TILES):
+                            for m in range(M_LOCAL):
                                 if m * 16 >= p.kpg:
                                     continue
                                 w_frag_pw = preloaded_w[
@@ -3570,7 +4110,33 @@ def build_direct_conv(spec: "DirectConvSpec", arch: str = "gfx950") -> KernelDef
                 # that slower waves are still reading.
                 b.sync()
             store_to_lds(loads_next, nxt)
-        b.sync()
+        # Tile-local index of the output row that completes at this y_local.
+        _so_row = y_local - (p.KH - 1)
+        if spec.stage_out and 0 <= _so_row < (BLOCK_H if BLOCK_H > 0 else p.H):
+            # Publish the finished row to LDS before the row barrier (an H
+            # tile's rows past the image are published too; their global
+            # stores are masked by the flush guard below).
+            _so_buf = so_bufs[y_local % 2]
+            _so_slot = (y_local - (p.KH - 1)) % p.KH
+            for qt in range(q_subtiles):
+                _col = b.add(q_in_lane, b.const_i32(qt * 16))
+                for m in range(M_LOCAL):
+                    _ch = b.add(
+                        b.mul(wave_group_idx, c_kpg),
+                        b.add(b.const_i32(m * 16), b.mul(c4, b.const_i32(4))),
+                    )
+                    if wm_base16 is not None:
+                        _ch = b.add(_ch, wm_base16)
+                    b.smem_store_vN(
+                        _so_buf,
+                        [c0, b.add(b.mul(_col, c_so_stride), _ch)],
+                        _trunc_f32(b, p.dtype, acc_tiles[qt][m][_so_slot]),
+                        4,
+                    )
+        if spec.lds_only_sync:
+            b.sync_lds_only()
+        else:
+            b.sync()
 
         # Flush accumulator for the output row that completes at this y_local.
         # p_flush_local is a Python int (tile-local offset from h_tile_start).
@@ -3608,13 +4174,22 @@ def build_direct_conv(spec: "DirectConvSpec", arch: str = "gfx950") -> KernelDef
                 ho_row_val = b.const_i32(p_flush_val // c_stride_gen)
                 in_h_range = None  # no runtime guard needed
 
-        if should_flush:
+        if should_flush and spec.stage_out:
+            _so_buf = so_bufs[y_local % 2]
+            _row_bytes = b.mul(ho_row_val, b.const_i32(Wo * p.total_k * 2))
+            for _ok, _gbytes, _lidx in so_meta:
+                if in_h_range is not None:
+                    _ok = b.land(_ok, in_h_range)
+                _vec = b.smem_load_vN(_so_buf, c0, _lidx, dtype=io_type, n=8)
+                _off = b.select(_ok, b.add(_gbytes, _row_bytes), oob_sentinel)
+                _buf_store_vN(b, p.dtype, d_rsrc, _off, c0, _vec, 4)
+        elif should_flush:
             for qt in range(q_subtiles):
                 qt_w_base = qt * 16
                 out_q = b.add(b.add(q_tile_start, b.const_i32(qt_w_base)), q_in_lane)
                 out_q_ok = b.cmp_lt(out_q, c_W)
 
-                for m in range(N_M_TILES):
+                for m in range(M_LOCAL):
                     if m * 16 >= p.kpg:
                         continue
 
@@ -3623,6 +4198,8 @@ def build_direct_conv(spec: "DirectConvSpec", arch: str = "gfx950") -> KernelDef
                         b.mul(g, c_kpg),
                         b.add(b.const_i32(m * 16), b.mul(c4, b.const_i32(4))),
                     )
+                    if wm_base16 is not None:
+                        k_val = b.add(k_val, wm_base16)
                     rows_in_tile = p.kpg - m * 16
                     if rows_in_tile < 16:
                         c4_ok = b.cmp_lt(
@@ -3683,7 +4260,7 @@ def build_direct_conv(spec: "DirectConvSpec", arch: str = "gfx950") -> KernelDef
                         _buf_store_vN(b, p.dtype, d_rsrc, safe_d, c0, acc_h, 2)
 
         for qt in range(q_subtiles):
-            for m in range(N_M_TILES):
+            for m in range(M_LOCAL):
                 acc_tiles[qt][m][P_FLUSH] = zero_acc
 
     # Close the persistent cell loop if open.
@@ -5188,6 +5765,12 @@ def make_dgrad_fprop_spec(
     dgrad_fused_weights: bool = False,
     dgrad_weights_lds: bool = False,
     waves_per_eu: int = 0,
+    prefetch_rows: int = 0,
+    lds_only_sync: bool = False,
+    waves_m: int = 1,
+    lds_pad: int = 0,
+    stage_out: bool = False,
+    xcd_tiles: bool = False,
 ) -> "DirectConvSpec":
     """Build the ``DirectConvSpec`` for the transposed-fprop pass of dgrad.
 
@@ -5213,6 +5796,10 @@ def make_dgrad_fprop_spec(
     :func:`build_direct_transpose_weights_dgrad` nor a workspace is needed.
     ``preload_weights=True`` keeps the pre-pass but loads ``W_T`` once per
     wave instead of once per row (``waves_k == 1`` only).
+
+    ``prefetch_rows`` / ``lds_only_sync`` / ``waves_m`` / ``lds_pad`` /
+    ``stage_out`` / ``xcd_tiles`` are the row-stream knobs of
+    :class:`DirectConvSpec`, forwarded unchanged.
     """
     p = problem
     assert p.stride == 1, "make_dgrad_fprop_spec requires stride=1"
@@ -5247,6 +5834,12 @@ def make_dgrad_fprop_spec(
         dgrad_fused_weights=dgrad_fused_weights,
         dgrad_weights_lds=dgrad_weights_lds,
         waves_per_eu=waves_per_eu,
+        prefetch_rows=prefetch_rows,
+        lds_only_sync=lds_only_sync,
+        waves_m=waves_m,
+        lds_pad=lds_pad,
+        stage_out=stage_out,
+        xcd_tiles=xcd_tiles,
     )
 
 
@@ -5294,6 +5887,7 @@ def make_dgrad_4c_spec(
     block_groups: int = DGRAD_4C_DEFAULT_BLOCK_GROUPS,
     dgrad_fused_weights: bool = False,
     dgrad_weights_lds: bool = False,
+    stage_rows: bool = False,
 ) -> DirectConv4cSpec:
     """Build the ``DirectConv4cSpec`` for the transposed-fprop pass of dgrad.
 
@@ -5306,6 +5900,9 @@ def make_dgrad_4c_spec(
     ``dgrad_fused_weights=True`` drops the pre-pass: the 4c kernel then takes
     the original ``W`` as ``B`` and gathers the flipped, transposed fragments
     itself (single kernel, no workspace).
+
+    ``stage_rows=True`` selects the row-staged kernel (needs the fused LDS
+    weight form); its ``waves_q`` is ``block_q // 4`` (one wave per 4 columns).
     """
     ok, why = is_valid_dgrad_4c_problem(problem)
     if not ok:
@@ -5331,6 +5928,8 @@ def make_dgrad_4c_spec(
         block_groups=block_groups,
         dgrad_fused_weights=dgrad_fused_weights,
         dgrad_weights_lds=dgrad_weights_lds,
+        stage_rows=stage_rows,
+        waves_q=max(1, block_q // 4) if stage_rows else 1,
     )
 
 
@@ -5341,6 +5940,7 @@ def dgrad_4c_spec_for_problem(
     block_q: int | None = None,
     block_groups: int | None = None,
     fused_weights: bool = True,
+    stage_rows: bool | None = None,
 ) -> DirectConv4cSpec | None:
     """Kernel-level helper: the 4c dgrad spec for ``problem``, or ``None``.
 
@@ -5356,6 +5956,11 @@ def dgrad_4c_spec_for_problem(
     kernel reads the original ``W`` (``dgrad_fused_weights``), staged through
     LDS with transpose reads where the target has them
     (``dgrad_weights_lds``), so no transpose kernel or workspace is needed.
+
+    ``stage_rows=None`` (default) takes the row-staged kernel whenever the
+    fused LDS form is used and the staged spec validates on ``arch`` (else
+    the direct-load kernel); ``True`` / ``False`` force it on or off
+    (``True`` returns ``None`` where the staged spec is invalid).
     """
     ok, _ = is_valid_dgrad_4c_problem(problem)
     if not ok:
@@ -5384,7 +5989,14 @@ def dgrad_4c_spec_for_problem(
     except ValueError:
         return None
     ok, _ = is_valid_spec_4c(spec, arch=arch)
-    return spec if ok else None
+    if not ok:
+        return None
+    if stage_rows is False or (stage_rows is None and not use_lds):
+        return spec
+    staged = replace(spec, stage_rows=True, waves_q=max(1, bq // 4))
+    if _stage_rows_reject_reason(staged) or not is_valid_spec_4c(staged, arch=arch)[0]:
+        return None if stage_rows else spec
+    return staged
 
 
 def direct_4c_dgrad_launch(spec: DirectConv4cSpec) -> dict:
@@ -6752,6 +7364,13 @@ def build_direct_depthwise_dgrad_streaming(
 #     (``v_dot2c_f32_{f16,bf16}``): the window stays in 16-bit, adjacent
 #     window columns are packed once per row, and an odd KW pads the last
 #     weight pair with zero. gfx950 only; ``ch_per_lane`` must be 1.
+#   - ``mfma`` switches to the Toeplitz MFMA form (gfx950, groups % 8 == 0):
+#     one-hot diagonal weights against 8 channels x 4 window columns per
+#     16x16x32 MFMA, with dY windows and dX rows staged through LDS double
+#     buffers (one barrier per row). ``w_fold`` puts 1, 2 or 4 images in one
+#     tile and ``prefetch_rows`` sets the dY rows in flight. Its non-finite
+#     semantics differ: an Inf / NaN in dY reaches its whole 8-channel group
+#     (see _build_dw_dgrad_win_mfma).
 #
 # Stride 1 only: the window covers consecutive wo positions.
 # ---------------------------------------------------------------------------
@@ -6764,16 +7383,53 @@ DW_DGRAD_WIN_OOB_UNIFORM = (1 << 30) - 1
 DW_DGRAD_WIN_MAX_TENSOR_BYTES = (1 << 30) - 1
 # Arches whose backend selects llvm.amdgcn.fdot2 for both f16 and bf16.
 DW_DGRAD_WIN_DOT2_ARCHES = ("gfx950",)
+# Toeplitz MFMA form (``mfma``): channels per wave (the 8-wide K group of the
+# 16x16x32 atom), the arches with that 16-bit atom, and the form's limits.
+DW_DGRAD_MFMA_CH = 8
+DW_DGRAD_MFMA_ARCHES = ("gfx950",)
+DW_DGRAD_MFMA_W_FOLDS = (1, 2, 4)
+# Statically unrolled MFMAs per wave (rows x KH x passes); dispatch sets
+# block_h so a tall image stays well below it.
+DW_DGRAD_MFMA_MAX_UNROLL = 512
+# Up to 8 waves (2 per SIMD) so a wave keeps 256 VGPRs, of which the
+# register-resident fragments (mfma_frag_vgprs) may take at most this many.
+DW_DGRAD_MFMA_MAX_WAVES = 8
+DW_DGRAD_MFMA_MAX_FRAG_VGPRS = 224
+DW_DGRAD_MFMA_MAX_PREFETCH_ROWS = 4
+# LDS per workgroup for the staged dY windows and dX rows.
+DW_DGRAD_MFMA_LDS_BUDGET = 64 * 1024
+
+
+def _dw_mfma_passes(KW: int) -> int:
+    """16x16x32 passes per filter row: each pass covers 4 window columns of
+    both column parities, so a row of KW taps needs ``ceil((KW + 1) / 4)``."""
+    return (KW + 4) // 4
 
 
 @dataclass(frozen=True)
 class DirectDepthwiseDgradWindowedSpec:
     """Windowed ho-streaming depthwise dgrad kernel (stride 1, cpg = kpg = 1).
 
-    Block geometry:
+    Block geometry (VALU form):
       ``threads_per_block = block_waves * 64``
       ``block_ch = threads_per_block * ch_per_lane``
       Grid: ``(ceil(W / block_w), ceil(C / block_ch), N * h_tiles)``
+
+    Toeplitz MFMA form (``mfma=True``, gfx950): every wave owns 8 channels,
+    so ``block_ch = 8 * block_waves``; a block covers ``tile_w = 32 / w_fold``
+    columns of ``w_fold`` images. Grid:
+    ``(ceil(W / tile_w), ceil(C / block_ch), ceil(N / w_fold) * h_tiles)``.
+    ``block_w`` and ``ch_per_lane`` do not apply (``ch_per_lane`` must stay 1;
+    ``block_w`` is left out of the kernel name).
+
+    The MFMA form multiplies one-hot weights against 8 channels at once, so a
+    non-finite dY value reaches every dX element of its 8-channel group, in
+    its rows of the receptive field and over ``4 * ceil((KW + 1) / 4)``
+    columns: the field plus the zero-weight taps of the passes, one to four
+    extra columns (one for KW = 3, 7, 11, two for KW = 6, 10, three for
+    KW = 5, 9, four for KW = 4, 8, 12; ``0 * Inf = NaN``).
+    Finite inputs give the same results as the VALU form up to fp32
+    summation order.
     """
 
     problem: DirectConvProblem
@@ -6783,6 +7439,13 @@ class DirectDepthwiseDgradWindowedSpec:
     ch_per_lane: int = 1
     block_h: int = 0  # dX rows per block; 0 (or >= H) = whole H
     dot2: bool = False
+    # Toeplitz MFMA form (default off); w_fold and prefetch_rows apply to it
+    # only and must stay 1 otherwise.
+    mfma: bool = False
+    # Images per block sharing one 16x16 tile (tile_w = 32 / w_fold columns).
+    w_fold: int = 1
+    # dY window rows in flight ahead of the row being multiplied.
+    prefetch_rows: int = 1
     wave_size: int = 64
 
     @property
@@ -6791,7 +7454,19 @@ class DirectDepthwiseDgradWindowedSpec:
 
     @property
     def block_ch(self) -> int:
+        if self.mfma:
+            return self.block_waves * DW_DGRAD_MFMA_CH
         return self.threads_per_block * self.ch_per_lane
+
+    @property
+    def tile_w(self) -> int:
+        """dX columns per block along W (per image)."""
+        return 32 // self.w_fold if self.mfma else self.block_w
+
+    @property
+    def n_tiles(self) -> int:
+        """Blocks along N (``w_fold`` images per block in the MFMA form)."""
+        return -(-self.problem.N // self.w_fold) if self.mfma else self.problem.N
 
     @property
     def rows_per_block(self) -> int:
@@ -6805,20 +7480,59 @@ class DirectDepthwiseDgradWindowedSpec:
     def grid(self) -> tuple[int, int, int]:
         p = self.problem
         return (
-            -(-p.W // self.block_w),
+            -(-p.W // self.tile_w),
             -(-p.groups // self.block_ch),
-            p.N * self.h_tiles,
+            self.n_tiles * self.h_tiles,
         )
 
     def unrolled_fmas(self) -> int:
-        """Upper bound of the statically unrolled FMAs per lane."""
+        """Upper bound of the statically unrolled FMAs per lane (VALU form)."""
         p = self.problem
         return self.rows_per_block * p.KH * p.KW * self.block_w * self.ch_per_lane
+
+    def unrolled_mfmas(self) -> int:
+        """Upper bound of the statically unrolled MFMAs per wave (MFMA form)."""
+        p = self.problem
+        return self.rows_per_block * p.KH * _dw_mfma_passes(p.KW)
+
+    def _mfma_in_passes(self) -> int:
+        """16-byte dY loads per thread and window row (MFMA form)."""
+        win = self.tile_w + 4 * _dw_mfma_passes(self.problem.KW) - 2
+        per_px = self.block_ch // DW_DGRAD_MFMA_CH
+        return -(-self.w_fold * win * per_px // self.threads_per_block)
+
+    def mfma_frag_vgprs(self) -> int:
+        """VGPRs of the register-resident fragments (MFMA form): the one-hot
+        weights (KH x passes), the KH accumulator tiles, one row of B
+        fragments and the prefetched dY rows, 4 VGPRs each."""
+        p = self.problem
+        kwp = _dw_mfma_passes(p.KW)
+        rows = self.prefetch_rows * self._mfma_in_passes()
+        return 4 * (p.KH * kwp + p.KH + kwp + rows)
+
+    def mfma_lds_bytes(self) -> int:
+        """LDS bytes of the MFMA form: double-buffered dY window rows and dX
+        rows, ``block_ch + 8`` channels per pixel (16-byte bank skew)."""
+        per_px = self.block_ch // DW_DGRAD_MFMA_CH
+        in_px = -(-self._mfma_in_passes() * self.threads_per_block // per_px)
+        out_px = self.w_fold * self.tile_w
+        return 2 * (in_px + out_px) * (self.block_ch + DW_DGRAD_MFMA_CH) * 2
 
     def kernel_name(self) -> str:
         from rocke.helpers.spec import kernel_name_join
 
         p = self.problem
+        if self.mfma:
+            return kernel_name_join(
+                self.name,
+                p.short(),
+                f"r{p.KH}s{p.KW}p{p.PAD}",
+                f"wv{self.block_waves}",
+                f"bh{self.rows_per_block}" if self.h_tiles > 1 else "",
+                f"f{self.w_fold}",
+                f"pf{self.prefetch_rows}",
+                flags={"mfma": True, "bf16": p.dtype == "bf16"},
+            )
         return kernel_name_join(
             self.name,
             p.short(),
@@ -6834,6 +7548,35 @@ class DirectDepthwiseDgradWindowedSpec:
         ok, why = _depthwise_dgrad_win_check(self)
         if not ok:
             raise ValueError(f"DirectDepthwiseDgradWindowedSpec: {why}")
+
+
+def _depthwise_dgrad_win_mfma_check(
+    spec: DirectDepthwiseDgradWindowedSpec,
+) -> tuple[bool, str]:
+    """Shape and resource limits of the MFMA form (``spec.mfma``)."""
+    p = spec.problem
+    if spec.dot2 or spec.ch_per_lane != 1:
+        return False, "mfma excludes dot2 and ch_per_lane > 1"
+    if spec.w_fold not in DW_DGRAD_MFMA_W_FOLDS:
+        return False, f"w_fold must be 1, 2 or 4 (got {spec.w_fold})"
+    if spec.prefetch_rows > DW_DGRAD_MFMA_MAX_PREFETCH_ROWS:
+        return False, (
+            f"prefetch_rows must be <= {DW_DGRAD_MFMA_MAX_PREFETCH_ROWS} "
+            f"(got {spec.prefetch_rows})"
+        )
+    if spec.block_waves > DW_DGRAD_MFMA_MAX_WAVES:
+        return False, (
+            f"mfma needs block_waves <= {DW_DGRAD_MFMA_MAX_WAVES} "
+            f"(got {spec.block_waves})"
+        )
+    if p.groups % DW_DGRAD_MFMA_CH != 0:
+        return False, f"mfma needs groups % {DW_DGRAD_MFMA_CH} == 0 (got {p.groups})"
+    if spec.mfma_frag_vgprs() > DW_DGRAD_MFMA_MAX_FRAG_VGPRS:
+        return False, (
+            f"mfma fragments need {spec.mfma_frag_vgprs()} VGPRs (> "
+            f"{DW_DGRAD_MFMA_MAX_FRAG_VGPRS}); lower prefetch_rows or the filter"
+        )
+    return True, "ok"
 
 
 def _depthwise_dgrad_win_check(
@@ -6860,6 +7603,17 @@ def _depthwise_dgrad_win_check(
         )
     if spec.dot2 and spec.ch_per_lane != 1:
         return False, f"dot2 requires ch_per_lane=1 (got {spec.ch_per_lane})"
+    if spec.prefetch_rows < 1:
+        return False, f"prefetch_rows must be >= 1 (got {spec.prefetch_rows})"
+    if spec.mfma:
+        ok, why = _depthwise_dgrad_win_mfma_check(spec)
+        if not ok:
+            return False, why
+    elif spec.w_fold != 1 or spec.prefetch_rows != 1:
+        return False, (
+            f"w_fold and prefetch_rows require mfma (got w_fold={spec.w_fold}, "
+            f"prefetch_rows={spec.prefetch_rows})"
+        )
     if spec.block_h < 0:
         return False, f"block_h must be >= 0 (got {spec.block_h})"
     dy_bytes = p.N * p.Ho * p.Wo * p.groups * 2
@@ -6869,7 +7623,18 @@ def _depthwise_dgrad_win_check(
             f"dY/dX of {max(dy_bytes, dx_bytes)} bytes exceed the "
             f"{DW_DGRAD_WIN_MAX_TENSOR_BYTES}-byte sentinel addressing range"
         )
-    if spec.unrolled_fmas() > DW_DGRAD_WIN_MAX_UNROLL:
+    if spec.mfma:
+        if spec.unrolled_mfmas() > DW_DGRAD_MFMA_MAX_UNROLL:
+            return False, (
+                f"unrolled body too large ({spec.unrolled_mfmas()} MFMAs > "
+                f"{DW_DGRAD_MFMA_MAX_UNROLL}); set block_h"
+            )
+        if spec.mfma_lds_bytes() > DW_DGRAD_MFMA_LDS_BUDGET:
+            return False, (
+                f"mfma stages {spec.mfma_lds_bytes()} LDS bytes per workgroup "
+                f"(budget {DW_DGRAD_MFMA_LDS_BUDGET}); lower block_waves"
+            )
+    elif spec.unrolled_fmas() > DW_DGRAD_WIN_MAX_UNROLL:
         return False, (
             f"unrolled body too large ({spec.unrolled_fmas()} FMAs > "
             f"{DW_DGRAD_WIN_MAX_UNROLL}); lower block_w or set block_h"
@@ -6889,6 +7654,8 @@ def is_valid_depthwise_dgrad_win_spec(
         return False, str(e)
     if spec.dot2 and arch not in DW_DGRAD_WIN_DOT2_ARCHES:
         return False, f"dot2 needs one of {DW_DGRAD_WIN_DOT2_ARCHES} (got {arch})"
+    if spec.mfma and arch not in DW_DGRAD_MFMA_ARCHES:
+        return False, f"mfma needs one of {DW_DGRAD_MFMA_ARCHES} (got {arch})"
     return _depthwise_dgrad_win_check(spec)
 
 
@@ -6915,6 +7682,8 @@ def build_direct_depthwise_dgrad_windowed(
     ok, why = is_valid_depthwise_dgrad_win_spec(spec, arch=arch)
     if not ok:
         raise ValueError(f"invalid DirectDepthwiseDgradWindowedSpec for {arch}: {why}")
+    if spec.mfma:
+        return _build_dw_dgrad_win_mfma(spec)
 
     p = spec.problem
     BW = spec.block_w
@@ -7175,6 +7944,282 @@ def build_direct_depthwise_dgrad_windowed(
                 )
             acc[slot][j] = zero_acc
 
+    return b.kernel
+
+
+def _build_dw_dgrad_win_mfma(spec: DirectDepthwiseDgradWindowedSpec) -> KernelDef:
+    """Toeplitz MFMA form of the windowed depthwise dgrad kernel (``spec.mfma``).
+
+    Each wave owns 8 channels and one 16x16 fp32 tile per in-flight dX row:
+    tile row ``m = 8 q + k`` is channel ``k`` at column parity ``q``, tile
+    column ``n`` is the column pair ``n % SUB`` of image ``n // SUB``
+    (``SUB = 16 / w_fold``). One 16x16x32 MFMA contracts 8 channels x 4
+    window columns, so a filter row takes ``ceil((KW + 1) / 4)`` passes.
+    Lane ``l`` (``t = l // 16``) holds:
+
+    - A: the one-hot weight ``W[k, r, KW - 1 - s]`` at slot ``k`` of its
+      8-wide K group, with ``s = 4 ph + t - q`` (zero outside ``[0, KW)``);
+    - B: the 8 channels of window column ``2 (n % SUB) + t + 4 ph``;
+    - D: channels ``4 (t % 2) .. + 3`` at column ``2 (n % SUB) + t // 2``.
+
+    The off-diagonal products are discarded work. They are also why a
+    non-finite dY value spreads: ``0 * Inf`` is NaN, so it reaches the other
+    7 channels of its group, and the zero-weight taps of the passes widen the
+    receptive field to ``4 * KWP`` columns (``4 * KWP - KW`` extra ones).
+
+    Memory path: per barrier phase the block writes the next dY window row
+    (loaded ``prefetch_rows`` live rows ahead with coalesced 16-byte loads)
+    into one half of an LDS double buffer and the previous finished dX row
+    into one half of a second double buffer, syncs once, then every wave
+    reads its B fragments with ``ds_read_b128`` and the block drains the
+    staged dX row with 16-byte stores of whole channel runs per pixel.
+    The row streaming, the KH-slot accumulator ring and the padding /
+    sentinel scheme follow the VALU form.
+    """
+    p = spec.problem
+    KH, KW, PAD = p.KH, p.KW, p.PAD
+    Ho, Wo, G = p.Ho, p.Wo, p.groups
+    F = spec.w_fold
+    SUB = 16 // F
+    TW = spec.tile_w
+    KWP = _dw_mfma_passes(KW)
+    U = TW + 4 * KWP - 2  # window columns per image
+    ROWS = spec.rows_per_block
+    THREADS = spec.threads_per_block
+    BLOCK_CH = spec.block_ch
+    PER_PX = BLOCK_CH // DW_DGRAD_MFMA_CH  # 16-byte channel chunks per pixel
+    CH_PAD = BLOCK_CH + DW_DGRAD_MFMA_CH
+    split_h = spec.h_tiles > 1
+    io_type = _io_type(p.dtype)
+
+    b = IRBuilder(spec.kernel_name())
+    b.kernel.attrs["max_workgroup_size"] = THREADS
+    A = b.param("A", PtrType(io_type, "global"), noalias=True, readonly=True, align=16)
+    Bp = b.param("B", PtrType(io_type, "global"), noalias=True, readonly=True, align=16)
+    D = b.param("D", PtrType(io_type, "global"), noalias=True, writeonly=True, align=16)
+    A_bytes = b.param("A_bytes", I32)
+    B_bytes = b.param("B_bytes", I32)
+    D_bytes = b.param("D_bytes", I32)
+
+    c0 = b.const_i32(0)
+    oob_lane = b.const_i32(DW_DGRAD_WIN_OOB_LANE)
+    oob_uniform = b.const_i32(DW_DGRAD_WIN_OOB_UNIFORM)
+    zero_acc = b.zero_vec_f32(4)
+    zero_f32 = b.const_f32(0.0)
+    if p.dtype == "bf16":
+        zero_half = b.trunc_f32_to_bf16(zero_f32)
+    else:
+        zero_half = b.trunc_f32_to_f16(zero_f32)
+
+    tid = b.thread_id_x()
+    bx = b.block_id_x()
+    by = b.block_id_y()
+    bz = b.block_id_z()
+    if split_h:
+        c_h_tiles = b.const_i32(spec.h_tiles)
+        n_tile = b.div(bz, c_h_tiles)
+        h0 = b.mul(b.mod(bz, c_h_tiles), b.const_i32(ROWS))
+    else:
+        n_tile = bz
+        h0 = None
+    c64 = b.const_i32(64)
+    lane = b.mod(tid, c64)
+    wave = b.div(tid, c64)
+    x0 = b.mul(bx, b.const_i32(TW))
+    img0 = b.mul(n_tile, b.const_i32(F))
+    ch_blk = b.mul(by, b.const_i32(BLOCK_CH))
+    wave_ch = b.mul(wave, b.const_i32(DW_DGRAD_MFMA_CH))
+    c_wave = b.add(ch_blk, wave_ch)
+    c_G = b.const_i32(G)
+    ch_ok = b.cmp_lt(c_wave, c_G)
+    c16 = b.const_i32(16)
+    c8 = b.const_i32(8)
+    col16 = b.mod(lane, c16)  # tile row m (A) / tile column n (B, D)
+    t = b.div(lane, c16)  # K group of A/B, row quad of D
+    k = b.mod(col16, c8)
+    q = b.div(col16, c8)
+
+    a_rsrc = b.buffer_rsrc(A, A_bytes)
+    b_rsrc = b.buffer_rsrc(Bp, B_bytes)
+    d_rsrc = b.buffer_rsrc(D, D_bytes)
+
+    # One-hot A fragments weights[r][ph]: W[k, r, KW - 1 - s] at slot k.
+    w_base = b.mul(b.add(c_wave, k), b.const_i32(KH * KW * 2))
+    c_KW = b.const_i32(KW)
+    is_k = [b.cmp_eq(k, b.const_i32(j)) for j in range(DW_DGRAD_MFMA_CH)]
+    weights: list[list[Value]] = []
+    for r in range(KH):
+        row: list[Value] = []
+        for ph in range(KWP):
+            s = b.sub(b.add(t, b.const_i32(4 * ph)), q)
+            ok = b.land(ch_ok, b.land(b.cmp_ge(s, c0), b.cmp_lt(s, c_KW)))
+            tap = b.sub(b.const_i32(r * KW + KW - 1), s)
+            off = b.select(ok, b.add(w_base, b.mul(tap, b.const_i32(2))), oob_lane)
+            if p.dtype == "bf16":
+                w = b.buffer_load_bf16(b_rsrc, off, c0)
+            else:
+                w = b.buffer_load_f16(b_rsrc, off, c0)
+            comps = [b.select(is_k[j], w, zero_half) for j in range(DW_DGRAD_MFMA_CH)]
+            row.append(b.vec_pack(comps, io_type))
+        weights.append(row)
+
+    # Lane parts shared by the B reads and the D staging.
+    c_sub = b.const_i32(SUB)
+    f = b.div(col16, c_sub)
+    pair2 = b.mul(b.mod(col16, c_sub), b.const_i32(2))
+    c_px_bytes = b.const_i32(G * 2)
+    c_dy_img_bytes = b.const_i32(Ho * Wo * G * 2)
+    c_dx_img_bytes = b.const_i32(p.H * p.W * G * 2)
+    c_N = b.const_i32(p.N)
+    c_W = b.const_i32(p.W)
+    c_Wo = b.const_i32(Wo)
+    c_per_px = b.const_i32(PER_PX)
+
+    # dX staging [buffer, image column, channel]: lane (n, t) writes its 4
+    # channels of column 2 (n % SUB) + t // 2; the block then drains each
+    # pixel's BLOCK_CH channels in 16-byte chunks.
+    o_smem = b.smem_alloc(io_type, [2, F * TW, CH_PAD], name_hint="dx_stage")
+    o_col = b.add(b.mul(f, b.const_i32(TW)), b.add(pair2, b.div(t, b.const_i32(2))))
+    o_ch = b.add(wave_ch, b.mul(b.mod(t, b.const_i32(2)), b.const_i32(4)))
+    n_out = F * TW * PER_PX
+    c_TW = b.const_i32(TW)
+    drain: list[tuple[Value, Value, Value]] = []
+    for i in range(-(-n_out // THREADS)):
+        idx = b.add(tid, b.const_i32(i * THREADS))
+        px = b.div(idx, c_per_px)
+        ch8 = b.mul(b.mod(idx, c_per_px), c8)
+        img_o = b.add(img0, b.div(px, c_TW))
+        wi_o = b.add(x0, b.mod(px, c_TW))
+        ch_o = b.add(ch_blk, ch8)
+        ok = b.land(
+            b.land(b.cmp_lt(idx, b.const_i32(n_out)), b.cmp_lt(img_o, c_N)),
+            b.land(b.cmp_lt(wi_o, c_W), b.cmp_lt(ch_o, c_G)),
+        )
+        g_off = b.add(
+            b.mul(img_o, c_dx_img_bytes),
+            b.add(b.mul(wi_o, c_px_bytes), b.mul(ch_o, b.const_i32(2))),
+        )
+        drain.append((px, ch8, b.select(ok, g_off, oob_lane)))
+
+    # dY staging [buffer, window column, channel]: the block loads the U
+    # window columns of each image with 16-byte chunks; padding columns,
+    # images past N and channels past G read zero through the lane sentinel.
+    n_in = F * U * PER_PX
+    in_passes = -(-n_in // THREADS)
+    in_px = -(-in_passes * THREADS // PER_PX)
+    i_smem = b.smem_alloc(io_type, [2, in_px, CH_PAD], name_hint="dy_stage")
+    c_U = b.const_i32(U)
+    in_plan: list[tuple[Value, Value, Value]] = []
+    for i in range(in_passes):
+        idx = b.add(tid, b.const_i32(i * THREADS))
+        px = b.div(idx, c_per_px)
+        ch8 = b.mul(b.mod(idx, c_per_px), c8)
+        img_i = b.add(img0, b.div(px, c_U))
+        wo = b.add(x0, b.add(b.mod(px, c_U), b.const_i32(PAD - (KW - 1))))
+        ch_i = b.add(ch_blk, ch8)
+        ok = b.land(
+            b.land(b.cmp_lt(idx, b.const_i32(n_in)), b.cmp_lt(img_i, c_N)),
+            b.land(b.land(b.cmp_ge(wo, c0), b.cmp_lt(wo, c_Wo)), b.cmp_lt(ch_i, c_G)),
+        )
+        g_off = b.add(
+            b.mul(img_i, c_dy_img_bytes),
+            b.add(b.mul(wo, c_px_bytes), b.mul(ch_i, b.const_i32(2))),
+        )
+        in_plan.append((px, ch8, b.select(ok, g_off, oob_lane)))
+    f_u = b.mul(f, c_U)
+    b_px = [
+        b.add(f_u, b.add(pair2, b.add(t, b.const_i32(4 * ph)))) for ph in range(KWP)
+    ]
+
+    c_dy_row_bytes = b.const_i32(Wo * G * 2)
+    c_dx_row_bytes = b.const_i32(p.W * G * 2)
+    c_Ho = b.const_i32(Ho) if split_h else None
+    c_H = b.const_i32(p.H) if split_h and p.H % ROWS != 0 else None
+
+    def row_taps(y: int) -> list[int]:
+        """Filter rows r whose dX row ``y + r - (KH - 1)`` this block owns."""
+        rs = [r for r in range(KH) if 0 <= y + r - (KH - 1) < ROWS]
+        rel_ho = y + PAD - (KH - 1)
+        return rs if rs and (split_h or 0 <= rel_ho < Ho) else []
+
+    def load_row(y: int) -> list[Value]:
+        """Issue the 16-byte dY window loads of local row ``y``."""
+        rel_ho = y + PAD - (KH - 1)
+        if split_h:
+            ho = b.add(h0, b.const_i32(rel_ho))
+            row_ok = b.land(b.cmp_ge(ho, c0), b.cmp_lt(ho, c_Ho))
+            dy_row = b.select(row_ok, b.mul(ho, c_dy_row_bytes), oob_uniform)
+        else:
+            dy_row = b.const_i32(rel_ho * Wo * G * 2)
+        vals = [
+            _buf_load_vN(b, p.dtype, a_rsrc, b.add(off, dy_row), c0, 4)
+            for _, _, off in in_plan
+        ]
+        b.sched_barrier(0)
+        return vals
+
+    def dx_row_part(hi_local: int) -> Value:
+        if not split_h:
+            return b.const_i32(hi_local * p.W * G * 2)
+        hi = b.add(h0, b.const_i32(hi_local))
+        part = b.mul(hi, c_dx_row_bytes)
+        return part if c_H is None else b.select(b.cmp_lt(hi, c_H), part, oob_uniform)
+
+    def drain_out(buf: Value, dx_row: Value) -> None:
+        for px, ch8, g_off in drain:
+            v = b.smem_load_vN(o_smem, buf, px, ch8, dtype=io_type, n=8)
+            _buf_store_vN(b, p.dtype, d_rsrc, b.add(g_off, dx_row), c0, v, 4)
+
+    live_rows = [y for y in range(ROWS + KH - 1) if row_taps(y)]
+    pending: dict[int, list[Value]] = {}
+    for y in live_rows[: spec.prefetch_rows]:
+        pending[y] = load_row(y)
+
+    phase = 0
+    pend_out: tuple[Value, Value] | None = None
+    acc: list[Value] = [zero_acc] * KH
+    for y in range(ROWS + KH - 1):
+        rs = row_taps(y)
+        raw = pending.pop(y) if rs else None
+        xs: list[Value] = []
+        if raw is not None or pend_out is not None:
+            buf = b.const_i32(phase % 2)
+            phase += 1
+            if raw is not None:
+                for (px, ch8, _), v in zip(in_plan, raw):
+                    b.smem_store_vN(i_smem, [buf, px, ch8], v, 8)
+            if pend_out is not None:
+                b.smem_store_vN(o_smem, [buf, o_col, o_ch], pend_out[0], 4)
+            b.sync_lds_only()
+            if raw is not None:
+                xs = [
+                    b.smem_load_vN(i_smem, buf, b_px[ph], wave_ch, dtype=io_type, n=8)
+                    for ph in range(KWP)
+                ]
+            if pend_out is not None:
+                drain_out(buf, pend_out[1])
+                pend_out = None
+        if rs:
+            k_next = live_rows.index(y) + spec.prefetch_rows
+            if k_next < len(live_rows):
+                pending[live_rows[k_next]] = load_row(live_rows[k_next])
+            for ph in range(KWP):
+                for r in rs:
+                    slot = (y + r - (KH - 1)) % KH
+                    acc[slot] = _mfma(
+                        b, p.dtype, "16x16x32", weights[r][ph], xs[ph], acc[slot]
+                    )
+        hi_local = y - (KH - 1)
+        if not 0 <= hi_local < ROWS:
+            continue
+        slot = hi_local % KH
+        pend_out = (_trunc_f32(b, p.dtype, acc[slot]), dx_row_part(hi_local))
+        acc[slot] = zero_acc
+    if pend_out is not None:
+        buf = b.const_i32(phase % 2)
+        b.smem_store_vN(o_smem, [buf, o_col, o_ch], pend_out[0], 4)
+        b.sync_lds_only()
+        drain_out(buf, pend_out[1])
     return b.kernel
 
 

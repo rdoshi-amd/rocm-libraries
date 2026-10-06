@@ -5,7 +5,7 @@
 # tests/parity/conv_direct_grouped_emit.py -- Python reference emitter for the
 # direct grouped convolution parity harness. Selects one of N sampled spec
 # configs by argv[1], builds the DirectConv16cSpec / DirectConv4cSpec /
-# DirectConv8cSpec / DirectConv32cSpec / DirectDepthwiseSpec /
+# DirectConv8cSpec / DirectConv32cSpec / DirectConvSpec / DirectDepthwiseSpec /
 # DirectConvDgradSpec / DirectDepthwiseDgradSpec /
 # DirectDepthwiseDgradWindowedSpec / DirectConvWgradSpec,
 # builds the kernel via the matching build_direct_conv_* function
@@ -19,6 +19,7 @@ from kernels.common.conv_direct_grouped import (
     DirectConv4cSpec,
     DirectConv8cSpec,
     DirectConv32cSpec,
+    DirectConvSpec,
     DirectConvWgradSpec,
     DirectDepthwiseSpec,
     DirectDepthwiseSpatialSpec,
@@ -28,6 +29,7 @@ from kernels.common.conv_direct_grouped import (
     build_direct_conv_16c,
     build_direct_conv_4c,
     build_direct_conv_8c,
+    build_direct_conv,
     build_direct_conv_32c,
     build_direct_conv_wgrad,
     build_direct_depthwise,
@@ -813,6 +815,142 @@ def _spec(idx: int):
             ),
             arch,
         )
+    if 49 <= idx <= 56:
+        # windowed depthwise dgrad, Toeplitz MFMA form (mfma): one-hot weights
+        # x 8 channels per 16x16x32 MFMA, LDS-staged dY windows and dX rows.
+        # 49 odd N with w_fold 2 (empty second image of the last tile);
+        # 50 ragged H split + 2 W tiles + a partial channel block, w_fold 1;
+        # 51 9x9 w_fold 4 even H split; 52 11x11 ragged split (3 passes);
+        # 53 gfx942 -> both reject; 54 3x3 pad 0 single pass, one wave;
+        # 55 groups % 8 != 0 -> both reject; 56 non-square 7x5.
+        n, h, w, g, kh, kw, pad, dt, wv, fold, pf, bh, arch = {
+            49: (3, 14, 14, 64, 7, 7, 3, "bf16", 8, 2, 2, 0, "gfx950"),
+            50: (2, 13, 37, 40, 5, 5, 2, "fp16", 4, 1, 1, 4, "gfx950"),
+            51: (2, 10, 11, 16, 9, 9, 4, "bf16", 2, 4, 3, 5, "gfx950"),
+            52: (1, 13, 13, 64, 11, 11, 5, "fp16", 8, 2, 2, 4, "gfx950"),
+            53: (2, 14, 14, 64, 7, 7, 3, "bf16", 8, 2, 2, 0, "gfx942"),
+            54: (1, 9, 12, 8, 3, 3, 0, "fp16", 1, 2, 1, 0, "gfx950"),
+            55: (2, 14, 14, 12, 7, 7, 3, "bf16", 1, 2, 2, 0, "gfx950"),
+            56: (2, 11, 15, 32, 7, 5, 2, "bf16", 4, 2, 2, 0, "gfx950"),
+        }[idx]
+        p = DirectConvProblem(
+            N=n,
+            H=h,
+            W=w,
+            groups=g,
+            cpg=1,
+            kpg=1,
+            KH=kh,
+            KW=kw,
+            PAD=pad,
+            stride=1,
+            dtype=dt,
+        )
+        return (
+            "dw_dgrad_win",
+            DirectDepthwiseDgradWindowedSpec(
+                problem=p,
+                block_waves=wv,
+                block_h=bh,
+                mfma=True,
+                w_fold=fold,
+                prefetch_rows=pf,
+            ),
+            arch,
+        )
+    if idx in (57, 58, 59, 60):
+        # 4c row-staged dgrad (stage_rows, fused LDS weights): 57 bf16 3x3 odd
+        # W (partial q tile), 58 fp16 1x1 with a partial row-staging pass,
+        # 59 bf16 two q waves x two channel waves, 60 fp16 H=1 (the halo rows
+        # outside the image are skipped).
+        n, h, w, g, kh, dt, bq, bg, wq = {
+            57: (2, 13, 13, 32, 3, "bf16", 4, 16, 1),
+            58: (1, 7, 9, 64, 1, "fp16", 4, 64, 1),
+            59: (2, 9, 21, 64, 3, "bf16", 8, 32, 2),
+            60: (1, 1, 6, 16, 3, "fp16", 4, 16, 1),
+        }[idx]
+        p = DirectConvProblem(
+            N=n,
+            H=h,
+            W=w,
+            groups=g,
+            cpg=4,
+            kpg=4,
+            KH=kh,
+            KW=kh,
+            PAD=(kh - 1) // 2,
+            stride=1,
+            dtype=dt,
+        )
+        return (
+            "4c",
+            DirectConv4cSpec(
+                problem=p,
+                name="direct_conv_4c_dgrad",
+                block_q=bq,
+                block_groups=bg,
+                dgrad_fused_weights=True,
+                dgrad_weights_lds=True,
+                stage_rows=True,
+                waves_q=wq,
+            ),
+            "gfx950",
+        )
+    if 61 <= idx <= 72:
+        # Generic DirectConvSpec (build_direct_conv, the grouped direct-MFMA
+        # dgrad main kernel): 61-66 the default-knob paths (fused gathers,
+        # LDS-staged transpose reads, fold_k32, the pre-pass runtime loops
+        # with partial K atoms, runtime_k_loop + persistent grid, waves_q x
+        # waves_k with the LDS reduction), 67-70 the row-stream knobs
+        # (prefetch_rows, lds_only_sync, lds_pad, stage_out, xcd_tiles,
+        # waves_m; whole image, H tiles with a partial last tile, fused
+        # gathers + 5x5), 71-72 preloaded weights / single buffer and the
+        # knobs on gfx942.
+        # (N, H, W, groups, cpg, kpg, K, dtype, arch, fields)
+        n, h, w, g, cpg, kpg, k, dt, arch, kw = {
+            61: (2, 9, 17, 8, 16, 16, 3, "fp16", "gfx950",
+                 {"block_groups": 2, "dgrad_fused_weights": True}),
+            62: (2, 10, 13, 32, 16, 16, 3, "bf16", "gfx950",
+                 {"block_groups": 2, "dgrad_fused_weights": True, "dgrad_weights_lds": True, "waves_per_eu": 4}),
+            63: (2, 9, 14, 16, 32, 32, 3, "bf16", "gfx950",
+                 {"block_groups": 1, "fold_k32": True, "dgrad_fused_weights": True, "dgrad_weights_lds": True}),
+            64: (2, 9, 17, 4, 24, 12, 5, "fp16", "gfx950",
+                 {"block_groups": 1, "block_h": 4}),
+            65: (2, 9, 17, 4, 16, 16, 3, "bf16", "gfx950",
+                 {"block_groups": 1, "block_h": 4, "persistent_grid": True, "runtime_k_loop": True}),
+            66: (2, 7, 17, 4, 32, 16, 3, "fp16", "gfx950",
+                 {"block_q": 32, "block_groups": 1, "waves_q": 2, "waves_k": 2}),
+            67: (9, 10, 13, 32, 16, 16, 3, "bf16", "gfx950",
+                 {"block_groups": 2, "dgrad_fused_weights": True, "dgrad_weights_lds": True, "waves_per_eu": 4, "prefetch_rows": 2, "lds_only_sync": True, "lds_pad": 8, "stage_out": True, "xcd_tiles": True}),
+            68: (8, 11, 19, 32, 16, 16, 3, "fp16", "gfx950",
+                 {"block_q": 32, "block_groups": 2, "block_h": 8, "dgrad_fused_weights": True, "dgrad_weights_lds": True, "prefetch_rows": 2, "lds_only_sync": True, "lds_pad": 8, "stage_out": True, "xcd_tiles": True}),
+            69: (8, 7, 14, 16, 32, 32, 3, "bf16", "gfx950",
+                 {"block_groups": 1, "fold_k32": True, "dgrad_fused_weights": True, "dgrad_weights_lds": True, "prefetch_rows": 2, "lds_only_sync": True, "waves_m": 2, "lds_pad": 8, "stage_out": True, "xcd_tiles": True}),
+            70: (2, 9, 14, 8, 8, 32, 5, "fp16", "gfx950",
+                 {"block_groups": 1, "block_h": 4, "dgrad_fused_weights": True, "prefetch_rows": 3, "lds_only_sync": True, "waves_m": 2, "stage_out": True}),
+            71: (2, 9, 17, 4, 16, 16, 3, "fp16", "gfx942",
+                 {"block_groups": 2, "preload_weights": True, "double_buffer": False}),
+            72: (2, 9, 17, 8, 16, 16, 3, "bf16", "gfx942",
+                 {"block_groups": 2, "block_h": 4, "dgrad_fused_weights": True, "prefetch_rows": 2, "lds_only_sync": True, "lds_pad": 8}),
+        }[idx]  # fmt: skip
+        p = DirectConvProblem(
+            N=n,
+            H=h,
+            W=w,
+            groups=g,
+            cpg=cpg,
+            kpg=kpg,
+            KH=k,
+            KW=k,
+            PAD=(k - 1) // 2,
+            stride=1,
+            dtype=dt,
+        )
+        return (
+            "generic",
+            DirectConvSpec(problem=p, name="direct_mfma_dgrad", **kw),
+            arch,
+        )
     raise SystemExit(f"unknown config index {idx}")
 
 
@@ -841,6 +979,8 @@ def main() -> int:
         kernel = build_direct_depthwise_dgrad(spec, arch=arch)
     elif kind == "dw_dgrad_win":
         kernel = build_direct_depthwise_dgrad_windowed(spec, arch=arch)
+    elif kind == "generic":
+        kernel = build_direct_conv(spec, arch=arch)
     else:
         kernel = build_direct_depthwise(spec, arch=arch)
     if mode == "ll":

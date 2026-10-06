@@ -470,8 +470,9 @@ The global-to-LDS phase is the larger half. This is the structural im2col cost:
 dY is re-gathered once per tap, and W is re-read by every M tile.
 
 A direct-convolution kernel loads a halo'd input tile once and reuses it across
-all nine taps. That is where the remaining gap lives, and it is out of reach for a
-loop-level change to the igemm.
+all nine taps. That is where the remaining gap lives. It first looked out of
+reach for a loop-level change to the igemm; lever 6 shows it is not, once the
+loop order is swapped.
 
 `rocprofv3 --pmc SQ_INSTS_LDS SQ_LDS_BANK_CONFLICT` with the same split builds
 shows the following:
@@ -620,12 +621,211 @@ is below the unmodified tree with launch order.
   were added to `_STRIDE1_CASES`, compared bit for bit with the flat and
   runtime-record builds and against the reference.
 
+## Lever 6: dY halo reuse (`dy_halo`, kept; dispatch default on gfx950)
+
+**Observation.** On a stride-1 problem whose output has the input's size,
+filter tap `(y, x)` reads dY pixel `m + (pH - y)*Wo + (pW - x)` for dX pixel
+`m` in the linear `(n, h, w)` order. All taps of a tile of `tile_m`
+consecutive dX pixels read one contiguous dY range: the tile plus
+`(Y-1)*Wo + (X-1)` halo pixels. Hardware counters on the tap-outer kernel
+showed several times the L2 read requests and misses of a direct
+convolution on the same problems, with the global-to-LDS phase dominating
+(see "Where the time goes" above).
+
+**Change.** `dy_halo` swaps the loop to output-channel chunk outer and filter
+tap inner (unrolled). Per chunk the extended A tile is loaded into LDS once
+and each tap reads it at a constant row shift. A lane whose shifted pixel
+leaves the image (row wrap, image edge, batch edge) reads a trailing all-zero
+LDS row: one select on the LDS row index per fragment row, no per-element
+masking. The epilogue is untouched: the M mapping stays linear.
+
+Steps, one lever each, all A/B in one locked session per comparison with
+arms interleaved and the arm order alternated per round (identical binaries
+measured noticeably apart at different list positions, so unbalanced
+orders misattribute small levers):
+
+- **Staged halo alone (`dy_halo=1`).** L2 read requests and misses fell to
+  about the direct convolution's level and MFMA utilization rose, but every
+  tap still exposed one B global load, two barriers and a full wait.
+- **Double-buffered B with a register prefetch (`dy_halo=2`).** The first
+  build was no faster: the ISA showed LLVM sinking the next tap's
+  `buffer_load`s to just before their `ds_write`, after the MFMA block, so
+  nothing overlapped. A `sched_barrier(0)` after the prefetch issue and
+  before the LDS store keeps the loads at the top of the tap. That pin is the
+  largest single gain after the halo itself, and it is implied by `dy_halo=2`
+  rather than being a knob.
+- **Larger M tiles, 4x1 waves.** With A reused, a larger M tile halves the B
+  traffic per output pixel. LDS fragment reads then became a co-limiter: with
+  2x2 waves a workgroup reads more LDS bytes per tap than the CU can feed at
+  the MFMA rate. 4x1 waves (each wave covers every B column) cut that.
+- **K-outer B pad 32 (`dy_halo_kouter_pad`).** The transpose-read bank
+  conflicts (lever 4) matter once dY traffic is gone. The pad removes them
+  on the `32x32x16` atom and wins where it keeps the workgroups per CU; where
+  the extra LDS crosses an occupancy bin it loses heavily, and on 2x2-wave
+  tiles it was slower at equal occupancy. A pad of 3 gave wrong dX (the
+  transpose read needs aligned rows): the validator now accepts only
+  multiples of 8.
+- **`s_setprio` around each tap's MFMAs (`dy_halo_setprio`).** A small gain on
+  the 4x1-wave tiles with several N tiles, slightly negative on the small
+  2x2 tile. A tuned knob; dispatch sets level 1 on its 4x1-wave tiles.
+- **2-D zero-bordered halo (`dy_halo_2d`).** No masks at all when a tile is
+  whole image rows. Neutral on average over the eligible cohort (small wins
+  at `Wo` 32, small losses at `Wo` 16 and below); kept as a knob, not
+  selected by dispatch.
+- **Reverted / not kept:** an A row pad of 16 (helps the `16x16x32` atom but
+  is much slower with the `32x32x16` atom the halo tiles use); prefetching
+  the next chunk's halo during the last tap (more VGPRs, lost occupancy,
+  neutral to slower; it also issued a load past the last chunk); an
+  XCD-contiguous order for dense problems (within noise, as in lever 5).
+
+**Occupancy is the dispatch problem.** The best halo tiles run at one or two
+workgroups per CU with large LDS footprints; one LDS bin step costs more than
+any of the small levers gain. `vgpr_count` in the code-object notes already
+includes the AGPRs on gfx950 (it equals the accumulation offset plus the AGPR
+count); adding `agpr_count` on top double counts and wrongly predicts one wave
+per SIMD for the 256x64 tile. Measured occupancy (`MeanOccupancyPerActiveCU`)
+confirmed the LDS bins: the K-outer pad on a 256x64 tile at about 80 KB
+dropped the kernel from two workgroups per CU to one.
+
+**Dispatch (`_gfx950_dgrad_halo_pick`).** Fitted on a 50-problem cohort
+(dense and grouped 3x3, 5x5, 7x7, 1x1 controls; N 1..128, 7..224 pixel rows,
+64..2560 channels) and checked on a separate 30-problem hold-out cohort,
+same-session against the previous dispatch:
+
+- The validator decides eligibility and the LDS fit; dispatch only orders
+  three tiles: 64x64 `w2x2` when the 128x64 grid is below 192 workgroups,
+  256x64 `w4x1` from 768 128x64 workgroups, or on a mid-size grid when its
+  LDS-limited workgroups per CU match the 128x64 tile's, it still has 128
+  workgroups, and it has either more than one workgroup per CU or a per-tap
+  halo of at least two 128x64 tiles (a tall filter on a wide image, which
+  the larger tile amortizes better); else 128x64 `w4x1`. The 256x64 tile is
+  limited to filters of at most 3x3.
+- `dy_halo_kouter_pad=32` only when the padded tile has the same LDS-limited
+  workgroups per CU; `dy_halo_setprio=1` on the 4x1-wave tiles.
+- **Wide images.** The hold-out cohort found losses the fit cohort did not
+  contain: 3x3 problems with 192- and 300-pixel rows and a 7x7 problem with
+  56-pixel rows, whose halo tiles fit only one workgroup per CU in LDS on
+  grids that need several rounds. With one workgroup per CU nothing hides
+  the per-chunk halo load. Rule: such a pick falls back to 128x64 if that
+  keeps two workgroups per CU, otherwise to the tile table. On a grid that
+  fits one round the halo still wins with one workgroup per CU and is kept.
+  This gives up the halo wins on a few wide problems (a 5x5 problem with
+  80-pixel rows, a 3x3 problem with 160-pixel rows) that the data could not
+  separate from the losses.
+- **One N tile against the 128x128 table tile.** An independent review found
+  a region neither cohort covered: 128 input channels per group on 112- to
+  136-pixel rows, where the tile table takes the 128x128 tile and the halo
+  pick the 128x64 tile at two workgroups per CU. The 128x128 tile covers all
+  input channels in one N tile and so reads each dY row once; the 128x64
+  tile reads it twice, and at that occupancy the halo load is exposed. The
+  halo pick lost there in warm, reversed-order and cold-cache runs, and no
+  halo variant (128x128 halo tiles, 256x64, `dy_halo=1`, no `setprio`) beat
+  the table tile. A third cohort over that region (`cpg` 128..512, 64..160
+  pixel rows, N 2..32, fp16 and bf16, warm and cold caches) set the rule:
+  where the table has the 128x128 tile, its N tiles cover `cpg` exactly in
+  one or two tiles (`cpg` 128 or 256) and the halo pick is the 128x64 tile
+  at two or fewer workgroups per CU, keep the table. At `cpg` 256 the halo
+  pick was level with warm caches but lost with cold ones on several
+  problems. With partly empty table N tiles (`cpg` 192, 320) or more of them
+  (`cpg` 384, 512) the halo pick won with warm and cold caches; with `cpg`
+  128 on narrower images the 256x64 halo tile still wins and is kept. The
+  rule gives up small warm-cache halo gains on some of the kept problems.
+- **Vertical-only filters and small grids.** A second independent review
+  timed 3x1 filters on wide images and small grids, which no earlier cohort
+  covered, and found reproducible losses with warm and cold caches. They had
+  two causes, which a cohort of 3x1, 5x1, 7x1, 1x3 and 3x3 neighbours
+  confirmed by timing every halo tile against the tile table:
+  - *Little dY reuse.* A 3x1 filter reuses a dY row only across three row
+    shifts of `Wo` pixels. Once `Wo >= tile_m` the halo tile stages
+    `tile_m + 2*Wo` rows, at least the `3*tile_m` rows the tap-outer loop
+    gathers anyway, and adds the per-chunk staging on top. No halo tile beat
+    the tile table there. Dispatch now computes the reuse
+    `taps * tile_m / (tile_m + (Y-1)*Wo + (X-1))` of the picked tile and
+    keeps the table below a floor. On the 4x1-wave tiles the losses were at a
+    reuse up to 1.2 and the wins from 1.33, so the floor is 1.3. The 64x64
+    tile still won down to a reuse of 0.67 on grids of at most one workgroup
+    per CU, where the table's own 64x64 kernel is weaker, but lost below 1.0
+    on larger grids, so its floor (1.0) applies only there.
+  - *Idle CUs.* The 256x64 tile on a mid-size grid of 128 to 256 workgroups
+    (3x1 and 3x3 filters on 56- to 80-pixel rows) leaves CUs idle or
+    single-occupied. The 128x64 tile was faster than the 256x64 tile and the
+    tile table on every such problem with warm caches, and at least level
+    with the table with cold ones. The 256x64 tile kept its edge
+    only where the per-tap halo spans two or more 128x64 tiles (7x1 on
+    64-pixel rows, 5x1 on 112-pixel rows) or where it has more than one
+    workgroup per CU. Dispatch now requires one of the two.
+- **Vertical-only filters keep the tile table.** A third review timed fresh
+  3x1 and 5x1 problems on 144- to 176-pixel rows and found the 256x64 tile,
+  taken there only for its tall per-tap halo, slower than the tile table in
+  warm and cold runs at reuses the 1.3 floor admits; the 128x64 tile was
+  slower still. Fresh cohorts over the whole vertical-only region (3x1, 5x1,
+  7x1 on every tile and grid size, fp16 and bf16, warm and cold caches) then
+  found the halo pick winning on most problems but losing on a minority with
+  no pattern in dY reuse, grid size, image width or channel counts: tightening
+  any one threshold moved the losses rather than removing them. Vertical-only
+  filters (`X == 1`, `Y > 1`) therefore keep the tile table; this gives up
+  their halo wins. Hold-out cohorts of square, horizontal and other 2-D
+  filters on all three tiles showed no such losses at the time.
+- **Horizontal-only filters keep the tile table too.** A later cohort of
+  fresh 1x3 problems on wide images (64 to 160 columns, a few to 16 images,
+  several hundred to a thousand channels) found the 256x64 tile behind the
+  tile table, cold above all and on some problems warm; 1x5 and 1x7 won on
+  the problems measured. Instead of another threshold, the halo pick is now
+  admitted only for filters of at least 2 rows and 2 columns, where every
+  cohort and hold-out problem won; one-dimensional filters (`X == 1` or
+  `Y == 1`) keep the tile table, which gives up the 1x5 / 1x7 wins. A
+  same-region probe of 3x3, 3x5 and 5x3 filters showed no losses.
+- **64x64 tile floor on small grids.** The same review found the 64x64 tile
+  slower than the tile table on grids of at most one workgroup per CU at a
+  reuse below about 0.6 (3x1 filters on wide images, and very wide 3x3
+  images), and with cold caches already at 0.67. Its floor there is 0.7
+  (`_GFX950_DGRAD_HALO_MIN_REUSE_2X2_SMALL_GRID`); above one workgroup per CU
+  it stays 1.0.
+- **Large filters.** The halo loop unrolls every tap: beyond a 9x9 filter
+  the kernel's code size and first-build compile time grow to several times
+  the tile-table kernel's, though the halo pick still ran faster. Filters
+  with more than 81 taps keep the tile table.
+- **9x9 on the 4x1-wave tiles.** A later review timed 9x9 filters with cold
+  caches on problems with large weights (64 input channels per group, many
+  groups) and found the 128x64 tile well behind the tile table there, though
+  ahead warm; 9x9 on the 64x64 tile and 7x7 on the 128x64 tile were ahead
+  cold and warm. The 4x1-wave tiles now take at most 49 taps
+  (`_GFX950_DGRAD_HALO_4X1_MAX_TAPS`): 9x9, 7x9 and 9x7 filters that would
+  pick them keep the tile table, while the 64x64 tile keeps them. A
+  re-measured cohort of 9x9 / 7x9 / 9x7 64x64 picks and heavy-weight 7x7
+  128x64 picks held up cold and warm.
+- Not applied: 1x1 filters, strided problems, size-changing pads,
+  `kpg % 64 != 0`, split-K -- the tile table is unchanged there.
+
+**Correctness.** fp32 reference, dX pre-filled with NaN (NaN counts as bad),
+on N=1, odd and non-square images, `W = 1`, a 7x7 filter on a 2-pixel-wide
+image, a 1x1 image, tiles straddling image boundaries, partial M and N tiles,
+5x5/7x7, grouped, the M-outer B tile and the 2-D layout, for every halo
+tiling (`TestConvDgradDyHalo`, including 1x7, 7x1, 1x3, 3x1 and 3x5
+filters: the row map handles the vertical and horizontal tap offsets
+separately), plus every dispatch pick of the cohorts. A mutation that drops
+the zero-row select fails the test.
+
+Mirrors:
+- C++: `_emit_dy_halo_kloop` / `_halo_dy_descriptor`, the `dy_halo*` fields of
+  `rocke_dgrad_conv_spec_t`, `_dgrad_dy_halo_ok` (validator, same reason text),
+  `_dgrad_lds_charge` (the exact Python LDS charge, now used for every dgrad
+  spec) and the `kp` / `halo` / `h2d` / `hprio` / `hkp` name flags.
+- Parity: configs 26-35 (1-D halo with odd sizes and a straddling tile, the
+  128x64 `w4x1` dispatch tile with `setprio` and the pad, the 2-D layout, the
+  M-outer B tile on a 5x5 filter, a non-default `lds_k_pad`, the `16x16x32`
+  atom, and the non-square 1x7, 7x1 and 3x5 filters, 1x7 also in the 2-D
+  layout). All fp16 (see "C++ mirror scope").
+
 ## Knob defaults
 
 The flat-loop `waves_per_eu` floor above adds no knob; it is the derived
 default of the existing `waves_per_eu` field. The flat-loop load batching and
 the XCD-contiguous tile order of grouped problems add none either: both are
 derived gfx950 rules of the builder.
+
+The `dy_halo*` knobs of lever 6 ship default OFF at the spec level (no golden
+moved); gfx950 dispatch turns `dy_halo` on where it applies.
 
 `static_sub_gemm` and `tap_outer_k` are new knobs that ship default ON, with
 the affected goldens re-blessed. That is a deliberate exception to the
@@ -641,7 +841,8 @@ explicit error instead of emitting IR that would silently differ from the
 Python engine; grouped dgrad is built by the Python engine, and no parity
 config is grouped. Porting the grouped descriptors and adding a grouped
 parity config is a follow-up. The grouped-only XCD-contiguous tile order
-(lever 5) is part of that follow-up.
+(lever 5) is part of that follow-up, and so is the grouped dY halo loop
+(lever 6), which the Python engine builds and dispatch selects.
 
 The C++ `CoalescedTileLoader` mirror has no `elem_dtype` (it always loads
 `half`), so a bf16 dgrad config cannot be byte-compared. Parity config 20,
@@ -843,6 +1044,19 @@ python -m pytest tests/test_conv_dgrad_spec_policy.py tests/dispatch/test_groupe
 # TCC_MISS_sum TCC_EA0_RDREQ_sum on each; for the single-N-tile 1x1 class add
 # TCC_EA0_RDREQ_DRAM_CREDIT_STALL_sum TCC_TAG_STALL_sum.
 
+# dY halo (lever 6): what dispatch ships for one problem, verified and looped
+# for a kernel trace; run the same command line against a checkout without
+# the lever for the A/B.
+python benchmarks/common/grouped_conv/run_direct_dgrad_dispatch.py \
+    --N 8 --C 1280 --K 1280 --H 16 --W 16 --G 1 --dtype bf16 --verify
+rocprofv3 --kernel-trace -d prof -o run -- python \
+    benchmarks/common/grouped_conv/run_direct_dgrad_dispatch.py \
+    --N 8 --C 1280 --K 1280 --H 16 --W 16 --G 1 --dtype bf16 --loop 20
+# Single-knob A/B: build DgradConvSpec with dy_halo / dy_halo_setprio /
+# dy_halo_kouter_pad / dy_halo_2d set one at a time (each is tagged in the
+# kernel name). Occupancy: rocprofv3 --pmc MeanOccupancyPerActiveCU.
+python -m pytest tests/test_conv_dgrad_correctness.py -k DyHalo
+
 # Byte identity, Python vs C++ engine.
 cd ../platform && python tools/check_byte_identity.py --only conv_implicit_gemm_dgrad
 ```
@@ -882,3 +1096,6 @@ speed-of-light split is a two-line temporary edit around `emit_load_phase` /
   differential golden with `--record-golden` into a scratch
   copy and splice only the `conv_implicit_gemm_dgrad` block: with `--only` the
   tool rewrites the whole `ir_canonical` section with the one family.
+- After lever 6 (dY halo): `ir_canonical` configs 26-35 are new; configs
+  0-25 are unchanged (the knobs default off). The representative golden did
+  not change.

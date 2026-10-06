@@ -147,6 +147,7 @@ hard-coded defaults if the model is absent or predicts an invalid config.
 
 from __future__ import annotations
 
+import functools
 import math
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
@@ -160,8 +161,12 @@ from kernels.common.conv_direct_grouped import (
     DirectDepthwiseDgradWindowedSpec,
     DGRAD_4C_DEFAULT_BLOCK_GROUPS,
     DGRAD_4C_DEFAULT_BLOCK_Q,
+    DW_DGRAD_MFMA_ARCHES,
+    DW_DGRAD_MFMA_CH,
+    DW_DGRAD_MFMA_W_FOLDS,
     DirectMfmaDgradPlan,
     build_direct_depthwise_dgrad_windowed,
+    direct_conv_lds_bytes,
     direct_mfma_dgrad_main_grid,
     is_valid_depthwise_dgrad_win_spec,
     is_valid_spec as _direct_is_valid_spec,
@@ -185,6 +190,7 @@ from kernels.common.conv_implicit_gemm_wgrad import (
 )
 from kernels.common.conv_implicit_gemm_dgrad import (
     DgradConvSpec,
+    dgrad_lds_bytes as _dgrad_lds_bytes,
     is_valid_dgrad_spec as _dgrad_is_valid_spec,
 )
 from rocke.dispatch.core import (
@@ -506,6 +512,10 @@ def _is_gfx1250(req: ConvGroupedRequest) -> bool:
 # ---------------------------------------------------------------------------
 
 
+# ConvGroupedSpec fields that carry the DgradConvSpec dY halo knobs.
+_DGRAD_HALO_FIELDS = ("dy_halo", "dy_halo_2d", "dy_halo_setprio", "dy_halo_kouter_pad")
+
+
 @dataclass(frozen=True)
 class ConvGroupedSpec:
     """Selected spec for a grouped conv candidate (fwd or wgrad)."""
@@ -525,6 +535,22 @@ class ConvGroupedSpec:
     split_k: int = 1  # wgrad only
     lds_k_outer: bool = False  # wgrad only
     name: str = "rocke_conv_grouped"
+    # dgrad only: the dY halo reuse knobs of DgradConvSpec (dy_halo,
+    # dy_halo_2d, dy_halo_setprio, dy_halo_kouter_pad), forwarded verbatim by
+    # to_dgrad_spec. All default off.
+    dy_halo: int = 0
+    dy_halo_2d: bool = False
+    dy_halo_setprio: int = 0
+    dy_halo_kouter_pad: int = 0
+
+    def __post_init__(self) -> None:
+        if self.direction != "dgrad":
+            set_knobs = [f for f in _DGRAD_HALO_FIELDS if getattr(self, f)]
+            if set_knobs:
+                raise ValueError(
+                    f"{', '.join(set_knobs)} only apply to direction='dgrad' "
+                    f"(got direction={self.direction!r})"
+                )
 
     def kernel_name(self) -> str:
         from rocke.helpers.spec import kernel_name_join
@@ -547,6 +573,19 @@ class ConvGroupedSpec:
         #     fetch rather than a transpose-on-store.
         if self.direction in ("wgrad", "dgrad") and self.lds_k_outer:
             parts.append("kouter")
+        # The dY halo knobs replace the dgrad K loop and its LDS layout; each
+        # one that is set changes the body (the instance validator rejects
+        # any that would not take effect), with the same tags as
+        # DgradConvSpec.kernel_name().
+        if self.direction == "dgrad":
+            if self.dy_halo:
+                parts.append(f"halo{self.dy_halo}")
+            if self.dy_halo_2d:
+                parts.append("h2d")
+            if self.dy_halo_setprio:
+                parts.append(f"hprio{self.dy_halo_setprio}")
+            if self.dy_halo_kouter_pad:
+                parts.append(f"hkp{self.dy_halo_kouter_pad}")
         return kernel_name_join(self.name, *parts)
 
     def to_fwd_spec(self, problem: "ConvProblem") -> "ImplicitGemmConvSpec":
@@ -647,6 +686,10 @@ class ConvGroupedSpec:
             pipeline=self.pipeline,
             epilogue=self.epilogue,
             split_k=self.split_k,
+            dy_halo=self.dy_halo,
+            dy_halo_2d=self.dy_halo_2d,
+            dy_halo_setprio=self.dy_halo_setprio,
+            dy_halo_kouter_pad=self.dy_halo_kouter_pad,
         )
 
 
@@ -1532,8 +1575,257 @@ def _gfx950_dgrad_tile(req: ConvGroupedRequest) -> tuple[int, ...]:
     return _GFX950_DGRAD_TILE_DEFAULT
 
 
+# dY halo reuse picks (DgradConvSpec.dy_halo) for gfx950 stride-1 dgrad whose
+# output has the input's size, a multi-tap filter and kpg % 64 == 0 (the
+# tap-outer K loop). On same-session cohorts of dense and grouped square and
+# non-square filters (1x3 .. 9x9; 1..128 images, 7..224 pixel rows, 64..2560
+# channels) the staged halo with the double-buffered B tile (dy_halo=2) was
+# faster than the tile-table pick once the tile matched the grid, the LDS
+# occupancy and the filter's dY reuse, except where the rules below keep the
+# tile table (the measurements live outside the tree). Three tiles, all
+# 32x32x16 MFMA with a K-outer B tile when the channel run allows it:
+#   - 64x64, 2x2 waves, for small grids;
+#   - 128x64, 4x1 waves (each wave reads every B column, which cuts LDS
+#     fragment reads per MFMA against 2x2), for mid-size grids;
+#   - 256x64, 4x1 waves (half the B traffic per output pixel), for large
+#     grids, and on mid-size grids when it keeps the 128x64 tile's LDS
+#     occupancy, still has _GFX950_DGRAD_HALO_LARGE_MIN_WGS workgroups, and
+#     either fills more than one workgroup per CU or has a per-tap halo of at
+#     least _GFX950_DGRAD_HALO_LARGE_MIN_HALO_TILES 128x64 tiles (a tall
+#     filter on a wide image: the larger tile amortizes the halo better). On
+#     a grid of one 256x64 workgroup per CU or fewer with a shorter halo
+#     (3x1 and 3x3 filters on 56- to 80-pixel rows) the 256x64 tile lost to
+#     the tile table on several problems; the 128x64 tile was faster than
+#     both with warm caches and at least level with the table with cold ones.
+# The 256x64 tile is limited to filters of at most 3x3: with more taps its
+# per-tap row masks lift the register count to one wave per SIMD.
+_GFX950_DGRAD_HALO_TILE_SMALL = (64, 64, 64, 2, 2, 32, 16)
+_GFX950_DGRAD_HALO_TILE_MID = (128, 64, 64, 4, 1, 32, 16)
+_GFX950_DGRAD_HALO_TILE_LARGE = (256, 64, 64, 4, 1, 32, 16)
+# 128x64 workgroup counts that bound the mid band: below the first the 64x64
+# tile won (the larger tiles leave CUs idle), from the second on the 256x64
+# tile won.
+_GFX950_DGRAD_HALO_MID_MIN_WGS = 192
+_GFX950_DGRAD_HALO_LARGE_GRID_WGS = 768
+_GFX950_DGRAD_HALO_LARGE_MIN_WGS = 128
+_GFX950_DGRAD_HALO_LARGE_MAX_TAPS = 9
+_GFX950_DGRAD_HALO_LARGE_MIN_HALO_TILES = 2
+# s_setprio around each tap's MFMA block on the 128x64 and 256x64 tiles: a
+# small gain on problems with several N tiles, within noise elsewhere. Not on
+# the 64x64 tile, where it measured slightly slower.
+_GFX950_DGRAD_HALO_SETPRIO = 1
+# K-outer B row pad for the 4x1-wave tiles: fewer transpose-read bank
+# conflicts. Only where it keeps the LDS-limited workgroups per CU -- where the
+# padded tile drops a workgroup per CU it was much slower. Not on the 2x2
+# tile, where it measured slower at equal occupancy.
+_GFX950_DGRAD_HALO_KOUTER_PAD = 32
+# A halo tile that fits only one workgroup per CU in LDS (a wide image: the
+# halo grows by (Y-1)*Wo rows) exposes the halo load of every channel chunk;
+# once the grid needs more than one workgroup per CU it lost to the tile
+# table on 3x3 problems with 192- and 300-pixel rows. There the 256x64 tile
+# falls back to 128x64 if that keeps two workgroups per CU, and every other
+# pick to the tile table.
+_GFX950_NUM_CUS = 256
+# The tile table's 128x128 tile against the 128x64 halo tile at fewer than
+# three LDS-limited workgroups per CU (a wide image), where the 128-wide N
+# tiles cover a group's input channels exactly in one or two tiles (cpg 128 or
+# 256): the 128x128 tile reads each dY row once per N tile, the 128x64 tile
+# twice as often, and with the halo load exposed at that occupancy the 128x64
+# tile was slower on 112- to 136-pixel rows at cpg 128, and at cpg 256 level
+# with warm caches but slower with cold ones on several 80- to 128-pixel-row
+# problems. Those problems keep the tile table. With partly empty table N
+# tiles (cpg 192, 320) or more of them (cpg >= 384) the halo tile was faster
+# with warm and cold caches.
+_GFX950_DGRAD_HALO_MID_OVER_LARGE_MIN_OCC = 3
+_GFX950_DGRAD_HALO_KEEP_LARGE_MAX_N_TILES = 2
+# The halo K loop unrolls every filter tap, so code size and compile time
+# grow with the tap count (several times the tile-table kernel's beyond a
+# 9x9 filter). Larger filters keep the tile table.
+_GFX950_DGRAD_HALO_MAX_TAPS = 81
+# The 4x1-wave tiles (128x64, 256x64) take filters of at most 7x7 taps. With
+# 9x9 filters (or 7x9 / 9x7) the 128x64 tile was faster with warm caches but
+# lost to the tile table with cold ones on problems with large weights (64
+# input channels per group, many groups); those problems keep the tile table.
+# The 64x64 tile keeps 9x9 filters, where it won with warm and cold caches.
+_GFX950_DGRAD_HALO_4X1_MAX_TAPS = 49
+# dY reuse of a halo tile: filter taps x tile rows over the staged rows (the
+# tile plus its (Y-1)*Wo + (X-1) halo pixels), i.e. how often each staged dY
+# row feeds an MFMA. The tap-outer loop gathers taps x tile rows, so at a
+# reuse near 1 the halo saves no dY traffic and only adds the per-chunk
+# staging. A vertical-only filter on a wide image has little reuse: a 3x1
+# filter with Wo >= tile_m is at 1.0 or below. Below the floor the tile table
+# is kept. The 4x1-wave tiles lost to it at a reuse up to 1.2 and won from
+# 1.33. The 64x64 tile lost below a reuse of 1.0 once the grid needed more
+# than one workgroup per CU; on smaller grids it won from 0.7 and lost below
+# that (cold caches already at 0.67).
+_GFX950_DGRAD_HALO_MIN_REUSE_4X1 = 1.3
+_GFX950_DGRAD_HALO_MIN_REUSE_2X2 = 1.0
+_GFX950_DGRAD_HALO_MIN_REUSE_2X2_SMALL_GRID = 0.7
+# One-dimensional filters keep the tile table. Vertical-only ones (3x1, 5x1,
+# 7x1): on every tile and grid size the halo pick won on some of these
+# problems and lost on others, with no pattern in dY reuse, grid size or
+# channel counts (cold caches above all). Horizontal-only ones (1x3, 1x5,
+# 1x7): 1x3 filters on the 256x64 tile lost on wide images (cold above all,
+# some warm), while 1x5 and 1x7 won on the problems measured; the halo pick is
+# admitted only for filters of at least 2 rows and 2 columns, where it won
+# throughout (a missed gain on 1x5 / 1x7 layers).
+
+
+def _dgrad_instance_spec(
+    req: ConvGroupedRequest, tile: tuple[int, ...], **halo
+) -> DgradConvSpec:
+    """The gfx950 dgrad instance spec for ``tile`` and halo knobs ``halo``."""
+    tm, tn, tk, wm, wn, wtmn, wtk = tile
+    return DgradConvSpec(
+        problem=_problem(req),
+        name="implicit_gemm_conv_dgrad",
+        lds_k_outer=_dgrad_lds_k_outer(req, wtmn),
+        data=_data_spec(req),
+        tile_m=tm,
+        tile_n=tn,
+        tile_k=tk,
+        warp_m=wm,
+        warp_n=wn,
+        warp_tile_m=wtmn,
+        warp_tile_n=wtmn,
+        warp_tile_k=wtk,
+        wave_size=ArchTarget.from_gfx(req.arch).wave_size,
+        pipeline=_PIPELINE,
+        epilogue=_epilogue_for(req),
+        split_k=1,
+        **halo,
+    )
+
+
+def _gfx950_dgrad_halo_pick(
+    req: ConvGroupedRequest,
+) -> tuple[tuple[int, ...], dict[str, int]] | None:
+    """``(tile, halo knobs)`` of the dY halo pick, or None (see above).
+
+    None when no halo tile is valid for the request (the instance validator
+    decides eligibility and the LDS fit, so a wide image whose halo outgrows
+    the LDS falls back to the tile table), when the filter has more than
+    ``_GFX950_DGRAD_HALO_MAX_TAPS`` taps, when a 4x1-wave tile is picked for
+    a filter of more than ``_GFX950_DGRAD_HALO_4X1_MAX_TAPS`` taps, where the
+    tile table's 128x128
+    tile is kept (see ``_GFX950_DGRAD_HALO_MID_OVER_LARGE_MIN_OCC``), or
+    where the picked tile's dY reuse is below its floor (see
+    ``_GFX950_DGRAD_HALO_MIN_REUSE_4X1``), and for one-dimensional filters
+    (one row or one column, see the note after
+    ``_GFX950_DGRAD_HALO_MIN_REUSE_2X2_SMALL_GRID``). Occupancy
+    is the LDS-limited workgroup count per CU from the instance's own LDS
+    charge.
+    """
+    p = _problem(req)
+    if p.Y * p.X > _GFX950_DGRAD_HALO_MAX_TAPS or p.X == 1 or p.Y == 1:
+        return None
+    lds_cap = ArchTarget.from_gfx(req.arch).lds_capacity_bytes
+
+    def _valid(spec: DgradConvSpec) -> bool:
+        return _dgrad_is_valid_spec(spec, arch=req.arch)[0]
+
+    def _wgs(tile: tuple[int, ...]) -> int:
+        tm, tn = tile[0], tile[1]
+        return -(-(p.N * p.Hi * p.Wi) // tm) * -(-p.cpg // tn) * max(int(p.groups), 1)
+
+    small, mid, large = (
+        _GFX950_DGRAD_HALO_TILE_SMALL,
+        _GFX950_DGRAD_HALO_TILE_MID,
+        _GFX950_DGRAD_HALO_TILE_LARGE,
+    )
+    base = {"dy_halo": 2}
+    specs = {t: _dgrad_instance_spec(req, t, **base) for t in (small, mid, large)}
+    ok = {t: _valid(s) for t, s in specs.items()}
+    if not ok[small] and not ok[mid]:
+        return None
+    occ = {t: lds_cap // _dgrad_lds_bytes(s) for t, s in specs.items()}
+    # dY pixels each tap's halo adds to the staged tile.
+    halo_rows = (p.Y - 1) * p.Wo + (p.X - 1)
+    if (_wgs(mid) < _GFX950_DGRAD_HALO_MID_MIN_WGS or not ok[mid]) and ok[small]:
+        tile = small
+    elif (
+        ok[large]
+        and p.Y * p.X <= _GFX950_DGRAD_HALO_LARGE_MAX_TAPS
+        and (
+            _wgs(mid) >= _GFX950_DGRAD_HALO_LARGE_GRID_WGS
+            or (
+                occ[large] >= occ[mid]
+                and _wgs(large) >= _GFX950_DGRAD_HALO_LARGE_MIN_WGS
+                and (
+                    _wgs(large) > _GFX950_NUM_CUS
+                    or halo_rows >= _GFX950_DGRAD_HALO_LARGE_MIN_HALO_TILES * mid[0]
+                )
+            )
+        )
+    ):
+        tile = large
+    else:
+        tile = mid
+    if occ[tile] < 2 and _wgs(tile) > _GFX950_NUM_CUS:
+        if tile == large and ok[mid] and occ[mid] >= 2:
+            tile = mid
+        else:
+            return None
+    if tile[4] == 1 and p.Y * p.X > _GFX950_DGRAD_HALO_4X1_MAX_TAPS:
+        return None
+    large_tn = _GFX950_DGRAD_TILE_LARGE[1]
+    if (
+        tile == mid
+        and occ[mid] < _GFX950_DGRAD_HALO_MID_OVER_LARGE_MIN_OCC
+        and p.cpg % large_tn == 0
+        and p.cpg // large_tn <= _GFX950_DGRAD_HALO_KEEP_LARGE_MAX_N_TILES
+        and _gfx950_dgrad_tile(req) == _GFX950_DGRAD_TILE_LARGE
+    ):
+        return None
+    if tile[4] == 1:
+        min_reuse = _GFX950_DGRAD_HALO_MIN_REUSE_4X1
+    elif _wgs(tile) > _GFX950_NUM_CUS:
+        min_reuse = _GFX950_DGRAD_HALO_MIN_REUSE_2X2
+    else:
+        min_reuse = _GFX950_DGRAD_HALO_MIN_REUSE_2X2_SMALL_GRID
+    if p.Y * p.X * tile[0] < min_reuse * (tile[0] + halo_rows):
+        return None
+    knobs = dict(base)
+    if tile[4] == 1:
+        knobs["dy_halo_setprio"] = _GFX950_DGRAD_HALO_SETPRIO
+        padded = _dgrad_instance_spec(
+            req,
+            tile,
+            dy_halo_kouter_pad=_GFX950_DGRAD_HALO_KOUTER_PAD,
+            **knobs,
+        )
+        if _valid(padded) and lds_cap // _dgrad_lds_bytes(padded) == occ[tile]:
+            knobs["dy_halo_kouter_pad"] = _GFX950_DGRAD_HALO_KOUTER_PAD
+    return tile, knobs
+
+
+@functools.lru_cache(maxsize=256)
+def _gfx950_dgrad_pick_cached(
+    req: ConvGroupedRequest,
+) -> tuple[tuple[int, ...], tuple[tuple[str, int], ...]]:
+    halo = _gfx950_dgrad_halo_pick(req)
+    if halo is not None:
+        tile, knobs = halo
+        return tile, tuple(knobs.items())
+    return _gfx950_dgrad_tile(req), ()
+
+
+def _gfx950_dgrad_pick(
+    req: ConvGroupedRequest,
+) -> tuple[tuple[int, ...], dict[str, int]]:
+    """``(tile, halo knobs)`` of the gfx950 dgrad candidate.
+
+    The dY halo pick where it applies (:func:`_gfx950_dgrad_halo_pick`),
+    otherwise the tile table (:func:`_gfx950_dgrad_tile`) with no halo knobs.
+    Memoized per request: support() and select() both need it, and the halo
+    pick builds and validates several instance specs.
+    """
+    tile, knobs = _gfx950_dgrad_pick_cached(req)
+    return tile, dict(knobs)
+
+
 def _make_gfx950_dgrad_candidate() -> KernelCandidate:
-    """Backward-data conv for gfx950, tile chosen by :func:`_gfx950_dgrad_tile`.
+    """Backward-data conv for gfx950, configured by :func:`_gfx950_dgrad_pick`.
 
     Pins ``epilogue="default"`` and ``split_k=1``. dgrad already dispatches its
     epilogue internally on ``needs_atomic`` (stride > 1 gives more than one
@@ -1555,29 +1847,9 @@ def _make_gfx950_dgrad_candidate() -> KernelCandidate:
     spec_id = "igemm_conv_dgrad_tile_table"
     algorithm = "implicit_gemm_dgrad"
 
-    def _tile(req: ConvGroupedRequest):
-        return _gfx950_dgrad_tile(req)
-
     def _build_instance_spec(req: ConvGroupedRequest) -> DgradConvSpec:
-        tm, tn, tk, wm, wn, wtmn, wtk = _tile(req)
-        return DgradConvSpec(
-            problem=_problem(req),
-            name=name,
-            lds_k_outer=_dgrad_lds_k_outer(req, wtmn),
-            data=_data_spec(req),
-            tile_m=tm,
-            tile_n=tn,
-            tile_k=tk,
-            warp_m=wm,
-            warp_n=wn,
-            warp_tile_m=wtmn,
-            warp_tile_n=wtmn,
-            warp_tile_k=wtk,
-            wave_size=ArchTarget.from_gfx(req.arch).wave_size,
-            pipeline=_PIPELINE,
-            epilogue=_epilogue_for(req),
-            split_k=1,
-        )
+        tile, halo = _gfx950_dgrad_pick(req)
+        return _dgrad_instance_spec(req, tile, **halo)
 
     def support(req: OperatorRequest) -> Tuple[bool, str]:
         errors = _request_errors(req)
@@ -1601,7 +1873,8 @@ def _make_gfx950_dgrad_candidate() -> KernelCandidate:
         if not ok:
             raise ValueError(f"{name} does not support request: {why}")
         assert isinstance(req, ConvGroupedRequest)
-        tm, tn, tk, wm, wn, wtmn, wtk = _tile(req)
+        tile, halo = _gfx950_dgrad_pick(req)
+        tm, tn, tk, wm, wn, wtmn, wtk = tile
         return ConvGroupedSpec(
             direction="dgrad",
             tile_m=tm,
@@ -1618,6 +1891,7 @@ def _make_gfx950_dgrad_candidate() -> KernelCandidate:
             arch=req.arch,
             split_k=1,
             name=name,
+            **halo,
         )
 
     candidate = KernelCandidate(
@@ -1656,6 +1930,48 @@ _DW_DGRAD_TARGET_WAVES = 1000
 _DW_DGRAD_MAX_BLOCK_CH = 256
 # Statically unrolled FMAs per lane the heuristic allows (compile time).
 _DW_DGRAD_UNROLL_BUDGET = 1 << 14
+# Toeplitz MFMA form admission box (_dw_dgrad_mfma_admits): the requests on
+# which it was measured to beat the dot2 VALU form with warm and with cold
+# caches; everything else keeps the VALU form. Square 7x7 filters with 'same'
+# padding, C a multiple of 64 (128-byte dY pixels) up to 2048 channels, up to
+# 256 images, dY tensors up to 512 MiB, images of 7 to 16 rows (at least one
+# filter tall, and kept whole by the MFMA form unless its grid is small) and
+# 7-8, 13-16 or 19-112 columns. Outside it the dot2 kernel kept up or won,
+# cold caches above all: taller images (the MFMA form's row chunks re-read a
+# 6-row dY halo), 9-12 columns (a 16-column tile mostly padding), short
+# images of a few rows, 5x5 and other filters; 17-18 columns (a 32-column
+# tile just over half used) only broke even.
+_DW_DGRAD_MFMA_FILTER = 7
+_DW_DGRAD_MFMA_CH_MULTIPLE = 64
+_DW_DGRAD_MFMA_MAX_C = 2048
+_DW_DGRAD_MFMA_MAX_N = 256
+_DW_DGRAD_MFMA_H_RANGE = (7, 16)
+_DW_DGRAD_MFMA_W_BANDS = ((7, 8), (13, 16), (19, 112))
+_DW_DGRAD_MFMA_MAX_DY_BYTES = 512 << 20
+# Waves per MFMA block (8 channels each) before the grid-fill steps.
+_DW_DGRAD_MFMA_WAVES = 8
+# Register-file model for the block-size choice: VGPRs per lane of a SIMD
+# (gfx950, arch + acc VGPRs share it), the allocation granule, and the
+# VGPRs the kernel holds beyond spec.mfma_frag_vgprs() (addresses, loop and
+# lane indices). With the overhead the model puts every filter on the same
+# side of the 4-waves-per-SIMD boundary the compiled kernels land on.
+_DW_DGRAD_SIMD_VGPRS = 512
+_DW_DGRAD_VGPR_GRANULE = 8
+_DW_DGRAD_MFMA_VGPR_OVERHEAD = 16
+# SIMDs per CU: an 8-wave block puts two waves on each.
+_DW_DGRAD_SIMDS_PER_CU = 4
+# Workgroups the MFMA grid should reach (one per CU) before it trades block
+# width, then rows, for more workgroups; also the round size of the 4-wave
+# rule for blocks that fit once per CU.
+_DW_DGRAD_MFMA_TARGET_BLOCKS = 256
+# Images up to this many rows stay whole; taller ones start from chunks of
+# about 14 rows, and the grid-fill steps go down to about 7, then 4.
+_DW_DGRAD_MFMA_WHOLE_H = 16
+_DW_DGRAD_MFMA_ROW_STEPS = (14, 7, 4)
+# Chunks of about 4 rows re-read a dY halo larger than the chunk, so that
+# last step is only taken for grids below this many workgroups.
+_DW_DGRAD_MFMA_SHORT_ROWS = 4
+_DW_DGRAD_MFMA_SHORT_ROWS_BLOCKS = 160
 
 
 @dataclass(frozen=True)
@@ -1694,8 +2010,217 @@ def _is_depthwise_dgrad(req: ConvGroupedRequest) -> tuple[bool, str]:
     return True, "ok"
 
 
+def _dw_dgrad_problem(req: ConvGroupedRequest) -> DirectConvProblem:
+    return DirectConvProblem(
+        N=int(req.N),
+        H=int(req.Hi),
+        W=int(req.Wi),
+        groups=int(req.C),
+        cpg=1,
+        kpg=1,
+        KH=int(req.Y),
+        KW=int(req.X),
+        PAD=int(req.pad_h),
+        stride=1,
+        dtype=req.dtype.lower(),
+    )
+
+
+def _dw_dgrad_mfma_admits(req: ConvGroupedRequest) -> bool:
+    """Whether dispatch gives ``req`` the Toeplitz MFMA form (the admission box).
+
+    True exactly when all of these hold (``req`` already passed
+    :func:`_is_depthwise_dgrad`):
+
+    - the arch is in ``DW_DGRAD_MFMA_ARCHES``;
+    - ``KH == KW == _DW_DGRAD_MFMA_FILTER`` (7) with ``pad_h == pad_w ==
+      KH // 2``, stride 1 and dilation 1;
+    - ``C % _DW_DGRAD_MFMA_CH_MULTIPLE == 0`` (64) and ``C <=
+      _DW_DGRAD_MFMA_MAX_C``;
+    - ``N <= _DW_DGRAD_MFMA_MAX_N``;
+    - ``H`` within ``_DW_DGRAD_MFMA_H_RANGE`` (7-16);
+    - ``W`` within one of ``_DW_DGRAD_MFMA_W_BANDS`` (7-8, 13-16, 19-112);
+    - the dY tensor is at most ``_DW_DGRAD_MFMA_MAX_DY_BYTES``.
+
+    The box is the measured win region (see the constants); requests outside
+    it keep the VALU form unchanged.
+    """
+    if req.arch not in DW_DGRAD_MFMA_ARCHES:
+        return False
+    KH, KW = int(req.Y), int(req.X)
+    if KH != _DW_DGRAD_MFMA_FILTER or KW != _DW_DGRAD_MFMA_FILTER:
+        return False
+    if int(req.pad_h) != KH // 2 or int(req.pad_w) != KW // 2:
+        return False
+    if int(req.stride_h) != 1 or int(req.stride_w) != 1:
+        return False
+    if int(req.dilation_h) != 1 or int(req.dilation_w) != 1:
+        return False
+    N, C, H, W = int(req.N), int(req.C), int(req.Hi), int(req.Wi)
+    if C % _DW_DGRAD_MFMA_CH_MULTIPLE or C > _DW_DGRAD_MFMA_MAX_C:
+        return False
+    if N > _DW_DGRAD_MFMA_MAX_N:
+        return False
+    h_lo, h_hi = _DW_DGRAD_MFMA_H_RANGE
+    if not h_lo <= H <= h_hi:
+        return False
+    if not any(lo <= W <= hi for lo, hi in _DW_DGRAD_MFMA_W_BANDS):
+        return False
+    # 'Same' padding keeps dY at H x W; the windowed form takes 2-byte dtypes.
+    return N * H * W * C * 2 <= _DW_DGRAD_MFMA_MAX_DY_BYTES
+
+
+def _dw_dgrad_mfma_fold(N: int, W: int, KW: int) -> int:
+    """Images per MFMA tile (``w_fold``) for ``N`` images ``W`` columns wide.
+
+    Up to one 32-column tile: 4 images up to 8 columns, 2 up to 16, else 1,
+    so the tile columns are mostly real columns. Wider images take the fold
+    with the least work: every block multiplies a full 32-column tile (image
+    slots past ``N`` and columns past ``W`` included), and every real image
+    reads a ``tile_w + KW - 1`` column window per column tile. One image per
+    32-column tile leaves up to half of the second tile empty on images just
+    past 32 columns, where narrower tiles fit the row better; few images
+    keep one image per tile, as the empty image slots would cost more. Ties
+    keep the smaller fold.
+    """
+    if W <= 32:
+        return 4 if W <= 8 else 2 if W <= 16 else 1
+
+    def cost(fold: int) -> int:
+        tile_w = 32 // fold
+        col_tiles = -(-W // tile_w)
+        mfma_cols = -(-N // fold) * col_tiles * 32
+        return mfma_cols + N * col_tiles * (tile_w + KW - 1)
+
+    return min(DW_DGRAD_MFMA_W_FOLDS, key=lambda f: (cost(f), f))
+
+
+def _dw_dgrad_mfma_blocks_per_cu(spec: DirectDepthwiseDgradWindowedSpec) -> int:
+    """MFMA blocks of ``spec``'s size that fit one CU by the VGPR estimate.
+
+    The estimate is ``spec.mfma_frag_vgprs()`` plus
+    ``_DW_DGRAD_MFMA_VGPR_OVERHEAD``, rounded up to the allocation granule;
+    a block puts ``ceil(block_waves / 4)`` waves on every SIMD.
+    """
+    granule = _DW_DGRAD_VGPR_GRANULE
+    vgprs = -(-(spec.mfma_frag_vgprs() + _DW_DGRAD_MFMA_VGPR_OVERHEAD) // granule)
+    waves_per_simd = _DW_DGRAD_SIMD_VGPRS // (vgprs * granule)
+    return waves_per_simd // -(-spec.block_waves // _DW_DGRAD_SIMDS_PER_CU)
+
+
+def _dw_dgrad_mfma_spec(
+    req: ConvGroupedRequest,
+) -> DirectDepthwiseDgradWindowedSpec | None:
+    """The Toeplitz MFMA form's knobs for ``req``, or ``None`` where it cannot run.
+
+    This is the knob rule only; dispatch calls it for requests inside
+    :func:`_dw_dgrad_mfma_admits`. ``None`` (VALU form) where the arch has no
+    MFMA form, C is not a multiple of ``DW_DGRAD_MFMA_CH``, the spec fails the
+    validator, or the grid passes the y/z launch limit.
+
+    - ``w_fold`` comes from :func:`_dw_dgrad_mfma_fold`.
+    - ``block_waves`` covers the channels with at most 8 waves, and at most
+      4 where the VGPR estimate fits only one 8-wave block per CU
+      (:func:`_dw_dgrad_mfma_blocks_per_cu`) and the 8-wave grid is not a
+      multiple of ``_DW_DGRAD_MFMA_TARGET_BLOCKS``.
+    - Images up to ``_DW_DGRAD_MFMA_WHOLE_H`` rows stay whole; taller ones
+      are split into balanced chunks of about 14 rows (each chunk re-reads a
+      ``KH - 1`` row halo, and the unrolled body stays bounded).
+    - While the grid has fewer than ``_DW_DGRAD_MFMA_TARGET_BLOCKS``
+      workgroups, the block first drops to 4 waves, then the rows step down
+      to chunks of about 7, then (below ``_DW_DGRAD_MFMA_SHORT_ROWS_BLOCKS``
+      workgroups only) about 4.
+    - ``prefetch_rows = 2`` keeps two dY rows in flight.
+    """
+    C, H, W = int(req.C), int(req.Hi), int(req.Wi)
+    if C % DW_DGRAD_MFMA_CH or req.arch not in DW_DGRAD_MFMA_ARCHES:
+        return None
+    problem = _dw_dgrad_problem(req)
+    fold = _dw_dgrad_mfma_fold(int(req.N), W, int(req.X))
+    waves = min(_DW_DGRAD_MFMA_WAVES, -(-C // DW_DGRAD_MFMA_CH))
+
+    def make(waves: int, rows: int) -> DirectDepthwiseDgradWindowedSpec:
+        return DirectDepthwiseDgradWindowedSpec(
+            problem=problem,
+            name="direct_depthwise_dgrad_win",
+            block_waves=waves,
+            block_h=0 if rows >= H else rows,
+            mfma=True,
+            w_fold=fold,
+            prefetch_rows=2,
+        )
+
+    # (rows, step) options, coarsest first; step is the ladder value (or H).
+    steps = [(H, H)] if H <= _DW_DGRAD_MFMA_WHOLE_H else []
+    steps += [(-(-H // -(-H // r)), r) for r in _DW_DGRAD_MFMA_ROW_STEPS if r < H]
+    rows_opts: list[tuple[int, int]] = []
+    for rows, step in steps:
+        if (
+            rows not in [o[0] for o in rows_opts]
+            and is_valid_depthwise_dgrad_win_spec(make(waves, rows), arch=req.arch)[0]
+        ):
+            rows_opts.append((rows, step))
+    if not rows_opts:
+        return None
+
+    def blocks(spec: DirectDepthwiseDgradWindowedSpec) -> int:
+        gx, gy, gz = spec.grid()
+        return gx * gy * gz
+
+    # Where an 8-wave block fits only once per CU (3 or fewer waves per
+    # SIMD by the VGPR estimate), a grid that is not a whole number of
+    # rounds over the CUs leaves most CUs idle in its last round. 4-wave
+    # blocks share CUs instead, so that tail spreads over every CU.
+    first = make(waves, rows_opts[0][0])
+    if (
+        _dw_dgrad_mfma_blocks_per_cu(first) < 2
+        and blocks(first) % _DW_DGRAD_MFMA_TARGET_BLOCKS
+    ):
+        waves = min(waves, _DW_DGRAD_MFMA_WAVES // 2)
+
+    i = 0
+    while True:
+        n_blocks = blocks(make(waves, rows_opts[i][0]))
+        if n_blocks >= _DW_DGRAD_MFMA_TARGET_BLOCKS:
+            break
+        if waves > _DW_DGRAD_MFMA_WAVES // 2:
+            waves = _DW_DGRAD_MFMA_WAVES // 2
+        elif i + 1 < len(rows_opts) and (
+            rows_opts[i + 1][1] > _DW_DGRAD_MFMA_SHORT_ROWS
+            or n_blocks < _DW_DGRAD_MFMA_SHORT_ROWS_BLOCKS
+        ):
+            i += 1
+        else:
+            break
+    spec = make(waves, rows_opts[i][0])
+    if not is_valid_depthwise_dgrad_win_spec(spec, arch=req.arch)[0]:
+        return None
+    # Fold-1 grids of very large batches can pass the y/z launch limit the
+    # VALU form still meets; keep that form for them.
+    if max(spec.grid()[1:]) > _MAX_GRID_DIM_Z:
+        return None
+    return spec
+
+
 def _dw_dgrad_win_spec(req: ConvGroupedRequest) -> DirectDepthwiseDgradWindowedSpec:
-    """Pick the windowed depthwise dgrad knobs for ``req``.
+    """Pick the windowed depthwise dgrad form and knobs for ``req``.
+
+    Requests inside the admission box (:func:`_dw_dgrad_mfma_admits`) take
+    the Toeplitz MFMA form (:func:`_dw_dgrad_mfma_spec`) when it can run
+    there; everything else takes the VALU form (:func:`_dw_dgrad_valu_spec`).
+    The MFMA form's non-finite semantics are group-local: an Inf / NaN in dY
+    reaches every channel of its 8-channel group, in its receptive field
+    widened to ``4 * ceil((KW + 1) / 4)`` columns.
+    """
+    if _dw_dgrad_mfma_admits(req):
+        mfma = _dw_dgrad_mfma_spec(req)
+        if mfma is not None:
+            return mfma
+    return _dw_dgrad_valu_spec(req)
+
+
+def _dw_dgrad_valu_spec(req: ConvGroupedRequest) -> DirectDepthwiseDgradWindowedSpec:
+    """The VALU form of the windowed depthwise dgrad kernel for ``req``.
 
     - ``dot2`` pairs filter taps on the packed dot unit; it pays for KW >= 5,
       where the kernel is bound on the FMA issue rate.
@@ -1738,21 +2263,8 @@ def _dw_dgrad_win_spec(req: ConvGroupedRequest) -> DirectDepthwiseDgradWindowedS
             block_w = -(-block_w // 2)
         else:
             rows = -(-rows // 2)
-    problem = DirectConvProblem(
-        N=int(req.N),
-        H=H,
-        W=W,
-        groups=C,
-        cpg=1,
-        kpg=1,
-        KH=KH,
-        KW=KW,
-        PAD=int(req.pad_h),
-        stride=1,
-        dtype=req.dtype.lower(),
-    )
     return DirectDepthwiseDgradWindowedSpec(
-        problem=problem,
+        problem=_dw_dgrad_problem(req),
         name="direct_depthwise_dgrad_win",
         block_w=block_w,
         block_waves=waves,
@@ -1890,6 +2402,30 @@ _DIRECT_DGRAD_NARROW_KPG = 8
 # 16-wide MFMA output tiles per wave.
 _DIRECT_DGRAD_WIDE_CPG = 20
 _DIRECT_DGRAD_4C_MIN_GRID = 300
+# Row-staged 4c kernel (stage_rows, see _direct_dgrad_4c_takes_stage_rows):
+# 3x3 filters take it below the 4c floor on images of at most
+# _DIRECT_DGRAD_4C_STAGED_SHORT_MAX_H rows (the generic kernel streams them
+# whole, see _DIRECT_DGRAD_TILE_H), from a grid of
+# _DIRECT_DGRAD_4C_STAGED_SHORT_MIN_GRID workgroups.
+# Taller images keep the generic kernel below the floor: its 4-row H tiles
+# give several times the workgroups, which hide DRAM latency with cold caches.
+# Smaller grids keep the generic kernel or igemm, which also hold up better
+# with cold caches. 1x1 filters keep the 4c floor and, on images
+# shorter than _DIRECT_DGRAD_4C_STAGED_MIN_H_1X1 rows, the direct-load 4c
+# kernel (the staged prologue's weight staging and barriers do not pay for so
+# few rows).
+_DIRECT_DGRAD_4C_STAGED_SHORT_MAX_H = 8
+_DIRECT_DGRAD_4C_STAGED_SHORT_MIN_GRID = 96
+# ... and only on images at least this wide: on narrower ones (1 to 3
+# columns) the staged kernel lost to igemm with cold caches.
+_DIRECT_DGRAD_4C_STAGED_SHORT_MIN_W = 4
+# ... and at least this tall: on 1- to 4-row images the staged kernel was no
+# faster than the generic kernel with cold caches.
+_DIRECT_DGRAD_4C_STAGED_SHORT_MIN_H = 5
+_DIRECT_DGRAD_4C_STAGED_MIN_H_1X1 = 8
+# 3x3 filters at or above the 4c floor: images shorter than this keep the
+# direct-load 4c kernel (3-row images with 1 or 2 columns lost warm).
+_DIRECT_DGRAD_4C_STAGED_MIN_H_3X3 = 4
 _DIRECT_DGRAD_PREPASS_MIN_TILES = 300
 _DIRECT_DGRAD_PREPASS_WIDE_MIN_TILES = 280
 _DIRECT_DGRAD_PREPASS_MIN_STRIP_FILL = 0.6
@@ -1952,12 +2488,32 @@ _DIRECT_DGRAD_WIDE_MIN_WAVES = 768
 # validates; the generic pre-pass pipeline is the fallback past the fused
 # form's register budget.
 _DIRECT_DGRAD_USE_4C = True
+_DIRECT_DGRAD_4C_STAGE_ROWS = True
 _DIRECT_DGRAD_USE_FUSED = True
 _DIRECT_DGRAD_POLICY_PREFIX = "outside the measured direct win region:"
 _DIRECT_DGRAD_RULE_4C = "cpg_kpg_4"
 _DIRECT_DGRAD_VARIANT_4C = "4c"
 _DIRECT_DGRAD_FUSED_WPE = 4
 _DIRECT_DGRAD_FUSED_WPE_MAX_VGPRS = 36
+# Row-stream knobs of fused generic specs (see _direct_dgrad_stream_knobs):
+# input-row prefetch distance and the LDS column pad (elements); the launch
+# rounds model uses gfx950's CU count and per-CU wave cap (8 per SIMD).
+_DIRECT_DGRAD_STREAM_KNOBS = True
+# Opt-in (off by default): give specs whose output channels split into two
+# 16-wide tile halves the waves_m = 2 stack instead of keeping them on the
+# previous pick. That stack won on some large-batch images and lost on
+# small-batch, many-group ones, so dispatch does not take it on its own;
+# the spec's waves_m knob stays available to explicit specs and sweeps.
+_DIRECT_DGRAD_STREAM_SPLIT_M = False
+# The stack's measured box beyond the spec checks in _direct_dgrad_stream_knobs:
+# untiled images (block_h 0) only up to this many output columns, and 1x1
+# filters on H-tiled images only from this many channels per group.
+_DIRECT_DGRAD_STREAM_UNTILED_MAX_WO = 64
+_DIRECT_DGRAD_STREAM_TILED_1X1_MIN_CPG = 12
+_DIRECT_DGRAD_PREFETCH_ROWS = 2
+_DIRECT_DGRAD_LDS_PAD = 8
+_DIRECT_DGRAD_NUM_CUS = 256
+_DIRECT_DGRAD_MAX_WAVES_PER_CU = 32
 
 
 @dataclass(frozen=True)
@@ -2018,6 +2574,20 @@ class ConvGroupedDirectDgradSpec:
     weights_lds: bool = False
     waves_per_eu: int = 0
     name: str = "rocke_conv_grouped_direct_dgrad"
+    # 4c variant only: the row-staged kernel (DirectConv4cSpec.stage_rows,
+    # one wave per 4 output columns); needs ``weights_lds``.
+    stage_rows: bool = False
+    # Generic variant only: the row-stream knobs of DirectConvSpec (see
+    # _direct_dgrad_stream_knobs): input rows ``prefetch_rows`` ahead, an
+    # LDS-only row barrier, ``waves_m`` waves per group over the output
+    # tiles, an LDS column pad, LDS-staged 16-byte output stores and the
+    # XCD-contiguous image order.
+    prefetch_rows: int = 0
+    lds_only_sync: bool = False
+    waves_m: int = 1
+    lds_pad: int = 0
+    stage_out: bool = False
+    xcd_tiles: bool = False
 
     def kernel_name(self) -> str:
         from rocke.helpers.spec import kernel_name_join
@@ -2036,6 +2606,13 @@ class ConvGroupedDirectDgradSpec:
             "k32" if self.fold_k32 else "",
             ("fwl" if self.weights_lds else "fw") if self.fused_weights else "",
             f"we{self.waves_per_eu}" if self.waves_per_eu else "",
+            "sr" if self.stage_rows else "",
+            f"pf{self.prefetch_rows}" if self.prefetch_rows > 1 else "",
+            "lso" if self.lds_only_sync else "",
+            f"wm{self.waves_m}" if self.waves_m > 1 else "",
+            f"lp{self.lds_pad}" if self.lds_pad else "",
+            "so" if self.stage_out else "",
+            "xc" if self.xcd_tiles else "",
         )
 
     def to_direct_problem(self, req: ConvGroupedRequest) -> DirectConvProblem:
@@ -2052,6 +2629,7 @@ class ConvGroupedDirectDgradSpec:
                 block_groups=self.block_groups,
                 dgrad_fused_weights=self.fused_weights,
                 dgrad_weights_lds=self.weights_lds,
+                stage_rows=self.stage_rows,
             )
         return make_dgrad_fprop_spec(
             problem,
@@ -2065,6 +2643,12 @@ class ConvGroupedDirectDgradSpec:
             dgrad_fused_weights=self.fused_weights,
             dgrad_weights_lds=self.weights_lds,
             waves_per_eu=self.waves_per_eu,
+            prefetch_rows=self.prefetch_rows,
+            lds_only_sync=self.lds_only_sync,
+            waves_m=self.waves_m,
+            lds_pad=self.lds_pad,
+            stage_out=self.stage_out,
+            xcd_tiles=self.xcd_tiles,
         )
 
     def launch_plan(self, req: ConvGroupedRequest) -> DirectMfmaDgradPlan:
@@ -2405,9 +2989,56 @@ def _select_direct_dgrad_4c_spec(
         * (p.groups // DGRAD_4C_DEFAULT_BLOCK_GROUPS)
         * p.N
     )
+    weights_lds = _direct_dgrad_has_transpose_reads(req.arch)
+    if weights_lds and _direct_dgrad_4c_takes_stage_rows(p, grid):
+        staged = _direct_dgrad_4c_spec(req, weights_lds=True, stage_rows=True)
+        if _direct_dgrad_main_is_valid(staged, p)[0]:
+            return staged
     if grid < _DIRECT_DGRAD_4C_MIN_GRID:
         return None
-    spec = ConvGroupedDirectDgradSpec(
+    spec = _direct_dgrad_4c_spec(req, weights_lds=weights_lds, stage_rows=False)
+    return spec if _direct_dgrad_main_is_valid(spec, p)[0] else None
+
+
+def _direct_dgrad_4c_takes_stage_rows(p: DirectConvProblem, grid: int) -> bool:
+    """Whether the 4c row takes the row-staged kernel (``stage_rows``).
+
+    The staged kernel replaces the per-lane 8-byte loads of the 4x4x4 B
+    layout with one cooperative 16-byte row copy into LDS, so it is the 4c
+    default wherever it is not measured slower: every grid at or above the
+    4c floor, except 1x1 filters on images shorter than
+    :data:`_DIRECT_DGRAD_4C_STAGED_MIN_H_1X1` and 3x3 filters on images
+    shorter than :data:`_DIRECT_DGRAD_4C_STAGED_MIN_H_3X3`; and for 3x3
+    filters also below the floor on images of at most
+    :data:`_DIRECT_DGRAD_4C_STAGED_SHORT_MAX_H` and at least
+    :data:`_DIRECT_DGRAD_4C_STAGED_SHORT_MIN_H` rows and at least
+    :data:`_DIRECT_DGRAD_4C_STAGED_SHORT_MIN_W` columns with a grid of at least
+    :data:`_DIRECT_DGRAD_4C_STAGED_SHORT_MIN_GRID` (the generic kernel has no
+    H tiles to split there, so one wave per workgroup still beats it).
+    """
+    if not _DIRECT_DGRAD_4C_STAGE_ROWS:
+        return False
+    if p.KH == 1:
+        return (
+            grid >= _DIRECT_DGRAD_4C_MIN_GRID
+            and p.H >= _DIRECT_DGRAD_4C_STAGED_MIN_H_1X1
+        )
+    if grid >= _DIRECT_DGRAD_4C_MIN_GRID:
+        return p.H >= _DIRECT_DGRAD_4C_STAGED_MIN_H_3X3
+    return (
+        _DIRECT_DGRAD_4C_STAGED_SHORT_MIN_H
+        <= p.H
+        <= _DIRECT_DGRAD_4C_STAGED_SHORT_MAX_H
+        and p.W >= _DIRECT_DGRAD_4C_STAGED_SHORT_MIN_W
+        and grid >= _DIRECT_DGRAD_4C_STAGED_SHORT_MIN_GRID
+    )
+
+
+def _direct_dgrad_4c_spec(
+    req: ConvGroupedRequest, *, weights_lds: bool, stage_rows: bool
+) -> ConvGroupedDirectDgradSpec:
+    """The 4c row's spec: the swept 4c tile, fused weights, ``stage_rows``."""
+    return ConvGroupedDirectDgradSpec(
         direction="dgrad",
         block_q=DGRAD_4C_DEFAULT_BLOCK_Q,
         block_groups=DGRAD_4C_DEFAULT_BLOCK_GROUPS,
@@ -2421,9 +3052,9 @@ def _select_direct_dgrad_4c_spec(
         rule_id=_DIRECT_DGRAD_RULE_4C,
         variant=_DIRECT_DGRAD_VARIANT_4C,
         fused_weights=True,
-        weights_lds=_direct_dgrad_has_transpose_reads(req.arch),
+        weights_lds=weights_lds,
+        stage_rows=stage_rows,
     )
-    return spec if _direct_dgrad_main_is_valid(spec, p)[0] else None
 
 
 def _select_direct_dgrad_spec(req: ConvGroupedRequest) -> ConvGroupedDirectDgradSpec:
@@ -2467,7 +3098,8 @@ def _select_direct_dgrad_spec(req: ConvGroupedRequest) -> ConvGroupedDirectDgrad
         fused = replace(base, fused_weights=True, weights_lds=use_lds)
         if _direct_dgrad_main_is_valid(fused, p)[0]:
             wpe = _direct_dgrad_fused_waves_per_eu(fused, p)
-            return replace(fused, waves_per_eu=wpe) if wpe else fused
+            fused = replace(fused, waves_per_eu=wpe) if wpe else fused
+            return _direct_dgrad_stream_knobs(fused, p)
     return base
 
 
@@ -2488,6 +3120,122 @@ def _direct_dgrad_fused_waves_per_eu(
     return 0
 
 
+def _direct_dgrad_stream_knobs(
+    spec: ConvGroupedDirectDgradSpec, p: DirectConvProblem
+) -> ConvGroupedDirectDgradSpec:
+    """Add the row-stream knobs to a fused-weight generic spec.
+
+    The stack is admitted on fused generic specs of square channel groups
+    (``cpg == kpg``) with the default 16-column strip (``block_q`` 16; on
+    32-column strips the stack lost on some 8, 12 and 20 channel groups, with
+    warm and cold caches) whose output channels do not split into two 16-wide tile
+    halves (``waves_m = 2`` not valid), whose image and channel group lie in
+    the measured box (:func:`_direct_dgrad_stream_box_admits`) and whose grid
+    has at least one image row band per XCD (``xcd_tiles`` valid); every
+    other spec is returned
+    unchanged. Without the XCD order (small batches of short or unsplit
+    images) the stack lost to the previous pick on many-group images, and on
+    groups with more input than output channels or the reverse (20 and 24
+    output channels per group above all) it lost on some images. The stack,
+    as one block:
+
+    * the two-row prefetch with the LDS-only row barrier (loads and the
+      previous row's stores stay in flight across it);
+    * ``xcd_tiles``: every tile of one image row band on one XCD;
+    * ``lds_pad``: 8 elements (16 bytes) per staged input column when the
+      column stride is an even number of 16-byte units, so the 16 q-lanes of
+      a fragment read spread over the LDS banks;
+    * ``stage_out``: LDS-staged 16-byte output stores (output channels a
+      multiple of 16).
+
+    ``lds_pad`` and ``stage_out`` add LDS, so they are dropped (``stage_out``
+    first) when they would need more launch rounds than the spec without
+    them (see :func:`_direct_dgrad_lds_rounds`): a nearly empty extra round
+    costs more than the stores and banks gain.
+
+    Specs where ``waves_m = 2`` is valid keep ``spec`` (no knobs) unless
+    ``_DIRECT_DGRAD_STREAM_SPLIT_M`` opts them into the same stack on top of
+    ``waves_m = 2`` (one wave per tile half shares the staged row and halves
+    the preloaded weights).
+    """
+    if not _DIRECT_DGRAD_STREAM_KNOBS or spec.variant != "generic":
+        return spec
+    if not spec.fused_weights or p.cpg != p.kpg:
+        return spec
+    if spec.block_q != _DIRECT_DGRAD_BLOCK_Q:
+        return spec
+    if not _direct_dgrad_stream_box_admits(spec, p):
+        return spec
+    knobs = replace(spec, prefetch_rows=_DIRECT_DGRAD_PREFETCH_ROWS, lds_only_sync=True)
+    if not _direct_dgrad_main_is_valid(knobs, p)[0]:
+        return spec
+    split_m = replace(knobs, waves_m=2)
+    if _direct_dgrad_main_is_valid(split_m, p)[0]:
+        if not _DIRECT_DGRAD_STREAM_SPLIT_M:
+            return spec
+        knobs = split_m
+    floor_rounds = _direct_dgrad_lds_rounds(knobs, p)
+    main = knobs.to_fprop_spec(p)
+    row_bytes = main.block_groups * main.problem.cpg * 2
+    pad = _DIRECT_DGRAD_LDS_PAD if row_bytes % 32 == 0 else 0
+    xcd = replace(knobs, xcd_tiles=True)
+    if not _direct_dgrad_main_is_valid(xcd, p)[0]:
+        return spec
+    knobs = xcd
+    for lds_pad, stage_out in ((pad, True), (pad, False), (0, False)):
+        cand = replace(knobs, lds_pad=lds_pad, stage_out=stage_out)
+        if cand == knobs or not _direct_dgrad_main_is_valid(cand, p)[0]:
+            continue
+        if _direct_dgrad_lds_rounds(cand, p) <= floor_rounds:
+            knobs = cand
+            break
+    return knobs
+
+
+def _direct_dgrad_stream_box_admits(
+    spec: ConvGroupedDirectDgradSpec, p: DirectConvProblem
+) -> bool:
+    """The image/channel box the row-stream stack was measured to win in.
+
+    * Untiled images (``block_h == 0``): up to
+      :data:`_DIRECT_DGRAD_STREAM_UNTILED_MAX_WO` output columns for every
+      channel group. On wider untiled images the stack lost to the previous
+      pick with warm or cold caches somewhere in every group: 16-channel
+      groups at 128 columns when the launch-rounds rule drops the LDS pad and
+      on single-row 1x1 images from about 176 columns, the other groups from
+      80 to 512 columns depending on the group and the image height.
+    * H-tiled images (``block_h > 0``): every channel group for 3x3 and larger
+      filters; 1x1 filters only from
+      :data:`_DIRECT_DGRAD_STREAM_TILED_1X1_MIN_CPG` channels per group (the
+      XCD order lost on 8-channel 1x1 images with cold caches).
+    """
+    if spec.block_h == 0:
+        return p.Wo <= _DIRECT_DGRAD_STREAM_UNTILED_MAX_WO
+    return p.KH > 1 or p.cpg >= _DIRECT_DGRAD_STREAM_TILED_1X1_MIN_CPG
+
+
+def _direct_dgrad_lds_rounds(
+    spec: ConvGroupedDirectDgradSpec, p: DirectConvProblem
+) -> int:
+    """Launch rounds of the main kernel when LDS (or the wave cap) limits occupancy.
+
+    ``ceil(workgroups / (CUs * workgroups per CU))`` with the per-CU
+    workgroup count from the LDS footprint (:func:`direct_conv_lds_bytes`)
+    and the per-CU wave cap. Register pressure is ignored: the stream knobs
+    barely move it, and where it binds first the LDS term is the looser one,
+    so the comparison only errs towards keeping the smaller footprint.
+    """
+    main = spec.to_fprop_spec(p)
+    target = ArchTarget.from_gfx(spec.arch)
+    waves = main.threads_per_block // target.wave_size
+    per_cu = min(
+        target.lds_capacity_bytes // max(direct_conv_lds_bytes(main), 1),
+        _DIRECT_DGRAD_MAX_WAVES_PER_CU // waves,
+    )
+    gx, gy, gz = direct_mfma_dgrad_main_grid(main)
+    return -(-(gx * gy * gz) // (max(per_cu, 1) * _DIRECT_DGRAD_NUM_CUS))
+
+
 _I32_MAX = (1 << 31) - 1
 _MAX_GRID_DIM = 65535  # y and z
 
@@ -2506,7 +3254,7 @@ def _direct_dgrad_block(spec: ConvGroupedDirectDgradSpec) -> tuple[int, int, int
     if spec.variant == _DIRECT_DGRAD_VARIANT_4C:
         # 16 groups per wave on the batched 4x4x4 atom.
         return ((spec.block_groups // 16) * wave, 1, 1)
-    waves = spec.block_groups * spec.waves_q * spec.waves_k
+    waves = spec.block_groups * spec.waves_q * spec.waves_k * spec.waves_m
     return (waves * wave, 1, 1)
 
 
@@ -2762,7 +3510,13 @@ def _kernel_id(
     req: ConvGroupedRequest, candidate: KernelCandidate, spec: ConvGroupedSpec
 ) -> KernelId:
     request_hash = stable_json_hash(req.normalized(), n=16)
-    spec_hash = stable_json_hash(asdict(spec), n=16)
+    spec_dict = asdict(spec)
+    # Hash the ConvGroupedSpec dY halo fields only when set, so every spec
+    # without them keeps the hash it had before the fields existed.
+    for f in _DGRAD_HALO_FIELDS:
+        if f in spec_dict and not spec_dict[f]:
+            del spec_dict[f]
+    spec_hash = stable_json_hash(spec_dict, n=16)
     return KernelId(
         op=f"conv_{req.direction}",
         family=candidate.family,

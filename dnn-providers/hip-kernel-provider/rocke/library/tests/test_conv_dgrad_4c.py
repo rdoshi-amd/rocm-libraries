@@ -353,8 +353,9 @@ def _run_4c_fprop(
 
 
 #: dgrad forms exercised on the device: the two-kernel pre-pass pipeline and
-#: the fused-weight single kernel with gathers or (gfx950) LDS staging.
-_MODES = ("prepass", "gather") + (("lds",) if GPU_ARCH == "gfx950" else ())
+#: the fused-weight single kernel with gathers or (gfx950) LDS staging, the
+#: latter also in its row-staged form (``stage_rows``).
+_MODES = ("prepass", "gather") + (("lds", "staged") if GPU_ARCH == "gfx950" else ())
 
 
 def _run_4c_dgrad(
@@ -373,10 +374,14 @@ def _run_4c_dgrad(
         block_q=block_q,
         block_groups=block_groups,
         fused_weights=mode != "prepass",
+        stage_rows=mode == "staged",
     )
     if spec is None:
         return False, "no 4c dgrad spec"
-    spec = replace(spec, dgrad_weights_lds=mode == "lds")
+    if mode != "staged":
+        spec = replace(spec, dgrad_weights_lds=mode == "lds")
+    else:
+        assert spec.stage_rows and spec.waves_q == spec.block_q // 4
     kt, km = build_direct_4c_dgrad(spec, arch=GPU_ARCH)
     art_t = compile_kernel(kt, arch=GPU_ARCH) if kt is not None else None
     art_m = compile_kernel(km, arch=GPU_ARCH)
@@ -484,6 +489,8 @@ class Test4cDgrad(unittest.TestCase):
         for bq in (4, 8, 16, 32):
             for bg in (16, 32, 64):
                 for mode in _MODES:
+                    if mode == "staged" and (bg // 16) * (bq // 4) * 64 > 1024:
+                        continue  # over the 1024-thread workgroup limit
                     with self.subTest(bq=bq, bg=bg, mode=mode):
                         ok, msg = _run_4c_dgrad(
                             p, block_q=bq, block_groups=bg, mode=mode
@@ -496,6 +503,147 @@ class Test4cDgrad(unittest.TestCase):
             for mode in _MODES:
                 with self.subTest(dtype=dtype, mode=mode):
                     ok, msg = _run_4c_dgrad(p, mode=mode)
+                    self.assertTrue(ok, msg)
+
+
+class Test4cStageRowsSpec(unittest.TestCase):
+    """CPU only: the ``stage_rows`` knob's name, validator and defaults."""
+
+    def _staged(self, p, bq=4, bg=16, **kw):
+        s = make_dgrad_4c_spec(
+            p,
+            block_q=bq,
+            block_groups=bg,
+            dgrad_fused_weights=True,
+            dgrad_weights_lds=True,
+            stage_rows=True,
+        )
+        return replace(s, **kw) if kw else s
+
+    def test_name_and_threads(self):
+        p = _problem(N=2, H=13, W=13, groups=32)
+        s = self._staged(p)
+        self.assertTrue(s.kernel_name().endswith("_bf16_fwl_sr1"))
+        self.assertEqual(s.threads_per_block, 64)
+        s2 = self._staged(p, bq=8, bg=32)
+        self.assertEqual(s2.waves_q, 2)
+        self.assertTrue(s2.kernel_name().endswith("_bq8_bg32_bf16_fwl_sr2"))
+        self.assertEqual(s2.threads_per_block, 256)
+        self.assertEqual(direct_4c_dgrad_launch(s2)["block"], (256, 1, 1))
+        # Default off: the name of an unstaged spec is unchanged.
+        plain = make_dgrad_4c_spec(p, dgrad_fused_weights=True, dgrad_weights_lds=True)
+        self.assertFalse(plain.kernel_name().endswith("_sr1"))
+        self.assertEqual(plain.threads_per_block, 64)
+        s.validate()
+        self.assertTrue(is_valid_spec_4c(s, arch="gfx950")[0])
+
+    def test_rejects(self):
+        p = _problem(N=2, H=13, W=13, groups=32)
+        same = DirectConvProblem(
+            N=1, H=8, W=8, groups=16, cpg=4, kpg=4, KH=3, KW=3, PAD=0
+        )
+        cases = {
+            "no_lds": (
+                replace(self._staged(p), dgrad_weights_lds=False),
+                "stage_rows needs dgrad_fused_weights and dgrad_weights_lds",
+            ),
+            "block_q": (
+                replace(self._staged(p), block_q=8),
+                "stage_rows needs block_q == 4*waves_q",
+            ),
+            "waves_q0": (replace(self._staged(p), waves_q=0), "waves_q must be >= 1"),
+            "waves_q_unstaged": (
+                replace(self._staged(p, bq=8), stage_rows=False),
+                "waves_q > 1 needs stage_rows",
+            ),
+            "not_same_pad": (
+                DirectConv4cSpec(
+                    problem=same,
+                    dgrad_fused_weights=True,
+                    dgrad_weights_lds=True,
+                    stage_rows=True,
+                ),
+                "'same' padding (Ho == H, Wo == W",
+            ),
+            "threads": (
+                self._staged(p, bq=64, bg=32),
+                "stage_rows needs threads_per_block <= 1024",
+            ),
+        }
+        for tag, (s, want) in cases.items():
+            with self.subTest(case=tag):
+                with self.assertRaises(ValueError) as cm:
+                    s.validate()
+                self.assertIn(want, str(cm.exception))
+                ok, why = is_valid_spec_4c(s, arch="gfx950")
+                self.assertFalse(ok)
+                self.assertIn(want, why)
+        # Transpose LDS reads are gfx950-only, so gfx942 rejects stage_rows.
+        ok, why = is_valid_spec_4c(self._staged(p), arch="gfx942")
+        self.assertFalse(ok)
+        self.assertIn("ds_read_b64_tr_b16", why)
+
+    def test_helper_default(self):
+        p = _problem(N=2, H=13, W=13, groups=32)
+        s = dgrad_4c_spec_for_problem(p)
+        self.assertTrue(s.stage_rows)
+        self.assertEqual(s.waves_q, 1)
+        self.assertFalse(dgrad_4c_spec_for_problem(p, stage_rows=False).stage_rows)
+        self.assertFalse(dgrad_4c_spec_for_problem(p, arch="gfx942").stage_rows)
+        self.assertIsNone(dgrad_4c_spec_for_problem(p, arch="gfx942", stage_rows=True))
+        # Auto falls back to the direct-load kernel past the thread limit.
+        big = dgrad_4c_spec_for_problem(
+            _problem(N=1, H=8, W=64, groups=64), block_q=32, block_groups=64
+        )
+        self.assertFalse(big.stage_rows)
+
+    def test_fprop_unaffected(self):
+        # The fprop 4c spec never takes the knob (it needs the dgrad fused
+        # weight form), so its default name and launch width are unchanged.
+        s = DirectConv4cSpec(problem=_problem(N=1, H=8, W=8, groups=16, dtype="fp16"))
+        self.assertFalse(s.stage_rows)
+        self.assertEqual(s.kernel_name(), "direct_conv_4c_N1H8W8_g16_c4k4_bq4_bg16")
+        self.assertEqual(s.threads_per_block, 64)
+        with self.assertRaises(ValueError):
+            replace(s, stage_rows=True).validate()
+
+    def test_staged_emission(self):
+        from rocke.core.lower_llvm import lower_kernel_to_llvm
+
+        p = _problem(N=1, H=8, W=8, groups=32)
+        ll = lower_kernel_to_llvm(
+            build_direct_conv_4c(self._staged(p, bg=32), arch="gfx950"), arch="gfx950"
+        )
+        # 16-byte row loads, ds_read_b64 fragments, one transpose read per tap.
+        self.assertIn("raw.ptr.buffer.load.v4i32", ll)
+        self.assertEqual(ll.count("call <4 x i16> @llvm.amdgcn.ds.read.tr16.b64("), 9)
+        self.assertNotIn("raw.ptr.buffer.load.v2i32", ll)
+
+
+@unittest.skipIf(GPU_ARCH != "gfx950" or not _HAS_TORCH, "needs gfx950 + torch")
+class Test4cStageRowsDgrad(unittest.TestCase):
+    """On device: the row-staged kernel over adversarial shapes (NaN-filled
+    dX, so an unwritten element fails)."""
+
+    def test_adversarial_shapes(self):
+        # (N, H, W, groups, K, block_q, block_groups)
+        cases = [
+            (1, 1, 6, 16, 3, 4, 16),  # H = 1: the halo rows are skipped
+            (3, 7, 1, 16, 3, 4, 16),  # W = 1: one live column per tile
+            (2, 5, 5, 32, 3, 4, 16),  # partial q tile
+            (1, 2, 33, 64, 3, 8, 32),  # two q waves, ragged right edge
+            (2, 9, 21, 64, 3, 16, 64),  # 4 q waves x 4 channel waves
+            (3, 7, 10, 32, 1, 4, 16),  # 1x1 filter
+            (1, 13, 11, 128, 1, 8, 64),  # 1x1, partial row-staging pass
+            (4, 28, 28, 32, 3, 4, 32),
+        ]
+        for dtype in ("fp16", "bf16"):
+            for N, H, W, g, K, bq, bg in cases:
+                p = _problem(N=N, H=H, W=W, groups=g, dtype=dtype, K=K)
+                with self.subTest(dtype=dtype, p=p.short(), K=K, bq=bq, bg=bg):
+                    ok, msg = _run_4c_dgrad(
+                        p, block_q=bq, block_groups=bg, mode="staged"
+                    )
                     self.assertTrue(ok, msg)
 
 

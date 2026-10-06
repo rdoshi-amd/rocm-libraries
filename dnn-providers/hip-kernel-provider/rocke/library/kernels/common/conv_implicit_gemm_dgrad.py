@@ -471,6 +471,12 @@ _LDS_K_OUTER_ARCH = "gfx950"  # the wave64 regime
 # the allocated shape cannot drift. Mirrors ROCKE_DGRAD_KOUTER_PAD.
 _KOUTER_PAD = 8
 
+
+def _default_lds_k_pad(tile_k: int) -> int:
+    """Row pad of the M-outer LDS tiles when ``lds_k_pad`` is None."""
+    return 8 if tile_k >= 16 else 0
+
+
 # Upper bound on fp32 accumulators per lane accepted by is_valid_dgrad_spec.
 # Mirrors ROCKE_DGRAD_MAX_ACC_REGS_PER_LANE.
 _MAX_ACC_REGS_PER_LANE = 256
@@ -611,6 +617,102 @@ class DgradConvSpec:
     # :attr:`uses_tap_outer_k` holds; otherwise the flat loop is emitted.
     # False forces the flat loop and tags the kernel name ``flatk``.
     tap_outer_k: bool = True
+    # dY halo reuse (default 0 = off). On a stride-1 problem whose output has
+    # the input's size (Ho == Hi, Wo == Wi), filter tap (y, x) reads dY pixel
+    # m + (pH - y)*Wo + (pW - x) for dX pixel m in the linear (n, h, w)
+    # order, so every tap of a tile of tile_m consecutive dX pixels reads one
+    # contiguous dY range: the tile plus (Y-1)*Wo + (X-1) halo pixels. With
+    # this knob the K loop runs output-channel chunk outer and filter tap
+    # inner (unrolled), loads that range into LDS once per chunk, and serves
+    # every tap from it at a constant row shift -- instead of re-gathering dY
+    # per (tap, chunk) as the tap-outer loop does. A lane whose shifted pixel
+    # leaves the image (row wrap, image edge, batch edge) reads an all-zero
+    # LDS row instead (one select on the LDS row index per fragment row).
+    #   1: the staged halo; B (W) is still loaded per (chunk, tap), with two
+    #      barriers per tap.
+    #   2: as 1, plus a double-buffered B tile: tap t+1's W tile is read into
+    #      registers before tap t's MFMAs and stored after them, with one
+    #      barrier per tap. The prefetch is pinned with sched_barrier on both
+    #      sides -- without it the scheduler sinks the loads next to their LDS
+    #      store and nothing overlaps.
+    # Needs :attr:`dy_halo_eligible`; is_valid_dgrad_spec rejects it otherwise
+    # rather than silently building the tap-outer loop. The extended tile
+    # grows with the image width ((Y-1)*Wo rows), so wide images can exceed
+    # the LDS budget; the validator rejects those too. Tags ``halo1`` /
+    # ``halo2``.
+    dy_halo: int = 0
+    # With dy_halo: stage the halo 2-D with a zero border --
+    # (tile_m/Wo + Y-1) image rows of (Wo + X-1) pixels -- so the loader
+    # zero-fills every out-of-image pixel and no tap needs a mask: a tap is
+    # the base row plus an immediate. Needs a tile of whole image rows that
+    # never straddles an image (tile_m % Wo == 0 and Hi % (tile_m / Wo) ==
+    # 0), see :attr:`dy_halo_2d_eligible`. Tags ``h2d``.
+    dy_halo_2d: bool = False
+    # With dy_halo: raise the wave priority (s_setprio level, 1..3) around
+    # each tap's MFMA block, so a wave that reaches its MFMAs issues ahead of
+    # waves still loading. A tuned knob, not a default: it helps some
+    # problems and slows others. Tags ``hprio<level>``.
+    dy_halo_setprio: int = 0
+    # With dy_halo and lds_k_outer: row pad of the K-outer B tile in elements
+    # instead of _KOUTER_PAD (0 keeps _KOUTER_PAD). A multiple of 8 keeps
+    # every row 16-byte aligned for the wide LDS store and the transpose read
+    # (an unaligned pad produces wrong results; the validator rejects it). A
+    # wider pad spreads the transpose read over more banks but costs LDS,
+    # which can lower the workgroups per CU; select it only where it keeps
+    # the occupancy. Tags ``hkp<pad>``.
+    dy_halo_kouter_pad: int = 0
+
+    @property
+    def dy_halo_eligible(self) -> bool:
+        """Whether the problem and loop admit :attr:`dy_halo`.
+
+        The tap-outer K loop (:attr:`uses_tap_outer_k`: stride 1, dilation
+        1, folded record, kpg % tile_k == 0, no split-K, wave64), an output
+        the size of the input (so a tap is one uniform shift in the linear
+        pixel index) and a filter with more than one tap (a 1x1 filter has
+        nothing to reuse).
+        """
+        p = self.problem
+        return self.uses_tap_outer_k and p.Ho == p.Hi and p.Wo == p.Wi and p.Y * p.X > 1
+
+    @property
+    def dy_halo_2d_eligible(self) -> bool:
+        """Whether a tile is whole image rows of one image (see dy_halo_2d)."""
+        p = self.problem
+        return self.tile_m % p.Wo == 0 and p.Hi % (self.tile_m // p.Wo) == 0
+
+    @property
+    def uses_dy_halo(self) -> bool:
+        """True when the builder emits the halo loop (validated specs only)."""
+        return self.dy_halo > 0 and self.dy_halo_eligible
+
+    @property
+    def dy_halo_lds_rows(self) -> int:
+        """LDS rows of the staged dY halo tile (one row = tile_k channels).
+
+        1-D: tile_m + (Y-1)*Wo + (X-1) pixels plus a trailing all-zero row;
+        2-D: (tile_m/Wo + Y-1) * (Wo + X-1) pixels. Padded to a whole number
+        of loader passes (block_size threads x 8 elements), so the loader
+        splits the tile evenly at every load width. Shared by the builder
+        and is_valid_dgrad_spec so the charged and the allocated shape
+        cannot drift.
+        """
+        p = self.problem
+        if self.dy_halo_2d:
+            rows = (self.tile_m // p.Wo + p.Y - 1) * (p.Wo + p.X - 1)
+        else:
+            rows = self.tile_m + (p.Y - 1) * p.Wo + (p.X - 1)
+        pass_elems = self.block_size * 8
+        quantum = pass_elems // _gcd(pass_elems, self.tile_k)
+        rows = -(-rows // quantum) * quantum
+        return rows if self.dy_halo_2d else rows + 1
+
+    @property
+    def kouter_b_pad(self) -> int:
+        """Row pad of the K-outer B tile (see dy_halo_kouter_pad)."""
+        if self.dy_halo > 0 and self.dy_halo_kouter_pad > 0:
+            return self.dy_halo_kouter_pad
+        return _KOUTER_PAD
 
     @property
     def folds_sub_gemm_record(self) -> bool:
@@ -837,6 +939,14 @@ class DgradConvSpec:
                 "spkauto": self.split_k == -1,
                 "dynrec": not self.static_sub_gemm,
                 "flatk": not self.tap_outer_k,
+                # The A row pad changes the LDS layout, so a non-default pad
+                # must reach the name or it collides with the default build.
+                f"kp{self.lds_k_pad}": self.lds_k_pad is not None
+                and self.lds_k_pad != _default_lds_k_pad(self.tile_k),
+                f"halo{self.dy_halo}": self.dy_halo > 0,
+                "h2d": self.dy_halo_2d,
+                f"hprio{self.dy_halo_setprio}": self.dy_halo_setprio > 0,
+                f"hkp{self.dy_halo_kouter_pad}": self.dy_halo_kouter_pad > 0,
             },
         )
 
@@ -966,7 +1076,7 @@ class DgradConvSpec:
         elif self.async_dma:
             layout = LdsLayout.packed_async(self.tile_k)
         else:
-            layout = LdsLayout.padded_k(self.tile_k, 8 if self.tile_k >= 16 else 0)
+            layout = LdsLayout.padded_k(self.tile_k, _default_lds_k_pad(self.tile_k))
         layout.validate()
         return layout
 
@@ -974,6 +1084,96 @@ class DgradConvSpec:
 # ---------------------------------------------------------------------
 # Arch-aware spec validation
 # ---------------------------------------------------------------------
+
+
+def _dgrad_lds_charge(spec: DgradConvSpec) -> Tuple[int, int, int]:
+    """``(a_b_bytes, c_bytes, total_bytes)`` of LDS the builder allocates."""
+    _ab_dtype_bytes = 4 if spec.data.dtype_a in ("fp32",) else 2
+    _lds_layout = spec.effective_lds_layout()
+    # A is genuinely still M-outer; only B flips, so only B's charge branches.
+    # Both sides read _KOUTER_PAD (via kouter_b_pad) and dy_halo_lds_rows from
+    # the spec so the charged shape and the allocated shape cannot drift.
+    _a_shape = _lds_layout.storage_shape(
+        spec.dy_halo_lds_rows if spec.dy_halo > 0 else spec.tile_m
+    )
+    _b_shape = (
+        (spec.tile_k, spec.tile_n + spec.kouter_b_pad)
+        if spec.lds_k_outer
+        else _lds_layout.storage_shape(spec.tile_n)
+    )
+    # dy_halo=2 double-buffers the B tile.
+    _b_copies = 2 if spec.dy_halo == 2 else 1
+    _ab_bytes = (
+        _a_shape[0] * _a_shape[1] + _b_copies * _b_shape[0] * _b_shape[1]
+    ) * _ab_dtype_bytes
+    # Single-buffered otherwise: the K loop never alternates LDS buffers.
+    # (compv4 here is a schedule policy only; async_dma/unroll_k are rejected.)
+    _c_dtype_bytes = 4 if spec.data.dtype_d == "fp32" else 2
+    _c_lds = (
+        spec.tile_m * spec.tile_n * _c_dtype_bytes if spec.epilogue == "cshuffle" else 0
+    )
+    # wavelet: A/B stay live across both scf_if_else branches, so the LDS pool
+    # cannot alias C onto the A/B region even when cshuffle_no_alias=False.
+    _no_alias = spec.cshuffle_no_alias or spec.pipeline == "wavelet"
+    _total_lds = (_ab_bytes + _c_lds) if _no_alias else max(_ab_bytes, _c_lds)
+    return _ab_bytes, _c_lds, _total_lds
+
+
+def dgrad_lds_bytes(spec: DgradConvSpec) -> int:
+    """Bytes of LDS one workgroup of ``spec`` allocates.
+
+    The charge is_valid_dgrad_spec checks against the LDS capacity; dispatch
+    divides the capacity by it to get the LDS-limited workgroups per CU.
+    """
+    return _dgrad_lds_charge(spec)[2]
+
+
+def _dy_halo_error(spec: DgradConvSpec) -> Optional[str]:
+    """Reason the dY halo knobs are unusable on ``spec``, or None.
+
+    Every knob that would otherwise be silently ignored is rejected, so a
+    kernel name never claims a knob that did not take effect. The reason
+    strings are mirrored verbatim by the C++ validator.
+    """
+    if spec.dy_halo not in (0, 1, 2):
+        return (
+            "dy_halo must be 0 (off), 1 (staged halo) or 2 (staged halo with "
+            f"double-buffered B); got {spec.dy_halo}"
+        )
+    if spec.dy_halo_setprio < 0 or spec.dy_halo_setprio > 3:
+        return f"dy_halo_setprio must be in 0..3; got {spec.dy_halo_setprio}"
+    if spec.dy_halo_kouter_pad < 0 or spec.dy_halo_kouter_pad % 8 != 0:
+        return (
+            "dy_halo_kouter_pad must be a non-negative multiple of 8 (16-byte "
+            "rows for the wide LDS store and the transpose read); got "
+            f"{spec.dy_halo_kouter_pad}"
+        )
+    if spec.dy_halo == 0:
+        if spec.dy_halo_2d:
+            return "dy_halo_2d needs dy_halo > 0"
+        if spec.dy_halo_setprio > 0:
+            return "dy_halo_setprio needs dy_halo > 0"
+        if spec.dy_halo_kouter_pad > 0:
+            return "dy_halo_kouter_pad needs dy_halo > 0 and lds_k_outer"
+        return None
+    p = spec.problem
+    if not spec.uses_tap_outer_k:
+        return (
+            "dy_halo needs the tap-outer K loop (stride 1, dilation 1, folded "
+            "record, kpg % tile_k == 0, no split-K, wave64)"
+        )
+    if p.Ho != p.Hi or p.Wo != p.Wi:
+        return "dy_halo needs an output the size of the input (Ho == Hi and Wo == Wi)"
+    if p.Y * p.X == 1:
+        return "dy_halo needs a filter with more than one tap"
+    if spec.dy_halo_2d and not spec.dy_halo_2d_eligible:
+        return (
+            "dy_halo_2d needs a tile of whole image rows of one image "
+            "(tile_m % Wo == 0 and Hi % (tile_m / Wo) == 0)"
+        )
+    if spec.dy_halo_kouter_pad > 0 and not spec.lds_k_outer:
+        return "dy_halo_kouter_pad needs dy_halo > 0 and lds_k_outer"
+    return None
 
 
 def is_valid_dgrad_spec(spec: DgradConvSpec, arch: str = "gfx950") -> Tuple[bool, str]:
@@ -1112,31 +1312,11 @@ def is_valid_dgrad_spec(spec: DgradConvSpec, arch: str = "gfx950") -> Tuple[bool
                 "allocation)"
             )
 
-    _ab_dtype_bytes = 4 if spec.data.dtype_a in ("fp32",) else 2
-    _lds_layout = spec.effective_lds_layout()
-    # A is genuinely still M-outer; only B flips, so only B's charge branches.
-    # Both sides read _KOUTER_PAD from the module constant so the charged shape
-    # and the allocated shape cannot drift.
-    _a_shape = _lds_layout.storage_shape(spec.tile_m)
-    _b_shape = (
-        (spec.tile_k, spec.tile_n + _KOUTER_PAD)
-        if spec.lds_k_outer
-        else _lds_layout.storage_shape(spec.tile_n)
-    )
-    _ab_bytes = (
-        _a_shape[0] * _a_shape[1] + _b_shape[0] * _b_shape[1]
-    ) * _ab_dtype_bytes
-    # Single-buffered: the K loop never alternates LDS buffers. (compv4 here
-    # is a schedule policy only; async_dma/unroll_k are rejected above.)
-    _ab_lds = _ab_bytes
-    _c_dtype_bytes = 4 if spec.data.dtype_d == "fp32" else 2
-    _c_lds = (
-        spec.tile_m * spec.tile_n * _c_dtype_bytes if spec.epilogue == "cshuffle" else 0
-    )
-    # wavelet: A/B stay live across both scf_if_else branches, so the LDS pool
-    # cannot alias C onto the A/B region even when cshuffle_no_alias=False.
-    _no_alias = spec.cshuffle_no_alias or spec.pipeline == "wavelet"
-    _total_lds = (_ab_lds + _c_lds) if _no_alias else max(_ab_lds, _c_lds)
+    halo_err = _dy_halo_error(spec)
+    if halo_err is not None:
+        return False, halo_err
+
+    _ab_bytes, _c_lds, _total_lds = _dgrad_lds_charge(spec)
     if not target.fits_lds(_total_lds):
         return False, (
             f"LDS budget {_total_lds} bytes "
@@ -1675,16 +1855,27 @@ def _build_tilde_dgrad(
 
     # LDS allocation.
     lds_layout = spec.effective_lds_layout()
+    use_halo = spec.uses_dy_halo
+    # The staged dY halo tile (DgradConvSpec.dy_halo) replaces the A tile; see
+    # dy_halo_lds_rows for its shape.
     A_smem = b.smem_alloc(
-        ir_dtype_a, lds_layout.storage_shape(block_m), name_hint="A_smem"
+        ir_dtype_a,
+        lds_layout.storage_shape(spec.dy_halo_lds_rows if use_halo else block_m),
+        name_hint="A_smem",
     )
     if spec.lds_k_outer:
         # K-outer: rows are K, columns are the free axis N. See _KOUTER_PAD for
         # why the stride must not be a multiple of the 32-dword bank period.
-        b_shape = (block_k, block_n + _KOUTER_PAD)
+        b_shape = (block_k, block_n + spec.kouter_b_pad)
     else:
         b_shape = lds_layout.storage_shape(block_n)
     B_smem = b.smem_alloc(ir_dtype_b, b_shape, name_hint="B_smem")
+    # dy_halo=2: the second B buffer of the per-tap double buffer.
+    B_smem2 = (
+        b.smem_alloc(ir_dtype_b, b_shape, name_hint="B_smem2")
+        if use_halo and spec.dy_halo == 2
+        else None
+    )
 
     mfmas_m = spec.mfmas_per_warp_m
     mfmas_n = spec.mfmas_per_warp_n
@@ -2096,7 +2287,10 @@ def _build_tilde_dgrad(
         )
 
     def emit_mfma_phase(
-        A_src: Value, B_src: Value, iter_vars: Sequence[Value]
+        A_src: Value,
+        B_src: Value,
+        iter_vars: Sequence[Value],
+        a_row_map=None,
     ) -> List[Value]:
         if op.family == "wmma":
             a_map = op.a_layout()
@@ -2177,6 +2371,8 @@ def _build_tilde_dgrad(
                     warp_m_off,
                     b.add(b.const_i32(mi * spec.warp_tile_m), m_in_atom),
                 )
+                if a_row_map is not None:
+                    a_row = a_row_map(a_row)
                 a_rows.append(
                     _emit_smem_load(
                         b, A_src, a_row, col_base, a_per_lane, smem_dtype=_smem_dtype
@@ -2376,7 +2572,27 @@ def _build_tilde_dgrad(
         )
         return b.kernel
 
-    if use_tap_outer:
+    if use_halo:
+        final_accs = _emit_dy_halo_kloop(
+            b,
+            spec,
+            op=op,
+            tid=tid,
+            accs=accs,
+            A_smem=A_smem,
+            b_bufs=[B_smem] if B_smem2 is None else [B_smem, B_smem2],
+            block_m_off=block_m_off_v,
+            k_out_group_base=k_out_group_base,
+            c_kpg=c_kpg,
+            load_vec_a=load_vec_a,
+            dy_rsrc=dy_rsrc,
+            w_rsrc=w_rsrc,
+            b_loader=b_sync_loader,
+            b_descriptor=_b_desc_fn,
+            tap_capture=tap_capture,
+            emit_mfma_phase=emit_mfma_phase,
+        )
+    elif use_tap_outer:
         # Tap outer, output-channel chunk inner (DgradConvSpec.tap_outer_k).
         # Same reduction order within a tap as the flat loop; the flat k_dg
         # index of (tap, kb) is tap*kpg + kb.
@@ -2424,6 +2640,223 @@ def _build_tilde_dgrad(
     _dispatch_dgrad_epilogue(final_accs)
 
     return b.kernel
+
+
+def _emit_dy_halo_kloop(
+    b: IRBuilder,
+    spec: DgradConvSpec,
+    *,
+    op,
+    tid: Value,
+    accs,
+    A_smem: Value,
+    b_bufs: Sequence[Value],
+    block_m_off: Value,
+    k_out_group_base: Optional[Value],
+    c_kpg: Optional[Value],
+    load_vec_a: int,
+    dy_rsrc: Value,
+    w_rsrc: Value,
+    b_loader: CoalescedTileLoader,
+    b_descriptor,
+    tap_capture: dict,
+    emit_mfma_phase,
+) -> List[Value]:
+    """Chunk-outer, tap-inner K loop over one staged dY halo tile.
+
+    See :attr:`DgradConvSpec.dy_halo`. Per output-channel chunk the loop
+    loads the tile's dY halo into ``A_smem`` once and runs every filter tap
+    (unrolled) against it; the per-tap B tile still comes from
+    ``b_descriptor`` (the tap-outer W descriptor, driven by
+    ``tap_capture["w_k"]``). Returns the final accumulators.
+
+    1-D layout: LDS row r holds linear dY pixel ``block_m_off + min_shift +
+    r`` (``min_shift`` is the most negative tap shift), and tap (y, x) reads
+    fragment row ``a_row + dh*Wo + dw - min_shift`` with ``dh = pH - y``,
+    ``dw = pW - x``; a lane whose pixel (hi + dh, wi + dw) leaves the image
+    reads the trailing all-zero row instead. 2-D layout
+    (:attr:`DgradConvSpec.dy_halo_2d`): LDS row r holds pixel (h0 - pH + r //
+    Wp, r % Wp - pW) of the tile's image (h0 = the tile's first image row,
+    Wp = Wo + X - 1), zero-filled outside the image by the loader, and tap
+    (y, x) reads row ``(a_row // Wo + dh + pH)*Wp + a_row % Wo + dw + pW``.
+    """
+    assert op.family == "mma", "dy_halo is MFMA-only"
+    p = spec.problem
+    ir_dtype_a = _ir_dtype(spec.data.dtype_a)
+    block_m, block_k = spec.tile_m, spec.tile_k
+    grouped = p.groups > 1
+    use_2d = spec.dy_halo_2d
+    lds_rows = spec.dy_halo_lds_rows
+    # The 1-D tile's last row is the zero row; the loader fills the rest.
+    load_rows = lds_rows if use_2d else lds_rows - 1
+    c0 = b.const_i32(0)
+    c_K = b.const_i32(p.K)
+    c_Wi = b.const_i32(p.Wi)
+    halo_loader = CoalescedTileLoader(
+        tile_rows=load_rows,
+        tile_cols=block_k,
+        block_size=spec.block_size,
+        load_vec=load_vec_a,
+        elem_dtype=ir_dtype_a,
+    )
+
+    if use_2d:
+        wp = p.Wo + p.X - 1
+        real_rows = (block_m // p.Wo + p.Y - 1) * wp
+        c_wp = b.const_i32(wp)
+        c_hw = b.const_i32(p.Hi * p.Wi)
+        c_Hi = b.const_i32(p.Hi)
+        c_Wo = b.const_i32(p.Wo)
+        h0 = b.div(b.mod(block_m_off, c_hw), c_Wi)
+        halo_base = b.sub(block_m_off, b.const_i32(p.pH * p.Wo + p.pW))
+
+        def halo_descriptor(b_: IRBuilder, row: Value, col: Value):
+            hr = b_.div(row, c_wp)
+            wc = b_.mod(row, c_wp)
+            h = b_.add(h0, b_.sub(hr, b_.const_i32(p.pH)))
+            w = b_.sub(wc, b_.const_i32(p.pW))
+            h_ok = b_.land(b_.cmp_ge(h, c0), b_.cmp_lt(h, c_Hi))
+            w_ok = b_.land(b_.cmp_ge(w, c0), b_.cmp_lt(w, c_Wi))
+            valid = b_.land(h_ok, w_ok)
+            if load_rows != real_rows:
+                valid = b_.land(valid, b_.cmp_lt(row, b_.const_i32(real_rows)))
+            pix = b_.add(halo_base, b_.add(b_.mul(hr, c_Wi), wc))
+            offset = b_.add(b_.add(b_.mul(pix, c_K), col), tap_capture["kb"])
+            return offset, valid
+
+        def row_map(dh: int, dw: int):
+            shift = (dh + p.pH) * wp + dw + p.pW
+
+            def _map(a_row: Value) -> Value:
+                r2 = b.add(b.mul(b.div(a_row, c_Wo), c_wp), b.mod(a_row, c_Wo))
+                return b.add(r2, b.const_i32(shift))
+
+            return _map
+
+    else:
+        min_shift = (p.pH - p.Y + 1) * p.Wo + (p.pW - p.X + 1)
+        real_rows = block_m + (p.Y - 1) * p.Wo + (p.X - 1)
+        c_npix = b.const_i32(p.N * p.Hi * p.Wi)
+        c_zero_row = b.const_i32(lds_rows - 1)
+        c_hw = b.const_i32(p.Hi * p.Wi)
+        halo_base = b.add(block_m_off, b.const_i32(min_shift))
+
+        def halo_descriptor(b_: IRBuilder, row: Value, col: Value):
+            q = b_.add(halo_base, row)
+            valid = b_.land(b_.cmp_ge(q, c0), b_.cmp_lt(q, c_npix))
+            if load_rows != real_rows:
+                valid = b_.land(valid, b_.cmp_lt(row, b_.const_i32(real_rows)))
+            offset = b_.add(b_.add(b_.mul(q, c_K), col), tap_capture["kb"])
+            return offset, valid
+
+        # Zero row: every thread writes the same zeros (benign); the first
+        # chunk's barrier orders it before any read, and the loader never
+        # writes it.
+        zvec = min(8, block_k)
+        zcol = b.mul(b.mod(tid, b.const_i32(block_k // zvec)), b.const_i32(zvec))
+        b.smem_store_vN(A_smem, [c_zero_row, zcol], b.zero_vec(ir_dtype_a, zvec), zvec)
+
+        def row_map(dh: int, dw: int):
+            shift = dh * p.Wo + dw - min_shift
+
+            def _map(a_row: Value) -> Value:
+                m = b.add(block_m_off, a_row)
+                rem = b.mod(m, c_hw)
+                hi = b.div(rem, c_Wi)
+                wi = b.mod(rem, c_Wi)
+                conds = []
+                if dh < 0:
+                    conds.append(b.cmp_ge(hi, b.const_i32(-dh)))
+                if dh > 0:
+                    conds.append(b.cmp_lt(hi, b.const_i32(p.Ho - dh)))
+                if dw < 0:
+                    conds.append(b.cmp_ge(wi, b.const_i32(-dw)))
+                if dw > 0:
+                    conds.append(b.cmp_lt(wi, b.const_i32(p.Wo - dw)))
+                row = b.add(a_row, b.const_i32(shift))
+                if not conds:
+                    return row
+                ok = conds[0]
+                for c_ in conds[1:]:
+                    ok = b.land(ok, c_)
+                return b.select(ok, row, c_zero_row)
+
+            return _map
+
+    n_taps = p.Y * p.X
+    c_yxc = b.const_i32(p.Y * p.X * p.cpg)
+
+    def mfma_tap(t: int, b_src: Value, cur: List[Value]) -> List[Value]:
+        y, x = divmod(t, p.X)
+        if spec.dy_halo_setprio > 0:
+            b.s_setprio(spec.dy_halo_setprio)
+        out = emit_mfma_phase(A_smem, b_src, cur, a_row_map=row_map(p.pH - y, p.pW - x))
+        if spec.dy_halo_setprio > 0:
+            b.s_setprio(0)
+        return out
+
+    chunk_for = b.scf_for_iter(
+        c0, c_kpg if grouped else c_K, b.const_i32(block_k), accs, iv_name="kb"
+    )
+    with chunk_for as (kb0, iter_vars):
+        kb = b.add(kb0, k_out_group_base) if grouped else kb0
+        tap_capture["kb"] = kb
+        w_kb = b.mul(kb, c_yxc)
+
+        def set_tap(t: int) -> None:
+            tap_capture["w_k"] = b.add(w_kb, b.const_i32(t * p.cpg))
+
+        cur = list(iter_vars)
+        if spec.dy_halo == 2:
+            # Chunk prologue: the halo and tap 0's B tile.
+            set_tap(0)
+            a_st = halo_loader.load_global(
+                b, tid=tid, descriptor=halo_descriptor, rsrc=dy_rsrc
+            )
+            b_st = b_loader.load_global(
+                b, tid=tid, descriptor=b_descriptor, rsrc=w_rsrc
+            )
+            halo_loader.store_lds(b, smem_dst=A_smem, staged=a_st)
+            b_loader.store_lds(b, smem_dst=b_bufs[0], staged=b_st)
+            b.sync()
+            for t in range(n_taps):
+                nxt = None
+                if t + 1 < n_taps:
+                    # Tap t+1's B tile into registers; the fence keeps the
+                    # loads ahead of the MFMAs (the scheduler otherwise sinks
+                    # them next to their LDS store).
+                    set_tap(t + 1)
+                    nxt = b_loader.load_global(
+                        b, tid=tid, descriptor=b_descriptor, rsrc=w_rsrc
+                    )
+                    b.sched_barrier(0)
+                cur = mfma_tap(t, b_bufs[t % 2], cur)
+                if nxt is not None:
+                    b.sched_barrier(0)
+                    b_loader.store_lds(b, smem_dst=b_bufs[(t + 1) % 2], staged=nxt)
+                # Orders the store above before tap t+1 reads it, and tap t's
+                # reads of b_bufs[t % 2] before tap t+2 overwrites it. After
+                # the last tap it protects A_smem from the next chunk's halo.
+                b.sync()
+        else:
+            for t in range(n_taps):
+                set_tap(t)
+                a_st = None
+                if t == 0:
+                    a_st = halo_loader.load_global(
+                        b, tid=tid, descriptor=halo_descriptor, rsrc=dy_rsrc
+                    )
+                b_st = b_loader.load_global(
+                    b, tid=tid, descriptor=b_descriptor, rsrc=w_rsrc
+                )
+                if a_st is not None:
+                    halo_loader.store_lds(b, smem_dst=A_smem, staged=a_st)
+                b_loader.store_lds(b, smem_dst=b_bufs[0], staged=b_st)
+                b.sync()
+                cur = mfma_tap(t, b_bufs[0], cur)
+                b.sync()
+        b.scf_yield(*cur)
+    return list(chunk_for.results)
 
 
 def _emit_dgrad_tilde_atomic_epilogue(

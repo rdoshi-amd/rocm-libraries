@@ -16,23 +16,24 @@ it via ``-m "not gpu"``. Run standalone:
 
 from __future__ import annotations
 
+import dataclasses
 import math
 
 import pytest
 
+from kernels.common.attention_dense_spec import DENSE_TILE_GEOMETRIES
 from kernels.gfx950.attention_dense import (
-    AttentionDenseSpec,
+    Gfx950AttentionDenseSpec,
     run_attention_dense_torch,
 )
+
+
+torch = pytest.importorskip("torch", reason="ROCm torch required")
 
 
 def _gpu_ready():
     """True only on a gfx950 box with ROCm torch. Gate on ``gcnArchName`` (the ISA
     target), NOT the marketing name."""
-    try:
-        import torch
-    except Exception:  # noqa: BLE001
-        return False
     if not torch.cuda.is_available():
         return False
     arch = torch.cuda.get_device_properties(0).gcnArchName.lower()
@@ -40,7 +41,7 @@ def _gpu_ready():
 
 
 requires_gfx950_gpu = pytest.mark.skipif(
-    not _gpu_ready(), reason="needs a gfx950 (MI355X) GPU with ROCm torch"
+    not _gpu_ready(), reason="needs a gfx950 GPU with ROCm torch"
 )
 
 _TORCH_DT = {"fp16": "float16", "bf16": "bfloat16"}
@@ -76,15 +77,23 @@ def _spec(
     factory rather than hand-rolled.
 
     Deriving the spec from the factory means a future gfx950 tuning change is picked
-    up here with no edit. Only ``dense_persistent`` is pinned rather than left on
-    "auto": the cohort asserts BOTH grid variants at one fixed Sq.
+    up here with no edit. The candidate is pinned by ``spec_id``: the cohort
+    asserts BOTH bodies at one fixed Sq, and the persistent row runs wide
+    DMA on aligned causal D128 without sinks/SWA (``TestWideDmaFeatures``
+    covers the other masks).
     """
     # Imported lazily: keeps module import (and hence CPU collection of this
     # gpu-marked file) independent of the dispatch package.
-    from dispatch.attention import AttentionRequest
-    from dispatch.attention.gfx950 import dense_spec_for_request
+    from dispatch.attention import AttentionRequest, attention_tuning_spec
 
-    return dense_spec_for_request(
+    wide = d == 128 and causal and not use_sinks and not sliding_window
+    if not persistent:
+        spec_id = "gfx950_dense_grid"
+    elif wide:
+        spec_id = "gfx950_dense_persist_widedma"
+    else:
+        spec_id = "gfx950_dense_persist"
+    return attention_tuning_spec(
         AttentionRequest(
             batch=batch,
             nhead_q=hq,
@@ -96,12 +105,11 @@ def _spec(
             arch="gfx950",
             mask_type=1 if causal else 0,
             dtype=dtype,
-            algorithm="attention_dense",
-            dense_persistent="on" if persistent else "off",
             use_sinks=use_sinks,
             sliding_window=sliding_window,
-        )
-    )
+        ),
+        spec_id,
+    ).kernel_spec
 
 
 def _launcher_for(spec):
@@ -203,6 +211,36 @@ class TestDenseNumeric:
         assert max_abs < tol, (
             f"{dtype} D{d} GQA{hq}/{hkv} "
             f"{'persist' if persistent else 'default'}: max_abs={max_abs:.3e} >= {tol}"
+        )
+
+    @requires_gfx950_gpu
+    @pytest.mark.gpu
+    @pytest.mark.parametrize(
+        "d,persistent,width",
+        [(128, False, 1), (128, True, 2), (64, False, 2), (64, True, 1)],
+    )
+    def test_bf16_narrow_output_store_is_bit_identical(self, d, persistent, width):
+        """bf16 o_store_width 1/2 must write the same bits as the width-4 store
+        (fp16 is rejected below 4 because it does not)."""
+        import torch
+
+        hq, hkv, B, S = 16, 4, 1, 512
+        scale = 1.0 / math.sqrt(d)
+        torch.manual_seed(0)
+        q = torch.randn(B, S, hq, d, device="cuda", dtype=torch.bfloat16)
+        k = torch.randn(B, S, hkv, d, device="cuda", dtype=torch.bfloat16)
+        v = torch.randn(B, S, hkv, d, device="cuda", dtype=torch.bfloat16)
+        base = _spec("bf16", d, hq, hkv, persistent, batch=B, sq=S)
+
+        outs = []
+        for spec in (base, dataclasses.replace(base, o_store_width=width)):
+            out = torch.empty(B, S, hq, d, device="cuda", dtype=torch.bfloat16)
+            run_attention_dense_torch(spec=spec, q=q, k=k, v=v, out=out, scale=scale)
+            outs.append(out)
+        torch.cuda.synchronize()
+        assert torch.equal(outs[0], outs[1]), (
+            f"bf16 D{d} {'persist' if persistent else 'default'} "
+            f"o_store_width={width} diverged from width 4"
         )
 
     @requires_gfx950_gpu
@@ -412,7 +450,7 @@ class TestDenseGqaPairVariants:
         scale = 1.0 / math.sqrt(D)
 
         # NQB=2 and Hkv=8, so the balanced mapping needs exactly 16 CTAs.
-        spec = AttentionDenseSpec(
+        spec = Gfx950AttentionDenseSpec(
             batch=B,
             seqlen_q=S,
             seqlen_kv=S,
@@ -470,7 +508,7 @@ class TestDenseGqaPairVariants:
         v = torch.randn(B, S, H, D, device="cuda", dtype=torch.float16)
         out = torch.empty_like(q)
         scale = 1.0 / math.sqrt(D)
-        spec = AttentionDenseSpec(
+        spec = Gfx950AttentionDenseSpec(
             batch=B,
             seqlen_q=S,
             seqlen_kv=S,
@@ -612,6 +650,200 @@ class TestDenseSinksNumeric:
             f"{'persist' if persistent else 'default'} {mask_str} sink_{sink_magnitude}: "
             f"max_abs={max_abs:.3e} >= {tol}"
         )
+
+
+def _bottom_right_reference(q, k, v, sinks, scale, *, top_left):
+    """Explicit fp32 causal oracle for unequal query and KV lengths."""
+    import torch
+
+    batch, sq, hq, _ = q.shape
+    skv = k.shape[1]
+    hkv = k.shape[2]
+    qh = q.transpose(1, 2).float()
+    kh = k.transpose(1, 2).repeat_interleave(hq // hkv, dim=1).float()
+    vh = v.transpose(1, 2).repeat_interleave(hq // hkv, dim=1).float()
+
+    scores = torch.einsum("bhqd,bhkd->bhqk", qh, kh) * scale
+    qi = torch.arange(sq, device=q.device).view(-1, 1)
+    ki = torch.arange(skv, device=q.device).view(1, -1)
+    diagonal = 0 if top_left else skv - sq
+    allowed = ki <= qi + diagonal
+    scores.masked_fill_(~allowed.view(1, 1, sq, skv), float("-inf"))
+
+    if sinks is None:
+        probabilities = torch.softmax(scores, dim=-1)
+    else:
+        sink_col = sinks.float().view(1, hq, 1, 1).expand(batch, hq, sq, 1)
+        probabilities = torch.softmax(torch.cat([scores, sink_col], dim=-1), dim=-1)[
+            ..., :-1
+        ]
+    return torch.einsum("bhqk,bhkd->bhqd", probabilities, vh).transpose(1, 2)
+
+
+# The original nine PR cases plus one aligned and one ragged BM128 case. Each
+# pytest.param is a separate GPU test node: on a real gfx950 none can disappear
+# behind an aggregate helper that reports success after skipping every case.
+_BOTTOM_RIGHT_CASES = [
+    pytest.param("default", 197, 400, 1, True, False, id="bm256-ragged-197x400"),
+    pytest.param("default", 300, 1234, 1, True, False, id="bm256-ragged-300x1234"),
+    pytest.param("default", 512, 4097, 1, True, False, id="bm256-ragged-512x4097"),
+    pytest.param("default", 100, 8000, 1, True, False, id="bm256-ragged-100x8000"),
+    # The ragged buffer spans the whole tensor: padded rows in batch 0 can read
+    # live batch-1 data, so correctness depends on the qtok < Sq store guard.
+    pytest.param("default", 300, 1000, 2, True, False, id="bm256-ragged-batch2"),
+    pytest.param("default", 256, 512, 1, False, False, id="bm256-aligned-256x512"),
+    pytest.param("default", 512, 1024, 1, False, False, id="bm256-aligned-512x1024"),
+    pytest.param("default", 512, 1024, 1, False, True, id="bm256-sinks-aligned"),
+    pytest.param("default", 300, 1234, 1, True, True, id="bm256-sinks-ragged"),
+    pytest.param("bm128", 512, 1024, 1, False, False, id="bm128-aligned-512x1024"),
+    pytest.param("bm128", 197, 400, 1, True, False, id="bm128-ragged-197x400"),
+]
+
+_BOTTOM_RIGHT_TOL = 2e-2
+
+
+class TestDenseBottomRightNumeric:
+    @requires_gfx950_gpu
+    @pytest.mark.gpu
+    @pytest.mark.parametrize(
+        "geometry,sq,skv,batch,ragged,use_sinks", _BOTTOM_RIGHT_CASES
+    )
+    def test_jit_matches_shifted_diagonal_not_top_left(
+        self, geometry, sq, skv, batch, ragged, use_sinks
+    ):
+        import torch
+
+        tile = DENSE_TILE_GEOMETRIES[geometry]
+        spec = Gfx950AttentionDenseSpec(
+            batch=batch,
+            seqlen_q=sq,
+            seqlen_kv=skv,
+            num_query_heads=4,
+            num_kv_heads=1,
+            head_size=128,
+            causal=True,
+            dtype="bf16",
+            block_m=int(tile["block_m"]),
+            block_n=int(tile["block_n"]),
+            ragged=ragged,
+            persistent=False,
+            use_sinks=use_sinks,
+            causal_bottom_right=True,
+        )
+        assert skv > sq, "every case must exercise a moving diagonal"
+
+        torch.manual_seed(0)
+        q = torch.randn(batch, sq, 4, 128, device="cuda", dtype=torch.bfloat16)
+        k = torch.randn(batch, skv, 1, 128, device="cuda", dtype=torch.bfloat16)
+        v = torch.randn(batch, skv, 1, 128, device="cuda", dtype=torch.bfloat16)
+        out = torch.empty_like(q)
+        sinks = (
+            torch.randn(4, device="cuda", dtype=torch.bfloat16) if use_sinks else None
+        )
+        scale = 1.0 / math.sqrt(spec.head_size)
+
+        run_attention_dense_torch(
+            spec=spec,
+            q=q,
+            k=k,
+            v=v,
+            out=out,
+            scale=scale,
+            sinks=sinks,
+        )
+        torch.cuda.synchronize()
+
+        shifted = _bottom_right_reference(q, k, v, sinks, scale, top_left=False)
+        top_left = _bottom_right_reference(q, k, v, sinks, scale, top_left=True)
+        shifted_err = (out.float() - shifted).abs().max().item()
+        top_left_err = (out.float() - top_left).abs().max().item()
+
+        label = (
+            f"{geometry} B{batch} {sq}x{skv} "
+            f"{'ragged' if ragged else 'aligned'}"
+            f"{'+sinks' if use_sinks else ''}"
+        )
+        assert shifted_err < _BOTTOM_RIGHT_TOL, (
+            f"{label}: shifted max_abs={shifted_err:.3e} " f">= {_BOTTOM_RIGHT_TOL}"
+        )
+        assert top_left_err > 1e-3, (
+            f"{label}: unexpectedly matches top-left " f"(max_abs={top_left_err:.3e})"
+        )
+
+
+# The wide-DMA candidate admits every mask the persistent body implements, not
+# only the causal no-sinks no-SWA shapes the cohort above routes to it.
+_WIDE_DMA_MASKS = [
+    # (name, causal, sliding_window, use_sinks)
+    ("non_causal", False, 0, False),
+    ("causal_sinks", True, 0, True),
+    ("causal_swa", True, 128, False),
+    ("non_causal_sinks", False, 0, True),
+    ("causal_swa_sinks", True, 128, True),
+]
+
+
+class TestWideDmaFeatures:
+    @requires_gfx950_gpu
+    @pytest.mark.gpu
+    @pytest.mark.parametrize("dtype", ("bf16", "fp16"))
+    @pytest.mark.parametrize("block_m", (256, 128))
+    @pytest.mark.parametrize("_name,causal,sliding_window,use_sinks", _WIDE_DMA_MASKS)
+    def test_wide_dma_numeric(
+        self, _name, causal, sliding_window, use_sinks, block_m, dtype
+    ):
+        import torch
+
+        from dispatch.attention import AttentionRequest, tuning_spec_with_knobs
+
+        B, S, Hq, Hkv, D = 1, 512, 32, 8, 128
+        spec = tuning_spec_with_knobs(
+            AttentionRequest(
+                batch=B,
+                nhead_q=Hq,
+                nhead_k=Hkv,
+                seqlen_q=S,
+                seqlen_k=S,
+                hdim_q=D,
+                hdim_v=D,
+                arch="gfx950",
+                mask_type=1 if causal else 0,
+                dtype=dtype,
+                use_sinks=use_sinks,
+                sliding_window=sliding_window,
+            ),
+            "gfx950_dense_persist_widedma",
+            {"block_m": block_m},
+        ).kernel_spec
+        assert spec.wide_lds_dma
+        assert spec.block_m == block_m
+
+        tdt = getattr(torch, _TORCH_DT[dtype])
+        torch.manual_seed(0)
+        q = torch.randn(B, S, Hq, D, device="cuda", dtype=tdt)
+        k = torch.randn(B, S, Hkv, D, device="cuda", dtype=tdt)
+        v = torch.randn(B, S, Hkv, D, device="cuda", dtype=tdt)
+        out = torch.empty_like(q)
+        sinks = torch.randn(Hq, device="cuda", dtype=tdt) if use_sinks else None
+        scale = 1.0 / math.sqrt(D)
+        run_attention_dense_torch(
+            spec=spec, q=q, k=k, v=v, out=out, scale=scale, sinks=sinks
+        )
+        torch.cuda.synchronize()
+
+        # A sink of -inf contributes nothing, so one reference covers both.
+        ref_sinks = (
+            sinks
+            if use_sinks
+            else torch.full((Hq,), float("-inf"), device="cuda", dtype=torch.float32)
+        )
+        ref = _sink_reference(
+            q, k, v, ref_sinks, scale, sliding_window=sliding_window, causal=causal
+        )
+        max_abs = (ref - out.float()).abs().max().item()
+        assert max_abs < _tolerance(
+            dtype
+        ), f"{spec_id} {dtype} {_name}: max_abs={max_abs:.3e}"
 
 
 if __name__ == "__main__":

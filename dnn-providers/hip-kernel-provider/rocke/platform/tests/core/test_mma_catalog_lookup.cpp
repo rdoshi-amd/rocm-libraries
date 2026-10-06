@@ -357,7 +357,7 @@ static int test_scale_contracts()
             ++scaled_rows;
         }
     }
-    for(const char* dtype : {"fp8", "bf8", "fp4"})
+    for(const char* dtype : {"fp8", "bf8", "fp6", "bf6", "fp4"})
     {
         for(auto block_k : {ROCKE_MMA_SCALE_K16, ROCKE_MMA_SCALE_K32})
         {
@@ -379,7 +379,7 @@ static int test_scale_contracts()
             CHECK(op->k == 128);
         }
     }
-    CHECK(packed_rows == 4 && scaled_rows == 6);
+    CHECK(packed_rows == 4 && scaled_rows == 10);
     return 0;
 }
 
@@ -450,7 +450,7 @@ static int test_scale_layouts_and_families()
             }
         }
     }
-    CHECK(scaled == 6);
+    CHECK(scaled == 10);
     return 0;
 }
 

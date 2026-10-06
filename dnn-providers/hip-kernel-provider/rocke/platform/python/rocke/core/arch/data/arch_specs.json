@@ -45,6 +45,8 @@
         "sgprs": 102
       },
       "mma": [
+        {"family": "mma", "srcs": [{"dtype": "tf32"}, {"dtype": "tf32"}, {"dtype": "fp32"}], "dst": {"dtype": "fp32"}, "m": 16, "n": 16, "k": 8, "op_id": "mfma_f32_16x16x8_xf32"},
+        {"family": "mma", "srcs": [{"dtype": "tf32"}, {"dtype": "tf32"}, {"dtype": "fp32"}], "dst": {"dtype": "fp32"}, "m": 32, "n": 32, "k": 4, "op_id": "mfma_f32_32x32x4_xf32"},
         {"family": "mma", "srcs": [{"dtype": "fp32"}, {"dtype": "fp32"}, {"dtype": "fp32"}], "dst": {"dtype": "fp32"}, "m": 16, "n": 16, "k": 4, "op_id": "mfma_f32_16x16x4_f32"},
         {"family": "mma", "srcs": [{"dtype": "fp32"}, {"dtype": "fp32"}, {"dtype": "fp32"}], "dst": {"dtype": "fp32"}, "m": 32, "n": 32, "k": 2, "op_id": "mfma_f32_32x32x2_f32"},
         {"family": "mma", "srcs": [{"dtype": "fp16"}, {"dtype": "fp16"}, {"dtype": "fp32"}], "dst": {"dtype": "fp32"}, "m": 16, "n": 16, "k": 16, "op_id": "mfma_f32_16x16x16_f16"},
@@ -170,6 +172,10 @@
         "sgprs": 106
       },
       "mma": [
+        {"family": "wmma_scaled", "srcs": [{"dtype": "fp6", "scale": {"dtype": "e8m0", "block_size": 32}}, {"dtype": "fp6", "scale": {"dtype": "e8m0", "block_size": 32}}, {"dtype": "fp32"}], "dst": {"dtype": "fp32"}, "m": 16, "n": 16, "k": 128, "op_id": "wmma_gfx1250_f32_16x16x128_fp6_fp6_scale_e8m0_e8m0_k32"},
+        {"family": "wmma_scaled", "srcs": [{"dtype": "bf6", "scale": {"dtype": "e8m0", "block_size": 32}}, {"dtype": "bf6", "scale": {"dtype": "e8m0", "block_size": 32}}, {"dtype": "fp32"}], "dst": {"dtype": "fp32"}, "m": 16, "n": 16, "k": 128, "op_id": "wmma_gfx1250_f32_16x16x128_bf6_bf6_scale_e8m0_e8m0_k32"},
+        {"family": "wmma_scaled", "srcs": [{"dtype": "fp6", "scale": {"dtype": "e8m0", "block_size": 16}}, {"dtype": "fp6", "scale": {"dtype": "e8m0", "block_size": 16}}, {"dtype": "fp32"}], "dst": {"dtype": "fp32"}, "m": 16, "n": 16, "k": 128, "op_id": "wmma_gfx1250_f32_16x16x128_fp6_fp6_scale_e8m0_e8m0_k16"},
+        {"family": "wmma_scaled", "srcs": [{"dtype": "bf6", "scale": {"dtype": "e8m0", "block_size": 16}}, {"dtype": "bf6", "scale": {"dtype": "e8m0", "block_size": 16}}, {"dtype": "fp32"}], "dst": {"dtype": "fp32"}, "m": 16, "n": 16, "k": 128, "op_id": "wmma_gfx1250_f32_16x16x128_bf6_bf6_scale_e8m0_e8m0_k16"},
         {"family": "wmma", "srcs": [{"dtype": "fp32"}, {"dtype": "fp32"}, {"dtype": "fp32"}], "dst": {"dtype": "fp32"}, "m": 16, "n": 16, "k": 4, "op_id": "wmma_gfx1250_f32_16x16x4_f32"},
         {"family": "wmma", "srcs": [{"dtype": "fp16"}, {"dtype": "fp16"}, {"dtype": "fp32"}], "dst": {"dtype": "fp32"}, "m": 16, "n": 16, "k": 32, "op_id": "wmma_gfx1250_f32_16x16x32_f16"},
         {"family": "wmma", "srcs": [{"dtype": "bf16"}, {"dtype": "bf16"}, {"dtype": "fp32"}], "dst": {"dtype": "fp32"}, "m": 16, "n": 16, "k": 32, "op_id": "wmma_gfx1250_f32_16x16x32_bf16"},

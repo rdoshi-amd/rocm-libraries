@@ -729,6 +729,71 @@ static const rocke_layout_map_t lm_mfma_32x32x16_src2
 static const rocke_layout_map_t lm_mfma_32x32x16_dst
     = {ROCKE_MMA_ROLE_DST, 16, 64, _mfma_row_col_32x32};
 
+static void _mfma_a_16x16x8_xf32(
+    rocke_ir_builder_t* b, rocke_value_t* lane, int slot, rocke_value_t** c0, rocke_value_t** c1)
+{
+    rocke_value_t* c = rocke_b_const_i32(b, 16);
+    rocke_value_t* axis = rocke_b_mod(b, lane, c);
+    rocke_value_t* group = rocke_b_div(b, lane, c);
+    rocke_value_t* two = rocke_b_const_i32(b, 2);
+    rocke_value_t* base = rocke_b_mul(b, group, two);
+    rocke_value_t* index = rocke_b_const_i32(b, slot);
+    rocke_value_t* k = rocke_b_add(b, base, index);
+    *c0 = axis;
+    *c1 = k;
+}
+
+static void _mfma_b_16x16x8_xf32(
+    rocke_ir_builder_t* b, rocke_value_t* lane, int slot, rocke_value_t** c0, rocke_value_t** c1)
+{
+    rocke_value_t* c = rocke_b_const_i32(b, 16);
+    rocke_value_t* axis = rocke_b_mod(b, lane, c);
+    rocke_value_t* group = rocke_b_div(b, lane, c);
+    rocke_value_t* two = rocke_b_const_i32(b, 2);
+    rocke_value_t* base = rocke_b_mul(b, group, two);
+    rocke_value_t* index = rocke_b_const_i32(b, slot);
+    rocke_value_t* k = rocke_b_add(b, base, index);
+    *c0 = k;
+    *c1 = axis;
+}
+
+static void _mfma_a_32x32x4_xf32(
+    rocke_ir_builder_t* b, rocke_value_t* lane, int slot, rocke_value_t** c0, rocke_value_t** c1)
+{
+    rocke_value_t* c = rocke_b_const_i32(b, 32);
+    rocke_value_t* axis = rocke_b_mod(b, lane, c);
+    rocke_value_t* group = rocke_b_div(b, lane, c);
+    rocke_value_t* two = rocke_b_const_i32(b, 2);
+    rocke_value_t* base = rocke_b_mul(b, group, two);
+    rocke_value_t* index = rocke_b_const_i32(b, slot);
+    rocke_value_t* k = rocke_b_add(b, base, index);
+    *c0 = axis;
+    *c1 = k;
+}
+
+static void _mfma_b_32x32x4_xf32(
+    rocke_ir_builder_t* b, rocke_value_t* lane, int slot, rocke_value_t** c0, rocke_value_t** c1)
+{
+    rocke_value_t* c = rocke_b_const_i32(b, 32);
+    rocke_value_t* axis = rocke_b_mod(b, lane, c);
+    rocke_value_t* group = rocke_b_div(b, lane, c);
+    rocke_value_t* two = rocke_b_const_i32(b, 2);
+    rocke_value_t* base = rocke_b_mul(b, group, two);
+    rocke_value_t* index = rocke_b_const_i32(b, slot);
+    rocke_value_t* k = rocke_b_add(b, base, index);
+    *c0 = k;
+    *c1 = axis;
+}
+
+static const rocke_layout_map_t lm_xf32_16_src0
+    = {ROCKE_MMA_ROLE_SRC0, 2, 64, _mfma_a_16x16x8_xf32};
+static const rocke_layout_map_t lm_xf32_16_src1
+    = {ROCKE_MMA_ROLE_SRC1, 2, 64, _mfma_b_16x16x8_xf32};
+static const rocke_layout_map_t lm_xf32_32_src0
+    = {ROCKE_MMA_ROLE_SRC0, 2, 64, _mfma_a_32x32x4_xf32};
+static const rocke_layout_map_t lm_xf32_32_src1
+    = {ROCKE_MMA_ROLE_SRC1, 2, 64, _mfma_b_32x32x4_xf32};
+
 /* --- mfma_f32_16x16x4_f32: src0/src1/src2/dst (frag 1/1/4/4, wave64) (#8348) --- */
 static const rocke_layout_map_t lm_mfma_16x16x4_f32_src0
     = {ROCKE_MMA_ROLE_SRC0, 1, 64, _mfma_a_16x16x4_f32};
@@ -928,6 +993,8 @@ static_assert(offsetof(rocke_ati_mma_frag_row_t, dst_frag_len) == sizeof(const c
               "dst_frag_len must immediately follow op_id (no leading padding)");
 
 static const rocke_ati_mma_frag_row_t rocke_ati_mma_frag[] = {
+    {"mfma_f32_32x32x4_xf32", 16},
+    {"mfma_f32_16x16x8_xf32", 4},
     /* --- MFMA fp32 (wave64) --- */
     {"mfma_f32_16x16x4_f32", 4},
     {"mfma_f32_32x32x2_f32", 16},
@@ -971,9 +1038,13 @@ static const rocke_ati_mma_frag_row_t rocke_ati_mma_frag[] = {
     {"wmma_gfx1250_f32_16x16x64_bf8_bf8", 8},
     {"wmma_gfx1250_f32_16x16x128_fp8_fp8_scale_e8m0_e8m0_k32", 8},
     {"wmma_gfx1250_f32_16x16x128_fp4_fp4_scale_e8m0_e8m0_k32", 8},
+    {"wmma_gfx1250_f32_16x16x128_fp6_fp6_scale_e8m0_e8m0_k32", 8},
+    {"wmma_gfx1250_f32_16x16x128_bf6_bf6_scale_e8m0_e8m0_k32", 8},
     {"wmma_gfx1250_f32_16x16x128_bf8_bf8_scale_e8m0_e8m0_k32", 8},
     {"wmma_gfx1250_f32_16x16x128_fp8_fp8_scale_e8m0_e8m0_k16", 8},
     {"wmma_gfx1250_f32_16x16x128_fp4_fp4_scale_e8m0_e8m0_k16", 8},
+    {"wmma_gfx1250_f32_16x16x128_fp6_fp6_scale_e8m0_e8m0_k16", 8},
+    {"wmma_gfx1250_f32_16x16x128_bf6_bf6_scale_e8m0_e8m0_k16", 8},
     {"wmma_gfx1250_f32_16x16x128_bf8_bf8_scale_e8m0_e8m0_k16", 8},
 };
 
@@ -1062,6 +1133,26 @@ static const rocke_mma_op_t k_mma_gfx90a[] = {
 
 /* ----------------------------- gfx942 (CDNA) ----------------------------- */
 static const rocke_mma_op_t k_mma_gfx942[] = {
+    {"mma",
+     {{"tf32", 2, &lm_xf32_16_src0},
+      {"tf32", 2, &lm_xf32_16_src1},
+      {"fp32", 4, &lm_mfma_16x16x4_f32_src2}},
+     {"fp32", 4, &lm_mfma_16x16x4_f32_dst},
+     16,
+     16,
+     8,
+     "mfma_f32_16x16x8_xf32",
+     64},
+    {"mma",
+     {{"tf32", 2, &lm_xf32_32_src0},
+      {"tf32", 2, &lm_xf32_32_src1},
+      {"fp32", 16, &lm_mfma_32x32x2_f32_src2}},
+     {"fp32", 16, &lm_mfma_32x32x2_f32_dst},
+     32,
+     32,
+     4,
+     "mfma_f32_32x32x4_xf32",
+     64},
     {"mma",
      {{"fp32", 1, &lm_mfma_16x16x4_f32_src0},
       {"fp32", 1, &lm_mfma_16x16x4_f32_src1},
@@ -1523,6 +1614,26 @@ static const rocke_mma_op_t k_mma_gfx1250[] = {
      "wmma_gfx1250_f32_16x16x128_fp4_fp4_scale_e8m0_e8m0_k32",
      32},
     {"wmma_scaled",
+     {{"fp6e2m3", 16, NULL, "e8m0", ROCKE_MMA_SCALE_K32, 4, &lm_wmma_scale_k32_a},
+      {"fp6e2m3", 16, NULL, "e8m0", ROCKE_MMA_SCALE_K32, 4, &lm_wmma_scale_k32_b},
+      {"fp32", 8, &lm_wmma_gfx12_src2}},
+     {"fp32", 8, &lm_wmma_gfx12_dst},
+     16,
+     16,
+     128,
+     "wmma_gfx1250_f32_16x16x128_fp6_fp6_scale_e8m0_e8m0_k32",
+     32},
+    {"wmma_scaled",
+     {{"fp6e3m2", 16, NULL, "e8m0", ROCKE_MMA_SCALE_K32, 4, &lm_wmma_scale_k32_a},
+      {"fp6e3m2", 16, NULL, "e8m0", ROCKE_MMA_SCALE_K32, 4, &lm_wmma_scale_k32_b},
+      {"fp32", 8, &lm_wmma_gfx12_src2}},
+     {"fp32", 8, &lm_wmma_gfx12_dst},
+     16,
+     16,
+     128,
+     "wmma_gfx1250_f32_16x16x128_bf6_bf6_scale_e8m0_e8m0_k32",
+     32},
+    {"wmma_scaled",
      {{"bf8e5m2", 16, NULL, "e8m0", ROCKE_MMA_SCALE_K32, 4, &lm_wmma_scale_k32_a},
       {"bf8e5m2", 16, NULL, "e8m0", ROCKE_MMA_SCALE_K32, 4, &lm_wmma_scale_k32_b},
       {"fp32", 8, &lm_wmma_gfx12_src2}},
@@ -1551,6 +1662,26 @@ static const rocke_mma_op_t k_mma_gfx1250[] = {
      16,
      128,
      "wmma_gfx1250_f32_16x16x128_fp4_fp4_scale_e8m0_e8m0_k16",
+     32},
+    {"wmma_scaled",
+     {{"fp6e2m3", 16, NULL, "e8m0", ROCKE_MMA_SCALE_K16, 8, &lm_wmma_scale_k16_a},
+      {"fp6e2m3", 16, NULL, "e8m0", ROCKE_MMA_SCALE_K16, 8, &lm_wmma_scale_k16_b},
+      {"fp32", 8, &lm_wmma_gfx12_src2}},
+     {"fp32", 8, &lm_wmma_gfx12_dst},
+     16,
+     16,
+     128,
+     "wmma_gfx1250_f32_16x16x128_fp6_fp6_scale_e8m0_e8m0_k16",
+     32},
+    {"wmma_scaled",
+     {{"fp6e3m2", 16, NULL, "e8m0", ROCKE_MMA_SCALE_K16, 8, &lm_wmma_scale_k16_a},
+      {"fp6e3m2", 16, NULL, "e8m0", ROCKE_MMA_SCALE_K16, 8, &lm_wmma_scale_k16_b},
+      {"fp32", 8, &lm_wmma_gfx12_src2}},
+     {"fp32", 8, &lm_wmma_gfx12_dst},
+     16,
+     16,
+     128,
+     "wmma_gfx1250_f32_16x16x128_bf6_bf6_scale_e8m0_e8m0_k16",
      32},
     {"wmma_scaled",
      {{"bf8e5m2", 16, NULL, "e8m0", ROCKE_MMA_SCALE_K16, 8, &lm_wmma_scale_k16_a},

@@ -122,8 +122,8 @@ int main(void)
         const rocke_layout_map_t src2_layout = {ROCKE_MMA_ROLE_SRC2, 3, 32, NULL};
         const rocke_layout_map_t dst_layout = {ROCKE_MMA_ROLE_DST, 7, 32, NULL};
         distinct.family = "mma";
-        distinct.srcs[0].dtype = "xf32";
-        distinct.srcs[1].dtype = "xf32";
+        distinct.srcs[0].dtype = "tf32";
+        distinct.srcs[1].dtype = "tf32";
         distinct.srcs[0].scale_dtype = "e8m0";
         distinct.srcs[0].scale_block_size = ROCKE_MMA_SCALE_K32;
         distinct.srcs[1].scale_dtype = "e4m3";

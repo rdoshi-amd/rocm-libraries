@@ -10,7 +10,7 @@ next-tile prefetch; the existing loop-entry wait/barrier completes prior PV
 reads before the same buffer is written again. This intentionally changes
 emission for a configuration that previously exceeded the target LDS limit.
 
-- Strided KV uses the separate K/V byte strides introduced in PR #13110.
+- Strided KV uses independent K/V byte strides.
 - Existing paged configurations retain their descriptor loader: `T == P` on
   both targets, and `T < P` on gfx942.
 - The token-mapped loader supports `T=32` with `P=1,16` on both targets, and
@@ -62,7 +62,10 @@ source generation. `allow_unsupported` does not bypass runtime safety checks.
 Use dispatch algorithm `paged_decode_t32` to request T32 explicitly. The
 candidate is automatic for page size 1 and opt-in for existing page sizes, so
 it preserves their default routing. Explicit `ExplicitAttention3DConfig`
-accepts `tile_policy="32"`. Direct `backend="3d"` also supports page size 1.
+accepts `tile_policy="32"` from `TILE_POLICIES_3D`. Tile tokens share whitespace
+and case normalization; `resolve_tile_policy(..., path="3d")` selects the 3D
+vocabulary, while the default retains the existing 2D policies.
+Direct `backend="3d"` also supports page size 1.
 Contiguous non-paged inputs continue to use `kv_layout="strided"`.
 
 The paired `attention_paged_kv_emit` emitters cover both targets, both working
@@ -71,5 +74,5 @@ LLVM20/22/23, golden hashes, address mapping, artifact identity and admission.
 `test_paged_kv_decode_numeric.py` exercises shuffled nonadjacent pages, NaN
 padding, page/tile boundaries, empty rows, output canaries, changing lengths,
 streams and graph reuse against a CPU FP32 reference after input quantization.
-The #13110 strided and paged regression suite remains a separate GPU gate.
+The strided and paged regression suite remains a separate GPU gate.
 No performance improvement is claimed.

@@ -4649,10 +4649,21 @@ def run_unified_attention_torch(
     # New token-mapped loaders have stricter admission than the legacy paged
     # path. Validate before cache lookup, address-width retargeting or launch;
     # allow_unsupported is a tuning override, never an address-safety bypass.
-    if problem.block_size == 1 or (
+    uses_paged_gather = False
+    if (
         tuning_spec is not None
-        and getattr(tuning_spec.kernel_spec, "uses_paged_gather", False)
+        and tuning_spec.path == "3d"
+        and tuning_spec.arch in ("gfx942", "gfx950")
     ):
+        try:
+            uses_paged_gather = tuning_spec.kernel_spec.uses_paged_gather
+        except AttributeError as exc:
+            raise ValueError(
+                "3D kernel_spec.uses_paged_gather is required on gfx942/gfx950"
+            ) from exc
+        if not isinstance(uses_paged_gather, bool):
+            raise ValueError("3D kernel_spec.uses_paged_gather must be a bool")
+    if problem.block_size == 1 or uses_paged_gather:
         from .attention_paged_decode import validate_paged_decode
 
         arch = _resolve_attention_arch()

@@ -111,7 +111,7 @@ class Tensor:
         return 4096
 
 
-def inputs():
+def inputs(page=1):
     from kernels.common.attention_unified import UnifiedAttentionProblem
 
     p = UnifiedAttentionProblem(
@@ -120,7 +120,7 @@ def inputs():
         num_query_heads=8,
         num_kv_heads=2,
         head_size=64,
-        block_size=1,
+        block_size=page,
         max_seqlen_q=1,
         max_seqlen_k=33,
         dtype="fp16",
@@ -128,12 +128,12 @@ def inputs():
     )
     ts = [
         Tensor((3, 8, 64)),
-        Tensor((99, 1, 2, 64)),
-        Tensor((99, 1, 2, 64)),
+        Tensor((99, page, 2, 64)),
+        Tensor((99, page, 2, 64)),
         Tensor((3, 8, 64)),
         Tensor((4,), "torch.int32"),
         Tensor((3,), "torch.int32"),
-        Tensor((3, 33), "torch.int32"),
+        Tensor((3, (33 + page - 1) // page), "torch.int32"),
     ]
     return p, ts
 
@@ -209,12 +209,10 @@ def test_logical_tile_address_mapping(page, hd):
                         assert got == expected
 
 
-@pytest.mark.parametrize("arch", ["gfx942", "gfx950"])
-def test_runtime_rejects_invalid_gather_before_launch(arch, monkeypatch):
+def _paged_runtime_kwargs(arch, page):
     from dispatch.attention import AttentionRequest, dispatch_attention
-    from kernels.common import attention_unified as au
 
-    p, ts = inputs()
+    p, ts = inputs(page)
     p = replace(p, clamp_arch=arch)
     req = AttentionRequest(
         batch=3,
@@ -226,17 +224,12 @@ def test_runtime_rejects_invalid_gather_before_launch(arch, monkeypatch):
         hdim_v=64,
         arch=arch,
         dtype="fp16",
-        kv_block_size=1,
+        kv_block_size=page,
         target_ctas=8,
+        algorithm="paged_decode_t32",
     )
     spec = dispatch_attention(req).spec
-    monkeypatch.setattr(au, "_resolve_attention_arch", lambda: arch)
-
-    def forbidden(**kwargs):
-        pytest.fail("invalid gather reached launch")
-
-    monkeypatch.setattr(au, "_run_3d_tiled", forbidden)
-    kwargs = {
+    return {
         "problem": p,
         "q": ts[0],
         "k": ts[1],
@@ -250,6 +243,23 @@ def test_runtime_rejects_invalid_gather_before_launch(arch, monkeypatch):
         "backend": "3d",
         "tuning_spec": spec,
     }
+
+
+@pytest.mark.parametrize(
+    "arch,page",
+    [("gfx942", 1), ("gfx942", 16), ("gfx950", 1), ("gfx950", 16), ("gfx950", 64)],
+)
+def test_runtime_rejects_invalid_gather_before_launch(arch, page, monkeypatch):
+    from kernels.common import attention_unified as au
+
+    kwargs = _paged_runtime_kwargs(arch, page)
+    spec, p = kwargs["tuning_spec"], kwargs["problem"]
+    monkeypatch.setattr(au, "_resolve_attention_arch", lambda: arch)
+
+    def forbidden(**kwargs):
+        pytest.fail("invalid gather reached launch")
+
+    monkeypatch.setattr(au, "_run_3d_tiled", forbidden)
     bad = replace(
         spec,
         allow_unsupported=True,
@@ -265,6 +275,7 @@ def test_runtime_rejects_invalid_gather_before_launch(arch, monkeypatch):
 
     incomplete = asdict(spec.kernel_spec)
     del incomplete["kv_storage_dtype"]
+    incomplete["uses_paged_gather"] = True
     with pytest.raises(ValueError, match="kv_storage_dtype"):
         au.run_unified_attention_torch(
             **dict(
@@ -272,6 +283,53 @@ def test_runtime_rejects_invalid_gather_before_launch(arch, monkeypatch):
                 tuning_spec=replace(spec, kernel_spec=SimpleNamespace(**incomplete)),
             )
         )
+
+
+@pytest.mark.parametrize("arch", ["gfx942", "gfx950"])
+@pytest.mark.parametrize("page", [1, 16, 32, 64])
+@pytest.mark.parametrize("flag", ["missing", None, 0, "false"])
+@pytest.mark.parametrize("allow_unsupported", [False, True])
+def test_runtime_rejects_incomplete_loader_contract(
+    arch, page, flag, allow_unsupported, monkeypatch
+):
+    from types import SimpleNamespace
+
+    from kernels.common import attention_unified as au
+
+    kwargs = _paged_runtime_kwargs(arch, page)
+    concrete = replace(kwargs["tuning_spec"], allow_unsupported=allow_unsupported)
+    snapshot = asdict(concrete.kernel_spec)
+    if flag != "missing":
+        snapshot["uses_paged_gather"] = flag
+
+    class SnapshotAdapter:
+        kernel_spec = SimpleNamespace(**snapshot)
+
+        def __getattr__(self, name):
+            return getattr(concrete, name)
+
+        def with_num_kv_blocks(self, count):
+            pytest.fail("incomplete loader contract reached address retargeting")
+
+    def forbidden(**kwargs):
+        pytest.fail("incomplete loader contract reached launch")
+
+    monkeypatch.setattr(au, "_resolve_attention_arch", lambda: arch)
+    monkeypatch.setattr(au, "_run_3d_tiled", forbidden)
+    with pytest.raises(ValueError, match="uses_paged_gather"):
+        au.run_unified_attention_torch(**dict(kwargs, tuning_spec=SnapshotAdapter()))
+
+
+@pytest.mark.parametrize("arch", ["gfx942", "gfx950"])
+@pytest.mark.parametrize("page", [1, 16, 32, 64])
+def test_runtime_accepts_concrete_paged_loader_contract(arch, page, monkeypatch):
+    from kernels.common import attention_unified as au
+
+    kwargs = _paged_runtime_kwargs(arch, page)
+    monkeypatch.setattr(au, "_resolve_attention_arch", lambda: arch)
+    marker = object()
+    monkeypatch.setattr(au, "_run_3d_tiled", lambda **kw: marker)
+    assert au.run_unified_attention_torch(**kwargs) is marker
 
 
 @pytest.mark.parametrize("dim", [64, 128, 256])
@@ -284,6 +342,54 @@ def test_gfx942_page_one_default_uses_async_gather(dim, monkeypatch):
     spec = au._tiled_3d_spec_from_problem(p)
     assert spec.tile_size == 32 and spec.uses_paged_gather
     assert not spec.use_wide_kv_load
+
+
+@pytest.mark.parametrize(
+    "arch,path", [("gfx942", "2d"), ("gfx950", "2d"), ("gfx1250", "3d")]
+)
+def test_runtime_preserves_specs_without_gather_property(arch, path, monkeypatch):
+    from types import SimpleNamespace
+
+    from kernels.common import attention_unified as au
+
+    kwargs = _paged_runtime_kwargs("gfx950", 32)
+    p = replace(kwargs["problem"], clamp_arch=arch, dtype="bf16", num_query_heads=16)
+    for name in ("q", "out"):
+        kwargs[name].shape = (3, 16, 64)
+    for name in ("q", "k", "v", "out"):
+        kwargs[name].dtype = "torch.bfloat16"
+    monkeypatch.setattr(au, "_resolve_attention_arch", lambda: arch)
+    kernel = (
+        au._tiled_spec_from_problem(p)
+        if path == "2d"
+        else au._tiled_3d_spec_from_problem(p)
+    )
+    assert not hasattr(kernel, "uses_paged_gather")
+
+    class ReachedLegacyPath(Exception):
+        pass
+
+    def reached(*args, **kwargs):
+        raise ReachedLegacyPath
+
+    spec = SimpleNamespace(
+        arch=arch,
+        path=path,
+        kernel_spec=kernel,
+        compile_backend="llvm",
+        allow_unsupported=True,
+        cache_key=lambda: (),
+        build=reached,
+        launch_grid=reached,
+        launch_block=reached,
+        with_num_kv_blocks=lambda count: spec,
+    )
+    monkeypatch.setattr(au, "_run_3d_tiled", reached)
+    monkeypatch.setattr(au, "_get_2d_launcher", reached)
+    with pytest.raises(ReachedLegacyPath):
+        au.run_unified_attention_torch(
+            **dict(kwargs, problem=p, tuning_spec=spec, backend="auto")
+        )
 
 
 def test_gather_workspace_bound():

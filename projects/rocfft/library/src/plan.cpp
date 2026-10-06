@@ -2583,10 +2583,13 @@ std::vector<size_t> rocfft_plan_t::GlobalTranspose(const field_view_t&        in
         // GlobalTransposeRCCL appends to multiPlan as it builds,
         // on failure roll back to this size so the fallback path does not
         // run alongside orphaned RCCL items
-        const size_t multiPlanRollback = multiPlan.size();
+        const size_t        multiPlanRollback = multiPlan.size();
+        std::vector<size_t> ret;
+        int                 rccl_ok = 0;
         try
         {
-            return GlobalTransposeRCCL(input, output, antecedents);
+            ret     = GlobalTransposeRCCL(input, output, antecedents);
+            rccl_ok = 1;
         }
         catch(const std::exception& e)
         {
@@ -2603,6 +2606,21 @@ std::vector<size_t> rocfft_plan_t::GlobalTranspose(const field_view_t&        in
                        "falling back to P2P/A2A"
                     << std::endl;
         }
+#ifdef ROCFFT_MPI_ENABLE
+        // all ranks must pick the same path, else RCCL and MPI peers wait on each other
+        if(desc.get_local_comm_size() > 1)
+        {
+            if(MPI_Allreduce(MPI_IN_PLACE, &rccl_ok, 1, MPI_INT, MPI_MIN, desc.mpi_comm)
+               != MPI_SUCCESS)
+                throw std::runtime_error("MPI_Allreduce failed in " + ROCFFT_CURRENT_FUNCTION);
+            if(!rccl_ok && LOG_PLAN_ENABLED())
+                *LogSingleton::GetInstance().GetPlanOS()
+                    << "GlobalTransposeRCCL failed on some ranks, falling back to P2P/A2A"
+                    << std::endl;
+        }
+#endif
+        if(rccl_ok)
+            return ret;
 
         // discard any partially-built RCCL items before falling back
         multiPlan.resize(multiPlanRollback);

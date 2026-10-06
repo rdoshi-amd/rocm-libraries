@@ -135,6 +135,7 @@ rocke_unified_attention_3d_tiled_spec_t rocke_unified_attention_3d_tiled_spec_de
     s.tile_size_override = 0;
     s.use_invariant_hoist = false;
     s.use_wide_kv_load = false;
+    s.causal_top_left = 0;
     return s;
 }
 
@@ -235,7 +236,8 @@ int rocke_unified_attention_3d_tiled_spec_kernel_name(
      *   "sinks" if use_sinks else "",
      *   "sw<sw>" if sw>0 else "", "softcap" if has_softcap else "",
      *   "alibi" if use_alibi else "", "qqb" if use_qq_bias else "",
-     *   "hoist" if use_invariant_hoist else "", "wkv" if use_wide_kv_load else "")
+     *   "hoist" if use_invariant_hoist else "", "wkv" if use_wide_kv_load else "",
+     *   "tl" if causal_top_left else "")
      *
      * The whole thing is a positional parts list (NOT flags=...): empty parts
      * are skipped by kernel_name_join. We materialise each part string and feed
@@ -246,7 +248,7 @@ int rocke_unified_attention_3d_tiled_spec_kernel_name(
     char seg_part[32];
     char kv_part[32];
     char sw_part[32];
-    const char* parts[16];
+    const char* parts[20];
     size_t np = 0;
     size_t out_len = 0;
     rocke_status_t st;
@@ -301,6 +303,10 @@ int rocke_unified_attention_3d_tiled_spec_kernel_name(
     if(s->use_wide_kv_load)
     {
         parts[np++] = "wkv";
+    }
+    if(s->causal_top_left)
+    {
+        parts[np++] = "tl";
     }
 
     /* kernel_name_join takes prefix + parts; we pass everything as parts with a

@@ -298,19 +298,32 @@ static bool IsSupportedProblem(const ProblemDescription& problem)
                                                   problem.GetOut().GetLengths());
 }
 
-static std::string HipConvKernelLabel(hipconv::ConvKernelHandle kernel);
+// A config's perf-db record, "<config_version>:family[full description]".
+//
+// A full description selects one config only within a hipconv minor version, so a record
+// from another version, or from a build with no version, must match nothing.
+static std::string HipConvConfigRecord(hipconv::ConvKernelHandle kernel)
+{
+    auto record = std::string{hipconv::config_version()} + ":" + std::string{hipconv::name(kernel)};
+    const auto config = hipconv::describe_config(kernel, true);
+    if(!config.empty())
+        record += "[" + config + "]";
+    return record;
+}
 
-// Resolve `config.descriptor` (arch-neutral name) to `config.index` for this
-// build's config enumeration `cfgs`, by matching kernel labels. No-op when the
-// index is already set (search / heuristic path) or the descriptor is empty.
+// Resolve `config.descriptor` (a perf-db record) to `config.index` for this
+// build's config enumeration `cfgs`. No-op when the index is already set
+// (search / heuristic path) or the descriptor is empty.
 static void ResolveIndexFromDescriptor(const std::vector<hipconv::ConvKernelHandle>& cfgs,
                                        const PerformanceConfigConvHipConv& config)
 {
     if(config.index >= 0 || config.descriptor.empty())
         return;
+    if(hipconv::config_version() == "unknown")
+        return;
     for(int i = 0; i < static_cast<int>(cfgs.size()); ++i)
     {
-        if(HipConvKernelLabel(cfgs[i]) == config.descriptor)
+        if(HipConvConfigRecord(cfgs[i]) == config.descriptor)
         {
             config.index = i;
             return;
@@ -409,7 +422,7 @@ void PerformanceConfigConvHipConv::InitFromArch(const void* arch, const ProblemD
         hipconv::get_valid_configs(static_cast<hipconv::ArchHandle>(arch), par, MAX_CONFIGS);
     config_count = static_cast<int>(cfgs.size());
     index        = cfgs.empty() ? -1 : 0;
-    descriptor   = cfgs.empty() ? std::string{} : HipConvKernelLabel(cfgs[0]);
+    descriptor   = cfgs.empty() ? std::string{} : HipConvConfigRecord(cfgs[0]);
 }
 
 void PerformanceConfigConvHipConv::HeuristicInit(const ExecutionContext& ctx,
@@ -443,15 +456,14 @@ bool PerformanceConfigConvHipConv::IsValid(const ExecutionContext& ctx,
     // (generic_search.hpp) calls IsValid before every SetNextValue.
     config_count = static_cast<int>(cfgs.size());
 
-    // Perf-config-picker / db-load path: resolve the arch-neutral descriptor to
-    // this build's local index by matching kernel labels.
+    // Perf-config-picker / db-load path: resolve the record to this build's local index.
     ResolveIndexFromDescriptor(cfgs, *this);
 
     if(!IsValidValue() || index >= config_count)
         return false;
     // Search path: keep the serialized descriptor in sync with the index, so a
-    // benchmarked pick is stored (and transfers across arches) by name.
-    descriptor = HipConvKernelLabel(cfgs[index]);
+    // benchmarked pick is stored by name.
+    descriptor = HipConvConfigRecord(cfgs[index]);
     return true;
 }
 

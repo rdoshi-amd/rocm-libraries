@@ -4639,11 +4639,11 @@ struct MIOPEN_INTERNALS_EXPORT ConvDepthwiseFwd3D final : ConvSolver
                              const miopen::conv::ProblemDescription&) const override;
 };
 
-// ConvHipConv tuning state: a hipconv kernel label, resolved to a config index at runtime.
-// Serialized whole because PerfConfigBase's field-wise format splits on the label's commas.
+// ConvHipConv tuning state: a hipconv config record, resolved to a config index at runtime.
+// Serialized whole because PerfConfigBase's field-wise format splits on the record's commas.
 struct PerformanceConfigConvHipConv : PerfConfig
 {
-    // Arch-neutral label, "family[field=value,...]"; the perf-db and the picker store it.
+    // Perf-db record, "<hipconv config_version>:family[field=value,...]" with every field.
     // mutable because IsValid() sets it from `index` on a const config after a search.
     mutable std::string descriptor;
 

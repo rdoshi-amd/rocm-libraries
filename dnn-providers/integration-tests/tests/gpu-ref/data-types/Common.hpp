@@ -9,6 +9,7 @@
 
 #include <hipdnn-gpu-ref/detail/GpuRefHipError.hpp>
 #include <hipdnn-gpu-ref/detail/GpuRefKernelCompiler.hpp>
+#include <hipdnn-gpu-ref/detail/GpuRefLaunch.hpp>
 #include <hipdnn-gpu-ref/detail/HipRtcTypeName.hpp>
 #include <hipdnn_data_sdk/utilities/Tensor.hpp>
 
@@ -67,31 +68,9 @@ void deviceDataCast(const std::vector<InputType>& input, std::vector<OutputType>
     args.output = outputTensor.memory().deviceData();
     args.count = static_cast<long long>(elementCount);
 
-    // TODO: Replace kernel launch with the utility function after rebase!!!
     const auto gridSize = (elementCount + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    auto argsSize = sizeof(args);
-    // NOLINTNEXTLINE(modernize-avoid-c-arrays)
-    void* config[] = {HIP_LAUNCH_PARAM_BUFFER_POINTER,
-                      &args,
-                      HIP_LAUNCH_PARAM_BUFFER_SIZE,
-                      &argsSize,
-                      HIP_LAUNCH_PARAM_END};
-
-    hipdnn_gpu_ref::detail::throwOnHipError(
-        hipModuleLaunchKernel(kernel.function(),
-                              static_cast<unsigned int>(gridSize),
-                              1,
-                              1,
-                              BLOCK_SIZE,
-                              1,
-                              1,
-                              0,
-                              nullptr,
-                              nullptr,
-                              config),
-        "hipModuleLaunchKernel failed");
-
-    hipdnn_gpu_ref::detail::throwOnHipError(hipDeviceSynchronize(), "hipDeviceSynchronize failed");
+    hipdnn_gpu_ref::detail::launchKernel1d(
+        kernel.function(), gridSize, BLOCK_SIZE, &args, sizeof(args));
 
     outputTensor.markDeviceModified();
     std::memcpy(output.data(),
@@ -129,30 +108,8 @@ std::vector<T> deviceNegate(const std::vector<T>& input)
     args.count = static_cast<long long>(elementCount);
 
     const auto gridSize = (elementCount + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    auto argsSize = sizeof(args);
-
-    // NOLINTNEXTLINE(modernize-avoid-c-arrays)
-    void* config[] = {HIP_LAUNCH_PARAM_BUFFER_POINTER,
-                      &args,
-                      HIP_LAUNCH_PARAM_BUFFER_SIZE,
-                      &argsSize,
-                      HIP_LAUNCH_PARAM_END};
-
-    hipdnn_gpu_ref::detail::throwOnHipError(
-        hipModuleLaunchKernel(kernel.function(),
-                              static_cast<unsigned int>(gridSize),
-                              1,
-                              1,
-                              BLOCK_SIZE,
-                              1,
-                              1,
-                              0,
-                              nullptr,
-                              nullptr,
-                              config),
-        "hipModuleLaunchKernel failed");
-
-    hipdnn_gpu_ref::detail::throwOnHipError(hipDeviceSynchronize(), "hipDeviceSynchronize failed");
+    hipdnn_gpu_ref::detail::launchKernel1d(
+        kernel.function(), gridSize, BLOCK_SIZE, &args, sizeof(args));
 
     outputTensor.markDeviceModified();
     std::vector<T> output(static_cast<size_t>(elementCount));
@@ -194,30 +151,8 @@ std::vector<StateFlags> deviceQueryState(const std::vector<T>& input)
     args.count = static_cast<long long>(elementCount);
 
     const auto gridSize = (elementCount + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    auto argsSize = sizeof(args);
-
-    // NOLINTNEXTLINE(modernize-avoid-c-arrays)
-    void* config[] = {HIP_LAUNCH_PARAM_BUFFER_POINTER,
-                      &args,
-                      HIP_LAUNCH_PARAM_BUFFER_SIZE,
-                      &argsSize,
-                      HIP_LAUNCH_PARAM_END};
-
-    hipdnn_gpu_ref::detail::throwOnHipError(
-        hipModuleLaunchKernel(kernel.function(),
-                              static_cast<unsigned int>(gridSize),
-                              1,
-                              1,
-                              BLOCK_SIZE,
-                              1,
-                              1,
-                              0,
-                              nullptr,
-                              nullptr,
-                              config),
-        "hipModuleLaunchKernel failed");
-
-    hipdnn_gpu_ref::detail::throwOnHipError(hipDeviceSynchronize(), "hipDeviceSynchronize failed");
+    hipdnn_gpu_ref::detail::launchKernel1d(
+        kernel.function(), gridSize, BLOCK_SIZE, &args, sizeof(args));
 
     flagsTensor.markDeviceModified();
     const auto* rawFlags = static_cast<const uint8_t*>(flagsTensor.memory().hostData());

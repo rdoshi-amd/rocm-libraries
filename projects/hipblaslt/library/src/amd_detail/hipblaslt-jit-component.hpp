@@ -2,11 +2,18 @@
 // SPDX-License-Identifier: MIT
 #pragma once
 
+#include "hipblaslt-jit-backend.hpp"
 #include <cstdint>
 #include <filesystem>
+#include <hip/hip_runtime_api.h>
 #include <memory>
 #include <string>
 #include <vector>
+
+namespace TensileLite
+{
+    class Hardware;
+}
 
 // Compiled-in stages of JIT solution generation. This is not a plugin ABI.
 namespace hipblaslt_jit
@@ -107,4 +114,124 @@ namespace hipblaslt_jit
     // Builds every unit of a solution with comgr and links them into one code
     // object for BuildRequest::targetId.
     std::shared_ptr<const CodeObjectBuilder> makeComgrBuilder();
+
+    using OperationRequest = hipblaslt_ext::experimental::jit::detail::OperationRequest;
+    using KernelBundle     = hipblaslt_ext::experimental::jit::detail::KernelBundle;
+
+    // "configure", "generate", ... as reports name stages.
+    const char* toString(Stage stage) noexcept;
+
+    struct DeviceTarget
+    {
+        int             device = -1;
+        hipDeviceProp_t properties{};
+        std::string     targetId; // gcnArchName, e.g. "gfx950:sramecc+:xnack-"
+        std::string     isa; // targetId up to the first ':'
+        std::string     libraryArch; // GEMM library subtree, e.g. "gfx1250v0"
+        int             wavefrontSize = 0;
+        int             cuCount       = 0;
+        std::shared_ptr<TensileLite::Hardware> hardware;
+
+        static Status make(int device, DeviceTarget& target);
+    };
+
+    struct GenerationRequest
+    {
+        const OperationRequest&  request;
+        const DeviceTarget&      target;
+        size_t                   count      = 1;
+        size_t                   workspaceLimit = 0;
+        std::vector<std::string> excludeKernels; // kernels the caller already has
+        std::filesystem::path    scratch; // private directory owned by this call
+        int codeObjectVersion = jitCodeObjectVersion; // for generators and the builder
+    };
+
+    struct BackendInfo
+    {
+        std::string id;
+        std::string name; // reported as Diagnostics::backend
+        std::string version; // changes whenever the generated solutions can change
+    };
+
+    class Backend
+    {
+    public:
+        virtual ~Backend()                               = default;
+        virtual const BackendInfo& info() const noexcept = 0;
+        // Returns up to request.count solutions and loads nothing. NotSupported
+        // means the request is outside the backend's domain.
+        virtual Status generate(const GenerationRequest&, std::vector<GeneratedSolution>&) const
+            = 0;
+    };
+
+    class SolutionLoader
+    {
+    public:
+        virtual ~SolutionLoader() = default;
+        // Evaluates the entry's predicates and workspace for the request. Loads no code.
+        virtual Status support(const BuiltSolution&,
+                               const OperationRequest&,
+                               const DeviceTarget&,
+                               size_t workspaceLimit) const
+            = 0;
+        // Loads the code objects into a process-local executable bundle.
+        virtual Status load(const BuiltSolution&,
+                            const OperationRequest&,
+                            const DeviceTarget&,
+                            size_t                               workspaceLimit,
+                            std::shared_ptr<const KernelBundle>& bundle) const
+            = 0;
+    };
+
+    class Jit
+    {
+    public:
+        struct Components
+        {
+            std::shared_ptr<const Backend>           backend;
+            std::shared_ptr<const CodeObjectBuilder> builder;
+            std::shared_ptr<const SolutionLoader>    loader;
+        };
+
+        struct Outcome
+        {
+            std::vector<std::shared_ptr<const KernelBundle>> bundles; // loaded, best first
+            std::vector<Status>                              failures; // in the order they happened
+            std::string                                      summary; // the backend's success note
+        };
+
+        // Throws std::invalid_argument when a required component is missing.
+        explicit Jit(Components components);
+
+        // Generate, build, check support and load. Returns at most count
+        // solutions that support the request. Thread-safe. Sets the stage of
+        // every failure it reports.
+        Outcome generate(const OperationRequest&         request,
+                         const DeviceTarget&             target,
+                         size_t                          count,
+                         size_t                          workspaceLimit,
+                         const std::vector<std::string>& excludeKernels) const;
+
+        const Components& components() const noexcept
+        {
+            return m_components;
+        }
+
+    private:
+        Components m_components;
+    };
+}
+
+namespace hipblaslt_ext::experimental::jit::detail
+{
+    struct CompiledSolution
+    {
+        hipblaslt_jit::DeviceTarget               target;
+        std::shared_ptr<const OperationRequest>   request;
+        std::shared_ptr<const hipblaslt_jit::Jit> jit;
+        std::shared_ptr<const KernelBundle>       bundle;
+        uint64_t                                  process        = 0;
+        size_t                                    workspaceLimit = 0;
+        size_t                                    workspaceBytes = 0;
+    };
 }

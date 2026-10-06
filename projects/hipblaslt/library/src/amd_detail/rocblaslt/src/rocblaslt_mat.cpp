@@ -179,18 +179,13 @@ rocblaslt_status rocblaslt_matmul_impl(const rocblaslt_handle       handle,
     }
 
     void*                  streamKFlags = nullptr;
-#ifdef HIPBLASLT_ENABLE_JIT
-    if(!algo || !hipblaslt_ext::experimental::detail::isJitAlgo(*algo))
-#endif
+    const rocblaslt_status skStatus     = handle->streamKFlagsForStream(stream, 0, &streamKFlags);
+    if(skStatus != rocblaslt_status_success)
     {
-        const rocblaslt_status skStatus = handle->streamKFlagsForStream(stream, 0, &streamKFlags);
-        if(skStatus != rocblaslt_status_success)
-        {
-            log_error(__func__,
-                      "no Stream-K flag region left: this handle has already handed one to "
-                      "c_syncSkStreamSlots distinct streams");
-            return skStatus;
-        }
+        log_error(__func__,
+                  "no Stream-K flag region left: this handle has already handed one to "
+                  "c_syncSkStreamSlots distinct streams");
+        return skStatus;
     }
 
     RocblasltContractionProblem problem{opA,

@@ -15,21 +15,6 @@ namespace hipblaslt_ext::experimental::jit::detail
         virtual std::string_view kind() const noexcept = 0;
     };
 
-    struct ExecutionContext
-    {
-        hipblasLtHandle_t handle;
-        void*             workspace;
-        size_t            workspaceBytes;
-        hipStream_t       stream;
-    };
-
-    struct PreparedLaunch
-    {
-        virtual ~PreparedLaunch() = default;
-        virtual hipblasStatus_t run(hipStream_t stream, hipEvent_t start, hipEvent_t stop) const
-            = 0;
-    };
-
     struct KernelBundle
     {
         virtual ~KernelBundle()                                 = default;
@@ -40,12 +25,6 @@ namespace hipblaslt_ext::experimental::jit::detail
                                          size_t                  workspaceLimit,
                                          size_t&                 workspaceBytes,
                                          Diagnostics&            diagnostics) const
-            = 0;
-        // Resolve every required symbol before submitting any GPU work.
-        virtual hipblasStatus_t prepare(const OperationRequest&                request,
-                                        const ExecutionContext&                execution,
-                                        std::shared_ptr<const PreparedLaunch>& launch,
-                                        Diagnostics&                           diagnostics) const
             = 0;
     };
 

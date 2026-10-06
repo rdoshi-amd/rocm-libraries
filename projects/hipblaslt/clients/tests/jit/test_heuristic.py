@@ -15,6 +15,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import time
 
@@ -384,15 +385,16 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("executable", type=Path)
     parser.add_argument("route", choices=ROUTES)
-    parser.add_argument("fresh_output", type=Path)
+    parser.add_argument("output", type=Path, help="a directory this run empties first")
     parser.add_argument(
         "--replay", action="append", type=Path, help="a bundle for the test backend to replay"
     )
     args = parser.parse_args()
     if (args.route != "jit-off") != bool(args.replay):
         parser.error("--replay is required for every route but jit-off")
-    args.fresh_output.mkdir(parents=True, exist_ok=False)
-    output = args.fresh_output.resolve()
+    shutil.rmtree(args.output, ignore_errors=True)
+    args.output.mkdir(parents=True)
+    output = args.output.resolve()
     replay = args.replay and os.pathsep.join(str(path.resolve(strict=True)) for path in args.replay)
     runner = Runner(args.executable.resolve(strict=True), output, replay)
     ROUTES[args.route](runner, output)

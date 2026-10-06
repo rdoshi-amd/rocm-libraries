@@ -9,7 +9,6 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
-#include <zlib.h>
 
 namespace hipblaslt_jit::source_bundle
 {
@@ -48,50 +47,6 @@ namespace hipblaslt_jit::source_bundle
         return bytes;
     }
 
-    inline std::vector<uint8_t> readLibrary(const fs::path& path)
-    {
-        auto bytes = readArtifact(path);
-        if(path.extension() != ".zlib")
-            return bytes;
-        struct Inflater
-        {
-            z_stream stream{};
-            Inflater()
-            {
-                require(inflateInit(&stream) == Z_OK, "Cannot initialize library decoder");
-            }
-            ~Inflater()
-            {
-                inflateEnd(&stream);
-            }
-        } decoder;
-        auto& stream               = decoder.stream;
-        stream.next_in             = bytes.data();
-        stream.avail_in            = static_cast<uInt>(bytes.size());
-        constexpr size_t     chunk = 64 * 1024, limit = 64 * 1024 * 1024;
-        std::vector<uint8_t> decoded;
-        int                  status;
-        do
-        {
-            require(decoded.size() < limit, "Decoded solution library is too large");
-            const auto offset         = decoded.size();
-            const auto inputRemaining = stream.avail_in;
-            decoded.resize(offset + chunk);
-            stream.next_out  = decoded.data() + offset;
-            stream.avail_out = chunk;
-            status           = inflate(&stream, Z_NO_FLUSH);
-            require(status == Z_OK || status == Z_STREAM_END,
-                    "Invalid compressed solution library");
-            decoded.resize(offset + chunk - stream.avail_out);
-            require(status == Z_STREAM_END || decoded.size() > offset
-                        || stream.avail_in < inputRemaining,
-                    "Truncated compressed solution library");
-        } while(status != Z_STREAM_END);
-        require(stream.avail_in == 0 && !decoded.empty(),
-                "Trailing or empty solution library data");
-        return decoded;
-    }
-
     struct SourceFile
     {
         std::string          name;
@@ -99,12 +54,12 @@ namespace hipblaslt_jit::source_bundle
     };
 
     // The build inputs of a TensileLite source bundle, found by directory
-    // convention: library/TensileLibrary.* is the solution library entry,
-    // sources/*.s are the main kernels, sources/Kernels.cpp holds the helper
-    // kernels, and every other file in sources/ is a header they include.
+    // convention: library/TensileLibrary.dat is the MsgPack solution library
+    // entry, sources/*.s are the main kernels, sources/Kernels.cpp holds the
+    // helper kernels, and every other file in sources/ is a header they include.
     struct SourceBundle
     {
-        std::vector<uint8_t>    library; // decoded
+        std::vector<uint8_t>    library;
         std::vector<SourceFile> assembly; // by name
         std::vector<SourceFile> helpers;
         std::vector<SourceFile> headers; // by name
@@ -114,15 +69,7 @@ namespace hipblaslt_jit::source_bundle
     {
         constexpr size_t fileLimit = 1024, byteLimit = 256 * 1024 * 1024;
         SourceBundle     result;
-        std::vector<fs::path> libraries;
-        for(const char* name : {"library/TensileLibrary.dat.zlib",
-                                "library/TensileLibrary.dat",
-                                "library/TensileLibrary.yaml"})
-            if(fs::exists(bundle / name))
-                libraries.push_back(artifact(bundle, name));
-        require(libraries.size() == 1,
-                "Expected one solution library in " + (bundle / "library").u8string());
-        result.library = readLibrary(libraries.front());
+        result.library = readArtifact(artifact(bundle, "library/TensileLibrary.dat"));
 
         const auto sources = artifact(bundle, "sources", false);
         require(fs::is_directory(sources), "Missing source directory: " + sources.u8string());

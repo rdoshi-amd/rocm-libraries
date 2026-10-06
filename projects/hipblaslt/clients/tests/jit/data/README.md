@@ -6,7 +6,7 @@ through the mock backend, so they need neither Python nor a generator.
 
 | Path | Contents |
 | --- | --- |
-| `library/TensileLibrary.dat.zlib` | The one-solution library entry (MsgPack, zlib-compressed) |
+| `library/TensileLibrary.dat` | The one-solution library entry (MsgPack, uncompressed) |
 | `sources/<kernel>.s` | The main kernel assembly; exactly one |
 | `sources/Kernels.cpp`, `sources/Kernels.h` | Helper kernel source, when the solution needs helpers |
 | Other `sources/*.h` files | Headers that `Kernels.cpp` includes |
@@ -45,6 +45,8 @@ cannot read its library entry or comgr cannot build its sources. The committed
 bundles are then stale. Regenerate every bundle with the commands above, with
 `PYTHONPATH` naming the `tensilelite/rocisa` and `tensilelite` directories of a
 hipBLASLt build and then `projects/hipblaslt/tensilelite`. Copy each bundle
-without symbolic links, remove `provenance.compiler_path` from its manifest,
-update the bundle table, and commit the bundles with the change that made them
-stale.
+without symbolic links, inflate the generator's `library/TensileLibrary.dat.zlib`
+into `library/TensileLibrary.dat` and point the manifest's `library.path` at it,
+remove `provenance.compiler_path` from the manifest, update the bundle table,
+and commit the bundles with the change that made them stale. No zlib-compressed
+file is committed.

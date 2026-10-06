@@ -4,9 +4,10 @@
 """Regenerate the committed JIT test bundles in clients/tests/jit/data.
 
 Runs the TensileLite generators with --source-only from this checkout, copies
-each bundle without symbolic links, removes the compiler path from its
-manifest and rewrites data/README.md. Run it with the Python interpreter of a
-hipBLASLt build when the bundle freshness test reports stale bundles.
+each bundle without symbolic links, stores its library entry uncompressed,
+removes the compiler path from its manifest and rewrites data/README.md. Run it
+with the Python interpreter of a hipBLASLt build when the bundle freshness test
+reports stale bundles.
 """
 
 import argparse
@@ -17,6 +18,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import zlib
 
 PROJECT = Path(__file__).resolve().parents[3]
 TENSILE = PROJECT / "tensilelite"
@@ -84,7 +86,7 @@ through the mock backend, so they need neither Python nor a generator.
 
 | Path | Contents |
 | --- | --- |
-| `library/TensileLibrary.dat.zlib` | The one-solution library entry (MsgPack, zlib-compressed) |
+| `library/TensileLibrary.dat` | The one-solution library entry (MsgPack, uncompressed) |
 | `sources/<kernel>.s` | The main kernel assembly; exactly one |
 | `sources/Kernels.cpp`, `sources/Kernels.h` | Helper kernel source, when the solution needs helpers |
 | Other `sources/*.h` files | Headers that `Kernels.cpp` includes |
@@ -118,9 +120,11 @@ cannot read its library entry or comgr cannot build its sources. The committed
 bundles are then stale. Regenerate every bundle with the commands above, with
 `PYTHONPATH` naming the `tensilelite/rocisa` and `tensilelite` directories of a
 hipBLASLt build and then `projects/hipblaslt/tensilelite`. Copy each bundle
-without symbolic links, remove `provenance.compiler_path` from its manifest,
-update the bundle table, and commit the bundles with the change that made them
-stale.
+without symbolic links, inflate the generator's `library/TensileLibrary.dat.zlib`
+into `library/TensileLibrary.dat` and point the manifest's `library.path` at it,
+remove `provenance.compiler_path` from the manifest, update the bundle table,
+and commit the bundles with the change that made them stale. No zlib-compressed
+file is committed.
 """
 
 
@@ -173,11 +177,19 @@ def main():
         shutil.rmtree(target, ignore_errors=True)
         shutil.copytree(generated, target, symlinks=False)
         manifest = json.loads((target / "manifest.json").read_text())
+        library = target / "library" / "TensileLibrary.dat"
+        compressed = library.with_name(library.name + ".zlib")
+        if compressed.exists():
+            library.write_bytes(zlib.decompress(compressed.read_bytes()))
+            compressed.unlink()
+            manifest["library"]["path"] = "library/TensileLibrary.dat"
         manifest["provenance"].pop("compiler_path", None)
         (target / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
         assembly = list((target / "sources").glob("*.s"))
         if len(assembly) != 1 or any(path.is_symlink() for path in target.rglob("*")):
             raise RuntimeError(f"{name}: expected one .s file and no symbolic links")
+        if any(path.suffix == ".zlib" for path in target.rglob("*")):
+            raise RuntimeError(f"{name}: a zlib-compressed file would be committed")
         print(f"{name}: {manifest['main_kernel']['name']}")
     rows = "\n".join(
         f"| `gfx950/{name}` | {BUNDLES[name][4]} | {command(name)} |" for name in BUNDLES

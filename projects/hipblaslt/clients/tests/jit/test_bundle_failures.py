@@ -17,6 +17,7 @@ import re
 import shutil
 import subprocess
 import sys
+import zlib
 
 # Build failures name the comgr log; the others fail while the backend reads
 # the bundle, or at launch.
@@ -64,13 +65,18 @@ def damage(bundle, case, outside):
         main.write_text(main.read_text() + "\n  s_not_an_instruction v0\n")
     if case == "broken-helper-source":
         helpers[0].write_text(helpers[0].read_text() + "\nthis is not C++;\n")
-    if case == "corrupt-library":
-        (bundle / data["library"]["path"]).write_bytes(b"bad library")
-    if case == "truncated-library":
+    if case in ("corrupt-library", "truncated-library"):
+        # Generators write the entry zlib-compressed; committed bundles store it inflated.
         library = bundle / data["library"]["path"]
-        assert library.suffix == ".zlib"
-        encoded = library.read_bytes()
-        library.write_bytes(encoded[: len(encoded) // 2])
+        if library.suffix == ".zlib":
+            encoded = library.read_bytes()
+        else:
+            encoded = zlib.compress(library.read_bytes())
+            library.unlink()
+            library = library.with_name(library.name + ".zlib")
+        library.write_bytes(
+            b"bad library" if case == "corrupt-library" else encoded[: len(encoded) // 2]
+        )
     if case == "missing-symbol":
         name = data["main_kernel"]["name"]
         text = main.read_text()
@@ -87,22 +93,23 @@ def damage(bundle, case, outside):
     if case == "mismatched-amax":
         import msgpack
         import yaml
-        import zlib
 
         path = bundle / data["library"]["path"]
         packed = data["library"]["format"] == "msgpack"
-        library = (
-            msgpack.unpackb(zlib.decompress(path.read_bytes()), raw=False)
-            if packed
-            else yaml.safe_load(path.read_text())
-        )
+        compressed = path.suffix == ".zlib"
+        if packed:
+            encoded = path.read_bytes()
+            library = msgpack.unpackb(zlib.decompress(encoded) if compressed else encoded, raw=False)
+        else:
+            library = yaml.safe_load(path.read_text())
         solution = library["solutions"][0]
         solution["problemType"]["outputAmaxD"] = True
         checks = [p for p in solution["problemPredicate"]["value"] if p["type"] == "AmaxDCheck"]
         assert len(checks) == 1
         checks[0]["value"] = True
         if packed:
-            path.write_bytes(zlib.compress(msgpack.packb(library)))
+            encoded = msgpack.packb(library)
+            path.write_bytes(zlib.compress(encoded) if compressed else encoded)
         else:
             path.write_text(yaml.safe_dump(library))
 

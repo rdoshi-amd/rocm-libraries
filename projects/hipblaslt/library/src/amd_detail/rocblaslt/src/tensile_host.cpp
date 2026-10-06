@@ -5859,6 +5859,23 @@ std::string getSolutionNameFromData(rocblaslt_handle             handle,
     return solutionName;
 }
 
+#ifdef HIPBLASLT_ENABLE_JIT
+bool skipJitHeuristic(rocblaslt_handle handle, const RocblasltContractionProblem& problem)
+{
+    (void)handle;
+    (void)problem;
+    return false;
+}
+
+const RocblasltContractionProblem* savedGemmProblem(const std::shared_ptr<void>& gemmData)
+{
+    auto data = std::static_pointer_cast<TensileDataGemm>(gemmData);
+    if(!data || !data->jitRequest)
+        return nullptr;
+    return &data->jitRequest->problem;
+}
+#endif
+
 std::string getKernelNameFromAlgoIndex(rocblaslt_handle handle, const rocblaslt_matmul_algo& algo)
 {
 #ifdef HIPBLASLT_ENABLE_JIT

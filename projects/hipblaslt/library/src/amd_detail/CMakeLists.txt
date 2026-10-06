@@ -13,8 +13,9 @@ target_sources(hipblaslt
 )
 
 if(HIPBLASLT_ENABLE_JIT)
+    find_package(ZLIB REQUIRED)
     find_package(amd_comgr CONFIG REQUIRED)
-    target_link_libraries(hipblaslt PRIVATE amd_comgr)
+    target_link_libraries(hipblaslt PRIVATE ZLIB::ZLIB amd_comgr)
     target_compile_definitions(hipblaslt PRIVATE HIPBLASLT_ENABLE_JIT)
     target_sources(hipblaslt PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/hipblaslt-jit-code-object.cpp"

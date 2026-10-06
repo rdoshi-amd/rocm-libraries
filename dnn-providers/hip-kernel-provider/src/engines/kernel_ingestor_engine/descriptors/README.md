@@ -88,9 +88,26 @@ dvc pull -r ingestor dnn-providers/hip-kernel-provider/src/engines/kernel_ingest
 cd .../descriptors/rocKE
 dvc add <bundle>
 printf '  remote: ingestor\n' >> <bundle>.dvc   # add under the single outs entry
-dvc push -r ingestor                            # needs S3 write access
+dvc push -r ingestor                            # needs S3 write access, see below
 git add <bundle>.dvc .gitignore
 ```
+
+**Pushing needs a signed request.** The committed `.dvc/config` sets
+`allow_anonymous_login = true` on `ingestor` so that CI and `fetch_sources` can pull
+without credentials. With that setting DVC sends unsigned requests, ignores your AWS
+credentials, and every write fails with `AccessDenied`. Override it locally; the override
+goes in `.dvc/config.local`, which git ignores, so the committed value stays `true`:
+
+```
+dvc remote modify --local ingestor allow_anonymous_login false
+AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... dvc push -r ingestor
+```
+
+Pass the credentials as environment variables for the one command. Do not write them into
+any config file. The identity needs `s3:PutObject` and `s3:ListBucket` on
+`s3://therock-dvc/rocm-libraries/hipdnn/ingestor/`. `dvc push -r ingestor` uploads every
+object in your local cache, not only this bundle, so do not pull other remotes' data
+into the same worktree before pushing.
 
 Commit the `.dvc` file in the same change as the push. A changed file changes the folder
 md5, so the pointer must be updated whenever the folder content changes.

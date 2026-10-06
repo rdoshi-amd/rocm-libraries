@@ -697,7 +697,7 @@ bool rocke_conv_build_ctx_init(rocke_conv_build_ctx_t* ctx,
          * and only the inner c is stride-1, so a chunk wider than cpg -- or one
          * that does not divide it -- would straddle a filter position and fetch
          * the wrong elements with no diagnostic. Mirrors the Python call. */
-        const int cpg = rocke_conv_problem_cpg(ctx->p_load);
+        const int cpg = rocke_conv_problem_cpg(ctx->p);
         rocke_status_t sa = rocke_async_tile_loader_from_tile(
             ctx->block_m, ctx->block_k, ctx->threads, spec->wave_size, 4, cpg, &ctx->a_loader);
         rocke_status_t sb = rocke_async_tile_loader_from_tile(
@@ -731,7 +731,7 @@ bool rocke_conv_build_ctx_init(rocke_conv_build_ctx_t* ctx,
         ctx->wavelet_n_math_warps = spec->warp_m * spec->warp_n;
         ctx->wavelet_math_block_size = rocke_implicit_gemm_conv_spec_block_size(spec);
         ctx->wavelet_K_iters
-            = (rocke_conv_problem_k_gemm(ctx->p_load) + ctx->block_k - 1) / ctx->block_k;
+            = (rocke_conv_problem_k_gemm(ctx->p) + ctx->block_k - 1) / ctx->block_k;
         /* epi_barriers = (no_alias ? 0 : war_barriers) + 1 (RAW), war_barriers=2 for wavelet.
          * This formula is the C++ mirror of CShuffleEpilogue.compute_barrier_count; both must
          * stay in sync.  war_barriers=2: one WAR before the cshuffle store (load waves overwrote

@@ -1457,6 +1457,7 @@ void fill_conv_problem(rocke_conv_problem_t* p, const py::dict& d)
     p->pW = dict_int(d, "pW", p->pW);
     p->dH = dict_int(d, "dH", p->dH);
     p->dW = dict_int(d, "dW", p->dW);
+    p->groups = dict_int(d, "groups", p->groups);
     p->is_3d = dict_bool(d, "is_3d", p->is_3d);
     p->Di = dict_int(d, "Di", p->Di);
     p->Z = dict_int(d, "Z", p->Z);

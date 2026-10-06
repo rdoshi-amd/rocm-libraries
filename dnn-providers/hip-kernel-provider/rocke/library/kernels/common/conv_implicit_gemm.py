@@ -568,6 +568,17 @@ def fwd_group_merge_available(
             f"group_merge forces a scalar B load; got vector_size_b="
             f"{spec.vector_size_b}. Leave it None (or 1)."
         )
+    # The merged A load and D store both run over exactly Gm consecutive NHWC
+    # channels -- a build-time extent, so an explicit width can be checked
+    # here rather than per problem. A width that does not divide Gm straddles
+    # the merged run: the A load crosses into the next filter tap and the
+    # store fails the epilogue's whole-vector bound and is dropped.
+    for _name, _vec in (("a", spec.vector_size_a), ("c", spec.vector_size_c)):
+        if _vec is not None and gm % _vec != 0:
+            return False, (
+                f"vector_size_{_name}={_vec} does not divide group_merge {gm}: "
+                f"the merged channel run is Gm wide"
+            )
     if p.is_pointwise:
         return False, (
             "group_merge is not implemented for the pointwise (1x1) fast path: "

@@ -180,6 +180,38 @@ class TestConvFwdGroupMergeGate(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("3-D", why)
 
+    def test_explicit_widths_must_divide_the_merged_run(self):
+        # The merged A load and D store run over exactly Gm channels. A wider
+        # A vector straddles the next filter tap; a wider store fails the
+        # whole-vector bound and every output is dropped.
+        from kernels.common.conv_implicit_gemm import is_valid_spec
+
+        for kw in (
+            dict(group_merge=2, vector_size_a=4),
+            dict(group_merge=4, vector_size_a=8),
+            dict(group_merge=2, vector_size_c=4),
+            dict(group_merge=4, vector_size_c=8),
+        ):
+            ok, why = is_valid_spec(self._spec(**kw), arch="gfx950")
+            self.assertFalse(ok, kw)
+            self.assertIn("does not divide group_merge", why)
+        for kw in (
+            dict(group_merge=8, vector_size_a=8, vector_size_c=4),
+            dict(group_merge=4, vector_size_a=2, vector_size_c=1),
+        ):
+            ok, why = is_valid_spec(self._spec(**kw), arch="gfx950")
+            self.assertTrue(ok, f"{kw}: {why}")
+
+    def test_cpp_backend_dict_carries_the_merge(self):
+        # The C++ engine binding builds from this dict. Without group_merge it
+        # silently emits an unmerged kernel; without problem.groups every
+        # grouped spec contradicts its own groups field.
+        from rocke.core.backend import conv_implicit_gemm_spec_to_dict
+
+        d = conv_implicit_gemm_spec_to_dict(self._spec(group_merge=8))
+        self.assertEqual(d["group_merge"], 8)
+        self.assertEqual(d["problem"]["groups"], 64)
+
     def test_kernel_names_are_tagged_per_degree(self):
         # The compile cache keys on kernel.name. Untagged, a Gm sweep would
         # measure one binary N times.

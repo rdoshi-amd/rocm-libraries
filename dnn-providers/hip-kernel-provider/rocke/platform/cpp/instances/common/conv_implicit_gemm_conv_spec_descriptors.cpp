@@ -602,6 +602,26 @@ bool rocke_conv_fwd_group_merge_available(const rocke_implicit_gemm_conv_spec_t*
                         s->vector_size_b);
     }
 
+    /* The merged A load and D store both run over exactly Gm consecutive NHWC
+     * channels -- a build-time extent, so an explicit width can be checked
+     * here rather than per problem. A width that does not divide Gm straddles
+     * the merged run: the A load crosses into the next filter tap and the
+     * store fails the epilogue's whole-vector bound and is dropped. */
+    if(s->has_vector_size_a && gm % s->vector_size_a != 0)
+    {
+        ROCKE_GM_REJECT("vector_size_a=%d does not divide group_merge %d: the merged channel "
+                        "run is Gm wide",
+                        s->vector_size_a,
+                        gm);
+    }
+    if(s->has_vector_size_c && gm % s->vector_size_c != 0)
+    {
+        ROCKE_GM_REJECT("vector_size_c=%d does not divide group_merge %d: the merged channel "
+                        "run is Gm wide",
+                        s->vector_size_c,
+                        gm);
+    }
+
     if(rocke_conv_problem_is_pointwise(&s->problem))
     {
         ROCKE_GM_REJECT("group_merge is not implemented for the pointwise (1x1) fast path: it "

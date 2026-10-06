@@ -238,6 +238,25 @@ static int make_cfg_raw(int idx, rocke_implicit_gemm_conv_spec_t* spec, const ch
         *arch = "gfx950";
         return 0;
     }
+    case 26:
+    case 27:
+    {
+        /* The 1-wide cshuffle store (store_vec == 1): 26 is merged Gm=8 pinned
+         * to vector_size_c=1, 27 the unmerged depthwise control whose open
+         * store width derives from kpg == 1. Same depthwise problem as 20-25.
+         * Keep in lockstep with conv_implicit_gemm_emit.py. */
+        spec->problem = rocke_conv_problem_make(2, 14, 14, 64, 64, 3, 3, 1, 1, 1, 1, 1, 1);
+        spec->problem.groups = 64;
+        spec->epilogue = "cshuffle";
+        if(idx == 26)
+        {
+            spec->group_merge = 8;
+            spec->has_vector_size_c = true;
+            spec->vector_size_c = 1;
+        }
+        *arch = "gfx950";
+        return 0;
+    }
     default:
         return -1;
     }

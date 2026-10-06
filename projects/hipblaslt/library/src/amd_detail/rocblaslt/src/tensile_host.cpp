@@ -3622,7 +3622,7 @@ rocblaslt_status runContractionProblem(rocblaslt_handle                   handle
 
         if(algo == nullptr)
         {
-            int returnAlgoCount;
+            int returnAlgoCount = 0;
             status = getBestSolutions(
                 prob, handle, gemmData, 1, &heuristicResult, &returnAlgoCount, prob.workspaceSize);
             if(returnAlgoCount == 0)
@@ -3698,6 +3698,8 @@ rocblaslt_status runContractionProblem(rocblaslt_handle                   handle
         }
 
         auto solution = library->getSolutionByIndex(data->problem, *hardware, *solutionIndex);
+        if(!solution)
+            return rocblaslt_status_not_implemented;
         if(prob.workspaceSize < solution->requiredWorkspaceSize(data->problem, *hardware))
         {
             if(get_logger_layer_mode() & rocblaslt_layer_mode_log_info)
@@ -4013,6 +4015,11 @@ rocblaslt_status makeArgument(rocblaslt_handle             handle,
 
             data->algoIndex = *solutionIndex;
             auto solution   = library->getSolutionByIndex(data->problem, *hardware, *solutionIndex);
+            if(!solution)
+            {
+                log_error(__func__, "No solution for index", *solutionIndex);
+                return rocblaslt_status_invalid_value;
+            }
 
             if(data->problem.getParams().uniformSummationOrder())
                 warnUniformSummationOrderBypass(__func__, tuning != nullptr);
@@ -4080,6 +4087,11 @@ rocblaslt_status makeArgument(rocblaslt_handle             handle,
             data->algoIndex = *solutionIndex;
             auto solution
                 = library->getSolutionByIndex(data->problem.gemms[0], *hardware, *solutionIndex);
+            if(!solution)
+            {
+                log_error(__func__, "No solution for index", *solutionIndex);
+                return rocblaslt_status_invalid_value;
+            }
 
             if(!data->problem.gemms.empty()
                && data->problem.gemms[0].getParams().uniformSummationOrder())
@@ -4755,6 +4767,7 @@ rocblaslt_status getBestSolutions(RocblasltContractionProblem const& prob,
                                   int*                               returnAlgoCount,
                                   size_t                             maxWorkSpaceBytes)
 {
+    *returnAlgoCount = 0;
 #ifdef HIPBLASLT_USE_ROCROLLER
     if(useRocRoller(handle, prob))
         return getRocRollerBestSolutions(handle,
@@ -5437,7 +5450,7 @@ rocblaslt_status isSolutionSupported(rocblaslt_handle              handle,
 rocblaslt_status getBestSolutions(rocblaslt_handle       handle,
                                   rocblaslt::RocGemmType gemmType,
                                   std::shared_ptr<void>  gemmData,
-                                  const int              workspaceBytes,
+                                  const size_t           workspaceBytes,
                                   const int              requestedAlgoCount,
                                   std::vector<rocblaslt_matmul_heuristic_result>& heuristicResults)
 {

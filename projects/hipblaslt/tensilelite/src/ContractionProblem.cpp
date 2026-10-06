@@ -981,6 +981,7 @@ namespace TensileLite
             m_beta); // Set enum using beta to potentially allow for faster solutions
         consistencyCheck();
         normalize();
+        calcArithmeticIntensity();
     }
 
     void ContractionProblemGemm::normalize()

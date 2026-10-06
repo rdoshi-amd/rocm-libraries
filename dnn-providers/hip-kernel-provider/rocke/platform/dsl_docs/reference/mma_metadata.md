@@ -54,7 +54,7 @@ rebuild for the indexed struct layout and role enum changes.
 
 ### gfx1250 Scale Mapping and Packing
 
-The six gfx1250 FP8/BF8/FP4 scaled atoms provide these scale maps: lane `l` and
+The ten gfx1250 FP8/BF8/FP6/BF6/FP4 scaled atoms provide these scale maps: lane `l` and
 slot `j` map to `(l % 16, j)` for A and `(j, l % 16)` for B. Both half-waves
 duplicate the scales. K32 uses four E8M0 elements per lane packed into i32;
 K16 uses eight packed into i64, with slot `j` at bit offset `8*j`. Matrix A/B
@@ -134,7 +134,7 @@ Pass `NULL` (`nullptr` in C++) for unconstrained scales, or a pointer to
 The scale-contract rules above apply. No match, or a null target, returns
 `NULL`; invalid filters and ambiguous matches raise `ckc::Error`. Handle those
 errors at a C++ boundary before returning to C. In particular, the scaled
-FP8/BF8/FP4 `16x16x128` shapes have both K16 and K32 records, so an unconstrained
+FP8/BF8/FP6/BF6/FP4 `16x16x128` shapes have both K16 and K32 records, so an unconstrained
 lookup is ambiguous.
 
 ## Operation IDs and Migration

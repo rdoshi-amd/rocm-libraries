@@ -6,10 +6,12 @@
 #include "rocke/lower_hip.h"
 #include "rocke/lower_llvm.h"
 #include "rocke/verify.h"
+#include "tf32_mma_probe_internal.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <initializer_list>
+#include <vector>
 
 #define CHECK(expr)                                                 \
     do                                                              \
@@ -20,6 +22,100 @@
             return 1;                                               \
         }                                                           \
     } while(0)
+
+static int test_probe_rejects_incompatible_result_layout()
+{
+    const auto* target = rocke_arch_target_from_gfx("gfx942");
+    const char* fields[] = {"width",
+                            "layout",
+                            "wave_size",
+                            "capacity",
+                            "zero",
+                            "negative",
+                            "src_missing",
+                            "dst_missing",
+                            "both_missing",
+                            "src_short",
+                            "dst_short",
+                            "both_short",
+                            "src_long",
+                            "dst_long",
+                            "both_long",
+                            "src_no_fn",
+                            "dst_no_fn",
+                            "both_no_fn"};
+    for(int m : {16, 32})
+        for(const char* mode : {"raw", "carrier", "rne", "prepacked", "fp32"})
+            for(const char* field : fields)
+            {
+                // Copy the catalog: never cast away const or mutate shared arch data.
+                std::vector<rocke_mma_op_t> ops(target->mma.ops,
+                                                target->mma.ops + target->mma.num_ops);
+                rocke_mma_catalog_t catalog = {ops.data(), static_cast<int>(ops.size())};
+                const auto* selected = rocke_mma_catalog_op_for_shape(
+                    &catalog, "mma", "tf32", "tf32", "fp32", m, m, 128 / m, nullptr);
+                CHECK(selected);
+                auto& atom = ops[selected - ops.data()];
+                auto src_map = *atom.srcs[2].layout;
+                auto dst_map = *atom.dst.layout;
+                atom.srcs[2].layout = &src_map;
+                atom.dst.layout = &dst_map;
+                if(std::strcmp(field, "width") == 0)
+                    atom.dst.frag_len = atom.srcs[2].frag_len - 1;
+                else if(std::strcmp(field, "layout") == 0)
+                    dst_map.fn = atom.srcs[0].layout->fn;
+                else if(std::strcmp(field, "wave_size") == 0)
+                    dst_map.wave_size = 32;
+                else if(std::strcmp(field, "capacity") == 0 || std::strcmp(field, "zero") == 0
+                        || std::strcmp(field, "negative") == 0)
+                {
+                    int width = std::strcmp(field, "capacity") == 0 ? 17
+                                : std::strcmp(field, "zero") == 0   ? 0
+                                                                    : -1;
+                    atom.srcs[2].frag_len = atom.dst.frag_len = width;
+                }
+                else
+                {
+                    bool src = std::strncmp(field, "dst_", 4) != 0;
+                    bool dst = std::strncmp(field, "src_", 4) != 0;
+                    const char* change = std::strchr(field, '_') + 1;
+                    if(std::strcmp(change, "missing") == 0)
+                    {
+                        if(src)
+                            atom.srcs[2].layout = nullptr;
+                        if(dst)
+                            atom.dst.layout = nullptr;
+                    }
+                    else if(std::strcmp(change, "no_fn") == 0)
+                    {
+                        if(src)
+                            src_map.fn = nullptr;
+                        if(dst)
+                            dst_map.fn = nullptr;
+                    }
+                    else
+                    {
+                        int delta = std::strcmp(change, "short") == 0 ? -1 : 1;
+                        if(src)
+                            src_map.frag_len += delta;
+                        if(dst)
+                            dst_map.frag_len += delta;
+                    }
+                }
+                rocke_ir_builder_t b;
+                auto* kernel = ckc::build_tf32_mma_probe(&b, m, mode, &catalog);
+                CHECK(kernel == nullptr);
+                CHECK(b.status == ROCKE_ERR_VALUE);
+                CHECK(std::strcmp(
+                          b.err,
+                          "TF32 probe requires matching src2/dst layouts with at most 16 slots")
+                      == 0);
+                CHECK(b.kernel->num_params == 0);
+                CHECK(b.kernel->body->num_ops == 0);
+                rocke_ir_builder_free(&b);
+            }
+    return 0;
+}
 
 static int test_invalid_tf32_ops_rejected()
 {
@@ -200,6 +296,7 @@ static int test_invalid_store_alignment()
 
 int main()
 {
+    CHECK(test_probe_rejects_incompatible_result_layout() == 0);
     CHECK(test_invalid_store_alignment() == 0);
     CHECK(test_invalid_tf32_ops_rejected() == 0);
     CHECK(test_vector_load() == 0);

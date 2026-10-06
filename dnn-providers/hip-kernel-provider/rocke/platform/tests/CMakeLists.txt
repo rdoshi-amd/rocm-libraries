@@ -16,6 +16,8 @@ endif()
 if(BUILD_TESTING)
   add_executable(rocke_tf32 core/test_tf32.cpp)
   target_link_libraries(rocke_tf32 PRIVATE rocke_core)
+  target_include_directories(rocke_tf32 PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/../cpp/instances/gfx942")
   add_test(NAME rocke_tf32 COMMAND rocke_tf32)
   set_tests_properties(rocke_tf32 PROPERTIES LABELS "ckc;unit;host")
   rocke_cxx_test_installed_name(_rocke_installed_name rocke_tf32)

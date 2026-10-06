@@ -58,16 +58,18 @@ def _assert_python_rejects(lower, error):
     assert str(caught.value) == error
 
 
-def _assert_llvm_rejects(kernel, arch, flavor, error):
-    native = pytest.importorskip("rocke_engine")
+def _assert_llvm_rejects(kernel, arch, flavor, error, engine):
     ir = serialize(kernel)
-    for candidate in (kernel, parse(ir)):
-        _assert_python_rejects(
-            lambda: _lower_kernel_to_llvm_python(
-                candidate, arch=arch, llvm_flavor=flavor
-            ),
-            error,
-        )
+    if engine == "python":
+        for candidate in (kernel, parse(ir)):
+            _assert_python_rejects(
+                lambda: _lower_kernel_to_llvm_python(
+                    candidate, arch=arch, llvm_flavor=flavor
+                ),
+                error,
+            )
+        return
+    native = pytest.importorskip("rocke_engine")
     with pytest.raises(RuntimeError) as caught:
         native.lower_serialized_ir(ir, arch=arch, flavor=flavor)
     assert str(caught.value) == (
@@ -120,10 +122,11 @@ def test_wmma_valid_llvm_bytes(case, flavor):
 @pytest.mark.parametrize("flavor", FLAVORS)
 @pytest.mark.parametrize("role", ["src2", "dst"])
 @pytest.mark.parametrize("kind", [4, 7, 16, "scalar", "dtype"])
-def test_wmma_llvm_rejects_actual_types(case, flavor, role, kind):
+@pytest.mark.parametrize("engine", ["python", "native"])
+def test_wmma_llvm_rejects_actual_types(case, flavor, role, kind, engine):
     kernel, op = _kernel(case)
     _corrupt_type(kernel, op, case, role, kind)
-    _assert_llvm_rejects(kernel, case[0], flavor, _type_error(case))
+    _assert_llvm_rejects(kernel, case[0], flavor, _type_error(case), engine)
 
 
 @pytest.mark.parametrize("case", CASES, ids=[c[1] for c in CASES])
@@ -131,16 +134,18 @@ def test_wmma_llvm_rejects_actual_types(case, flavor, role, kind):
 @pytest.mark.parametrize(
     "kind", ["missing_operand", "extra_operand", "missing_result", "extra_result"]
 )
-def test_wmma_llvm_rejects_arity(case, flavor, kind):
+@pytest.mark.parametrize("engine", ["python", "native"])
+def test_wmma_llvm_rejects_arity(case, flavor, kind, engine):
     kernel, op = _kernel(case)
     _corrupt_arity(op, kind)
-    _assert_llvm_rejects(kernel, case[0], flavor, ARITY_ERROR)
+    _assert_llvm_rejects(kernel, case[0], flavor, ARITY_ERROR, engine)
 
 
 @pytest.mark.parametrize("case", CASES, ids=[c[1] for c in CASES])
 @pytest.mark.parametrize("flavor", FLAVORS)
 @pytest.mark.parametrize("kind", ["width", "dtype"])
-def test_wmma_rejects_custom_destination(case, flavor, kind):
+@pytest.mark.parametrize("engine", ["python", "native"])
+def test_wmma_rejects_custom_destination(case, flavor, kind, engine):
     atom = ArchTarget.from_gfx(case[0]).mma.by_op_id(case[1])
     dst = (
         replace(atom.dst, frag_len=7)
@@ -148,7 +153,7 @@ def test_wmma_rejects_custom_destination(case, flavor, kind):
         else replace(atom.dst, dtype="fp32" if case[4] == I32 else "i32")
     )
     kernel, _ = _kernel(case, atom=replace(atom, dst=dst), use_result=True)
-    _assert_llvm_rejects(kernel, case[0], flavor, _type_error(case))
+    _assert_llvm_rejects(kernel, case[0], flavor, _type_error(case), engine)
 
 
 # Python HIP has no gfx11/gfx12 bf16 handlers. Native HIP has no unscaled WMMA

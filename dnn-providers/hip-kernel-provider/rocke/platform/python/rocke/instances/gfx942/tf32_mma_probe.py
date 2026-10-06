@@ -41,10 +41,16 @@ def build_tf32_mma_probe(spec: Tf32MmaProbeSpec):
     )
     # This fixed probe reuses input coordinates for stores; require the catalog
     # layouts to agree before emitting IR or indexing the native fixed arrays.
-    src_layout, dst_layout = atom.src_layout(2), atom.dst_layout()
+    src_layout, dst_layout = atom.srcs[2].layout, atom.dst.layout
     if (
         not 0 < atom.srcs[2].frag_len <= 16
         or atom.srcs[2].frag_len != atom.dst.frag_len
+        or src_layout is None
+        or dst_layout is None
+        or src_layout.frag_len != atom.srcs[2].frag_len
+        or dst_layout.frag_len != atom.dst.frag_len
+        or src_layout.fn is None
+        or dst_layout.fn is None
         or src_layout.fn is not dst_layout.fn
         or src_layout.wave_size != dst_layout.wave_size
     ):

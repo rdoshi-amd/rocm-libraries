@@ -94,29 +94,82 @@ def test_catalog_isolation(m, k, acc):
         assert set(coords) == {(i, j) for i in range(shape[0]) for j in range(shape[1])}
 
 
-@pytest.mark.parametrize("field", ["width", "layout", "wave_size", "capacity"])
-def test_probe_rejects_incompatible_result_layout(field):
+@pytest.mark.parametrize("m", [16, 32])
+@pytest.mark.parametrize("mode", PREPARATIONS)
+@pytest.mark.parametrize(
+    "field",
+    [
+        "width",
+        "layout",
+        "wave_size",
+        "capacity",
+        "zero",
+        "negative",
+        "src_missing",
+        "dst_missing",
+        "both_missing",
+        "src_short",
+        "dst_short",
+        "both_short",
+        "src_long",
+        "dst_long",
+        "both_long",
+        "src_no_fn",
+        "dst_no_fn",
+        "both_no_fn",
+    ],
+)
+def test_probe_rejects_incompatible_result_layout(m, mode, field):
     catalog = ArchTarget.from_gfx("gfx942").mma
     atom = catalog.op_for_shape(
-        family="mma", a_dtype="tf32", b_dtype="tf32", c_dtype="fp32", m=16, n=16, k=8
+        family="mma",
+        a_dtype="tf32",
+        b_dtype="tf32",
+        c_dtype="fp32",
+        m=m,
+        n=m,
+        k=128 // m,
     )
+    src, dst = atom.srcs[2], atom.dst
     if field == "width":
-        atom = replace(atom, dst=replace(atom.dst, frag_len=7))
+        dst = replace(dst, frag_len=src.frag_len - 1)
     elif field == "layout":
-        layout = replace(atom.dst_layout(), fn=lambda b, lane, slot: (lane, slot))
-        atom = replace(atom, dst=replace(atom.dst, layout=layout))
-    elif field == "wave_size":
-        layout = replace(atom.dst_layout(), wave_size=32)
-        atom = replace(atom, dst=replace(atom.dst, layout=layout))
-    else:
-        atom = replace(
-            atom,
-            srcs=(*atom.srcs[:2], replace(atom.srcs[2], frag_len=17)),
-            dst=replace(atom.dst, frag_len=17),
+        dst = replace(
+            dst, layout=replace(dst.layout, fn=lambda b, lane, slot: (lane, slot))
         )
-    with patch.object(type(catalog), "op_for_shape", return_value=atom):
-        with pytest.raises(ValueError, match="matching src2/dst layouts"):
-            build_tf32_mma_probe(Tf32MmaProbeSpec())
+    elif field == "wave_size":
+        dst = replace(dst, layout=replace(dst.layout, wave_size=32))
+    elif field in ("capacity", "zero", "negative"):
+        width = {"capacity": 17, "zero": 0, "negative": -1}[field]
+        src, dst = replace(src, frag_len=width), replace(dst, frag_len=width)
+    else:
+        role, change = field.split("_", 1)
+
+        def changed(desc):
+            if change == "missing":
+                layout = None
+            elif change == "no_fn":
+                layout = replace(desc.layout, fn=None)
+            else:
+                delta = -1 if change == "short" else 1
+                layout = replace(desc.layout, frag_len=desc.frag_len + delta)
+            return replace(desc, layout=layout)
+
+        if role in ("src", "both"):
+            src = changed(src)
+        if role in ("dst", "both"):
+            dst = changed(dst)
+    atom = replace(atom, srcs=(*atom.srcs[:2], src), dst=dst)
+    with (
+        patch.object(type(catalog), "op_for_shape", return_value=atom),
+        patch("rocke.instances.gfx942.tf32_mma_probe.IRBuilder") as builder,
+    ):
+        with pytest.raises(ValueError) as caught:
+            build_tf32_mma_probe(Tf32MmaProbeSpec(m, mode))
+        assert str(caught.value) == (
+            "TF32 probe requires matching src2/dst layouts with at most 16 slots"
+        )
+        builder.assert_not_called()
 
 
 @pytest.mark.parametrize("m", [16, 32])

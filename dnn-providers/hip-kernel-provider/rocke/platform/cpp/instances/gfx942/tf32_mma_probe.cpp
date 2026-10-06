@@ -1,15 +1,23 @@
 // Copyright (c) Advanced Micro Devices, Inc., or its affiliates.
 // SPDX-License-Identifier: MIT
 /* Spec-driven native mirror of instances/gfx942/tf32_mma_probe.py. */
-#include "rocke/arch_target.h"
 #include "rocke/error_boundary.hpp"
 #include "rocke/helper_rocke.helpers.mma_io.h"
 #include "rocke/instance_tf32_mma_probe.h"
 #include "rocke/ir_internal.h"
+#include "tf32_mma_probe_internal.h"
 #include <stdio.h>
 #include <string.h>
 
 rocke_kernel_def_t* rocke_build_tf32_mma_probe(rocke_ir_builder_t* b, int m, const char* mode)
+{
+    return ckc::build_tf32_mma_probe(b, m, mode, nullptr);
+}
+
+rocke_kernel_def_t* ckc::build_tf32_mma_probe(rocke_ir_builder_t* b,
+                                              int m,
+                                              const char* mode,
+                                              const rocke_mma_catalog_t* catalog)
 {
     char name[96];
     snprintf(name, sizeof(name), "tf32_probe_%d_%s", m, mode ? mode : "invalid");
@@ -22,14 +30,17 @@ rocke_kernel_def_t* rocke_build_tf32_mma_probe(rocke_ir_builder_t* b, int m, con
             return (rocke_kernel_def_t*)rocke_i_set_err(
                 b, ROCKE_ERR_VALUE, "TF32 probe requires m=16/32 and a known preparation");
         int k = 128 / m;
-        const rocke_arch_target_t* target = rocke_arch_target_from_gfx("gfx942");
-        const rocke_mma_op_t* atom = rocke_mma_catalog_op_for_shape(
-            &target->mma, "mma", "tf32", "tf32", "fp32", m, m, k, NULL);
+        if(!catalog)
+            catalog = &rocke_arch_target_from_gfx("gfx942")->mma;
+        const rocke_mma_op_t* atom
+            = rocke_mma_catalog_op_for_shape(catalog, "mma", "tf32", "tf32", "fp32", m, m, k, NULL);
         // This fixed probe reuses input coordinates for stores. Check the
         // catalog assumption before emitting IR or indexing the fixed arrays.
         if(!atom || atom->srcs[2].frag_len <= 0 || atom->srcs[2].frag_len > 16
            || atom->srcs[2].frag_len != atom->dst.frag_len || !atom->srcs[2].layout
-           || !atom->dst.layout || atom->srcs[2].layout->fn != atom->dst.layout->fn
+           || !atom->dst.layout || atom->srcs[2].layout->frag_len != atom->srcs[2].frag_len
+           || atom->dst.layout->frag_len != atom->dst.frag_len || !atom->srcs[2].layout->fn
+           || !atom->dst.layout->fn || atom->srcs[2].layout->fn != atom->dst.layout->fn
            || atom->srcs[2].layout->wave_size != atom->dst.layout->wave_size)
             return (rocke_kernel_def_t*)rocke_i_set_err(
                 b,
@@ -75,7 +86,7 @@ rocke_kernel_def_t* rocke_build_tf32_mma_probe(rocke_ir_builder_t* b, int m, con
         if(strcmp(mode, "fp32") == 0)
         {
             const rocke_mma_op_t* full = rocke_mma_catalog_op_for_shape(
-                &target->mma, "mma", "fp32", "fp32", "fp32", m, m, k / 2, NULL);
+                catalog, "mma", "fp32", "fp32", "fp32", m, m, k / 2, NULL);
             for(int step = 0; step < 2; ++step)
             {
                 rocke_value_t* delta = rocke_b_const_i32(b, step * (64 / m));

@@ -18,6 +18,7 @@ from .rocke_compile import compile_rocke_variant, rocke_variant_key
 from .descriptors import (
     KPACK_DIR_NAME,
     arch_matches,
+    canonical_id,
     kdp_survives,
     load_flat_input,
     reachable_generic_ids,
@@ -425,7 +426,7 @@ def _selected_entries(doc, arch, ukd_by_id):
         return
     for entry in doc["kernelDescriptors"]:
         if isinstance(entry, str):
-            sdesc = ukd_by_id[entry]
+            sdesc = ukd_by_id[canonical_id(entry)]
             if arch_matches(sdesc.doc, arch):
                 yield entry, sdesc.doc, sdesc
         elif arch_matches(entry, arch):
@@ -443,8 +444,9 @@ def _agreement_inputs(flat, arch):
     authoring `engine` as null leaves an EMPTY obligation, not a waived one, so a
     contract declared under it is rejected.
     """
-    generics = {d.id: d.doc for d in flat.generics()}
-    schemas = {d.id: d.doc for d in flat.generics() if d.type == "kmd"}
+    generics = flat.generic_by_id()
+    # Keyed as authored: specialization consumers name their KMD by that spelling.
+    schemas = {d.id: d.doc for d in generics.values() if d.type == "kmd"}
     ukd_by_id = flat.ukd_by_id()
     records, requests = {}, {}
     for kdp in flat.kdps():
@@ -464,17 +466,18 @@ def _agreement_inputs(flat, arch):
                         "contract names an engine, and this KDP authors none"
                     )
             continue
-        if engine_id not in generics:
+        if canonical_id(engine_id) not in generics:
             raise HkpPackError(
                 f"KDP {kdp.path.name}: engine '{engine_id}' resolves to no descriptor"
             )
-        engine = generics[engine_id]
+        engine = generics[canonical_id(engine_id)].doc
         kmd_id = engine.get("metadata")
-        if kmd_id not in schemas:
+        kmd_desc = generics.get(canonical_id(kmd_id))
+        if kmd_desc is None or kmd_desc.type != "kmd":
             raise HkpPackError(
                 f"engine '{engine_id}': metadata '{kmd_id}' resolves to no KMD"
             )
-        kmd = schemas[kmd_id]
+        kmd = kmd_desc.doc
         header = _kdp_header(kdp.doc)
         header["arch"] = [arch]
         for sid, ukd, sdesc in _selected_entries(kdp.doc, arch, ukd_by_id):
@@ -921,14 +924,15 @@ def compile_intermediate(flat, source_root, arch, hipcc, inter_arch_dir, log=pri
                 # reference appears in both and is compiled for the first only.
                 entries.append(sid)
                 new_kds.append(sid)
-                if sid in passthrough_standalone_ukds:
+                key = canonical_id(sid)
+                if key in passthrough_standalone_ukds:
                     continue
                 sukd = entry
                 where = f"standalone UKD {sdesc.path.name}"
                 if _is_passthrough(sukd):
                     kind = sukd["kernel_source"]["kind"]
                     log(f"{where}: emitting kind '{kind}' as authored")
-                    passthrough_standalone_ukds[sid] = PassthroughUKD(
+                    passthrough_standalone_ukds[key] = PassthroughUKD(
                         doc=copy.deepcopy(sukd),
                         filename=sdesc.path.name,
                         rel_dir=sdesc.rel_dir,
@@ -949,9 +953,9 @@ def compile_intermediate(flat, source_root, arch, hipcc, inter_arch_dir, log=pri
                     variant_observations,
                     origins,
                 )
-                if sid in standalone_ukds:
+                if key in standalone_ukds:
                     continue
-                standalone_ukds[sid] = StandaloneUKD(
+                standalone_ukds[key] = StandaloneUKD(
                     id=sukd.get("id"),
                     name=sukd.get("name"),
                     metadata=sukd.get("metadata"),
@@ -1447,7 +1451,7 @@ def pack_arch(
     surviving_generics = [
         generic
         for generic in flat.generics()
-        if generic.id in prune_result.reachable_generic_ids
+        if canonical_id(generic.id) in prune_result.reachable_generic_ids
     ]
     for generic in surviving_generics:
         _write_bytes_at(

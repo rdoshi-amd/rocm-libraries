@@ -84,6 +84,22 @@ constexpr HWModel kGfx1250Model = {
             .vmVsrcTex = 11,
             .vmVsrcBridge = 11,
         },
+    // Fitted to every v_wmma issue time of the mxf8/mxf4/f8 MAF traces; a
+    // v_wmma predicted from its measured history is off by about 0.6 cycles.
+    .coexecTiming =
+        {
+            .afterWmmaIssue = 2,
+            .wmmaMinSpacing = 4,
+            .wmmaQueueDepth = 3,
+            .queueSlotRelease = 2,
+            .msbAfterMemory = 3,
+            .msbWmmaToValu = 2,
+            .msbValuToValu = 1,
+            // Measured 7-10, most often 9; held after a write of any scalar register.
+            .saluScalarToValu = 9,
+            .vccWriteToRead = 8,
+            .waitDscntIssue = 3,
+        },
 };
 
 // gfx1250v0: starts from the gfx1250 values. Kept as its own object so those

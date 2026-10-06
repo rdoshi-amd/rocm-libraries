@@ -88,6 +88,34 @@ struct HWModel {
         int maxSlotBudget;
     };
 
+    /// Issue timing around the matrix pipe, measured from thread traces of
+    /// v_wmma_scale_f32_16x16x128_f8f6f4 loops; CoexecModel scores schedules with it.
+    /// How long a v_wmma holds the pipe is not here: it is the instruction's
+    /// resolved latency (HwInstDesc, including the matrix-format override).
+    struct CoexecTiming {
+        /// Cycles from a v_wmma to the next instruction the wave issues.
+        int afterWmmaIssue;
+        /// Fewest cycles between two v_wmma issues.
+        int wmmaMinSpacing;
+        /// v_wmma that can wait in front of a busy matrix pipe.
+        int wmmaQueueDepth;
+        /// Cycles after a v_wmma starts on the pipe until its waiting slot is free.
+        int queueSlotRelease;
+        /// Extra issue cycles of an s_set_vgpr_msb right after a ds or vmem
+        /// instruction, between a v_wmma and the VALU after it, and between two
+        /// VALU. Free between any other pair.
+        int msbAfterMemory;
+        int msbWmmaToValu;
+        int msbValuToValu;
+        /// A VALU with a scalar or VCC source issues no sooner than this after the
+        /// latest SALU that wrote any scalar register.
+        int saluScalarToValu;
+        /// A VALU that reads VCC issues no sooner than this after the VALU that wrote it.
+        int vccWriteToRead;
+        /// Issue cycles of an s_wait_dscnt whose count is already met.
+        int waitDscntIssue;
+    };
+
     /// Producer->consumer hazard gap rules. Points at the arch's static rule
     /// table (see HazardRules.hpp); this is a reference to that table, not a
     /// copy.
@@ -144,6 +172,7 @@ struct HWModel {
     DelayAlu delayAlu;
     Counters counters;
     WaitHide waitHide;
+    CoexecTiming coexecTiming;
 };
 
 /// Collapse a {major, minor, stepping} arch triple to a switchable key.

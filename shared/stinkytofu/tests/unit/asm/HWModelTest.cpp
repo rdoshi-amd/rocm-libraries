@@ -52,6 +52,40 @@ TEST(HWModel, Gfx1250KnownDefaults) {
     EXPECT_EQ(hw.coexec.maxSlotBudget, 18);
 }
 
+TEST(HWModel, Gfx1250CoexecTiming) {
+    for (const auto& arch : {kGfx1250, kGfx1250v0}) {
+        const HWModel::CoexecTiming& t = hwModelForArch(arch).coexecTiming;
+        EXPECT_EQ(t.afterWmmaIssue, 2);
+        EXPECT_EQ(t.wmmaMinSpacing, 4);
+        EXPECT_EQ(t.wmmaQueueDepth, 3);
+        EXPECT_EQ(t.queueSlotRelease, 2);
+        EXPECT_EQ(t.msbAfterMemory, 3);
+        EXPECT_EQ(t.msbWmmaToValu, 2);
+        EXPECT_EQ(t.msbValuToValu, 1);
+        EXPECT_EQ(t.saluScalarToValu, 9);
+        EXPECT_EQ(t.vccWriteToRead, 8);
+        EXPECT_EQ(t.waitDscntIssue, 3);
+    }
+}
+
+TEST(HWModel, Cdna5InterlockRules) {
+    ASSERT_EQ(kNumCdna5InterlockRules, 2);
+    EXPECT_TRUE(hazardRulesWellFormed());
+
+    // The interlock distances match the coexec timing the repair model uses.
+    const HWModel::CoexecTiming& t = hwModelForArch(kGfx1250).coexecTiming;
+
+    EXPECT_STREQ(kCdna5InterlockRules[0].name, "SaluSgprToValuScalarSrc");
+    EXPECT_EQ(kCdna5InterlockRules[0].distance, t.saluScalarToValu);
+    EXPECT_EQ(kCdna5InterlockRules[0].scope, HazardScope::AnyRegister);
+    EXPECT_EQ(kCdna5InterlockRules[0].unit, HazardUnit::Cycles);
+
+    EXPECT_STREQ(kCdna5InterlockRules[1].name, "ValuVccToValuVccSrc");
+    EXPECT_EQ(kCdna5InterlockRules[1].regType, RegType::VCC_LO);
+    EXPECT_EQ(kCdna5InterlockRules[1].distance, t.vccWriteToRead);
+    EXPECT_EQ(kCdna5InterlockRules[1].scope, HazardScope::SameRegister);
+}
+
 TEST(HWModel, Gfx1250HazardRules) {
     const HWModel& hw = hwModelForArch(kGfx1250);
 

@@ -125,6 +125,7 @@ set(UNIT_ASM_TEST_FILES
     unit/asm/DumpStinkyModulePassTest.cpp
     unit/asm/StinkySignatureTest.cpp
     unit/asm/HWModelTest.cpp
+    unit/asm/CoexecModelTest.cpp
     unit/asm/SchedulingKnobHeuristicsTest.cpp
 )
 

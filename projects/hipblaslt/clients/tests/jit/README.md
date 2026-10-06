@@ -4,7 +4,7 @@ The JIT tests check the comgr code-object builder, the source bundle reader,
 the TensileLite loader and, through the replay backend, the internal entry
 points that run a JIT solution with the GEMM APIs. The JIT headers are not
 installed. The tests include them from `library/src/amd_detail`. They build
-the gfx950 source bundle committed in [`data`](data/README.md), so they need
+the gfx950 source bundles committed in [`data`](data/README.md), so they need
 neither Python nor a generator.
 
 ## Build and run from a checkout
@@ -29,10 +29,11 @@ The CTest tests are:
 
 - `jit-cpu`: `jit-source-bundle` and `jit-builder`. A build with
   `HIPBLASLT_ENABLE_JIT=OFF` has `jit-source-bundle` and `jit-disabled`.
-- `jit-gpu`: `jit-loader`, and `jit-end-to-end` in a build with
+- `jit-gpu`: `jit-loader`, and `jit-end-to-end`, `jit-api-streamk`,
+  `jit-api-amax` and `jit-api-alpha-zero` in a build with
   `HIPBLASLT_JIT_TESTING=ON`, when `GPU_TARGETS` include gfx950. A build with
-  `HIPBLASLT_ENABLE_YAML=ON` has neither, because the committed library entry
-  is MsgPack.
+  `HIPBLASLT_ENABLE_YAML=ON` has none of them, because the committed library
+  entries are MsgPack.
 
 ## What each test checks
 
@@ -42,6 +43,8 @@ The CTest tests are:
 | `jit-builder` | The comgr builder building the committed bundle's assembly and a HIP helper unit for the bundle's target, without a GPU; the code object defines both kernels and has the builder's code-object version |
 | `jit-loader` | The committed bundle built with comgr for device 0 and loaded through the Tensile loader; its library selects its solution for the FP16 GEMM it was generated for and nothing for a transposed A. Launches no kernel |
 | `jit-end-to-end` | The committed bundle replayed, built with comgr and loaded, then run through `hipblasLtMatmul` and `hipblaslt_ext::Gemm` with D checked against a host reference; a problem the bundle does not solve is not supported |
+| `jit-api-streamk`, `jit-api-amax` | The bundle of that name replayed and run through `hipblasLtMatmul` and `hipblaslt_ext::Gemm`: copied algorithms, forged tokens and indices rejected, the workspace rules, repeated runs with changed inputs, a second solution beside the first, and a rejected reinitialization that keeps the prepared solution; D, and the amax output, checked against a host reference |
+| `jit-api-alpha-zero` | Alpha=0 with null A and B and a nonzero K still computes beta*C and the amax output through both APIs |
 | `jit-disabled` | The JIT headers are absent from the public include tree, `hipblaslt-ext.hpp` compiles without them, and the extension API links against the disabled library |
 
 ## Test arguments
@@ -53,3 +56,11 @@ runs no generator, and solves an FP16 problem with M=256, N=128 and K=512.
 `hipblaslt-jit-builder-test` and `hipblaslt-jit-loader-test` take the same
 bundle and a scratch directory; the loader test uses the same problem.
 `hipblaslt-jit-source-bundle-test` takes a scratch directory.
+
+`hipblaslt-jit-api-test --replay BUNDLE` runs the API checks on the solution
+the replay backend replays from `BUNDLE`. `--m`, `--n`, `--k`, `--trans-b`,
+`--amax` and `--alpha-zero` shape the problem, `--workspace-fallback 1` expects
+a run with too little workspace to succeed, as Stream-K's does, and
+`--second-replay` names the bundle of the second solution. CTest runs the
+Stream-K case with `TENSILE_PERSISTENT_FIXED_GRID=16` and
+`TENSILE_PERSISTENT_DYNAMIC_GRID=0`.

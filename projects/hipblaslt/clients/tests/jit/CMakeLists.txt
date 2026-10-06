@@ -45,7 +45,7 @@ target_link_libraries(hipblaslt-jit-builder-test PRIVATE
 hipblaslt_jit_test(jit-builder jit-cpu hipblaslt-jit-builder-test
     "${hipblaslt_jit_bundle}" "${hipblaslt_jit_scratch}/builder")
 
-# The bundle holds gfx950 code and a MsgPack library entry, which a YAML build
+# The bundles hold gfx950 code and MsgPack library entries, which a YAML build
 # cannot read.
 if(NOT hipblaslt_jit_gfx950 OR HIPBLASLT_ENABLE_YAML)
     return()
@@ -70,4 +70,18 @@ if(HIPBLASLT_JIT_TESTING)
     target_link_libraries(hipblaslt-jit-end-to-end-test PRIVATE roc::hipblaslt hip::device)
     hipblaslt_jit_test(jit-end-to-end jit-gpu hipblaslt-jit-end-to-end-test
         "${hipblaslt_jit_bundle}")
+
+    # The C and C++ GEMM APIs on replayed solutions; each case names its bundle.
+    add_executable(hipblaslt-jit-api-test jit_api_test.cpp)
+    target_include_directories(hipblaslt-jit-api-test PRIVATE "${hipblaslt_jit_source}")
+    target_link_libraries(hipblaslt-jit-api-test PRIVATE roc::hipblaslt hip::device)
+    foreach(case "streamk;streamk;--k;4096;--workspace-fallback;1"
+                 "amax;amax;--amax;1"
+                 "alpha-zero;amax;--amax;1;--alpha-zero;1")
+        list(POP_FRONT case name bundle)
+        hipblaslt_jit_test(jit-api-${name} jit-gpu hipblaslt-jit-api-test
+            --replay "${CMAKE_CURRENT_SOURCE_DIR}/data/gfx950/${bundle}" ${case})
+    endforeach()
+    set_tests_properties(jit-api-streamk PROPERTIES ENVIRONMENT
+        "TENSILE_PERSISTENT_FIXED_GRID=16;TENSILE_PERSISTENT_DYNAMIC_GRID=0")
 endif()

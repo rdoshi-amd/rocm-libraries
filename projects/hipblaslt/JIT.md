@@ -240,8 +240,8 @@ Artifact paths must be relative and stay inside the bundle, including through
 symbolic links, and `sources/` may hold only regular files. The reader bounds
 the file count (1024), each file (64 MiB) and the sources in total (256 MiB).
 
-The JIT tests use a gfx950 source bundle committed in `clients/tests/jit/data`.
-Its manifest records the kernel-argument and persistent-loop argument layout
+The JIT tests use gfx950 source bundles committed in `clients/tests/jit/data`.
+Each manifest records the kernel-argument and persistent-loop argument layout
 versions of the generator that wrote it, and
-[its README](clients/tests/jit/data/README.md) gives the command that
-generated it.
+[their README](clients/tests/jit/data/README.md) gives the command that
+generated each one.

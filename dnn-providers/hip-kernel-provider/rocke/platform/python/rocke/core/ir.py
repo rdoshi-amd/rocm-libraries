@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from .arch import target as _arch
-from .dtypes import dtype_info
+from .dtypes import dtype_info, normalize_dtype
 
 # ----------------------------- Types --------------------------------------
 
@@ -1930,7 +1930,9 @@ class IRBuilder:
 
         The result vector type is ``<dst.frag_len x float>`` (the per-lane
         result length the atom produces). When ``op`` is an ``op_id``
-        string the frag length is resolved from the static MMA fragment table.
+        string, or its destination length is zero (unspecified), the frag length
+        is resolved from the static MMA fragment table. Supplied lengths must be
+        nonnegative integers; destination dtypes must normalize to fp32 or i32.
 
         The ISA-named helpers (:meth:`mfma_f32_16x16x16_f16`,
         :meth:`wmma_f32_16x16x16_f16`, …) are thin wrappers over this method,
@@ -1946,19 +1948,25 @@ class IRBuilder:
         error = tf32_mma_error(op_id, [a, b, c, *extra])
         if error:
             raise ValueError(error)
-        dst_frag_len = (
-            op.dst.frag_len
-            if hasattr(op, "dst") and op.dst.frag_len
-            else _mma_dst_frag_len(op_id)
-        )
-        # Accumulator element type: integer WMMA atoms (iu8/iu4) accumulate in
-        # i32; everything else in f32. Prefer the atom's own dst dtype when ``op``
-        # is an MmaOp, else resolve from the arch SSOT via op_id.
-        dst_dtype = op.dst.dtype if hasattr(op, "dst") else None
-        is_int_acc = (
-            dst_dtype == "i32" if dst_dtype is not None else _mma_dst_is_int(op_id)
-        )
-        dst_elem = I32 if is_int_acc else F32
+        if hasattr(op, "dst"):
+            dst_frag_len = op.dst.frag_len
+            if type(dst_frag_len) is not int or dst_frag_len < 0:
+                raise ValueError(
+                    "MMA destination fragment length must be a nonnegative integer"
+                )
+            # Zero retains the historical unspecified-metadata fallback.
+            if dst_frag_len == 0:
+                dst_frag_len = _mma_dst_frag_len(op_id)
+            dst_dtype = op.dst.dtype
+            if not isinstance(dst_dtype, str) or normalize_dtype(dst_dtype) not in (
+                "fp32",
+                "i32",
+            ):
+                raise ValueError("MMA destination dtype must be fp32 or i32")
+            dst_elem = I32 if normalize_dtype(dst_dtype) == "i32" else F32
+        else:
+            dst_frag_len = _mma_dst_frag_len(op_id)
+            dst_elem = I32 if _mma_dst_is_int(op_id) else F32
         hint = (
             "mxacc"
             if _arch._op_id_family().get(op_id) == "wmma_scaled"

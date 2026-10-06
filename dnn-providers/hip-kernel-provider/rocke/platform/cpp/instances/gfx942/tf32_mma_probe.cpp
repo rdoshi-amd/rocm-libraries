@@ -25,6 +25,16 @@ rocke_kernel_def_t* rocke_build_tf32_mma_probe(rocke_ir_builder_t* b, int m, con
         const rocke_arch_target_t* target = rocke_arch_target_from_gfx("gfx942");
         const rocke_mma_op_t* atom = rocke_mma_catalog_op_for_shape(
             &target->mma, "mma", "tf32", "tf32", "fp32", m, m, k, NULL);
+        // This fixed probe reuses input coordinates for stores. Check the
+        // catalog assumption before emitting IR or indexing the fixed arrays.
+        if(!atom || atom->srcs[2].frag_len <= 0 || atom->srcs[2].frag_len > 16
+           || atom->srcs[2].frag_len != atom->dst.frag_len || !atom->srcs[2].layout
+           || !atom->dst.layout || atom->srcs[2].layout->fn != atom->dst.layout->fn
+           || atom->srcs[2].layout->wave_size != atom->dst.layout->wave_size)
+            return (rocke_kernel_def_t*)rocke_i_set_err(
+                b,
+                ROCKE_ERR_VALUE,
+                "TF32 probe requires matching src2/dst layouts with at most 16 slots");
         const rocke_type_t* ty = strcmp(mode, "prepacked") == 0 ? rocke_i32() : rocke_f32();
         rocke_param_opts_t opts = {};
         opts.align = 4;

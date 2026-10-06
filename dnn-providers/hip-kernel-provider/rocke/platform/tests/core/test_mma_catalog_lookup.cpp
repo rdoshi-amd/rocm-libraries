@@ -6,6 +6,7 @@
 #include "rocke/arch_target.h"
 #include "rocke/error.hpp"
 #include "rocke/helper_rocke.core.arch.h"
+#include "rocke/instance_gemm_internal.h"
 #include "rocke/wmma_scale_internal.h"
 
 #include <atomic>
@@ -454,11 +455,26 @@ static int test_scale_layouts_and_families()
     return 0;
 }
 
+static int test_independent_accumulator_width()
+{
+    rocke_ir_builder_t b = {};
+    CHECK(rocke_ir_builder_init(&b, "independent_accumulator") == ROCKE_OK);
+    rocke_mmaop_t op = {};
+    op.srcs[2].frag_len = 4;
+    op.dst.frag_len = 7;
+    auto* acc = rocke_gemm_emit_zero_acc_op(&b, &op);
+    CHECK(acc && acc->type->count == 4);
+    CHECK(acc->type->elem == rocke_f32());
+    rocke_ir_builder_free(&b);
+    return 0;
+}
+
 int main()
 {
     // Keep this first: no previous query may prime the shared family index.
     if(test_family_index_first_use() || test_family_index_duplicates() || test_mma_result_names()
-       || test_scale_contracts() || test_scale_layouts_and_families())
+       || test_scale_contracts() || test_scale_layouts_and_families()
+       || test_independent_accumulator_width())
         return 1;
     int checked = 0;
     for(const char* gfx : {"gfx950", "gfx1250"})

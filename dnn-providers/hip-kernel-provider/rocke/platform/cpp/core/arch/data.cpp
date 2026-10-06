@@ -794,7 +794,7 @@ static const rocke_layout_map_t lm_xf32_32_src0
 static const rocke_layout_map_t lm_xf32_32_src1
     = {ROCKE_MMA_ROLE_SRC1, 2, 64, _mfma_b_32x32x4_xf32};
 
-/* --- mfma_f32_16x16x4_f32: src0/src1/src2/dst (frag 1/1/4/4, wave64) (#8348) --- */
+/* --- mfma_f32_16x16x4_f32: src0/src1/src2/dst (frag 1/1/4/4, wave64) --- */
 static const rocke_layout_map_t lm_mfma_16x16x4_f32_src0
     = {ROCKE_MMA_ROLE_SRC0, 1, 64, _mfma_a_16x16x4_f32};
 static const rocke_layout_map_t lm_mfma_16x16x4_f32_src1
@@ -804,7 +804,7 @@ static const rocke_layout_map_t lm_mfma_16x16x4_f32_src2
 static const rocke_layout_map_t lm_mfma_16x16x4_f32_dst
     = {ROCKE_MMA_ROLE_DST, 4, 64, _mfma_row_col_16x16};
 
-/* --- mfma_f32_32x32x2_f32: src0/src1/src2/dst (frag 1/1/16/16, wave64) (#8348) --- */
+/* --- mfma_f32_32x32x2_f32: src0/src1/src2/dst (frag 1/1/16/16, wave64) --- */
 static const rocke_layout_map_t lm_mfma_32x32x2_f32_src0
     = {ROCKE_MMA_ROLE_SRC0, 1, 64, _mfma_a_32x32x2_f32};
 static const rocke_layout_map_t lm_mfma_32x32x2_f32_src1

@@ -40,6 +40,68 @@ from rocke.core.arch.target import (
 from rocke.core.ir import IRBuilder
 
 
+@pytest.mark.parametrize("width", [-1, 1.5, "4", None, True, False])
+def test_mma_rejects_invalid_destination_width(width):
+    atom = ArchTarget.from_gfx("gfx942").mma.op_for_shape(
+        family="mma", a_dtype="fp32", b_dtype="fp32", c_dtype="fp32", m=16, n=16, k=4
+    )
+    atom = replace(atom, dst=replace(atom.dst, frag_len=width))
+    b = IRBuilder("invalid_dst_width")
+    value = b.const_i32(0)
+    with pytest.raises(ValueError, match="destination fragment length"):
+        b.mma(atom, value, value, value)
+
+
+@pytest.mark.parametrize("dtype", ["garbage", "fp16", "bf16", "tf32", "", None, 32])
+def test_mma_rejects_unsupported_destination_dtype(dtype):
+    atom = ArchTarget.from_gfx("gfx942").mma.op_for_shape(
+        family="mma", a_dtype="fp32", b_dtype="fp32", c_dtype="fp32", m=16, n=16, k=4
+    )
+    atom = replace(atom, dst=replace(atom.dst, dtype=dtype))
+    b = IRBuilder("invalid_dst_dtype")
+    value = b.const_i32(0)
+    with pytest.raises(ValueError, match="destination dtype"):
+        b.mma(atom, value, value, value)
+
+
+@pytest.mark.parametrize(
+    "dtype,element",
+    [("fp32", "f32"), (" F32 ", "f32"), ("i32", "i32"), (" INT32 ", "i32")],
+)
+def test_mma_destination_aliases_and_unspecified_width(dtype, element):
+    atom = ArchTarget.from_gfx("gfx942").mma.op_for_shape(
+        family="mma", a_dtype="fp32", b_dtype="fp32", c_dtype="fp32", m=16, n=16, k=4
+    )
+    unspecified = replace(atom, dst=MmaDst(dtype))
+    b = IRBuilder("unspecified_dst_width")
+    value = b.const_i32(0)
+    result = b.mma(unspecified, value, value, value)
+    assert result.type.count == atom.dst.frag_len
+    assert result.type.elem.name == element
+    assert b.mma(atom.op_id, value, value, value).type.count == atom.dst.frag_len
+    unknown = replace(unspecified, op_id="unknown_atom")
+    with pytest.raises(ValueError, match="unknown MMA op_id"):
+        b.mma(unknown, value, value, value)
+
+
+def test_gemm_zero_accumulator_uses_source_width():
+    from rocke.instances.common.gemm_universal import _emit_zero_acc_op
+
+    atom = ArchTarget.from_gfx("gfx942").mma.op_for_shape(
+        family="mma", a_dtype="fp32", b_dtype="fp32", c_dtype="fp32", m=16, n=16, k=4
+    )
+    atom = replace(
+        atom,
+        srcs=(*atom.srcs[:2], MmaSrc("fp32", frag_len=4)),
+        dst=MmaDst("fp32", frag_len=7),
+    )
+    b = IRBuilder("independent_accumulator")
+    acc = _emit_zero_acc_op(b, atom)
+    assert acc.type.count == 4
+    assert acc.type.elem.name == "f32"
+    assert b.mma(atom, acc, acc, acc).type.count == 7
+
+
 class TestOpIdDstDtype(unittest.TestCase):
     def test_matches_catalog_first_hit(self):
         # Every op_id in the catalog resolves to its normalized dst dtype,

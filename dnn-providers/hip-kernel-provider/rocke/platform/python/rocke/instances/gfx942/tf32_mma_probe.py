@@ -39,6 +39,18 @@ def build_tf32_mma_probe(spec: Tf32MmaProbeSpec):
         n=m,
         k=k,
     )
+    # This fixed probe reuses input coordinates for stores; require the catalog
+    # layouts to agree before emitting IR or indexing the native fixed arrays.
+    src_layout, dst_layout = atom.src_layout(2), atom.dst_layout()
+    if (
+        not 0 < atom.srcs[2].frag_len <= 16
+        or atom.srcs[2].frag_len != atom.dst.frag_len
+        or src_layout.fn is not dst_layout.fn
+        or src_layout.wave_size != dst_layout.wave_size
+    ):
+        raise ValueError(
+            "TF32 probe requires matching src2/dst layouts with at most 16 slots"
+        )
     b = IRBuilder(spec.name)
     ty = I32 if mode == "prepacked" else F32
     a = b.param("A", PtrType(ty, "global"), align=4)
@@ -58,8 +70,8 @@ def build_tf32_mma_probe(spec: Tf32MmaProbeSpec):
     row_base = b.add(batch_input, row)
     batch_output = b.mul(batch, b.const_i32(m * m))
     c_values, out_indices = [], []
-    for slot in range(atom.c_frag_len):
-        r, col = atom.c_layout().coord(b, lane, slot)
+    for slot in range(atom.srcs[2].frag_len):
+        r, col = src_layout.coord(b, lane, slot)
         index = b.add(batch_output, b.add(b.mul(r, cm), col))
         out_indices.append(index)
         c_values.append(b.global_load(cc, index, F32, align=4))

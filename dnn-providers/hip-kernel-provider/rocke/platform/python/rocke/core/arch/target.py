@@ -183,7 +183,11 @@ class MmaScaleOperand:
 
 @dataclass(frozen=True)
 class MmaDst:
-    """Metadata for the matrix ``dst`` operand."""
+    """Metadata for the matrix ``dst`` operand.
+
+    A zero ``frag_len`` leaves the width unspecified; ``IRBuilder.mma`` resolves
+    it from the atom's catalog entry. Emission supports fp32 and i32 destinations.
+    """
 
     dtype: str
     frag_len: int = 0

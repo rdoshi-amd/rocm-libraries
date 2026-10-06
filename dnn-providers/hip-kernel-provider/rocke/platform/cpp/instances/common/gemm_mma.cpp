@@ -158,7 +158,7 @@ rocke_value_t* rocke_gemm_emit_mma(rocke_ir_builder_t* b,
 }
 
 /* ====================================================================== *
- * _emit_zero_acc_op(b, op): zero accumulator sized from op.c_frag_len.
+ * _emit_zero_acc_op(b, op): zero input accumulator sized from op.srcs[2].frag_len.
  *   return b.zero_vec_f32(op.c_frag_len)
  * ====================================================================== */
 rocke_value_t* rocke_gemm_emit_zero_acc_op(rocke_ir_builder_t* b, const rocke_mmaop_t* op)

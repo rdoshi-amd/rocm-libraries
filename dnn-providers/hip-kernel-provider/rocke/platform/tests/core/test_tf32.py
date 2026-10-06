@@ -1,6 +1,9 @@
 # Copyright (c) Advanced Micro Devices, Inc., or its affiliates.
 # SPDX-License-Identifier: MIT
 """Logical TF32 contracts and strict native parity, independent of GPU access."""
+from dataclasses import replace
+from unittest.mock import patch
+
 import numpy as np
 import pytest
 
@@ -55,6 +58,9 @@ def test_catalog_isolation(m, k, acc):
     )
     assert (atom.a_frag_len, atom.b_frag_len, atom.c_frag_len) == (2, 2, acc)
     assert atom.op_id == f"mfma_f32_{m}x{m}x{k}_xf32"
+    assert atom.srcs[2].frag_len == atom.dst.frag_len <= 16
+    assert atom.src_layout(2).fn is atom.dst_layout().fn
+    assert atom.src_layout(2).wave_size == atom.dst_layout().wave_size
     full = catalog.op_for_shape(
         family="mma", a_dtype="fp32", b_dtype="fp32", c_dtype="fp32", m=m, n=m, k=k // 2
     )
@@ -86,6 +92,31 @@ def test_catalog_isolation(m, k, acc):
         ]
         assert len(set(coords)) == shape[0] * shape[1] == len(coords)
         assert set(coords) == {(i, j) for i in range(shape[0]) for j in range(shape[1])}
+
+
+@pytest.mark.parametrize("field", ["width", "layout", "wave_size", "capacity"])
+def test_probe_rejects_incompatible_result_layout(field):
+    catalog = ArchTarget.from_gfx("gfx942").mma
+    atom = catalog.op_for_shape(
+        family="mma", a_dtype="tf32", b_dtype="tf32", c_dtype="fp32", m=16, n=16, k=8
+    )
+    if field == "width":
+        atom = replace(atom, dst=replace(atom.dst, frag_len=7))
+    elif field == "layout":
+        layout = replace(atom.dst_layout(), fn=lambda b, lane, slot: (lane, slot))
+        atom = replace(atom, dst=replace(atom.dst, layout=layout))
+    elif field == "wave_size":
+        layout = replace(atom.dst_layout(), wave_size=32)
+        atom = replace(atom, dst=replace(atom.dst, layout=layout))
+    else:
+        atom = replace(
+            atom,
+            srcs=(*atom.srcs[:2], replace(atom.srcs[2], frag_len=17)),
+            dst=replace(atom.dst, frag_len=17),
+        )
+    with patch.object(type(catalog), "op_for_shape", return_value=atom):
+        with pytest.raises(ValueError, match="matching src2/dst layouts"):
+            build_tf32_mma_probe(Tf32MmaProbeSpec())
 
 
 @pytest.mark.parametrize("m", [16, 32])

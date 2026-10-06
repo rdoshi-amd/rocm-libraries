@@ -150,10 +150,6 @@ struct TestConfigOptions
     std::optional<std::filesystem::path> articlePath;
     std::optional<std::string> engineName;
     bool failOnUnsupported = false;
-    // Opt-in while CI's Unverifiable counts are collected; the default flips in a
-    // follow-up. Off, a bundle whose oracles all ended in a decline SKIPs as it
-    // always has; one whose last oracle errored fails regardless.
-    bool failOnNoOracle = false;
     bool skipGraphValidation = false;
     std::optional<std::filesystem::path> configPath;
     std::optional<ReferenceExecutorType> referenceExecutorType;
@@ -175,7 +171,6 @@ struct TestConfigOptions
 //   - articlePath: omit to use hipDNN's default plugin discovery
 //   - engineName: omit to let hipDNN select the engine
 //   - failOnUnsupported: when true, FAIL instead of SKIP for unsupported graphs
-//   - failOnNoOracle: when true, FAIL instead of SKIP for a bundle no oracle can verify
 class TestConfig
 {
 public:
@@ -202,7 +197,6 @@ public:
         instance._articlePath = std::move(opts.articlePath);
         instance._engineName = std::move(opts.engineName);
         instance._failOnUnsupported = opts.failOnUnsupported;
-        instance._failOnNoOracle = opts.failOnNoOracle;
         instance._skipGraphValidation = opts.skipGraphValidation;
         instance._referenceExecutorType = opts.referenceExecutorType;
 
@@ -303,12 +297,6 @@ public:
     {
         throwIfNotInitialized();
         return _failOnUnsupported;
-    }
-
-    bool failOnNoOracle() const
-    {
-        throwIfNotInitialized();
-        return _failOnNoOracle;
     }
 
     bool skipGraphValidation() const
@@ -528,7 +516,6 @@ private:
     std::size_t _currentDeviceVramMb = 0;
     std::string _currentPlatform;
     bool _failOnUnsupported = false;
-    bool _failOnNoOracle = false;
     bool _skipGraphValidation = false;
     bool _allowBundles = false;
     bool _enforceSupportClaims = false;

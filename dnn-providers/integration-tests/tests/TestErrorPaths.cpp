@@ -136,8 +136,9 @@ TEST_F(TestErrorPaths, EngineFailureWithNoMessageStillFails)
 }
 
 // One of the two forms the harness maps to CAPABILITY_MISS; the other is
-// isApplicable()==false, covered by RefNotApplicableSkips below.
-TEST_F(TestErrorPaths, RefCapabilityMissSkips)
+// isApplicable()==false, covered by RefNotApplicableFails below. Either way the
+// only reference asked for cannot check the engine, so the bundle has no oracle.
+TEST_F(TestErrorPaths, RefCapabilityMissFails)
 {
     testing_support::HarnessMocks mocks;
     testing_support::engineWrites(
@@ -153,14 +154,14 @@ TEST_F(TestErrorPaths, RefCapabilityMissSkips)
                  VerificationMode::CPU,
                  &results);
 
-    EXPECT_TRUE(testing_support::anySkipped(results))
-        << "ReferenceCapabilityError should produce a SKIP";
-    EXPECT_FALSE(testing_support::anyFailed(results));
+    EXPECT_TRUE(testing_support::anyFailed(results))
+        << "ReferenceCapabilityError leaves no oracle, which should FAIL";
+    EXPECT_FALSE(testing_support::anySkipped(results));
 }
 
 // The other capability-miss form: the reference says up front, via isApplicable(),
 // that it has no plan for this op, without ever being asked to execute.
-TEST_F(TestErrorPaths, RefNotApplicableSkips)
+TEST_F(TestErrorPaths, RefNotApplicableFails)
 {
     testing_support::HarnessMocks mocks;
     testing_support::engineWrites(
@@ -175,9 +176,9 @@ TEST_F(TestErrorPaths, RefNotApplicableSkips)
                  VerificationMode::CPU,
                  &results);
 
-    EXPECT_TRUE(testing_support::anySkipped(results))
-        << "isApplicable()==false should produce a SKIP";
-    EXPECT_FALSE(testing_support::anyFailed(results));
+    EXPECT_TRUE(testing_support::anyFailed(results))
+        << "isApplicable()==false leaves no oracle, which should FAIL";
+    EXPECT_FALSE(testing_support::anySkipped(results));
 }
 
 // A reference that breaks on an op it accepted is a real defect in the reference,

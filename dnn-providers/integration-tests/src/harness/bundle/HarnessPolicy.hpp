@@ -118,10 +118,6 @@ struct HarnessPolicy
     ValidatorDevice validator = ValidatorDevice::AUTO;
     ClaimMode claims = ClaimMode::WARN;
     TensorPlacement placement = TensorPlacement::DEVICE;
-    /// FAIL rather than SKIP a bundle no oracle can verify. A chain whose last
-    /// reference errored fails regardless; this only decides the case where the
-    /// chain ended in a decline, including after an earlier reference errored.
-    bool failOnNoOracle = false;
 
     /// Full arch token as detected, e.g. "gfx942:sramecc+:xnack-". Empty when
     /// detection failed; the metadata guard treats that as "nothing to check".

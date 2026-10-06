@@ -117,11 +117,6 @@ int main(int argc, char** argv) noexcept
             .default_value(false)
             .implicit_value(true)
             .help("FAIL instead of SKIP when no engine supports a graph");
-        parser.add_argument("--fail-on-no-oracle")
-            .default_value(false)
-            .implicit_value(true)
-            .help("FAIL instead of SKIP when no oracle (golden data, GPU ref, CPU ref) "
-                  "can verify a bundle");
         parser.add_argument("--skip-graph-validation")
             .default_value(false)
             .implicit_value(true)
@@ -150,8 +145,7 @@ int main(int argc, char** argv) noexcept
         // parameterized tests (which ref executor is exercised as the SUT).
         parser.add_argument("--vm", "--verification-mode")
             .help("How bundle engine output is verified: 'auto' (default; golden -> "
-                  "GPU ref -> CPU ref; skip, or fail under --fail-on-no-oracle, when none "
-                  "applies), 'golden', 'gpu', or 'cpu'. Validating "
+                  "GPU ref -> CPU ref -> fail), 'golden', 'gpu', or 'cpu'. Validating "
                   "golden data against a reference (no engine involved) is not a mode "
                   "here; run the hipdnn_golden_data_tests binary instead. Can also be "
                   "set via HIPDNN_TEST_VERIFICATION_MODE env var.");
@@ -216,7 +210,6 @@ int main(int argc, char** argv) noexcept
             engineName = parser.get<std::string>("--test-engine");
         }
         auto failOnUnsupported = parser.get<bool>("--fail-on-unsupported");
-        auto failOnNoOracle = parser.get<bool>("--fail-on-no-oracle");
         auto skipGraphValidation = parser.get<bool>("--skip-graph-validation");
 
         std::optional<std::filesystem::path> configPath;
@@ -397,7 +390,6 @@ int main(int argc, char** argv) noexcept
         opts.articlePath = std::move(articlePath);
         opts.engineName = std::move(engineName);
         opts.failOnUnsupported = failOnUnsupported;
-        opts.failOnNoOracle = failOnNoOracle;
         opts.skipGraphValidation = skipGraphValidation;
         opts.configPath = std::move(configPath);
         opts.referenceExecutorType = refExecType;
@@ -523,9 +515,8 @@ int main(int argc, char** argv) noexcept
         const int result = RUN_ALL_TESTS();
 
         // Print bundles that ended without a verdict (no oracle / reference bug).
-        // Informational only — the tests themselves already carry the verdict (SKIP, or
-        // FAIL under --fail-on-no-oracle or when the last reference errored), so this
-        // does not touch `result`.
+        // Informational only — the tests themselves already carry the verdict, so
+        // this does not touch `result`.
         hipdnn_integration_tests::bundle::UnverifiableBundleReport::get().print();
         if(!hipdnn_integration_tests::TestConfig::get().writeSupportClaims())
         {

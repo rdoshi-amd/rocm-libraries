@@ -166,13 +166,14 @@ namespace hipblaslt_jit
         }
         outcome.summary = std::move(status.message);
 
+        const BuildRequest build{target.targetId, generation.codeObjectVersion, scratch->path()};
         std::vector<BuiltSolution> supported;
         for(const auto& solution : generated)
         {
             if(supported.size() == count)
                 break;
             BuiltSolution built;
-            status = guarded([&] { return c.builder->build(solution, generation, built); });
+            status = guarded([&] { return c.builder->build(solution, build, built); });
             if(!status.ok())
             {
                 record(Stage::Build, std::move(status));
@@ -218,7 +219,7 @@ namespace hipblaslt_jit
                 if(status.ok() && !bundle)
                     status = {Status::Code::Failed, Stage::Load, "Loader returned no bundle"};
                 if(status.ok())
-                    outcome.unpublished.push_back(std::move(bundle));
+                    outcome.bundles.push_back(std::move(bundle));
                 else
                     record(Stage::Load, std::move(status));
             }

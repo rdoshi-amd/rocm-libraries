@@ -1,11 +1,12 @@
 // Copyright Advanced Micro Devices, Inc., or its affiliates.
 // SPDX-License-Identifier: MIT
 
+#include "hipblaslt-jit-gemm-internal.hpp"
 #include "hipblaslt-jit-hash.hpp"
 #include "hipblaslt-jit-library.hpp"
 #include "hipblaslt-jit-loader.hpp"
-#include "hipblaslt-jit-mock.hpp"
 #include "hipblaslt-jit-problem-type.hpp"
+#include "hipblaslt-jit-replay.hpp"
 #include <Tensile/Tensile.hpp>
 #include <algorithm>
 #include <cstdlib>
@@ -13,7 +14,7 @@
 #include <stdexcept>
 #include <string_view>
 
-namespace hipblaslt_ext::experimental::jit::mock
+namespace hipblaslt_ext::experimental::jit::replay
 {
     namespace
     {
@@ -44,18 +45,18 @@ namespace hipblaslt_ext::experimental::jit::mock
             return line;
         }
 
-        class MockBackend final : public hipblaslt_jit::Backend
+        class ReplayBackend final : public hipblaslt_jit::Backend
         {
         public:
-            explicit MockBackend(const Options& options)
+            explicit ReplayBackend(const Options& options)
                 : m_fault(options.fault)
                 , m_record(options.record)
-                , m_info{"mock", "mock", ""}
+                , m_info{"replay", "replay", ""}
             {
                 if(options.replay.empty())
-                    throw std::invalid_argument("The mock backend has no bundle to replay");
+                    throw std::invalid_argument("The replay backend has no bundle to replay");
                 if(m_fault == Options::Fault::Record && m_record.empty())
-                    throw std::invalid_argument("The mock record fault has no file to record to");
+                    throw std::invalid_argument("The replay record fault has no file to record to");
                 const auto text = [](const std::vector<uint8_t>& bytes) {
                     return std::string_view(reinterpret_cast<const char*>(bytes.data()),
                                             bytes.size());
@@ -81,7 +82,7 @@ namespace hipblaslt_ext::experimental::jit::mock
                     }
                     m_replayed.push_back(std::move(replayed));
                 }
-                m_info.version = "mock:" + version.hex();
+                m_info.version = "replay:" + version.hex();
             }
 
             const hipblaslt_jit::BackendInfo& info() const noexcept override
@@ -99,22 +100,24 @@ namespace hipblaslt_ext::experimental::jit::mock
                 if(!gemm)
                     return {Status::Code::NotSupported,
                             Stage::Generate,
-                            "The mock backend replays a GEMM solution"};
+                            "The replay backend replays a GEMM solution"};
                 if(m_fault == Options::Fault::Record)
                 {
                     std::ofstream file(fs::u8path(m_record), std::ios::app);
                     file << describe(request, *gemm) << '\n';
                     return {Status::Code::Failed,
                             Stage::Generate,
-                            (file ? "Mock generation recorded its request in "
-                                  : "Mock generation could not record its request in ")
+                            (file ? "Replay generation recorded its request in "
+                                  : "Replay generation could not record its request in ")
                                 + m_record};
                 }
                 if(m_fault == Options::Fault::Generate)
                 {
-                    Status     failure{Status::Code::Failed, Stage::Generate, "Mock generation fault"};
-                    const auto log = request.scratch / "mock.log";
-                    std::ofstream(log) << failure.message << '\n' << describe(request, *gemm) << '\n';
+                    Status failure{
+                        Status::Code::Failed, Stage::Generate, "Replay generation fault"};
+                    const auto log = request.scratch / "replay.log";
+                    std::ofstream(log) << failure.message << '\n'
+                                       << describe(request, *gemm) << '\n';
                     std::error_code error;
                     if(fs::exists(log, error))
                     {
@@ -162,7 +165,7 @@ namespace hipblaslt_ext::experimental::jit::mock
                             "No replayed solution solves this problem"};
                 return {Status::Code::Success,
                         Stage::Generate,
-                        "The mock replayed " + std::to_string(solutions.size())
+                        "Replayed " + std::to_string(solutions.size())
                             + (solutions.size() == 1 ? " bundle" : " bundles")};
             }
 
@@ -176,27 +179,26 @@ namespace hipblaslt_ext::experimental::jit::mock
 
     std::shared_ptr<const hipblaslt_jit::Backend> makeBackend(const Options& options)
     {
-        return std::make_shared<const MockBackend>(options);
+        return std::make_shared<const ReplayBackend>(options);
     }
 
     hipblasStatus_t
         createBackend(const Options& options, Backend& backend, Diagnostics& diagnostics)
     {
         backend     = {};
-        diagnostics = {"mock", ""};
+        diagnostics = {"replay", ""};
         try
         {
             backend = detail::BackendAccess::make(
                 std::make_shared<const hipblaslt_jit::Jit>(
                     hipblaslt_jit::Jit::Components{makeBackend(options),
                                                    hipblaslt_jit::makeComgrBuilder(),
-                                                   hipblaslt_jit::makeTensileLoader(),
-                                                   nullptr}));
+                                                   hipblaslt_jit::makeTensileLoader()}));
             return HIPBLAS_STATUS_SUCCESS;
         }
         catch(const std::bad_alloc&)
         {
-            diagnostics.message = "Cannot allocate mock backend";
+            diagnostics.message = "Cannot allocate the replay backend";
             return HIPBLAS_STATUS_ALLOC_FAILED;
         }
         catch(const std::exception& e)

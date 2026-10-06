@@ -118,8 +118,9 @@ static void build_wmma_k64_bf8_bf8(rocke_ir_builder_t* b)
     wmma_k64(b, "wmma_gfx1250_f32_16x16x64_bf8_bf8");
 }
 
-/* K=128 FP8 SCALE/SCALE16 WMMA. Matrix fragments are <16 x i32>; packed
- * E8M0 scale operands are i32 for SCALE and i64 for SCALE16. */
+/* K=128 SCALE/SCALE16 WMMA with independent FP8/BF8/FP6/BF6/FP4 A/B formats.
+ * Matrix fragments are <16 x i32>; packed E8M0 scale operands are i32 for SCALE
+ * and i64 for SCALE16. */
 static void wmma_scaled(rocke_ir_builder_t* b, bool scale16, const char* dtype, const char* dtype_b)
 {
     const rocke_mma_scale_block_k_t block = scale16 ? ROCKE_MMA_SCALE_K16 : ROCKE_MMA_SCALE_K32;

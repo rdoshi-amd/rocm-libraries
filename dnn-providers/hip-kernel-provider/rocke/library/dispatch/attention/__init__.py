@@ -41,6 +41,7 @@ from . import (
     gfx950_tuning,
     gfx1250,
     strided_decode,
+    paged_decode,
 )
 from .common import (
     ATTENTION_ABI_VERSION,
@@ -421,3 +422,6 @@ __all__ = [
     "priority_ranker",
     "registered_attention_combos",
 ]
+
+paged_decode.register(ATTENTION_ROUTE_REGISTRY)
+paged_decode.register(ATTENTION_EXECUTION_REGISTRY)

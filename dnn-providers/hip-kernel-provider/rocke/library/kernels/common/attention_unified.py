@@ -3032,7 +3032,7 @@ def _enable_gfx942_3d_wide_kv_load(problem: UnifiedAttentionProblem) -> bool:
     Opt-in via HIPDNN_GFX942_3D_WKV while it is A/B'd against the async path;
     promoted to default once the win is confirmed.
     """
-    if _resolve_attention_arch() != "gfx942":
+    if _resolve_attention_arch() != "gfx942" or problem.block_size == 1:
         return False
     if _kv_storage_dtype(problem) is not None:  # fp8 path already loads wide
         return False
@@ -4645,6 +4645,35 @@ def run_unified_attention_torch(
         and getattr(tuning_spec.kernel_spec, "kv_layout", "paged") != "paged"
     ):
         raise ValueError("strided tuning spec requires kv_layout='strided'")
+
+    # New token-mapped loaders have stricter admission than the legacy paged
+    # path. Validate before cache lookup, address-width retargeting or launch;
+    # allow_unsupported is a tuning override, never an address-safety bypass.
+    if problem.block_size == 1 or (
+        tuning_spec is not None
+        and getattr(tuning_spec.kernel_spec, "uses_paged_gather", False)
+    ):
+        from .attention_paged_decode import validate_paged_decode
+
+        arch = _resolve_attention_arch()
+        if arch not in ("gfx942", "gfx950") or problem.clamp_arch not in (None, arch):
+            raise ValueError(
+                "paged gather requires matching gfx942/gfx950 architecture"
+            )
+        if backend not in ("auto", "3d"):
+            raise ValueError("paged gather requires the 3D backend")
+        if (
+            any(x is not None for x in (sinks, alibi_slopes, qq_bias))
+            or softcap
+            or (k_scale, v_scale, out_scale) != (1.0, 1.0, 1.0)
+        ):
+            raise ValueError("paged gather does not support bias, sinks or scaling")
+        validate_paged_decode(
+            problem, (q, k, v, out, cu_seqlens_q, seqused_k, block_table), tuning_spec
+        )
+        if problem.clamp_arch is None:
+            problem = replace(problem, clamp_arch=arch)
+        backend = "3d"
 
     bt_stride = (
         int(block_table.stride(0))

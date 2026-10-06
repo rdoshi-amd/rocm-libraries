@@ -257,15 +257,11 @@ def make_explicit_attention_3d_specs(
     if config.waves_per_eu not in WAVES_PER_EU:
         raise ValueError(f"waves_per_eu must be one of {WAVES_PER_EU}")
 
-    tile = resolve_tile_policy(problem.block_size, config.tile_policy)
-    if arch == "gfx950" and tile != int(problem.block_size):
-        raise ValueError("gfx950 3D implements only tile_size == block_size")
-    if arch == "gfx942" and tile not in (
-        int(problem.block_size),
-        max(1, int(problem.block_size) // 2),
-    ):
-        raise ValueError("gfx942 3D implements only full- or half-block tiles")
-
+    tile = (
+        32
+        if config.tile_policy == "32"
+        else resolve_tile_policy(problem.block_size, config.tile_policy)
+    )
     spec_type, reduce_type, _, _, supports = _tiled_3d_impl(arch)
     knobs = _checked_knobs(config.knob_dict())
     if arch == "gfx950" and any(

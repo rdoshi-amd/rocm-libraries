@@ -4,6 +4,7 @@
 #include "hipblaslt-jit-hipkittens.hpp"
 #include "hipblaslt-jit-code-object.hpp"
 #include "hipblaslt-jit-fs.hpp"
+#include "hipblaslt-jit-gemm-internal.hpp"
 #include "hipblaslt-jit-hash.hpp"
 #include "hipblaslt-jit-heuristic.hpp"
 #include "hipblaslt-jit-loader.hpp"

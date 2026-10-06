@@ -513,24 +513,48 @@ tests; an older local compiler failure is separate evidence. Review skipped
 tests explicitly: Torch-free execution, missing native fixtures, and unavailable
 GPUs each leave different coverage gaps. Host pytest is not a full GPU job replay.
 
-TF32 recipe replay uses the prebuilt `rocke_portable_ir_replay_cli` installed
-under `tests/portable_ir/`. It compares native CBOR replay with Python lowering
-for both gfx942 atom shapes, every preparation mode, and LLVM 20/22/23. When the
-replay executable is unset or missing, the native lane skips like the other
-portable-IR replay tests. CLI execution errors and IR mismatches fail the test;
-installed tests never attempt to configure a source build. CTest supplies it through
-`ROCKE_TEST_TF32_REPLAY_CLI`, relative to its working directory so the artifact
-remains relocatable. In a source checkout, build that target and set the same
-variable to its executable path. The fixture is local to the TF32 module and
-does not use or modify `ROCKE_REPLAY_CLI`, which controls other portable-IR tests.
+#### 5.1.3 Writing native recipe replay tests
 
-The gfx942 TF32 numerical test runs the Python engine's 12 variants against its
-independent NumPy references when `rocke_engine` is absent. With the binding
-available, it demands all 24 variants, native builder/lowerer byte identity,
-and backend numerical parity. A discoverable but broken binding fails rather
-than falling back. The standalone TF32 numerical CLI retains its strict
-`--backend both` default. Set `ROCKE_REQUIRE_GFX942=1` to make a missing or
-different GPU fail instead of skip.
+Native replay APIs can hide a source-build dependency. In particular,
+[`online.recipe_cbor_to_llvm()`](platform/python/rocke/portable_ir/src/online.py)
+calls `online.load()`, which calls `build_lib()` when it finds no prebuilt shared
+library. A test can pass in a source checkout or with a cached library, then fail
+in an installed artifact because the source tree and `CMakeLists.txt` are absent.
+Do not let replay test setup implicitly configure or build native code.
+
+When adding or changing a native replay test:
+
+- Build the native artifact during build/setup, from the same revision as the
+  Python oracle. Run a prebuilt replay CLI, or supply a prebuilt shared-library
+  path explicitly before calling the online API. Never fall back to a cached
+  library or an automatic source build to make the test pass.
+- If the prebuilt CLI is unset or missing, skip the native replay lane with a
+  reason identifying the missing artifact, following the existing portable-IR
+  tests. Once present, execution errors and IR mismatches are failures; do not
+  catch them as capability skips. Keep independent Python coverage enabled.
+- Let the launcher supply artifact paths. Installed CTest paths must be relative
+  to its working directory so relocation works. Do not infer artifact presence
+  or location from test-file paths, nearby source files, or conventional build
+  directories. Install required content through CMake and the artifact manifest.
+- Keep a suite-specific fixture local to its module. Do not change shared
+  environment settings or add an autouse fixture that changes other suites'
+  native-lane discovery or skips. A shared fixture needs an intentional consumer
+  contract and validation of every affected suite.
+
+The existing replay CLI target is `rocke_portable_ir_replay_cli`; its installed
+location is `tests/portable_ir/`. Current launcher settings have separate consumers:
+
+| Setting | Consumer |
+|---|---|
+| `ROCKE_REPLAY_CLI` | Existing portable-IR replay suites |
+| `ROCKE_TEST_TF32_REPLAY_CLI` | Module-local TF32 replay fixture, supplied by installed CTest |
+
+For source execution, build the target first and supply its executable through
+the setting for the intended suite. Do not set another suite's variable as a
+side effect. For validation, check absent and present artifacts, a broken
+executable, and unrelated suites' skips. Repeat the native lane in a clean
+relocated install without source directories or native caches available; a
+source-only pass cannot establish installed-artifact support.
 
 ## 6. Invariants & contracts
 

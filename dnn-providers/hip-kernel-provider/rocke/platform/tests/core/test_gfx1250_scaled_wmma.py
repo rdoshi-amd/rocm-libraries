@@ -14,7 +14,7 @@ from rocke.core.arch import ArchTarget
 from rocke.core.arch.wmma_scale import gfx1250_scaled_wmma
 from rocke.core.backend import _cpp_strict, resolve_backend
 from rocke.core.isa.wmma_scale import ScaledWmmaLLVM
-from rocke.core.ir import F32, I32, I64, IRBuilder, PtrType, VectorType
+from rocke.core.ir import F32, I32, I64, IRBuilder, Param, PtrType, VectorType
 from rocke.core.ir_serialize import parse, serialize
 from rocke.core.lower_hip import lower_kernel_to_hip
 from rocke.core.lower_llvm import (
@@ -81,12 +81,13 @@ def test_scaled_backend_rejects_accumulator_widths(scale16, role, width):
             gfx1250_scaled_wmma(atom.op_id)
 
 
-def _scaled_call(scale16, concrete):
+def _scaled_call(scale16, concrete, dtype="fp8"):
     b = IRBuilder("scaled_operand_contract")
     a = b.param("a", VectorType(I32, 16))
+    bb = b.param("b", VectorType(I32, 16))
     c = b.param("c", VectorType(F32, 8))
     s = b.param("s", I64 if scale16 else I32)
-    b.mma(_scaled_atom(scale16=scale16), a, a, c, s, s)
+    b.mma(_scaled_atom(dtype, scale16), a, bb, c, s, s)
     call = b.kernel.body.ops[-1]
     if concrete:
         call.name = f"tile.{call.attrs.pop('op_id')}"
@@ -94,23 +95,31 @@ def _scaled_call(scale16, concrete):
     return b.kernel, call
 
 
-def _assert_scaled_lowering_rejects(kernel, message):
+def _assert_scaled_lowering_rejects(kernel, message, engine):
     # Use the normal catalog; re-resolving op_id must not hide malformed SSA.
-    native = pytest.importorskip("rocke_engine")
     ir = serialize(kernel)
     neutral = any(op.name == "tile.mma" for op in kernel.body.ops)
+    if engine == "native":
+        if not neutral:
+            pytest.skip("native LLVM uses neutral MMA dispatch")
+        native = pytest.importorskip("rocke_engine")
+        with pytest.raises(RuntimeError) as caught:
+            native.lower_serialized_ir(ir, arch="gfx1250", flavor="llvm23")
+        assert str(caught.value) == (
+            "rocke_engine.lower_serialized_ir: lower failed for arch 'gfx1250' "
+            f"(status 1): {message}"
+        )
+        return
     for candidate in (kernel, parse(ir)):
-        # Concrete scaled names are supported directly by HIP; LLVM uses tile.mma.
         if neutral:
-            with pytest.raises(ValueError, match=message):
+            with pytest.raises(ValueError) as caught:
                 _lower_kernel_to_llvm_python(
                     candidate, arch="gfx1250", llvm_flavor="llvm23"
                 )
-        with pytest.raises(ValueError, match=message):
+            assert str(caught.value) == message
+        with pytest.raises(ValueError) as caught:
             lower_kernel_to_hip(candidate, arch="gfx1250")
-    if neutral:
-        with pytest.raises(RuntimeError, match=message):
-            native.lower_serialized_ir(ir, arch="gfx1250", flavor="llvm23")
+        assert str(caught.value) == message
 
 
 @pytest.mark.parametrize("scale16", [False, True])
@@ -126,14 +135,17 @@ def _assert_scaled_lowering_rejects(kernel, message):
         VectorType(I32, 8),
     ],
 )
-def test_scaled_lowering_rejects_accumulator_types(scale16, concrete, role, bad_type):
+@pytest.mark.parametrize("engine", ["python", "native"])
+def test_scaled_lowering_rejects_accumulator_types(
+    scale16, concrete, role, bad_type, engine
+):
     kernel, call = _scaled_call(scale16, concrete)
     value = call.operands[2] if role == "src2" else call.result
     value.type = bad_type
     if role == "src2":
         next(p for p in kernel.params if p.name == "c").type = bad_type
     _assert_scaled_lowering_rejects(
-        kernel, "scaled WMMA requires src2 and dst to be vec<f32x8>"
+        kernel, "scaled WMMA requires src2 and dst to be vec<f32x8>", engine
     )
 
 
@@ -142,7 +154,8 @@ def test_scaled_lowering_rejects_accumulator_types(scale16, concrete, role, bad_
 @pytest.mark.parametrize(
     "arity", ["missing_operand", "extra_operand", "missing_result", "extra_result"]
 )
-def test_scaled_lowering_rejects_arity(scale16, concrete, arity):
+@pytest.mark.parametrize("engine", ["python", "native"])
+def test_scaled_lowering_rejects_arity(scale16, concrete, arity, engine):
     kernel, call = _scaled_call(scale16, concrete)
     if arity == "missing_operand":
         call.operands.pop()
@@ -152,7 +165,12 @@ def test_scaled_lowering_rejects_arity(scale16, concrete, arity):
         call.results.clear()
     else:
         call.results.append(replace(call.result, name="%extra"))
-    _assert_scaled_lowering_rejects(kernel, "expects 5 operands and 1 result")
+    name = next(op for op in kernel.body.ops if op.name.startswith("tile.")).name
+    if name == "tile.mma":
+        name = f"tile.{call.attrs['op_id']}"
+    _assert_scaled_lowering_rejects(
+        kernel, f"{name} expects 5 operands and 1 result", engine
+    )
 
 
 class TestGfx1250ScaledWmma(unittest.TestCase):
@@ -507,3 +525,114 @@ class TestGfx1250ScaledWmma(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+@pytest.mark.parametrize("scale16", [False, True])
+@pytest.mark.parametrize("concrete", [False, True])
+@pytest.mark.parametrize("role", [0, 1, 3, 4])
+@pytest.mark.parametrize("kind", ["scalar", "dtype", "short", "long"])
+@pytest.mark.parametrize("engine", ["python", "native"])
+@pytest.mark.parametrize("dtype", ["fp8", "bf8", "fp6", "bf6", "fp4"])
+def test_scaled_lowering_rejects_sources(scale16, concrete, role, kind, engine, dtype):
+    kernel, call = _scaled_call(scale16, concrete, dtype)
+    if role < 2:
+        bad = (
+            I32
+            if kind == "scalar"
+            else VectorType(
+                F32 if kind == "dtype" else I32,
+                16 + (-1 if kind == "short" else 1 if kind == "long" else 0),
+            )
+        )
+        message = f"scaled WMMA requires src{role} to be vec<i32x16>"
+        param = ("a", "b")[role]
+    else:
+        expected = I64 if scale16 else I32
+        bad = (
+            F32
+            if kind == "dtype"
+            else (
+                VectorType(I32, 1 if kind == "short" else 2)
+                if kind != "scalar"
+                else (I32 if scale16 else I64)
+            )
+        )
+        # Split the shared scale value so each role is corrupted independently.
+        call.operands[role] = replace(call.operands[role], name=f"%bad_scale{role}")
+
+        kernel.params.append(Param(f"bad_scale{role}", bad))
+        param = f"bad_scale{role}"
+    call.operands[role].type = bad
+    next(p for p in kernel.params if p.name == param).type = bad
+    if role >= 3:
+        op_id = call.attrs.get("op_id", call.name.removeprefix("tile."))
+        message = f"tile.{op_id} expects {expected.name} scale operands, got {call.operands[3].type.name}/{call.operands[4].type.name}"
+    _assert_scaled_lowering_rejects(kernel, message, engine)
+
+
+@pytest.mark.parametrize("scale16", [False, True])
+@pytest.mark.parametrize("role", [0, 1, 2, 3])
+@pytest.mark.parametrize("dtype", [None, "", "unknown"])
+def test_scaled_backend_rejects_matrix_dtypes(scale16, role, dtype):
+    atom = _scaled_atom(scale16=scale16)
+    if role < 3:
+        srcs = list(atom.srcs)
+        srcs[role] = replace(srcs[role], dtype=dtype)
+        atom = replace(atom, srcs=tuple(srcs))
+    else:
+        atom = replace(atom, dst=replace(atom.dst, dtype=dtype))
+    catalog = ArchTarget.from_gfx("gfx1250").mma
+    with mock.patch.object(catalog, "by_op_id", return_value=atom):
+        with pytest.raises(ValueError) as caught:
+            gfx1250_scaled_wmma(atom.op_id)
+        assert (
+            str(caught.value)
+            == f"unsupported scaled WMMA backend contract: {atom.op_id}"
+        )
+
+
+@pytest.mark.parametrize("scale16", [False, True])
+@pytest.mark.parametrize("bad_width", [None, 16, 7, 9])
+def test_scaled_python_preserves_independent_carrier_widths(scale16, bad_width):
+    atom = _scaled_atom(scale16=scale16)
+    atom = replace(
+        atom,
+        srcs=(
+            atom.srcs[0],
+            replace(atom.srcs[1], dtype="bf8e5m2", frag_len=8),
+            atom.srcs[2],
+        ),
+    )
+    b = IRBuilder("mixed_scaled_carriers")
+    a = b.param("a", VectorType(I32, 16))
+    bb = b.param("b", VectorType(I32, 8 if bad_width is None else bad_width))
+    c = b.param("c", VectorType(F32, 8))
+    scale = b.param("s", I64 if scale16 else I32)
+    d = b.mma(atom, a, bb, c, scale, scale)
+    dest = b.param("dest", PtrType(F32, "global"))
+    b.global_store(dest, b.const_i32(0), b.vec_extract(d, 7))
+    b.ret()
+    catalog = ArchTarget.from_gfx("gfx1250").mma
+    with mock.patch.object(catalog, "by_op_id", return_value=atom):
+        for candidate in (b.kernel, parse(serialize(b.kernel))):
+            if bad_width is None:
+                ll = _lower_kernel_to_llvm_python(
+                    candidate, arch="gfx1250", llvm_flavor="llvm23"
+                )
+                assert ".v16i32.v8i32" in ll
+                assert "__builtin_amdgcn_wmma_scale" in lower_kernel_to_hip(
+                    candidate, arch="gfx1250"
+                )
+            else:
+                for lower in (
+                    lambda: _lower_kernel_to_llvm_python(
+                        candidate, arch="gfx1250", llvm_flavor="llvm23"
+                    ),
+                    lambda: lower_kernel_to_hip(candidate, arch="gfx1250"),
+                ):
+                    with pytest.raises(ValueError) as caught:
+                        lower()
+                    assert (
+                        str(caught.value)
+                        == "scaled WMMA requires src1 to be vec<i32x8>"
+                    )

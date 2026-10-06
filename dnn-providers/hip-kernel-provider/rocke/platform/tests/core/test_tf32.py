@@ -1,6 +1,7 @@
 # Copyright (c) Advanced Micro Devices, Inc., or its affiliates.
 # SPDX-License-Identifier: MIT
 """Logical TF32 contracts and strict native parity, independent of GPU access."""
+
 from dataclasses import replace
 from unittest.mock import patch
 
@@ -92,6 +93,17 @@ def test_catalog_isolation(m, k, acc):
         ]
         assert len(set(coords)) == shape[0] * shape[1] == len(coords)
         assert set(coords) == {(i, j) for i in range(shape[0]) for j in range(shape[1])}
+        if shape == (m, m):
+            expected = [
+                (
+                    ((lane // 16) * 4 + slot, lane % 16)
+                    if m == 16
+                    else ((slot // 4) * 8 + (lane // 32) * 4 + slot % 4, lane % 32)
+                )
+                for lane in range(64)
+                for slot in range(acc)
+            ]
+            assert coords == expected
 
 
 @pytest.mark.parametrize("m", [16, 32])
@@ -167,7 +179,7 @@ def test_probe_rejects_incompatible_result_layout(m, mode, field):
         with pytest.raises(ValueError) as caught:
             build_tf32_mma_probe(Tf32MmaProbeSpec(m, mode))
         assert str(caught.value) == (
-            "TF32 probe requires matching src2/dst layouts with at most 16 slots"
+            "TF32 probe requires the fixed gfx942 instruction and layout contract"
         )
         builder.assert_not_called()
 
@@ -618,3 +630,181 @@ def test_numeric_harness_auto_flavor(flavor, monkeypatch, tmp_path):
     monkeypatch.setattr(comgr, "build_hsaco_from_llvm_ir", check_compiler_input)
     with pytest.raises(ReachedCompiler):
         tf32_numerics.run(tmp_path, backend="cpp", shapes=(16,))
+
+
+@pytest.mark.parametrize("m", [16, 32])
+@pytest.mark.parametrize("mode", PREPARATIONS)
+@pytest.mark.parametrize(
+    "field",
+    [
+        "coherent_short",
+        "coherent_long",
+        "coherent_wave",
+        "coherent_fn",
+        "atom_wave",
+        "atom_id",
+        "src0_width",
+        "src1_width",
+        "src0_dtype",
+        "src2_dtype",
+        "dst_dtype",
+        "width_float",
+        "map_float",
+        "wave_float",
+        "missing_atom",
+    ],
+)
+def test_probe_rejects_fixed_abi_corruption(m, mode, field):
+    catalog = ArchTarget.from_gfx("gfx942").mma
+    atom = catalog.op_for_shape(
+        family="mma",
+        a_dtype="tf32",
+        b_dtype="tf32",
+        c_dtype="fp32",
+        m=m,
+        n=m,
+        k=128 // m,
+    )
+    full = catalog.op_for_shape(
+        family="mma",
+        a_dtype="fp32",
+        b_dtype="fp32",
+        c_dtype="fp32",
+        m=m,
+        n=m,
+        k=64 // m,
+    )
+    srcs = list(atom.srcs)
+    dst = atom.dst
+    if field.startswith("coherent_"):
+        change = field.removeprefix("coherent_")
+        if change in ("short", "long"):
+            width = srcs[2].frag_len + (-1 if change == "short" else 1)
+            srcs[2] = replace(
+                srcs[2], frag_len=width, layout=replace(srcs[2].layout, frag_len=width)
+            )
+            dst = replace(
+                dst, frag_len=width, layout=replace(dst.layout, frag_len=width)
+            )
+        else:
+            update = (
+                {"wave_size": 32}
+                if change == "wave"
+                else {"fn": lambda b, lane, slot: (lane, slot)}
+            )
+            srcs[2] = replace(srcs[2], layout=replace(srcs[2].layout, **update))
+            dst = replace(dst, layout=replace(dst.layout, **update))
+    elif field in ("atom_wave", "atom_id"):
+        atom = replace(
+            atom, **({"wave_size": 32} if field == "atom_wave" else {"op_id": "wrong"})
+        )
+    elif field == "width_float":
+        srcs[2] = replace(srcs[2], frag_len=float(srcs[2].frag_len))
+    elif field in ("map_float", "wave_float"):
+        key = "frag_len" if field == "map_float" else "wave_size"
+        srcs[2] = replace(
+            srcs[2],
+            layout=replace(
+                srcs[2].layout, **{key: float(getattr(srcs[2].layout, key))}
+            ),
+        )
+    elif field != "missing_atom":
+        role, change = field.split("_")
+        index = int(role[-1]) if role.startswith("src") else 3
+        desc = srcs[index] if index < 3 else dst
+        desc = replace(
+            desc, **({"frag_len": 1} if change == "width" else {"dtype": "i32"})
+        )
+        if index < 3:
+            srcs[index] = desc
+        else:
+            dst = desc
+    atom = None if field == "missing_atom" else replace(atom, srcs=tuple(srcs), dst=dst)
+    with (
+        patch.object(
+            type(catalog),
+            "op_for_shape",
+            side_effect=[atom, full] if mode == "fp32" else [atom],
+        ),
+        patch("rocke.instances.gfx942.tf32_mma_probe.IRBuilder") as builder,
+    ):
+        with pytest.raises(ValueError) as caught:
+            build_tf32_mma_probe(Tf32MmaProbeSpec(m, mode))
+        assert (
+            str(caught.value)
+            == "TF32 probe requires the fixed gfx942 instruction and layout contract"
+        )
+        builder.assert_not_called()
+
+
+@pytest.mark.parametrize("m", [16, 32])
+@pytest.mark.parametrize(
+    "field",
+    [
+        "missing",
+        "id",
+        "wave",
+        "src0_width",
+        "src1_width",
+        "src2_width",
+        "dst_width",
+        "src0_dtype",
+        "src1_dtype",
+        "src2_dtype",
+        "dst_dtype",
+    ],
+)
+def test_probe_preflights_fp32_comparison(m, field):
+    catalog = ArchTarget.from_gfx("gfx942").mma
+    atom = catalog.op_for_shape(
+        family="mma",
+        a_dtype="tf32",
+        b_dtype="tf32",
+        c_dtype="fp32",
+        m=m,
+        n=m,
+        k=128 // m,
+    )
+    full = catalog.op_for_shape(
+        family="mma",
+        a_dtype="fp32",
+        b_dtype="fp32",
+        c_dtype="fp32",
+        m=m,
+        n=m,
+        k=64 // m,
+    )
+    if field == "missing":
+        full = None
+    elif field == "id":
+        full = replace(full, op_id="wrong")
+    elif field == "wave":
+        full = replace(full, wave_size=32)
+    else:
+        role, change = field.split("_")
+        desc = full.dst if role == "dst" else full.srcs[int(role[-1])]
+        desc = replace(
+            desc,
+            **(
+                {"frag_len": desc.frag_len + 1}
+                if change == "width"
+                else {"dtype": "i32"}
+            ),
+        )
+        if role == "dst":
+            full = replace(full, dst=desc)
+        else:
+            srcs = list(full.srcs)
+            srcs[int(role[-1])] = desc
+            full = replace(full, srcs=tuple(srcs))
+    with (
+        patch.object(type(catalog), "op_for_shape", side_effect=[atom, full]),
+        patch("rocke.instances.gfx942.tf32_mma_probe.IRBuilder") as builder,
+    ):
+        with pytest.raises(ValueError) as caught:
+            build_tf32_mma_probe(Tf32MmaProbeSpec(m, "fp32"))
+        assert (
+            str(caught.value)
+            == "TF32 probe requires the fixed gfx942 instruction and layout contract"
+        )
+        builder.assert_not_called()

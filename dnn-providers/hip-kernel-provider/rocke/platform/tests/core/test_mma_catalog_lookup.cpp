@@ -482,6 +482,30 @@ static int test_scaled_accumulator_contracts()
             continue;
         CHECK(base.srcs[2].frag_len == 8 && base.dst.frag_len == 8);
         CHECK(strstr(rocke_scaled_wmma_contract(&base).intrinsic, ".v8f32."));
+        for(int role = 0; role < 4; ++role)
+            for(const char* dtype : {static_cast<const char*>(nullptr), "", "unknown"})
+            {
+                auto invalid = base;
+                if(role == 3)
+                    invalid.dst.dtype = dtype;
+                else
+                    invalid.srcs[role].dtype = dtype;
+                try
+                {
+                    rocke_scaled_wmma_contract(&invalid);
+                    CHECK(false);
+                }
+                catch(const ckc::Error& error)
+                {
+                    CHECK(error.code() == ROCKE_ERR_VALUE);
+                    char expected[256];
+                    snprintf(expected,
+                             sizeof(expected),
+                             "unsupported scaled WMMA backend contract: %s",
+                             base.op_id);
+                    CHECK(strcmp(error.what(), expected) == 0);
+                }
+            }
         for(int role = 0; role < 3; ++role)
             for(int width : {0, 4, 7, 16})
             {
@@ -545,6 +569,83 @@ static int test_scaled_hip_accumulator_values()
     return 0;
 }
 
+static int test_scaled_source_values()
+{
+    const auto* target = rocke_arch_target_from_gfx("gfx1250");
+    for(int row = 0; row < target->mma.num_ops; ++row)
+    {
+        const auto& atom = target->mma.ops[row];
+        if(strcmp(atom.family, "wmma_scaled"))
+            continue;
+        for(int role : {0, 1, 3, 4})
+            for(int kind = 0; kind < 4; ++kind)
+            {
+                rocke_ir_builder_t b = {};
+                CHECK(rocke_ir_builder_init(&b, "scaled_source_values") == ROCKE_OK);
+                const auto* scale_type
+                    = atom.srcs[0].scale_block_size == 16 ? rocke_i64() : rocke_i32();
+                auto* a = rocke_b_param(
+                    &b, "a", rocke_vector_type(&b, rocke_i32(), atom.srcs[0].frag_len), nullptr);
+                auto* bb = rocke_b_param(
+                    &b, "b", rocke_vector_type(&b, rocke_i32(), atom.srcs[1].frag_len), nullptr);
+                auto* c = rocke_b_param(&b, "c", rocke_vector_type(&b, rocke_f32(), 8), nullptr);
+                auto* sa = rocke_b_param(&b, "sa", scale_type, nullptr);
+                auto* sb = rocke_b_param(&b, "sb", scale_type, nullptr);
+                rocke_value_t* scales[] = {sa, sb};
+                auto* result = rocke_b_mma(&b, atom.op_id, a, bb, c, scales, 2);
+                CHECK(result);
+                auto* value = result->op->operands[role];
+                char expected[ROCKE_ERR_MSG_CAP];
+                if(role < 2)
+                {
+                    int width = atom.srcs[role].frag_len;
+                    value->type = kind == 0
+                                      ? rocke_i32()
+                                      : rocke_vector_type(&b,
+                                                          kind == 1 ? rocke_f32() : rocke_i32(),
+                                                          width
+                                                              + (kind == 2   ? -1
+                                                                 : kind == 3 ? 1
+                                                                             : 0));
+                    snprintf(expected,
+                             sizeof(expected),
+                             "scaled WMMA requires src%d to be vec<i32x%d>",
+                             role,
+                             width);
+                }
+                else
+                {
+                    value->type = kind == 0
+                                      ? (scale_type == rocke_i64() ? rocke_i32() : rocke_i64())
+                                  : kind == 1 ? rocke_f32()
+                                              : rocke_vector_type(&b, rocke_i32(), kind - 1);
+                    snprintf(expected,
+                             sizeof(expected),
+                             "tile.%s expects %s scale operands, got %s/%s",
+                             atom.op_id,
+                             scale_type->name,
+                             sa->type->name,
+                             sb->type->name);
+                }
+                rocke_b_ret(&b);
+                char* ll = nullptr;
+                char error[ROCKE_ERR_MSG_CAP] = {};
+                CHECK(rocke_lower_kernel_to_llvm_ex(
+                          b.kernel, ROCKE_LLVM_FLAVOR_LLVM23, "gfx1250", &ll, error, sizeof(error))
+                      == ROCKE_ERR_VALUE);
+                CHECK(ll == nullptr && strcmp(error, expected) == 0);
+                rocke_strbuf_t hip;
+                CHECK(rocke_strbuf_init(&hip, 0) == 0);
+                rocke_lower_hip_opts_t opts = {};
+                opts.arch = "gfx1250";
+                CHECK(rocke_lower_kernel_to_hip(&b, b.kernel, &opts, &hip) == ROCKE_ERR_VALUE);
+                rocke_strbuf_free(&hip);
+                rocke_ir_builder_free(&b);
+            }
+    }
+    return 0;
+}
+
 // Exercise the C ABI independently of the Python serializer and binding.
 static int test_unscaled_wmma_values()
 {
@@ -571,14 +672,16 @@ static int test_unscaled_wmma_values()
         {"gfx1250", "wmma_gfx1250_f32_16x16x64_bf8_bf8", rocke_i32(), 8, rocke_f32()},
     };
     for(const auto& spec : cases)
-        for(int variant = 0; variant < 15; ++variant)
+        for(int variant = 0; variant < 23; ++variant)
         {
             rocke_ir_builder_t b = {};
             CHECK(rocke_ir_builder_init(&b, "unscaled_values") == ROCKE_OK);
             auto* a = rocke_b_param(
                 &b, "a", rocke_vector_type(&b, spec.matrix_elem, spec.matrix_width), NULL);
+            auto* bb = rocke_b_param(
+                &b, "b", rocke_vector_type(&b, spec.matrix_elem, spec.matrix_width), NULL);
             auto* c = rocke_b_param(&b, "c", rocke_vector_type(&b, spec.accum_elem, 8), NULL);
-            auto* result = rocke_b_mma(&b, spec.id, a, a, c, NULL, 0);
+            auto* result = rocke_b_mma(&b, spec.id, a, bb, c, NULL, 0);
             CHECK(result);
             auto* op = result->op;
             char expected[ROCKE_ERR_MSG_CAP];
@@ -597,7 +700,7 @@ static int test_unscaled_wmma_values()
                                       &b, kind == 4 ? wrong_elem : spec.accum_elem, widths[kind]);
                 (variant < 5 ? c : result)->type = type;
             }
-            rocke_value_t* operands[] = {a, a, c, c};
+            rocke_value_t* operands[] = {a, bb, c, c};
             rocke_value_t extra = {"%extra", result->type, op};
             rocke_value_t* results[] = {result, &extra};
             op->operands = operands;
@@ -609,6 +712,26 @@ static int test_unscaled_wmma_values()
             if(variant >= 10)
                 snprintf(
                     expected, sizeof(expected), "unscaled WMMA expects 3 operands and 1 result");
+            if(variant >= 15)
+            {
+                int role = (variant - 15) / 4;
+                int kind = (variant - 15) % 4;
+                const auto* type
+                    = kind == 0 ? spec.matrix_elem
+                                : rocke_vector_type(&b,
+                                                    kind == 1 ? rocke_f32() : spec.matrix_elem,
+                                                    spec.matrix_width
+                                                        + (kind == 2   ? -1
+                                                           : kind == 3 ? 1
+                                                                       : 0));
+                (role == 0 ? a : bb)->type = type;
+                snprintf(expected,
+                         sizeof(expected),
+                         "unscaled WMMA requires src%d to be vec<%sx%d>",
+                         role,
+                         spec.matrix_elem->name,
+                         spec.matrix_width);
+            }
             rocke_b_ret(&b);
             for(auto flavor :
                 {ROCKE_LLVM_FLAVOR_LLVM20, ROCKE_LLVM_FLAVOR_LLVM22, ROCKE_LLVM_FLAVOR_LLVM23})
@@ -648,7 +771,8 @@ int main()
     if(test_family_index_first_use() || test_family_index_duplicates() || test_mma_result_names()
        || test_scale_contracts() || test_scale_layouts_and_families()
        || test_independent_accumulator_width() || test_scaled_accumulator_contracts()
-       || test_scaled_hip_accumulator_values() || test_unscaled_wmma_values())
+       || test_scaled_hip_accumulator_values() || test_scaled_source_values()
+       || test_unscaled_wmma_values())
         return 1;
     int checked = 0;
     for(const char* gfx : {"gfx950", "gfx1250"})

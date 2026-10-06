@@ -14,7 +14,6 @@ from rocke.core.ir_serialize import parse, serialize
 from rocke.core.lower_hip import lower_kernel_to_hip
 from rocke.core.lower_llvm import _lower_kernel_to_llvm_python
 
-
 # Explicit physical shapes: a change to the catalog must not change the oracle.
 CASES = [
     ("gfx1151", "wmma_i32_16x16x16_iu8", I32, 4, I32),
@@ -38,8 +37,9 @@ def _kernel(case, *, atom=None, use_result=False):
     arch, op_id, elem, width, accum = case
     b = IRBuilder("wmma_operand_contract")
     a = b.param("a", VectorType(elem, width))
+    bb = b.param("b", VectorType(elem, width))
     c = b.param("c", VectorType(accum, 8))
-    d = b.mma(atom or ArchTarget.from_gfx(arch).mma.by_op_id(op_id), a, a, c)
+    d = b.mma(atom or ArchTarget.from_gfx(arch).mma.by_op_id(op_id), a, bb, c)
     op = b.kernel.body.ops[-1]
     if use_result:
         out = b.param("out", PtrType(accum, "global"))
@@ -194,6 +194,56 @@ def test_wmma_hip_contract(case, concrete, kind, role):
     else:
         _corrupt_type(kernel, op, case, role, kind)
         error = _type_error(case)
+    for candidate in (kernel, parse(serialize(kernel))):
+        _assert_python_rejects(
+            lambda: lower_kernel_to_hip(candidate, arch=case[0]), error
+        )
+
+
+@pytest.mark.parametrize("case", CASES, ids=[c[1] for c in CASES])
+@pytest.mark.parametrize("flavor", FLAVORS)
+@pytest.mark.parametrize("role", [0, 1])
+@pytest.mark.parametrize("kind", ["scalar", "dtype", "short", "long"])
+@pytest.mark.parametrize("engine", ["python", "native"])
+def test_wmma_llvm_rejects_multiplicands(case, flavor, role, kind, engine):
+    kernel, op = _kernel(case)
+    elem, width = case[2:4]
+    bad_type = (
+        elem
+        if kind == "scalar"
+        else (
+            VectorType(F32 if elem != F32 else I32, width)
+            if kind == "dtype"
+            else VectorType(elem, width + (-1 if kind == "short" else 1))
+        )
+    )
+    op.operands[role].type = bad_type
+    next(p for p in kernel.params if p.name == ("a", "b")[role]).type = bad_type
+    error = f"unscaled WMMA requires src{role} to be {VectorType(elem, width).name}"
+    _assert_llvm_rejects(kernel, case[0], flavor, error, engine)
+
+
+@pytest.mark.parametrize("case", HIP_CASES, ids=[c[1] for c in HIP_CASES])
+@pytest.mark.parametrize("concrete", [False, True])
+@pytest.mark.parametrize("role", [0, 1])
+@pytest.mark.parametrize("kind", ["scalar", "dtype", "short", "long"])
+def test_wmma_hip_rejects_multiplicands(case, concrete, role, kind):
+    kernel, op = _kernel(case)
+    if concrete:
+        op.name = f"tile.{op.attrs.pop('op_id')}"
+    elem, width = case[2:4]
+    bad_type = (
+        elem
+        if kind == "scalar"
+        else (
+            VectorType(F32, width)
+            if kind == "dtype"
+            else VectorType(elem, width + (-1 if kind == "short" else 1))
+        )
+    )
+    op.operands[role].type = bad_type
+    next(p for p in kernel.params if p.name == ("a", "b")[role]).type = bad_type
+    error = f"unscaled WMMA requires src{role} to be {VectorType(elem, width).name}"
     for candidate in (kernel, parse(serialize(kernel))):
         _assert_python_rejects(
             lambda: lower_kernel_to_hip(candidate, arch=case[0]), error

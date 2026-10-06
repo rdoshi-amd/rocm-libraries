@@ -225,6 +225,17 @@ static void _emit_wmma_scale(rocke_lower_t* L, const rocke_op_t* op)
            || !rocke_type_eq(type->elem, rocke_f32()))
             rocke_ll_fail(L, ROCKE_ERR_VALUE, "scaled WMMA requires src2 and dst to be vec<f32x8>");
 
+    for(int role = 0; role < 2; ++role)
+    {
+        const auto* type = op->operands[role]->type;
+        if(!type || type->kind != ROCKE_TYPE_VECTOR || type->count != spec->matrix_words[role]
+           || !rocke_type_eq(type->elem, rocke_i32()))
+            rocke_ll_fail(L,
+                          ROCKE_ERR_VALUE,
+                          "scaled WMMA requires src%d to be vec<i32x%d>",
+                          role,
+                          spec->matrix_words[role]);
+    }
     char packed_type[8];
     snprintf(packed_type, sizeof(packed_type), "i%d", rocke_scale_word_bits(&spec->scales));
     scale_ty = packed_type;
@@ -448,7 +459,9 @@ static const int WMMA_INT_SPECS_N = (int)(sizeof(WMMA_INT_SPECS) / sizeof(WMMA_I
 static void _validate_unscaled_wmma(rocke_lower_t* L,
                                     const rocke_op_t* op,
                                     const rocke_type_t* elem,
-                                    int count)
+                                    int count,
+                                    const rocke_type_t* source_elem,
+                                    int source_count)
 {
     if(op->num_operands != 3 || op->num_results != 1)
         rocke_ll_fail(L, ROCKE_ERR_VALUE, "unscaled WMMA expects 3 operands and 1 result");
@@ -461,6 +474,18 @@ static void _validate_unscaled_wmma(rocke_lower_t* L,
                           "unscaled WMMA requires src2 and dst to be vec<%sx%d>",
                           elem->name,
                           count);
+    for(int role = 0; role < 2; ++role)
+    {
+        const auto* type = op->operands[role]->type;
+        if(!type || type->kind != ROCKE_TYPE_VECTOR || type->count != source_count
+           || !rocke_type_eq(type->elem, source_elem))
+            rocke_ll_fail(L,
+                          ROCKE_ERR_VALUE,
+                          "unscaled WMMA requires src%d to be vec<%sx%d>",
+                          role,
+                          source_elem->name,
+                          source_count);
+    }
 }
 
 /* Emit an integer WMMA (iu8/iu4) call (Python _emit_wmma_int). The signature is
@@ -470,7 +495,7 @@ static void _validate_unscaled_wmma(rocke_lower_t* L,
 static void _emit_wmma_int(rocke_lower_t* L, const rocke_op_t* op, const _wmma_int_spec_t* spec)
 {
     const rocke_value_t *a, *b, *c;
-    _validate_unscaled_wmma(L, op, rocke_i32(), spec->acc_vec);
+    _validate_unscaled_wmma(L, op, rocke_i32(), spec->acc_vec, rocke_i32(), spec->op_vec);
     a = op->operands[0];
     b = op->operands[1];
     c = op->operands[2];
@@ -536,7 +561,10 @@ static void _emit_wmma(rocke_lower_t* L, const rocke_op_t* op, const char* op_id
                       L->backend ? L->backend->gfx : "(rdna)");
     }
 
-    _validate_unscaled_wmma(L, op, rocke_f32(), 8);
+    const auto* source_elem = strcmp(spec->ssa_elt, "half") == 0     ? rocke_f16()
+                              : strcmp(spec->ssa_elt, "bfloat") == 0 ? rocke_bf16()
+                                                                     : rocke_i32();
+    _validate_unscaled_wmma(L, op, rocke_f32(), 8, source_elem, spec->frag_width);
     a = op->operands[0];
     b = op->operands[1];
     c = op->operands[2];

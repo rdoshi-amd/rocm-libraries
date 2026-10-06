@@ -34,18 +34,47 @@ rocke_kernel_def_t* ckc::build_tf32_mma_probe(rocke_ir_builder_t* b,
             catalog = &rocke_arch_target_from_gfx("gfx942")->mma;
         const rocke_mma_op_t* atom
             = rocke_mma_catalog_op_for_shape(catalog, "mma", "tf32", "tf32", "fp32", m, m, k, NULL);
-        // This fixed probe reuses input coordinates for stores. Check the
-        // catalog assumption before emitting IR or indexing the fixed arrays.
-        if(!atom || atom->srcs[2].frag_len <= 0 || atom->srcs[2].frag_len > 16
-           || atom->srcs[2].frag_len != atom->dst.frag_len || !atom->srcs[2].layout
-           || !atom->dst.layout || atom->srcs[2].layout->frag_len != atom->srcs[2].frag_len
-           || atom->dst.layout->frag_len != atom->dst.frag_len || !atom->srcs[2].layout->fn
-           || !atom->dst.layout->fn || atom->srcs[2].layout->fn != atom->dst.layout->fn
-           || atom->srcs[2].layout->wave_size != atom->dst.layout->wave_size)
+        const rocke_mma_op_t* full = nullptr;
+        if(strcmp(mode, "fp32") == 0)
+            full = rocke_mma_catalog_op_for_shape(
+                catalog, "mma", "fp32", "fp32", "fp32", m, m, k / 2, nullptr);
+        const int width = m == 16 ? 4 : 16;
+        char expected_id[64];
+        snprintf(expected_id, sizeof(expected_id), "mfma_f32_%dx%dx%d_xf32", m, m, k);
+        const auto* registered
+            = rocke_mma_catalog_by_op_id(&rocke_arch_target_from_gfx("gfx942")->mma, expected_id);
+        auto valid = [&](const rocke_mma_op_t* selected,
+                         const char* dtype,
+                         int source_width,
+                         int atom_k,
+                         const char* suffix) {
+            char id[64];
+            snprintf(id, sizeof(id), "mfma_f32_%dx%dx%d_%s", m, m, atom_k, suffix);
+            if(!selected || !selected->op_id || strcmp(selected->op_id, id) || !selected->family
+               || strcmp(selected->family, "mma") || selected->m != m || selected->n != m
+               || selected->k != atom_k || selected->wave_size != 64)
+                return false;
+            for(int role = 0; role < 2; ++role)
+                if(!selected->srcs[role].dtype || strcmp(selected->srcs[role].dtype, dtype)
+                   || selected->srcs[role].frag_len != source_width)
+                    return false;
+            return selected->srcs[2].dtype && selected->dst.dtype
+                   && strcmp(selected->srcs[2].dtype, "fp32") == 0
+                   && strcmp(selected->dst.dtype, "fp32") == 0
+                   && selected->srcs[2].frag_len == width && selected->dst.frag_len == width;
+        };
+        auto valid_map = [&](const rocke_layout_map_t* layout, const rocke_layout_map_t* expected) {
+            return layout && expected && layout->fn && layout->fn == expected->fn
+                   && layout->frag_len == width && layout->wave_size == 64;
+        };
+        if(!valid(atom, "tf32", 2, k, "xf32")
+           || (strcmp(mode, "fp32") == 0 && !valid(full, "fp32", 1, k / 2, "f32")) || !registered
+           || !valid_map(atom->srcs[2].layout, registered->srcs[2].layout)
+           || !valid_map(atom->dst.layout, registered->dst.layout))
             return (rocke_kernel_def_t*)rocke_i_set_err(
                 b,
                 ROCKE_ERR_VALUE,
-                "TF32 probe requires matching src2/dst layouts with at most 16 slots");
+                "TF32 probe requires the fixed gfx942 instruction and layout contract");
         const rocke_type_t* ty = strcmp(mode, "prepacked") == 0 ? rocke_i32() : rocke_f32();
         rocke_param_opts_t opts = {};
         opts.align = 4;
@@ -85,8 +114,6 @@ rocke_kernel_def_t* ckc::build_tf32_mma_probe(rocke_ir_builder_t* b,
         rocke_value_t* acc = rocke_b_vec_pack(b, c_values, atom->srcs[2].frag_len, rocke_f32());
         if(strcmp(mode, "fp32") == 0)
         {
-            const rocke_mma_op_t* full = rocke_mma_catalog_op_for_shape(
-                catalog, "mma", "fp32", "fp32", "fp32", m, m, k / 2, NULL);
             for(int step = 0; step < 2; ++step)
             {
                 rocke_value_t* delta = rocke_b_const_i32(b, step * (64 / m));

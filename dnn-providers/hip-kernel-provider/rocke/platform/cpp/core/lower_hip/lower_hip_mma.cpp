@@ -100,7 +100,7 @@ static rocke_status_t h_emit_gfx1250_scaled_wmma(rocke_h_lowerer_t* lw, const ro
     }
     if(op->num_operands != 5 || op->num_results != 1)
     {
-        return rocke_h_fail(lw, ROCKE_ERR_VALUE, "%s expects 5 operands and 1 result", op_id);
+        return rocke_h_fail(lw, ROCKE_ERR_VALUE, "tile.%s expects 5 operands and 1 result", op_id);
     }
     const rocke_type_t* acc_types[] = {op->operands[2]->type, op->results[0]->type};
     for(const auto* type : acc_types)
@@ -108,6 +108,27 @@ static rocke_status_t h_emit_gfx1250_scaled_wmma(rocke_h_lowerer_t* lw, const ro
            || !rocke_type_eq(type->elem, rocke_f32()))
             return rocke_h_fail(
                 lw, ROCKE_ERR_VALUE, "scaled WMMA requires src2 and dst to be vec<f32x8>");
+    for(int role = 0; role < 2; ++role)
+    {
+        const auto* type = op->operands[role]->type;
+        if(!type || type->kind != ROCKE_TYPE_VECTOR || type->count != spec->matrix_words[role]
+           || !rocke_type_eq(type->elem, rocke_i32()))
+            return rocke_h_fail(lw,
+                                ROCKE_ERR_VALUE,
+                                "scaled WMMA requires src%d to be vec<i32x%d>",
+                                role,
+                                spec->matrix_words[role]);
+    }
+    const auto* scale_type = scale16 ? rocke_i64() : rocke_i32();
+    if(!rocke_type_eq(op->operands[3]->type, scale_type)
+       || !rocke_type_eq(op->operands[4]->type, scale_type))
+        return rocke_h_fail(lw,
+                            ROCKE_ERR_VALUE,
+                            "tile.%s expects %s scale operands, got %s/%s",
+                            op_id,
+                            scale_type->name,
+                            op->operands[3]->type->name,
+                            op->operands[4]->type->name);
     rocke_h_emitf(lw,
                   "f32x8 %s = %s(%d, %s, %d, %s, (int16_t)0, %s, "
                   "0, %d, %s, 0, %d, %s, false, false);",

@@ -97,7 +97,17 @@ static inline rocke_matrix_fragment_layout_t
 static inline rocke_scaled_wmma_op_t rocke_scaled_wmma_contract(const rocke_mma_op_t* atom)
 {
     rocke_scaled_wmma_op_t spec = {};
+    if(!atom || !atom->op_id || !*atom->op_id || !atom->family
+       || strcmp(atom->family, "wmma_scaled") != 0)
+        ckc::raise_status(ROCKE_ERR_VALUE, "unsupported scaled WMMA backend contract");
     spec.op_id = atom->op_id;
+    char contract_error[256];
+    snprintf(contract_error,
+             sizeof(contract_error),
+             "unsupported scaled WMMA backend contract: %s",
+             atom->op_id);
+    if(!atom->srcs[0].dtype || !atom->srcs[1].dtype || !atom->srcs[2].dtype || !atom->dst.dtype)
+        ckc::raise_status(ROCKE_ERR_VALUE, contract_error);
     const char* dtypes[2] = {atom->srcs[0].dtype, atom->srcs[1].dtype};
     const int words[2] = {atom->srcs[0].frag_len, atom->srcs[1].frag_len};
     const char* scale_dtypes[2] = {atom->srcs[0].scale_dtype, atom->srcs[1].scale_dtype};
@@ -114,9 +124,9 @@ static inline rocke_scaled_wmma_op_t rocke_scaled_wmma_contract(const rocke_mma_
         else if(strcmp(dtypes[i], "fp4e2m1") == 0)
             spec.matrix_formats[i] = 4;
         else
-            ckc::raise_status(ROCKE_ERR_VALUE, "unsupported scaled WMMA matrix format");
+            ckc::raise_status(ROCKE_ERR_VALUE, contract_error);
         if(!scale_dtypes[i] || strcmp(scale_dtypes[i], "e8m0") != 0)
-            ckc::raise_status(ROCKE_ERR_VALUE, "unsupported scaled WMMA scale format");
+            ckc::raise_status(ROCKE_ERR_VALUE, contract_error);
         spec.scale_formats[i] = 0; // E8M0.
         spec.matrix_words[i] = words[i];
     }
@@ -125,7 +135,7 @@ static inline rocke_scaled_wmma_op_t rocke_scaled_wmma_contract(const rocke_mma_
        || strcmp(atom->srcs[2].dtype, "fp32") != 0 || strcmp(atom->dst.dtype, "fp32") != 0
        || atom->srcs[2].frag_len != 8 || atom->dst.frag_len != 8 || atom->m != 16 || atom->n != 16
        || atom->k != 128)
-        ckc::raise_status(ROCKE_ERR_VALUE, "unsupported scaled WMMA backend contract");
+        ckc::raise_status(ROCKE_ERR_VALUE, contract_error);
     spec.scales.block_k = atom->srcs[0].scale_block_size;
     const int count = atom->k / spec.scales.block_k;
     if(atom->srcs[0].scale_frag_len != count || atom->srcs[1].scale_frag_len != count)

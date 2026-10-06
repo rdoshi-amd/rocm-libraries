@@ -108,10 +108,86 @@ static int test_probe_rejects_incompatible_result_layout()
                 CHECK(b.status == ROCKE_ERR_VALUE);
                 CHECK(std::strcmp(
                           b.err,
-                          "TF32 probe requires matching src2/dst layouts with at most 16 slots")
+                          "TF32 probe requires the fixed gfx942 instruction and layout contract")
                       == 0);
                 CHECK(b.kernel->num_params == 0);
                 CHECK(b.kernel->body->num_ops == 0);
+                rocke_ir_builder_free(&b);
+            }
+    return 0;
+}
+
+static int test_probe_fixed_contracts()
+{
+    const auto* target = rocke_arch_target_from_gfx("gfx942");
+    for(int m : {16, 32})
+        for(const char* mode : {"raw", "carrier", "rne", "prepacked", "fp32"})
+            for(int variant = 0; variant < 24; ++variant)
+            {
+                const bool comparison = variant >= 13;
+                if(comparison && strcmp(mode, "fp32"))
+                    continue;
+                std::vector<rocke_mma_op_t> ops(target->mma.ops,
+                                                target->mma.ops + target->mma.num_ops);
+                rocke_mma_catalog_t catalog = {ops.data(), static_cast<int>(ops.size())};
+                const auto* selected = rocke_mma_catalog_op_for_shape(&catalog,
+                                                                      "mma",
+                                                                      comparison ? "fp32" : "tf32",
+                                                                      comparison ? "fp32" : "tf32",
+                                                                      "fp32",
+                                                                      m,
+                                                                      m,
+                                                                      (comparison ? 64 : 128) / m,
+                                                                      nullptr);
+                CHECK(selected);
+                auto& atom = ops[selected - ops.data()];
+                auto src = *atom.srcs[2].layout;
+                auto dst = *atom.dst.layout;
+                atom.srcs[2].layout = &src;
+                atom.dst.layout = &dst;
+                if(variant < 2)
+                    atom.srcs[2].frag_len = atom.dst.frag_len = src.frag_len = dst.frag_len
+                        = atom.dst.frag_len + (variant == 0 ? -1 : 1);
+                else if(variant == 2)
+                    src.wave_size = dst.wave_size = 32;
+                else if(variant == 3)
+                    src.fn = dst.fn = atom.srcs[0].layout->fn;
+                else if(variant == 4 || variant == 15)
+                    atom.wave_size = 32;
+                else if(variant == 5 || variant == 14)
+                    atom.op_id = "wrong";
+                else if(variant == 6 || variant == 7)
+                    atom.srcs[variant - 6].frag_len = 1;
+                else if(variant == 8 || variant == 9)
+                    atom.srcs[variant - 8].dtype = "i32";
+                else if(variant == 10)
+                    atom.srcs[2].dtype = "i32";
+                else if(variant == 11)
+                    atom.dst.dtype = "i32";
+                else if(variant == 12 || variant == 13)
+                    atom.family = "absent";
+                else
+                {
+                    int role = (variant - 16) % 4;
+                    if(variant < 20)
+                    {
+                        if(role == 3)
+                            ++atom.dst.frag_len;
+                        else
+                            ++atom.srcs[role].frag_len;
+                    }
+                    else if(role == 3)
+                        atom.dst.dtype = "i32";
+                    else
+                        atom.srcs[role].dtype = "i32";
+                }
+                rocke_ir_builder_t b;
+                CHECK(ckc::build_tf32_mma_probe(&b, m, mode, &catalog) == nullptr);
+                CHECK(b.status == ROCKE_ERR_VALUE);
+                CHECK(strcmp(b.err,
+                             "TF32 probe requires the fixed gfx942 instruction and layout contract")
+                      == 0);
+                CHECK(b.kernel->num_params == 0 && b.kernel->body->num_ops == 0);
                 rocke_ir_builder_free(&b);
             }
     return 0;
@@ -297,6 +373,7 @@ static int test_invalid_store_alignment()
 int main()
 {
     CHECK(test_probe_rejects_incompatible_result_layout() == 0);
+    CHECK(test_probe_fixed_contracts() == 0);
     CHECK(test_invalid_store_alignment() == 0);
     CHECK(test_invalid_tf32_ops_rejected() == 0);
     CHECK(test_vector_load() == 0);

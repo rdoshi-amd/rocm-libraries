@@ -591,14 +591,20 @@ TEST(GPU_HipdnnShimConvStreamSwitch_FP32, CallAfterStreamSwitchWaitsForOldStream
     ASSERT_EQ(miopenSetStream(handle, stream_a.handle), miopenStatusSuccess);
     ASSERT_EQ(hipStreamSynchronize(stream_a.handle), hipSuccess);
     ASSERT_EQ(hipStreamSynchronize(stream_b.handle), hipSuccess);
+    // So the result checks see only what the gated calls wrote.
+    ResetAfterFind(y1_dev, y1);
+    ResetAfterFind(y2_dev, y2);
 
     StreamGate gate;
     ASSERT_NO_FATAL_FAILURE(gate.Close(stream_a.handle));
 
-    // Started before the gated calls, so a call that makes the host wait for stream A fails
-    // late instead of hanging. Nothing may return before the join.
-    std::thread opener([&gate] {
+    // Started before the gated calls, so a call that makes the host wait for stream A returns
+    // once the gate opens instead of hanging, and `opened` shows it waited. Nothing may return
+    // before the join.
+    std::atomic<bool> opened{false};
+    std::thread opener([&gate, &opened] {
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        opened = true;
         gate.Open();
     });
 
@@ -607,6 +613,7 @@ TEST(GPU_HipdnnShimConvStreamSwitch_FP32, CallAfterStreamSwitchWaitsForOldStream
     const miopenStatus_t switched = miopenSetStream(handle, stream_b.handle);
     const miopenStatus_t status2  = forward(x2, x2_dev, y2, y2_dev, workspace2);
     const hipError_t record_b     = hipEventRecord(event_b.handle, stream_b.handle);
+    const bool host_waited        = opened;
 
     const hipError_t waited_b = hipEventSynchronize(event_b.handle);
     const hipError_t a_done   = hipEventQuery(event_a.handle);
@@ -625,6 +632,8 @@ TEST(GPU_HipdnnShimConvStreamSwitch_FP32, CallAfterStreamSwitchWaitsForOldStream
     // MIOpen uses each caller's own workspace, so natively B may finish first.
     if(ForwardingEnabled())
     {
+        EXPECT_FALSE(host_waited)
+            << "a gated call made the host wait for stream A, which hides whether stream B waits";
         EXPECT_EQ(a_done, hipSuccess)
             << "the call on stream B finished while the call on stream A was still waiting";
     }
@@ -633,6 +642,90 @@ TEST(GPU_HipdnnShimConvStreamSwitch_FP32, CallAfterStreamSwitchWaitsForOldStream
     y2.data = staging.Read<float>(y2_dev, y2.data.size());
     CheckMatchesCpuReference(x1, w, y1, geometry);
     CheckMatchesCpuReference(x2, w, y2, geometry);
+}
+
+// The caller may destroy the old stream after a stream switch, so the next forwarded call must
+// not touch it.
+TEST(GPU_HipdnnShimConvStreamSwitch_FP32, CallAfterOldStreamIsDestroyed)
+{
+    OwnedStream stream_a;
+    OwnedStream stream_b;
+    ASSERT_EQ(hipStreamCreate(&stream_a.handle), hipSuccess);
+    ASSERT_EQ(hipStreamCreate(&stream_b.handle), hipSuccess);
+
+    Owned<miopenHandle_t, miopenDestroy> owned_handle;
+    ASSERT_EQ(miopenCreateWithStream(&owned_handle.handle, stream_a.handle), miopenStatusSuccess);
+    miopenHandle_t handle = owned_handle.handle;
+
+    const ConvGeometry geometry{{1, 1, 1}, {1, 1, 1}, {1, 1, 1}};
+    tensor<float> x{1, 4, 6, 8, 8};
+    x.generate(tensor_elem_gen_integer{17});
+    tensor<float> w{4, 4, 3, 3, 3};
+    w.generate(tensor_elem_gen_integer{17});
+    OwnedConvDescriptor conv;
+    ASSERT_NO_FATAL_FAILURE(InitConvDescriptor(conv, miopenConvolution, geometry));
+    std::vector<std::size_t> out_lengths;
+    ASSERT_NO_FATAL_FAILURE(OutputLengths(conv.handle, x, w, out_lengths));
+    tensor<float> y{out_lengths};
+
+    auto& staging = get_handle();
+    auto x_dev    = staging.Write(x.data);
+    auto w_dev    = staging.Write(w.data);
+    auto y_dev    = staging.Write(y.data);
+
+    std::size_t workspace_size = 0;
+    ASSERT_EQ(miopenConvolutionForwardGetWorkSpaceSize(
+                  handle, &w.desc, &x.desc, conv.handle, &y.desc, &workspace_size),
+              miopenStatusSuccess);
+    Workspace workspace{workspace_size};
+
+    int returned_algo_count = 0;
+    miopenConvAlgoPerf_t perf{};
+    ASSERT_EQ(miopenFindConvolutionForwardAlgorithm(handle,
+                                                    &x.desc,
+                                                    x_dev.get(),
+                                                    &w.desc,
+                                                    w_dev.get(),
+                                                    conv.handle,
+                                                    &y.desc,
+                                                    y_dev.get(),
+                                                    1,
+                                                    &returned_algo_count,
+                                                    &perf,
+                                                    workspace.ptr(),
+                                                    workspace.size(),
+                                                    false),
+              miopenStatusSuccess);
+    ASSERT_GT(returned_algo_count, 0);
+
+    auto forward = [&] {
+        return miopenConvolutionForward(handle,
+                                        &kOne,
+                                        &x.desc,
+                                        x_dev.get(),
+                                        &w.desc,
+                                        w_dev.get(),
+                                        conv.handle,
+                                        perf.fwd_algo,
+                                        &kZero,
+                                        &y.desc,
+                                        y_dev.get(),
+                                        workspace.ptr(),
+                                        workspace.size());
+    };
+
+    ASSERT_EQ(forward(), miopenStatusSuccess);
+    ASSERT_EQ(miopenSetStream(handle, stream_b.handle), miopenStatusSuccess);
+    ASSERT_EQ(hipStreamDestroy(stream_a.handle), hipSuccess);
+    stream_a.handle = nullptr;
+    ResetAfterFind(y_dev, y);
+
+    EXPECT_EQ(forward(), miopenStatusSuccess) << "the first call after the switch";
+    EXPECT_EQ(forward(), miopenStatusSuccess) << "a later call";
+    ASSERT_EQ(hipStreamSynchronize(stream_b.handle), hipSuccess);
+
+    y.data = staging.Read<float>(y_dev, y.data.size());
+    CheckMatchesCpuReference(x, w, y, geometry);
 }
 
 void RunFusedCase(const FusedCase& config, const FusedScales& scales = {})

@@ -41,7 +41,7 @@ bool IsAvailable();
 // MIOPEN_DISABLE_HIPDNN_FOR took its entry points back off the hipDNN path.
 // Like miopenDestroy, it must not run while another call is using the handle:
 // calls use the handle's state without holding the map lock.
-void ReleaseHandle(miopenHandle_t handle);
+void ReleaseHandle(miopenHandle_t handle) noexcept;
 
 // Replacement text for miopenGetErrorString when the last wrapped call on this
 // thread was forwarded and failed with `status`, or null otherwise. The result
@@ -50,11 +50,11 @@ void ReleaseHandle(miopenHandle_t handle);
 //
 // This exists so a forwarded failure is distinguishable from the same status
 // raised by MIOpen itself, without adding a public symbol to do it.
-const char* PrefixedErrorString(miopenStatus_t status, const char* nativeMessage);
+const char* PrefixedErrorString(miopenStatus_t status, const char* nativeMessage) noexcept;
 
 // Every stub that MIOpen serves calls this, so a later MIOpen failure with the
 // same status is not reported as forwarded.
-void ClearForwardedFailure();
+void ClearForwardedFailure() noexcept;
 
 // One value per kind of graph the wrapper builds. Kept in one list so that the
 // values stay distinct as operations are added: it is the first element of
@@ -85,6 +85,11 @@ struct PlanKey
 // Records a forwarded failure for miopenGetErrorString to report, and returns
 // `status`.
 miopenStatus_t RecordFailure(miopenStatus_t status, std::string message);
+
+// Records the exception being handled as a forwarded miopenStatusUnknownError,
+// the status MIOpen returns for one, and returns it. Call only from a catch
+// block.
+miopenStatus_t RecordCurrentException() noexcept;
 
 using PopulateGraphFn = std::function<bool(hipdnn_frontend::graph::Graph&)>;
 using VariantPack     = std::unordered_map<int64_t, void*>;

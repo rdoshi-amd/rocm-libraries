@@ -12,6 +12,7 @@
 #include <hip/hip_runtime_api.h>
 
 #include <cstdint>
+#include <exception>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -44,7 +45,10 @@ struct PlanKeyHash
 struct HandleState
 {
     fe::HipdnnHandlePtr hipdnnHandle;
-    hipStream_t stream   = nullptr;
+    hipStream_t stream = nullptr;
+    // Marks the end of the last call's work. A call on a new stream waits on this
+    // instead of the old stream, which the caller may have destroyed.
+    hipEvent_t lastWork  = nullptr;
     void* workspace      = nullptr;
     size_t workspaceSize = 0;
     std::mutex mutex;
@@ -53,6 +57,8 @@ struct HandleState
     {
         if(workspace != nullptr)
             static_cast<void>(hipFree(workspace));
+        if(lastWork != nullptr)
+            static_cast<void>(hipEventDestroy(lastWork));
     }
 
     bool EnsureWorkspace(size_t bytes)
@@ -87,17 +93,6 @@ std::unordered_map<miopenHandle_t, std::unique_ptr<HandleState>>& HandleMap()
     return handles;
 }
 
-bool WaitForEarlierStream(hipStream_t stream, hipStream_t earlier)
-{
-    hipEvent_t event = nullptr;
-    if(hipEventCreateWithFlags(&event, hipEventDisableTiming) != hipSuccess)
-        return false;
-    const bool ordered = hipEventRecord(event, earlier) == hipSuccess &&
-                         hipStreamWaitEvent(stream, event, 0) == hipSuccess;
-    static_cast<void>(hipEventDestroy(event));
-    return ordered;
-}
-
 // Created on first forwarded call rather than in miopenCreate, so a process that
 // never forwards never pays for hipdnnCreate.
 std::pair<HandleState*, miopenStatus_t> AcquireHandleState(miopenHandle_t handle)
@@ -119,14 +114,22 @@ std::pair<HandleState*, miopenStatus_t> AcquireHandleState(miopenHandle_t handle
             return {nullptr,
                     RecordFailure(miopenStatusInternalError, "could not create a hipDNN handle")};
         }
-        slot               = std::make_unique<HandleState>();
-        slot->hipdnnHandle = std::move(created);
-        slot->stream       = stream;
+        auto state = std::make_unique<HandleState>();
+        if(hipEventCreateWithFlags(&state->lastWork, hipEventDisableTiming) != hipSuccess)
+        {
+            HandleMap().erase(handle);
+            return {nullptr,
+                    RecordFailure(miopenStatusInternalError,
+                                  "could not create the HIP event that orders hipDNN work")};
+        }
+        state->hipdnnHandle = std::move(created);
+        state->stream       = stream;
+        slot                = std::move(state);
     }
     else if(slot->stream != stream)
     {
         // Work still queued on the old stream may be using the shared workspace.
-        if(!WaitForEarlierStream(stream, slot->stream))
+        if(hipStreamWaitEvent(stream, slot->lastWork, 0) != hipSuccess)
             return {nullptr,
                     RecordFailure(miopenStatusInternalError,
                                   "could not make the MIOpen handle's new stream wait for the "
@@ -224,8 +227,14 @@ miopenStatus_t RunGraph(HandleState& state, const GraphPtr& graph, VariantPack& 
         return RecordFailure(miopenStatusAllocFailed, "hipDNN workspace allocation failed");
 
     const fe::Error error = graph->execute(*state.hipdnnHandle, variantPack, state.workspace);
+    // Recorded even when execute failed, because it may have queued work first.
+    const bool recorded = hipEventRecord(state.lastWork, state.stream) == hipSuccess;
     if(!error.is_good())
         return RecordHipdnnFailure(error);
+    if(!recorded)
+        return RecordFailure(miopenStatusInternalError,
+                             "could not record the end of the hipDNN work on the MIOpen "
+                             "handle's stream");
 
     return RecordSuccess();
 }
@@ -238,7 +247,33 @@ miopenStatus_t RecordFailure(miopenStatus_t status, std::string message)
     return status;
 }
 
-void ClearForwardedFailure() { LastError().failed = false; }
+miopenStatus_t RecordCurrentException() noexcept
+{
+    try
+    {
+        try
+        {
+            throw;
+        }
+        catch(const std::exception& e)
+        {
+            return RecordFailure(miopenStatusUnknownError,
+                                 std::string("unexpected exception: ") + e.what());
+        }
+        catch(...)
+        {
+            return RecordFailure(miopenStatusUnknownError, "unexpected exception");
+        }
+    }
+    catch(...)
+    {
+        // Building the message ran out of memory, so record the status alone.
+        LastError() = LastForwardedError{true, miopenStatusUnknownError, {}};
+        return miopenStatusUnknownError;
+    }
+}
+
+void ClearForwardedFailure() noexcept { LastError().failed = false; }
 
 miopenStatus_t RunCachedGraph(miopenHandle_t handle,
                               const PlanKey& key,
@@ -276,18 +311,26 @@ bool IsAvailable()
     return available;
 }
 
-void ReleaseHandle(miopenHandle_t handle)
+void ReleaseHandle(miopenHandle_t handle) noexcept
 {
+    try
     {
-        const std::lock_guard<std::mutex> lock(PlanMutex());
-        PlanCache().EraseIf([handle](const PlanKey& key) { return key.handle == handle; });
-    }
+        {
+            const std::lock_guard<std::mutex> lock(PlanMutex());
+            PlanCache().EraseIf([handle](const PlanKey& key) { return key.handle == handle; });
+        }
 
-    const std::lock_guard<std::mutex> lock(HandleMapMutex());
-    HandleMap().erase(handle);
+        const std::lock_guard<std::mutex> lock(HandleMapMutex());
+        HandleMap().erase(handle);
+    }
+    catch(...)
+    {
+        // miopenDestroy must still succeed, so the state is left allocated.
+        std::cerr << "[MIOpen] could not release the hipDNN state of a destroyed MIOpen handle\n";
+    }
 }
 
-const char* PrefixedErrorString(miopenStatus_t status, const char* nativeMessage)
+const char* PrefixedErrorString(miopenStatus_t status, const char* nativeMessage) noexcept
 {
     const LastForwardedError& last = LastError();
     if(!last.failed || last.status != status || nativeMessage == nullptr)
@@ -296,9 +339,16 @@ const char* PrefixedErrorString(miopenStatus_t status, const char* nativeMessage
     // miopenGetErrorString returns a bare const char* the caller does not own,
     // so the prefixed text has to outlive this call without being leaked.
     static thread_local std::string prefixed;
-    prefixed = "[hipDNN-forwarded] " + std::string(nativeMessage);
-    if(!last.message.empty())
-        prefixed += ": " + last.message;
+    try
+    {
+        prefixed = "[hipDNN-forwarded] " + std::string(nativeMessage);
+        if(!last.message.empty())
+            prefixed += ": " + last.message;
+    }
+    catch(...)
+    {
+        return nullptr;
+    }
     return prefixed.c_str();
 }
 

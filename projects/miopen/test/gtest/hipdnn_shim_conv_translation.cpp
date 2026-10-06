@@ -457,12 +457,16 @@ bool WithinTolerance(const tensor<float>& reference, const tensor<float>& got)
 } // namespace
 
 // MIOpen's kernel lookup key leaves out strides, so a non-packed run with no Find of its own
-// reuses the packed problem's kernel and returns wrong values with a success status. No other
-// test uses this shape, because the kernel cache is shared across the binary.
+// reuses the packed problem's kernel and returns wrong values with a success status. MIOpen
+// caches kernels per handle, so a separate handle keeps earlier tests from changing the result.
+// Sharing the staging handle's stream keeps the copies ordered with the runs.
 TEST(GPU_HipdnnShimConvNonPackedAfterPacked_FP32, MatchesCpuReference)
 {
-    auto& handle_deref    = get_handle();
-    miopenHandle_t handle = &handle_deref;
+    auto& handle_deref = get_handle();
+    Owned<miopenHandle_t, miopenDestroy> owned_handle;
+    ASSERT_EQ(miopenCreateWithStream(&owned_handle.handle, handle_deref.GetStream()),
+              miopenStatusSuccess);
+    miopenHandle_t handle = owned_handle.handle;
 
     OwnedConvDescriptor conv;
     ASSERT_NO_FATAL_FAILURE(InitNormalFindConvDescriptor(conv));

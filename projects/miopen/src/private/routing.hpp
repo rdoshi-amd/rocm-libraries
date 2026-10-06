@@ -222,15 +222,27 @@ Route DispatchFromStub(const char* entryPoint, const char* enclosingFunction);
 // miopenSetTensorDescriptor about as cheap as the plain tail-call they were
 // before the seam existed.
 //
-// Requires hipdnn_graph.hpp to be included, for ClearForwardedFailure.
-#define MIOPEN_WRAPPER_FORWARD(fn, expr)                              \
-    do                                                                \
-    {                                                                 \
-        static const ::miopen::wrapper::Route miopen_wrapper_route_ = \
-            ::miopen::wrapper::DispatchFromStub(#fn, __func__);       \
-        if(miopen_wrapper_route_ == ::miopen::wrapper::Route::Hipdnn) \
-            return (expr);                                            \
-        ::miopen::wrapper::hipdnn::ClearForwardedFailure();           \
+// Both the route lookup and `expr` can throw, and an exception must not leave
+// an extern "C" function, so both sit inside the try. The MIOpen route needs no
+// catch: every _impl function catches its own exceptions.
+//
+// Requires hipdnn_graph.hpp, for ClearForwardedFailure and
+// RecordCurrentException.
+#define MIOPEN_WRAPPER_FORWARD(fn, expr)                                  \
+    do                                                                    \
+    {                                                                     \
+        try                                                               \
+        {                                                                 \
+            static const ::miopen::wrapper::Route miopen_wrapper_route_ = \
+                ::miopen::wrapper::DispatchFromStub(#fn, __func__);       \
+            if(miopen_wrapper_route_ == ::miopen::wrapper::Route::Hipdnn) \
+                return (expr);                                            \
+        }                                                                 \
+        catch(...)                                                        \
+        {                                                                 \
+            return ::miopen::wrapper::hipdnn::RecordCurrentException();   \
+        }                                                                 \
+        ::miopen::wrapper::hipdnn::ClearForwardedFailure();               \
     } while(false)
 
 // The same seam for the stubs with nowhere to forward to yet:

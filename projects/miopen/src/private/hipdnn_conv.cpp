@@ -357,9 +357,10 @@ miopenStatus_t ForwardConvolution(miopenHandle_t handle,
        ReadConvolution(convDesc, problem.conv) != miopenStatusSuccess)
         return RecordFailure(miopenStatusBadParm, "could not read the MIOpen descriptors");
 
-    const miopenDataType_t dataType = problem.tensors[0].dataType;
-    // Matches the status MIOpen's own 2-D convolution returns.
-    if(!ScalarEquals(alpha, dataType, 1.0) || !ScalarEquals(beta, dataType, 0.0))
+    // MIOpen reads alpha and beta as the output tensor's type. Its own 2-D
+    // convolution returns the same status.
+    const miopenDataType_t scalarType = problem.tensors[2].dataType;
+    if(!ScalarEquals(alpha, scalarType, 1.0) || !ScalarEquals(beta, scalarType, 0.0))
         return RecordFailure(miopenStatusNotImplemented,
                              "hipDNN convolution supports only alpha=1, beta=0");
 
@@ -471,17 +472,17 @@ miopenStatus_t ConvolutionBiasActivationForward(miopenHandle_t handle,
        ReadConvolution(convDesc, problem.conv) != miopenStatusSuccess)
         return RecordFailure(miopenStatusBadParm, "could not read the MIOpen descriptors");
 
-    const miopenDataType_t dataType = problem.tensors[0].dataType;
-    // MIOpen reads a null alpha1 or alpha2 as 1. alpha2 scales z, and the graph
-    // has no z, so only alpha2 = 0 can be forwarded.
-    if(alpha1 != nullptr && !ScalarEquals(alpha1, dataType, 1.0))
+    // MIOpen reads alpha1 and alpha2 as float for every tensor type, and a null
+    // one as 1. alpha2 scales z, which the graph lacks, so only alpha2 = 0 can be
+    // forwarded.
+    if(alpha1 != nullptr && !ScalarEquals(alpha1, miopenFloat, 1.0))
         return RecordFailure(miopenStatusUnsupportedOp,
                              "hipDNN fused convolution supports only alpha1=1");
     if(alpha2 == nullptr)
         return RecordFailure(miopenStatusUnsupportedOp,
                              "alpha2 is null, which MIOpen reads as 1, and hipDNN fused "
                              "convolution does not support adding z");
-    if(!ScalarEquals(alpha2, dataType, 0.0))
+    if(!ScalarEquals(alpha2, miopenFloat, 0.0))
         return RecordFailure(miopenStatusUnsupportedOp,
                              "hipDNN fused convolution supports only alpha2=0");
 

@@ -23,6 +23,7 @@
 #include <cstdlib>
 #include <ostream>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 
@@ -598,6 +599,26 @@ TEST(CPU_WrapperRoutingLastError_NONE, ClearedFailureIsNotPrefixed)
     hipdnn::ClearForwardedFailure();
 
     EXPECT_EQ(hipdnn::PrefixedErrorString(miopenStatusUnsupportedOp, "native"), nullptr);
+}
+
+TEST(CPU_WrapperRoutingLastError_NONE, RecordsAnException)
+{
+    miopenStatus_t status = miopenStatusSuccess;
+    try
+    {
+        throw std::runtime_error("what went wrong");
+    }
+    catch(...)
+    {
+        status = hipdnn::RecordCurrentException();
+    }
+    const char* const prefixed = hipdnn::PrefixedErrorString(miopenStatusUnknownError, "native");
+    const std::string text     = prefixed != nullptr ? prefixed : "";
+    hipdnn::ClearForwardedFailure();
+
+    EXPECT_EQ(status, miopenStatusUnknownError);
+    ASSERT_NE(prefixed, nullptr);
+    EXPECT_NE(text.find("what went wrong"), std::string::npos) << text;
 }
 
 } // namespace

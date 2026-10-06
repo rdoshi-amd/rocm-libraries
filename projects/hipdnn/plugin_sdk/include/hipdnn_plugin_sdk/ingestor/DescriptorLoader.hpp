@@ -39,6 +39,7 @@
 #include <hipdnn_plugin_sdk/ingestor/KernelIngestorStateManager.hpp>
 #include <hipdnn_plugin_sdk/ingestor/MakeEngine.hpp>
 #include <hipdnn_plugin_sdk/ingestor/NativeRegistry.hpp>
+#include <hipdnn_plugin_sdk/ingestor/detail/TopLevelArraySax.hpp>
 
 /**
  * @file DescriptorLoader.hpp
@@ -94,8 +95,8 @@
  *    bare base id: a device reports feature suffixes and matching stops at ':', so a
  *    partial target id (`gfx942:xnack-`) would match nothing while reading as deliberate.
  *  - RFC 0020 §10.1 and §11 make any unknown field a hard rejection
- *    (`additionalProperties: false`); a key prefixed `x-` or `_`, plus the packager's
- *    `provenance` block, is warned about and ignored instead, so a descriptor may carry
+ *    (`additionalProperties: false`); a key prefixed `x-` or `_`, plus an unprefixed
+ *    `provenance`, is warned about and ignored instead, so a descriptor may carry
  *    tracking data. Every other unknown key is still the hard rejection the RFC asks
  *    for, including a leftover `schema`.
  *
@@ -225,8 +226,10 @@ inline void requireObject(const nlohmann::json& value, const std::string& where)
 }
 
 /// Extension data has to look like extension data: a key starting `x-` or `_`, plus
-/// `provenance`, the one unprefixed block the descriptor packager emits. Those warn and
-/// are ignored, so a descriptor can carry tracking fields the loader has no use for.
+/// `provenance`, the one unprefixed block. The packager keeps it inline only on a KDP
+/// header (a packed UKD's lives in the provenance sidecar), but unpacked and authored
+/// trees carry it on any descriptor. Those warn and are ignored, so a descriptor can
+/// carry tracking fields the loader has no use for.
 ///
 /// Anything else the struct does not spell fails the file, because the alternative is
 /// silent damage. A UED spelling `heuristik` has no heuristic key, and absence is legal:
@@ -1042,9 +1045,10 @@ inline DescriptorId
     }
 }
 
-/// Everything a KDP declares except its kernels: the header rules run against the document
-/// root exactly as before, `kernelDescriptors` included -- the key must be present and an
-/// array -- but its elements are left to addPackKernelEntry().
+/// Everything a KDP declares except its kernels. The header rules run against the whole
+/// document root, `kernelDescriptors` included -- the key must be present and an array --
+/// but its elements are left to addPackKernelEntry(), so a header whose kernels array is
+/// empty, as the scan builds it, reads the same as the full document.
 inline KernelDescriptorPack parseKernelDescriptorPackHeader(const nlohmann::json& root,
                                                             const std::string& where)
 {
@@ -1108,71 +1112,6 @@ inline void addPackKernelEntry(KernelDescriptorPack& pack,
     pack.kernels.push_back(std::move(*kernel));
 }
 
-/// Builds a document from SAX events the way nlohmann's own DOM parser does -- a repeated
-/// key overwrites, and each number keeps the integer, unsigned or float kind the lexer
-/// reported -- through the public json API only.
-class JsonBuilder
-{
-public:
-    explicit JsonBuilder(nlohmann::json& root)
-        : _root(&root)
-    {
-    }
-
-    /// Open containers; 0 once the value started at the root is complete.
-    size_t depth() const
-    {
-        return _open.size();
-    }
-    void value(nlohmann::json value)
-    {
-        *slot() = std::move(value);
-    }
-    void startObject()
-    {
-        auto* opened = slot();
-        *opened = nlohmann::json::object();
-        _open.push_back(opened);
-    }
-    void startArray()
-    {
-        auto* opened = slot();
-        *opened = nlohmann::json::array();
-        _open.push_back(opened);
-    }
-    void key(std::string name)
-    {
-        _key = std::move(name);
-    }
-    void end()
-    {
-        _open.pop_back();
-    }
-
-private:
-    /// Where the next value goes. An array element's address is taken only while that
-    /// element is the last one, and no sibling is appended until it closes, so every
-    /// pointer on the open stack stays valid.
-    nlohmann::json* slot()
-    {
-        if(_open.empty())
-        {
-            return _root;
-        }
-        auto& parent = *_open.back();
-        if(parent.is_array())
-        {
-            parent.push_back(nullptr);
-            return &parent.back();
-        }
-        return &parent[_key];
-    }
-
-    nlohmann::json* _root;
-    std::vector<nlohmann::json*> _open;
-    std::string _key;
-};
-
 /// RFC 0017 §4's version accept rule without its warning, for deciding early whether a
 /// header is worth acting on. The walk still runs versionIsSupported() on the finished
 /// document, which is what reports a rejected version.
@@ -1200,6 +1139,12 @@ inline bool versionAccepted(const nlohmann::json& document, int major, int minor
 /// parsed as they streamed past, so @c pack or @c headerError is set and the text is not
 /// read again. Otherwise, unless the walk's own version check declines the file first, the
 /// loader validates the finished header and reads the kernels in a second pass.
+///
+/// Parsing during the scan logs as it goes. The WARNs a streamed header and its kernels
+/// emit (extension keys, kernels skipped for their version) are logged before the rest of
+/// the text is lexed, so they can precede a syntax error that then fails the file; and a
+/// layout that falls back to the second pass parses that header and those kernels again,
+/// logging the same WARNs a second time.
 struct PackScan
 {
     /// Top-level `kernelDescriptors` arrays in the text; with a repeated key a DOM keeps
@@ -1213,430 +1158,118 @@ struct PackScan
     std::exception_ptr kernelError; ///< the first kernel entry that failed, if any
 };
 
-/// One pass over a KDP's text. The whole document is lexed, so every syntax error surfaces
-/// exactly as a DOM parse reports it, and only the header is built as a document: each
-/// top-level `kernelDescriptors` array's value is an empty array there, so the header rules
-/// read the same document they always did. When the first kernels array opens and the
-/// header so far passes the version rule, the header is parsed, and each kernel is then
-/// built as its own small document, parsed and discarded as it streams past. The first
-/// failure -- header or kernel -- is kept rather than thrown, so a later syntax error still
-/// wins, as it does for a DOM parse; the caller applies it once the text proved well formed.
-///
-/// No `nlohmann::json_sax` base: sax_parse takes any type with these members, and the base's
-/// virtual template members fail clang-tidy.
-class PackScanSax final
+/// The single pass's TopLevelArraySax handler. Only the first kernels array streams, and
+/// only when the header so far passes the version rule; a version this build rejects is
+/// left to the walk's own check, which reports it only for well-formed text. The first
+/// failure, header or kernel, is kept rather than thrown, so a later syntax error still wins.
+class PackScanHandler
 {
 public:
-    PackScanSax(nlohmann::json& header, PackScan& scan, std::string where, int major, int minor)
+    PackScanHandler(const nlohmann::json& header,
+                    PackScan& scan,
+                    const std::string& where,
+                    int major,
+                    int minor)
         : _header(header)
-        , _headerBuilder(header)
         , _scan(scan)
-        , _where(std::move(where))
+        , _where(where)
         , _major(major)
         , _minor(minor)
-        , _elementBuilder(_element)
     {
     }
 
-    // NOLINTBEGIN(readability-identifier-naming) - nlohmann's SAX interface names these
-    bool null()
-    {
-        return scalar(nullptr);
-    }
-    bool boolean(bool value)
-    {
-        return scalar(value);
-    }
-    bool number_integer(nlohmann::json::number_integer_t value)
-    {
-        return scalar(value);
-    }
-    bool number_unsigned(nlohmann::json::number_unsigned_t value)
-    {
-        return scalar(value);
-    }
-    bool number_float(nlohmann::json::number_float_t value,
-                      const nlohmann::json::string_t& /*text*/)
-    {
-        return scalar(value);
-    }
-    bool string(nlohmann::json::string_t& value)
-    {
-        return scalar(std::move(value));
-    }
-    bool binary(nlohmann::json::binary_t& value)
-    {
-        return scalar(nlohmann::json::binary(value));
-    }
-    bool start_object(std::size_t /*elements*/)
-    {
-        if(_skipDepth == 0)
-        {
-            ++_depth;
-            _kernelsNext = false;
-            _headerBuilder.startObject();
-            return true;
-        }
-        beginElement();
-        ++_depth;
-        if(_building)
-        {
-            _elementBuilder.startObject();
-        }
-        return true;
-    }
-    bool key(nlohmann::json::string_t& name)
-    {
-        if(_skipDepth == 0)
-        {
-            if(_depth == 1 && _scan.kernelArrays != 0)
-            {
-                _scan.keysAfterKernels = true;
-            }
-            _kernelsNext = _depth == 1 && name == "kernelDescriptors";
-            _headerBuilder.key(name);
-        }
-        else if(_building)
-        {
-            _elementBuilder.key(name);
-        }
-        return true;
-    }
-    bool end_object()
-    {
-        --_depth;
-        if(_skipDepth == 0)
-        {
-            _headerBuilder.end();
-        }
-        else
-        {
-            endContainer();
-        }
-        return true;
-    }
-    bool start_array(std::size_t /*elements*/)
-    {
-        if(_skipDepth == 0)
-        {
-            ++_depth;
-            _headerBuilder.startArray();
-            if(_kernelsNext)
-            {
-                // The kernels array stays in the header, empty; its elements stream.
-                _kernelsNext = false;
-                _headerBuilder.end();
-                _skipDepth = _depth;
-                if(++_scan.kernelArrays == 1)
-                {
-                    beginStreaming();
-                }
-            }
-            return true;
-        }
-        beginElement();
-        ++_depth;
-        if(_building)
-        {
-            _elementBuilder.startArray();
-        }
-        return true;
-    }
-    bool end_array()
-    {
-        if(_skipDepth == 0)
-        {
-            --_depth;
-            _headerBuilder.end();
-            return true;
-        }
-        if(!_building && _depth == _skipDepth)
-        {
-            _skipDepth = 0;
-            _streaming = false;
-            --_depth;
-            return true;
-        }
-        --_depth;
-        endContainer();
-        return true;
-    }
-    static bool parse_error(std::size_t /*position*/,
-                            const std::string& /*lastToken*/,
-                            const nlohmann::json::exception& error)
-    {
-        // What a DOM parse would throw, message and position included.
-        throw error;
-    }
-    // NOLINTEND(readability-identifier-naming)
-
-private:
     /// The header so far is the whole header whenever the kernels are the last key, which
-    /// the caller confirms at the end. A version this build would reject is left to the
-    /// walk's own check, which must report it only once the text has proven well formed.
-    void beginStreaming()
+    /// parseKernelDescriptorPack() confirms before using what this parsed.
+    bool openArray(size_t ordinal)
     {
-        if(!versionAccepted(_header, _major, _minor))
+        if(ordinal != 1 || !versionAccepted(_header, _major, _minor))
         {
-            return;
+            return false;
         }
         try
         {
             _scan.pack = parseKernelDescriptorPackHeader(_header, _where);
-            _streaming = true;
+            return true;
         }
         catch(const std::exception&)
         {
             _scan.headerError = std::current_exception();
+            return false;
         }
     }
 
-    /// Starts a new element when a container opens directly inside the streamed array.
-    void beginElement()
-    {
-        if(_streaming && !_building && _depth == _skipDepth && !_scan.kernelError)
-        {
-            _element = nlohmann::json();
-            _building = true;
-        }
-    }
-
-    void endContainer()
-    {
-        if(!_building)
-        {
-            return;
-        }
-        _elementBuilder.end();
-        if(_elementBuilder.depth() == 0)
-        {
-            _building = false;
-            visit(_element);
-        }
-    }
-
-    void visit(const nlohmann::json& entry)
+    bool element(const nlohmann::json& entry)
     {
         try
         {
             addPackKernelEntry(*_scan.pack, entry, _where);
+            return true;
         }
         catch(const std::exception&)
         {
             // A DOM walk stops at the first bad entry; the rest are lexed, not parsed.
             _scan.kernelError = std::current_exception();
+            return false;
         }
     }
-
-    template <typename Value>
-    bool scalar(Value&& value)
-    {
-        if(_skipDepth == 0)
-        {
-            _kernelsNext = false;
-            _headerBuilder.value(nlohmann::json(std::forward<Value>(value)));
-        }
-        else if(_building)
-        {
-            _elementBuilder.value(nlohmann::json(std::forward<Value>(value)));
-        }
-        else if(_streaming && _depth == _skipDepth && !_scan.kernelError)
-        {
-            visit(nlohmann::json(std::forward<Value>(value)));
-        }
-        return true;
-    }
-
-    nlohmann::json& _header;
-    JsonBuilder _headerBuilder;
-    PackScan& _scan;
-    std::string _where;
-    int _major;
-    int _minor;
-    nlohmann::json _element;
-    JsonBuilder _elementBuilder;
-    bool _building = false;
-    bool _streaming = false; ///< inside the first kernels array, parsing its entries
-    size_t _depth = 0;
-    size_t _skipDepth = 0; ///< depth of the kernels array being read; 0 outside one
-    bool _kernelsNext = false;
-};
-
-/// The second pass over a KDP's text, for the layouts the single pass cannot finish -- a
-/// key after the kernels, a repeated `kernelDescriptors` -- run once the text has proven
-/// well formed: builds each element of the chosen top-level `kernelDescriptors` array as
-/// its own small DOM, hands it to @p visit, and discards it. Elements arrive in document
-/// order, so @p visit sees exactly what a loop over the DOM array would, and an exception
-/// from it ends the walk there.
-template <typename Visit>
-class PackKernelsSax final
-{
-public:
-    PackKernelsSax(size_t targetArray, Visit visit)
-        : _targetArray(targetArray)
-        , _visit(std::move(visit))
-        , _builder(_element)
-    {
-    }
-
-    // NOLINTBEGIN(readability-identifier-naming) - nlohmann's SAX interface names these
-    bool null()
-    {
-        return scalar(nullptr);
-    }
-    bool boolean(bool value)
-    {
-        return scalar(value);
-    }
-    bool number_integer(nlohmann::json::number_integer_t value)
-    {
-        return scalar(value);
-    }
-    bool number_unsigned(nlohmann::json::number_unsigned_t value)
-    {
-        return scalar(value);
-    }
-    bool number_float(nlohmann::json::number_float_t value,
-                      const nlohmann::json::string_t& /*text*/)
-    {
-        return scalar(value);
-    }
-    bool string(nlohmann::json::string_t& value)
-    {
-        return scalar(std::move(value));
-    }
-    bool binary(nlohmann::json::binary_t& value)
-    {
-        return scalar(nlohmann::json::binary(value));
-    }
-    bool start_object(std::size_t /*elements*/)
-    {
-        _kernelsNext = false;
-        if(beginElement())
-        {
-            _builder.startObject();
-        }
-        else
-        {
-            ++_depth;
-        }
-        return true;
-    }
-    bool key(nlohmann::json::string_t& name)
-    {
-        if(_building)
-        {
-            _builder.key(name);
-        }
-        else
-        {
-            _kernelsNext = _depth == 1 && name == "kernelDescriptors";
-        }
-        return true;
-    }
-    bool end_object()
-    {
-        return endContainer();
-    }
-    bool start_array(std::size_t /*elements*/)
-    {
-        if(beginElement())
-        {
-            _builder.startArray();
-            return true;
-        }
-        ++_depth;
-        if(_kernelsNext)
-        {
-            _kernelsNext = false;
-            if(++_arraysSeen == _targetArray)
-            {
-                _kernelsDepth = _depth;
-            }
-        }
-        return true;
-    }
-    bool end_array()
-    {
-        if(!_building && _kernelsDepth != 0 && _depth == _kernelsDepth)
-        {
-            _kernelsDepth = 0;
-        }
-        return endContainer();
-    }
-    bool parse_error(std::size_t /*position*/,
-                     const std::string& /*lastToken*/,
-                     const nlohmann::json::exception& error)
-    {
-        // Unreachable once pass one has succeeded; rethrown rather than swallowed if not.
-        throw error;
-    }
-    // NOLINTEND(readability-identifier-naming)
 
 private:
-    bool atElementLevel() const
-    {
-        return !_building && _kernelsDepth != 0 && _depth == _kernelsDepth;
-    }
+    const nlohmann::json& _header;
+    PackScan& _scan;
+    const std::string& _where;
+    int _major;
+    int _minor;
+};
 
-    /// True when the container being opened belongs to an element being built: either
-    /// one already under construction, or a new element starting here.
-    bool beginElement()
-    {
-        if(atElementLevel())
-        {
-            _element = nlohmann::json();
-            _building = true;
-        }
-        return _building;
-    }
+/// One pass over a KDP's text. @p header receives the document with each top-level
+/// `kernelDescriptors` array left empty, which is all the header rules read, and the
+/// kernels of the first array are parsed one small document at a time as they stream
+/// past (see PackScanHandler). Throws what a DOM parse of @p text would on a syntax
+/// error; what the scan learned lands in @p scan.
+inline void scanKernelDescriptorPack(std::string_view text,
+                                     nlohmann::json& header,
+                                     PackScan& scan,
+                                     const std::string& where,
+                                     int major,
+                                     int minor)
+{
+    PackScanHandler handler(header, scan, where, major, minor);
+    TopLevelArraySax<PackScanHandler> sax("kernelDescriptors", &header, handler);
+    nlohmann::json::sax_parse(text,
+                              &sax,
+                              nlohmann::json::input_format_t::json,
+                              /*strict=*/true,
+                              /*ignore_comments=*/true);
+    scan.kernelArrays = sax.arrays();
+    scan.keysAfterKernels = sax.keysAfterArray();
+}
 
-    bool endContainer()
+/// The second pass's TopLevelArraySax handler, for the layouts the single pass cannot
+/// finish -- a key after the kernels, a repeated `kernelDescriptors`. It streams the last
+/// kernels array, the one a DOM keeps, into @c pack; an exception from a kernel ends the
+/// walk there, as it ends a loop over the DOM array.
+struct PackKernelsHandler
+{
+    KernelDescriptorPack& pack;
+    const std::string& where;
+    size_t lastArray;
+
+    bool openArray(size_t ordinal) const
     {
-        if(!_building)
-        {
-            --_depth;
-            return true;
-        }
-        _builder.end();
-        if(_builder.depth() == 0)
-        {
-            _building = false;
-            _visit(_element);
-        }
+        return ordinal == lastArray;
+    }
+    bool element(const nlohmann::json& entry)
+    {
+        addPackKernelEntry(pack, entry, where);
         return true;
     }
-
-    template <typename Value>
-    bool scalar(Value&& value)
-    {
-        _kernelsNext = false;
-        if(_building)
-        {
-            _builder.value(nlohmann::json(std::forward<Value>(value)));
-        }
-        else if(atElementLevel())
-        {
-            _visit(nlohmann::json(std::forward<Value>(value)));
-        }
-        return true;
-    }
-
-    size_t _targetArray;
-    Visit _visit;
-    nlohmann::json _element;
-    JsonBuilder _builder;
-    bool _building = false;
-    size_t _depth = 0;
-    size_t _arraysSeen = 0;
-    size_t _kernelsDepth = 0; ///< depth of the chosen kernels array; 0 outside it
-    bool _kernelsNext = false;
 };
 
 /// A KDP from its scan. In the packer's layout -- one `kernelDescriptors`, the last key --
 /// the header and kernels were already parsed during the scan, and their first failure is
 /// raised here, header before kernel, as a single DOM walk raised it. Any other layout
-/// validates the finished header and reads the kernels in a second pass over @p text.
+/// validates the finished header and reads the kernels in a second pass over @p text,
+/// which has already proven well formed.
 inline KernelDescriptorPack parseKernelDescriptorPack(const nlohmann::json& header,
                                                       std::string_view text,
                                                       PackScan& scan,
@@ -1659,11 +1292,10 @@ inline KernelDescriptorPack parseKernelDescriptorPack(const nlohmann::json& head
     }
 
     auto pack = parseKernelDescriptorPackHeader(header, where);
-    auto visit
-        = [&pack, &where](const nlohmann::json& entry) { addPackKernelEntry(pack, entry, where); };
-    PackKernelsSax<decltype(visit)> kernels(scan.kernelArrays, visit);
+    PackKernelsHandler handler{pack, where, scan.kernelArrays};
+    TopLevelArraySax<PackKernelsHandler> sax("kernelDescriptors", nullptr, handler);
     nlohmann::json::sax_parse(text,
-                              &kernels,
+                              &sax,
                               nlohmann::json::input_format_t::json,
                               /*strict=*/true,
                               /*ignore_comments=*/true);
@@ -1712,7 +1344,8 @@ inline std::string keyDescription(const ArchKey& key)
 }
 
 /// @p path parsed whole, read the way the walk reads it, or nullopt if it no longer opens
-/// or parses.
+/// or parses. The failure is logged here, naming its cause, so the caller's verdict about
+/// the collision is never mistaken for a statement about the file's contents.
 inline std::optional<nlohmann::json> reparseDescriptorFile(const std::filesystem::path& path)
 {
     try
@@ -1720,6 +1353,8 @@ inline std::optional<nlohmann::json> reparseDescriptorFile(const std::filesystem
         std::ifstream file(path, std::ios::binary);
         if(!file.is_open())
         {
+            HIPDNN_PLUGIN_LOG_ERROR("descriptor loader: failed to re-open "
+                                    << path << " to compare it with a file sharing its id");
             return std::nullopt;
         }
         return nlohmann::json::parse(file,
@@ -1727,23 +1362,31 @@ inline std::optional<nlohmann::json> reparseDescriptorFile(const std::filesystem
                                      /*allow_exceptions=*/true,
                                      /*ignore_comments=*/true);
     }
-    catch(const std::exception&)
+    catch(const std::exception& error)
     {
+        HIPDNN_PLUGIN_LOG_ERROR("descriptor loader: failed to re-read "
+                                << path
+                                << " to compare it with a file sharing its id: " << error.what());
         return std::nullopt;
     }
 }
 
-/// Whether two descriptor files parse to the same document. A file that no longer opens or
-/// parses matches nothing, so its id is treated as contested.
-inline bool filesParseEqual(const std::filesystem::path& first, const std::filesystem::path& second)
+/// Whether two descriptor files parse to the same document, or nullopt when either could
+/// not be re-read.
+inline std::optional<bool> filesParseEqual(const std::filesystem::path& first,
+                                           const std::filesystem::path& second)
 {
     const auto lhs = reparseDescriptorFile(first);
     if(!lhs)
     {
-        return false;
+        return std::nullopt;
     }
     const auto rhs = reparseDescriptorFile(second);
-    return rhs && *lhs == *rhs;
+    if(!rhs)
+    {
+        return std::nullopt;
+    }
+    return *lhs == *rhs;
 }
 
 /// Inserts a freshly parsed descriptor, resolving a repeated key against what is already
@@ -1771,9 +1414,13 @@ inline void insertCatalogEntry(Map& map, T descriptor, const std::filesystem::pa
     // per-arch layout shipping one shared UED. RFC 0020 §10.2.1's drop-all rule exists
     // because keep-the-first leaves which definition won up to load order; with
     // identical content there is no second definition to choose between. Both files are
-    // re-read rather than any DOM being retained -- a pack's is never whole in memory --
-    // and ids rarely repeat, so this almost never runs.
-    if(filesParseEqual(it->second.path, path))
+    // re-read rather than any DOM being retained -- a pack's is never whole in memory.
+    // The per-arch layout repeats every generic descriptor (UED, KMD, UMD, UDD, UHD) in
+    // each arch shard, so this runs once per generic per shard after the first; those
+    // are small files. A file that can no longer be re-read cannot prove the two equal,
+    // so it is treated as a disagreement, under a diagnostic that says so.
+    const auto same = filesParseEqual(it->second.path, path);
+    if(same.value_or(false))
     {
         HIPDNN_PLUGIN_LOG_INFO("descriptor loader: duplicate identical descriptor "
                                << path << " " << description << " name='" << name
@@ -1791,12 +1438,16 @@ inline void insertCatalogEntry(Map& map, T descriptor, const std::filesystem::pa
         HIPDNN_PLUGIN_LOG_ERROR("descriptor loader: "
                                 << path << " redefines " << description << " name='" << name
                                 << "' already loaded from " << it->second.path
-                                << " under an earlier root; ignoring the redefinition");
+                                << " under an earlier root"
+                                << (same ? "" : ", and the two could not be compared")
+                                << "; ignoring the redefinition");
         return;
     }
     HIPDNN_PLUGIN_LOG_ERROR("descriptor loader: "
                             << path << " and " << it->second.path << " both define " << description
-                            << " name='" << name << "' with different contents; ignoring both");
+                            << " name='" << name << "'"
+                            << (same ? " with different contents" : ", and could not be compared")
+                            << "; ignoring both");
     // Never cleared by a later file: once two files disagree about what an id means,
     // no third file can decide which of them was right. A later root does not repair it
     // either -- the refusal above keeps the poisoned entry, since the disagreement is
@@ -2263,19 +1914,20 @@ inline void
             // make two copies of one descriptor look like a collision.
             if(fileType->headerOnly)
             {
-                // Read whole: a layout the single pass cannot finish is lexed again.
-                std::array<char, 1 << 16> chunk{};
-                while(file.read(chunk.data(), chunk.size()) || file.gcount() > 0)
+                // Read whole, in one read sized up front: a layout the single pass cannot
+                // finish is lexed again. A stream that cannot report its size leaves the
+                // text empty, which fails as an empty input.
+                file.seekg(0, std::ios::end);
+                const std::streamoff size = file.tellg();
+                if(size > 0)
                 {
-                    text.append(chunk.data(), static_cast<size_t>(file.gcount()));
+                    text.resize(static_cast<size_t>(size));
+                    file.seekg(0, std::ios::beg);
+                    file.read(text.data(), static_cast<std::streamsize>(size));
+                    text.resize(static_cast<size_t>(file.gcount()));
                 }
-                PackScanSax scanner(
-                    document, scan, path.string(), fileType->major, fileType->minor);
-                nlohmann::json::sax_parse(text,
-                                          &scanner,
-                                          nlohmann::json::input_format_t::json,
-                                          /*strict=*/true,
-                                          /*ignore_comments=*/true);
+                scanKernelDescriptorPack(
+                    text, document, scan, path.string(), fileType->major, fileType->minor);
             }
             else
             {

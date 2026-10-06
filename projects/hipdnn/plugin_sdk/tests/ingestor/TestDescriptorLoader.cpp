@@ -936,6 +936,77 @@ TEST(TestDescriptorLoader, DropsAnIdTwoFilesDisagreeAbout)
     EXPECT_EQ(sets.front().engine.name, "test:survivor");
 }
 
+namespace
+{
+
+/// One way the first of two same-id files stops being readable before the second arrives,
+/// and the ERROR that names it.
+struct RereadFailureCase
+{
+    std::string name;
+    std::function<void(const std::filesystem::path&)> spoil;
+    std::string diagnostic;
+};
+
+class TestDescriptorLoaderRereadFailure : public ::testing::TestWithParam<RereadFailureCase>
+{
+};
+
+} // namespace
+
+TEST_P(TestDescriptorLoaderRereadFailure, DropsAnIdWhoseEarlierFileCanNoLongerBeReRead)
+{
+    // A collision is settled by re-reading both files, and a file that no longer reads cannot
+    // prove the two equal: even identical copies drop the id, under an ERROR that says the
+    // comparison failed rather than that the contents differ.
+    auto recorder
+        = hipdnn_test_sdk::utilities::SharedLogRecorder::withOverrideLevel(HIPDNN_SEV_ERROR);
+    const hipdnn_test_sdk::utilities::ScopedDirectory dir(
+        uniqueDirectory("reread_failure_" + GetParam().name));
+    auto documents = makeSetDocuments('1', "test:reread");
+    const auto& body = documentOfType(documents, ".udd.json");
+    const auto first = dir.path() / "first.udd.json";
+    const auto second = dir.path() / "second.udd.json";
+    for(const auto& path : {first, second})
+    {
+        std::ofstream(path, std::ios::binary) << body.dump(2);
+    }
+
+    DescriptorMap<DispatchDescriptor> dispatches;
+    detail::insertCatalogEntry(
+        dispatches, detail::parseDispatchDescriptor(body, first.string()), first);
+    GetParam().spoil(first);
+    detail::insertCatalogEntry(
+        dispatches, detail::parseDispatchDescriptor(body, second.string()), second);
+
+    ASSERT_EQ(dispatches.size(), 1u);
+    const auto& entry = dispatches.begin()->second;
+    EXPECT_TRUE(entry.conflicted);
+    EXPECT_EQ(detail::findDescriptor(dispatches, entry.descriptor.id), nullptr);
+    EXPECT_TRUE(recorder.hasLogContaining(HIPDNN_SEV_ERROR, GetParam().diagnostic))
+        << recorder.getRecordedLogsAsString();
+    EXPECT_TRUE(recorder.hasLogContaining(HIPDNN_SEV_ERROR, "could not be compared"))
+        << recorder.getRecordedLogsAsString();
+    EXPECT_FALSE(recorder.hasLogContaining("with different contents"))
+        << recorder.getRecordedLogsAsString();
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    Collision,
+    TestDescriptorLoaderRereadFailure,
+    ::testing::Values(RereadFailureCase{"deleted",
+                                        [](const std::filesystem::path& path) {
+                                            ASSERT_TRUE(std::filesystem::remove(path));
+                                        },
+                                        "failed to re-open"},
+                      RereadFailureCase{"unparsable",
+                                        [](const std::filesystem::path& path) {
+                                            std::ofstream(path, std::ios::binary | std::ios::trunc)
+                                                << "not json";
+                                        },
+                                        "failed to re-read"}),
+    [](const ::testing::TestParamInfo<RereadFailureCase>& info) { return info.param.name; });
+
 TEST(TestDescriptorLoader, LoadsNothingFromAnEmptyDirectory)
 {
     const hipdnn_test_sdk::utilities::ScopedDirectory dir(uniqueDirectory("empty"));
@@ -3327,6 +3398,28 @@ INSTANTIATE_TEST_SUITE_P(Kdp,
                          [](const ::testing::TestParamInfo<OracleCase>& info) {
                              return info.param.name;
                          });
+
+TEST(TestDescriptorLoader, ScansAPackInThePackersLayoutInOnePass)
+{
+    // The single pass's defining property: the header is whole when the kernels open, so
+    // they are parsed as they stream past and nothing is left for a second pass.
+    const auto* const kdp = detail::findFileType("pack.kdp.json");
+    ASSERT_NE(kdp, nullptr);
+    const std::string where = "pack.kdp.json";
+    nlohmann::json header;
+    detail::PackScan scan;
+    detail::scanKernelDescriptorPack(
+        packersLayoutText(), header, scan, where, kdp->major, kdp->minor);
+
+    EXPECT_EQ(scan.kernelArrays, 1u);
+    EXPECT_FALSE(scan.keysAfterKernels);
+    EXPECT_FALSE(scan.headerError);
+    EXPECT_FALSE(scan.kernelError);
+    ASSERT_TRUE(scan.pack.has_value());
+    ASSERT_EQ(scan.pack->kernels.size(), 2u);
+    EXPECT_EQ(scan.pack->kernels[0].name, "kernel_1");
+    EXPECT_EQ(scan.pack->kernels[1].name, "kernel_2");
+}
 
 namespace
 {

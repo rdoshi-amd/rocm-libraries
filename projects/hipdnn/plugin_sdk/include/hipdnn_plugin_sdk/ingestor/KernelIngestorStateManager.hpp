@@ -68,8 +68,8 @@ struct ResolvedDispatch
 
 /// A completed metadata tuple reduced to its values, in the tuple's own (name-sorted)
 /// order. completeMetadata() has already proven every tuple of an engine carries exactly
-/// the KMD's field names, so for comparing two of them the names are redundant -- and
-/// comparing them was most of the cost of keying an ordered map on MetadataValues.
+/// the KMD's field names, so for comparing two of them the names are redundant, and
+/// leaving them out keeps hashing and comparing a key to the values alone.
 using MetadataTupleValues = std::vector<MetadataValue>;
 
 struct MetadataTupleValuesHash

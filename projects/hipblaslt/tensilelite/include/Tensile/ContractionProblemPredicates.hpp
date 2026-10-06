@@ -3182,7 +3182,7 @@ namespace TensileLite
                 }
             };
 
-            // These predicates apply only to UseScaleAB="Block".
+            // W4A16 group-scale predicates.
             struct ScaleBlockSizeA
                 : public Predicate_CRTP<ScaleBlockSizeA, ContractionProblemGemm>
             {

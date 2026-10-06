@@ -265,13 +265,12 @@ class ProblemType:
         rv.useScaleAB = ""
         if 'UseScaleAB' in d:
             rv.useScaleAB = d['UseScaleAB']
-        # w4a16 group scale (UseScaleAB="Block"): K-group size and scale element
-        # type. Zero / compute type when the mode is off.
+        # W4A16 group scaling is independent of scalar/vector operand scales.
         rv.scaleBlockSizeA = d.get('ScaleBlockSizeA', 0)
         groups = d.get('ScaleBlockSizesA', [])
         if not isinstance(groups, (list, tuple)):
             raise ValueError("ScaleBlockSizesA must be a list of supported groups")
-        if groups and (rv.useScaleAB != "Block" or not rv.aType.isInt4()
+        if groups and (not rv.aType.isInt4()
                        or any(type(g) is not int or g not in (32, 64, 128) for g in groups)
                        or rv.scaleBlockSizeA not in groups):
             raise ValueError("ScaleBlockSizesA requires W4A16 groups containing ScaleBlockSizeA")
@@ -437,7 +436,7 @@ class ProblemType:
             predicates.append(ProblemPredicate("StridedBatched", value=self.stridedBatched))
             predicates.append(ProblemPredicate("GroupedGemm", value=self.groupedGemm))
             predicates.append(ProblemPredicate("UseScaleAB", value=self.useScaleAB))
-            if self.useScaleAB == "Block":
+            if self.scaleBlockSizeA:
                 if self.scaleBlockSizesA:
                     predicates.append(ProblemPredicate("Or", value=[
                         ProblemPredicate("ScaleBlockSizeA", value=g)

@@ -456,7 +456,7 @@ ProblemType:
   UseGateResidual: false
   UseInitialStridesAB: false
   UseInitialStridesCD: false
-  UseScaleAB: Block
+  UseScaleAB: ''
   UseScaleAlphaVec: 0
   UseScaleCD: false
   isMixMode: false

@@ -4066,11 +4066,8 @@ void testing_matmul_with_bias(const Arguments& arg,
                     extepilogue[gemmIdx].setAuxDataType(aux_type);
                     extepilogue[gemmIdx].setAuxLeadingDimension(lde[gemmIdx]);
                     extepilogue[gemmIdx].setAuxBatchStride(stride_e[gemmIdx]);
-                    // Preserve None: assigning Scalar would fail scale-format validation.
-                    if(arg.scaleA != hipblaslt_scaling_format::none)
-                        extepilogue[gemmIdx].setScalingAType(toMatrixScale(arg.scaleA));
-                    if(arg.scaleB != hipblaslt_scaling_format::none)
-                        extepilogue[gemmIdx].setScalingBType(toMatrixScale(arg.scaleB));
+                    extepilogue[gemmIdx].setScalingAType(toMatrixScale(arg.scaleA));
+                    extepilogue[gemmIdx].setScalingBType(toMatrixScale(arg.scaleB));
                 }
                 extinputs[b][gemmIdx].setA((void*)((dA[gemmIdx].as<char>())
                                                    + b * size_dA[gemmIdx] * realDataTypeSize(TiA)));

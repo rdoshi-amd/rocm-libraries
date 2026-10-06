@@ -533,7 +533,7 @@ class MasterSolutionLibrary:
                     placeholderName += '_SAB'
                 elif problemType.useScaleAB == "Vector":
                     placeholderName += '_SABV'
-                elif problemType.useScaleAB == "Block":
+                if problemType.scaleBlockSizeA:
                     # Runtime-group kernels share one table; fixed-group kernels
                     # and different quantization modes still need separate tables.
                     groups = problemType.scaleBlockSizesA

@@ -695,37 +695,33 @@ namespace
         }
     }
 
-    /// True for every w4a16 group-scale mode.
-    inline bool isBlockScaleA(RocblasltContractionProblem::ScalingFormat fmt)
-    {
-        return blockScaleAGroupSize(fmt) != 0;
-    }
-
     /// Shared scale-mode mapping for problem construction and updates.
     inline void setTensileScaleAB(const RocblasltContractionProblem&   prob,
                                   TensileLite::ContractionProblemGemm& tensileProblem)
     {
         // w4a16 group scaling: A carries a dense [M][ceil(K/G)] fp16/bf16 scale
         // tensor, consumed in the main loop rather than the epilogue.
-        if(isBlockScaleA(prob.scaleAType))
+        if(isW4A16ScaleFormat(prob.scaleAType))
         {
             const int gs = blockScaleAGroupSize(prob.scaleAType);
-            tensileProblem.setUseScaleAB("Block");
-            // Dense [M][ceil(K/G)], group dimension innermost. setScaleA later
-            // is a no-op once "Block" is set, so ordering is safe.
+            tensileProblem.setUseScaleAB(prob.scaleB ? "Scalar" : "");
+            // setScaleA preserves this group-scale descriptor.
             // The scale shares B's element type.
-            tensileProblem.setScaleBlockSizeA(gs,
-                                              hipDataType_to_tensile_type(prob.b_type),
-                                              static_cast<size_t>(prob.m),
-                                              TensileLite::CeilDivide<size_t>(prob.k, gs),
-                                              isBlockScaleAZeroPoint(prob.scaleAType));
+            tensileProblem.setW4A16ScaleBlockSizeA(
+                gs,
+                hipDataType_to_tensile_type(prob.b_type),
+                static_cast<size_t>(prob.m),
+                TensileLite::CeilDivide<size_t>(prob.k, gs),
+                isBlockScaleAZeroPoint(prob.scaleAType));
             // HIPBLASLT_MATMUL_DESC_A_INT4_ENCODING_EXT. Orthogonal to the
             // scale mode: it describes the weight nibbles, not the scales.
             tensileProblem.setInt4EncodingA(
                 static_cast<TensileLite::ContractionProblemGemm::Int4Encoding>(
                     prob.int4EncodingA));
+            return;
         }
-        else if(prob.scaleA == nullptr && prob.scaleB == nullptr)
+        tensileProblem.setW4A16ScaleBlockSizeA(0, rocisa::DataType::None, 0, 0);
+        if(prob.scaleA == nullptr && prob.scaleB == nullptr)
             tensileProblem.setUseScaleAB("");
         else if(prob.scaleAType == RocblasltContractionProblem::ScalingFormat::Vector
                 || prob.scaleBType == RocblasltContractionProblem::ScalingFormat::Vector)
@@ -1137,10 +1133,10 @@ namespace
     {
         return benchScaleFormat(problem.mxTypeB(), problem.mxBlockB(), problem.useScaleAB());
     }
-    /// True on the w4a16 group-scale path; "Block" is exclusive to it.
+    /// True on the W4A16 group-scale path.
     inline bool isW4A16(const TensileLite::ContractionProblemGemm& problem)
     {
-        return problem.useScaleAB() == "Block";
+        return problem.scaleBlockSizeA() != 0;
     }
 
     /// hipblaslt-bench --scaleA mode, matching the client's scaleInt2Enum:

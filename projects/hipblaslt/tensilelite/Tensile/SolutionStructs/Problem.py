@@ -430,11 +430,11 @@ _defaultProblemType = {
     "UseBias": 0,  # =1 support bias vector on M direction, =2 support bias vector on N direction, =3 support bias vector on both M,N direction
     "UseGateResidual": False,  # =True apply gate residual: D = gate * spmm_result + gate
     "BiasSrc": "D",  # This parameter is used in gradient + bias. Support A, B, D.
-    "UseScaleAB": "",  # Support "", "Scalar", "Vector", and "Block"
+    "UseScaleAB": "",  # Support "", "Scalar", and "Vector"
     # Block scales: dense [M][ceil(K/G)] in DataTypeB, applied before LDS writes.
     "ScaleBlockSizeA": 0,  # 0 = off, else the K-group size (32, 64 or 128)
     "ScaleBlockSizesA": [],  # Accepted groups for a custom runtime-group kernel.
-    # Packed per-group zero-points; see setScaleBlockSizeA for layout.
+    # Packed per-group zero-points; see setW4A16ScaleBlockSizeA for layout.
     "ScaleZeroPointA": False,
     # Int4 weight encoding; UnsignedBias8 uses implicit zero-point 8 when symmetric.
     "Int4EncodingA": "Signed",
@@ -1392,7 +1392,7 @@ class ProblemType(Mapping):
       name.append("SAB")
     elif self["UseScaleAB"] == "Vector":
       name.append("SABV")
-    elif self["UseScaleAB"] == "Block":
+    if self["ScaleBlockSizeA"]:
       name.append("SABB%u%s%s" % (self["ScaleBlockSizeA"],
                                   "ZP" if self["ScaleZeroPointA"] else "",
                                   _INT4_ENCODING_CHAR[self["Int4EncodingA"]]))

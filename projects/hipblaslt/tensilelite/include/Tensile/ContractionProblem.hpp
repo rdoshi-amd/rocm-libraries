@@ -370,7 +370,7 @@ namespace TensileLite
             MXSA          = 15,
             MXSB          = 16,
             GATE_RESIDUAL = 17,
-            // Packed per-group zero-points; see setScaleBlockSizeA for layout.
+            // Packed per-group zero-points; see setW4A16ScaleBlockSizeA for layout.
             SCALEZEROA    = 18,
             TENSOR_COUNT
         };
@@ -800,11 +800,11 @@ namespace TensileLite
         }
 
         /// Shape SCALEA as [rows][kGroups], where rows=M and kGroups=ceil(K/blockSize).
-        void setScaleBlockSizeA(int              blockSize,
-                                rocisa::DataType scaleType,
-                                size_t           rows,
-                                size_t           kGroups,
-                                bool             zeroPoint = false)
+        void setW4A16ScaleBlockSizeA(int              blockSize,
+                                    rocisa::DataType scaleType,
+                                    size_t           rows,
+                                    size_t           kGroups,
+                                    bool             zeroPoint = false)
         {
             m_scaleBlockSizeA  = blockSize;
             m_scaleZeroPointA  = blockSize ? zeroPoint : false;
@@ -1002,8 +1002,8 @@ namespace TensileLite
 
         void setScaleA(rocisa::DataType type, size_t length)
         {
-            // Preserve the group-scale descriptor set by setScaleBlockSizeA.
-            if(m_useScaleAB == "Block")
+            // Preserve the group-scale descriptor set by setW4A16ScaleBlockSizeA.
+            if(m_scaleBlockSizeA)
                 return;
             m_scaleAType = type;
             if(type != rocisa::DataType::None && !m_useScaleAB.empty())

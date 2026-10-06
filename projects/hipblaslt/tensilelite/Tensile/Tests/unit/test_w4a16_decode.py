@@ -188,7 +188,7 @@ def test_runtime_group_predicate_accepts_only_declared_groups():
 
     config = dict(DataType=4, DataTypeA=24, DataTypeB=4, DestDataType=4,
                   ComputeDataType=0, HighPrecisionAccumulate=True,
-                  UseScaleAB="Block", ScaleBlockSizeA=32,
+                  UseScaleAB="", ScaleBlockSizeA=32,
                   ScaleBlockSizesA=[128, 32, 64], ScaleZeroPointA=True,
                   Int4EncodingA="UnsignedBias8")
     problem = ProblemType.FromOriginalState(OriginalProblemType(config, False))
@@ -237,7 +237,7 @@ def test_invalid_runtime_groups_are_rejected(groups):
     problem = OriginalProblemType(dict(
         DataType=4, DataTypeA=24, DataTypeB=4, DestDataType=4,
         ComputeDataType=0, HighPrecisionAccumulate=True,
-        UseScaleAB="Block", ScaleBlockSizeA=32), False)
+        UseScaleAB="", ScaleBlockSizeA=32), False)
     problem["ScaleBlockSizesA"] = groups
     with pytest.raises(ValueError, match="ScaleBlockSizesA"):
         ProblemType.FromOriginalState(problem)
@@ -355,3 +355,21 @@ def test_decode_kernels_do_not_use_generic_size_assertions():
     assert not keys.intersection(validParameters)
     for source in DIRECTORY.glob("RuntimeGroup_Decode_*.s"):
         assert not keys.intersection(readCustomKernelConfig(source.stem, DIRECTORY))
+
+
+def test_shipped_w4a16_kernels_do_not_support_scalar_operand_scales():
+    from Tensile.Contractions import ProblemType
+    from Tensile.SolutionStructs import ProblemType as OriginalProblemType
+
+    root = DIRECTORY.parents[2] / "library/src/amd_detail/rocblaslt/src/Tensile/Logic/asm_full/gfx1151"
+    catalogs = list(root.glob("*/*I4*.yaml"))
+    assert catalogs
+    for path in catalogs:
+        logic = yaml.safe_load(path.read_text())
+        configs = [logic["ProblemType"]] + [s.get("ProblemType", logic["ProblemType"]) for s in logic["Solutions"]]
+        for config in configs:
+            assert config["UseScaleAB"] == "", path
+            problem = ProblemType.FromOriginalState(OriginalProblemType(config, False))
+            predicates = [state(p) for p in problem.predicates(includeType=True)]
+            assert {"type": "UseScaleAB", "value": ""} in predicates, path
+            assert any(p["type"] in ("ScaleBlockSizeA", "Or") for p in predicates), path

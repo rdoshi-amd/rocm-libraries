@@ -3,7 +3,7 @@
 This root holds the descriptors the provider **ships**. Its sibling `test_descriptors/`
 stages into the build tree for the unit and integration binaries and is installed only
 under `HIPKERNELPROVIDER_ENABLE_TESTS`. It holds one bundle,
-`rocKE/gfx950_attention_dense/` (its KDP is stored in DVC, see "Large rocKE files live in DVC" below), whose KDP declares gfx950 only, so production packaging
+`rocKE/gfx950_attention_dense/` (its KDP is stored in DVC, see [Large rocKE files live in DVC](#large-rocke-files-live-in-dvc) below), whose KDP declares gfx950 only, so production packaging
 runs for a build whose GPU targets include gfx950 and is dormant for every other build
 unless the cache variable below is pointed elsewhere.
 
@@ -57,63 +57,39 @@ packs the fixtures and never this root.
 
 ## Large rocKE files live in DVC
 
-Only the large files of a rocKE bundle are stored in DVC: the KDPs (`*.kdp.json`) and any
-kernel object (`*.co`, `*.hsaco`). The other descriptors (KMD, UDD, UED, UHD, UMD) are small,
-human-readable JSON and stay in git, so their changes show in review. Each DVC file has a
-pointer beside it:
+The KDPs (`*.kdp.json`) and any kernel objects (`*.co`, `*.hsaco`) of a rocKE bundle are in
+DVC, not git. The other descriptors are small JSON and stay in git. Each DVC file has a
+`<name>.dvc` pointer beside it (md5, size, `remote: ingestor`); the file itself is
+git-ignored. The blobs are in `s3://therock-dvc/rocm-libraries/hipdnn/ingestor`, which
+allows anonymous read.
+
+### Using the bundles
+
+- **Fetch:** TheRock's `fetch_sources.py` pulls every `*.dvc` pointer. By hand:
+  `dvc pull -r ingestor <path-to-pointer>.dvc`.
+- **`HIPKERNELPROVIDER_ENABLE_ROCKE=ON`:** configure fails if a DVC file is missing or its
+  size differs from the pointer, and prints the `dvc pull` command. It checks only the root
+  the build packs from, so a `HIPKERNELPROVIDER_PRODUCTION_SOURCE_ROOT` override does not
+  need these files.
+- **`OFF`:** rocKE descriptors are not consumed. DVC is not needed.
+
+### Adding or changing a large file
 
 ```
-rocKE/<bundle>/<name>.kdp.json.dvc   in git: md5, size, remote: ingestor
-rocKE/<bundle>/<name>.kdp.json       not in git (ignored): the file itself
-```
-
-The blobs live in the `ingestor` remote (`s3://therock-dvc/rocm-libraries/hipdnn/ingestor`,
-anonymous read, declared in `.dvc/config`). Each file is stored as-is under its md5, with
-no compression. The packer reads only `*.json`, so the `.dvc` and `.gitignore` files beside
-the descriptors are ignored.
-
-**Fetch.** TheRock's `build_tools/fetch_sources.py` pulls every `*.dvc` pointer in
-`rocm-libraries`, so a source fetch populates these files. By hand:
-
-```
-dvc pull -r ingestor dnn-providers/hip-kernel-provider/src/engines/kernel_ingestor_engine/descriptors/rocKE/<bundle>/<name>.kdp.json.dvc
-```
-
-**Build behavior.** Keyed on the existing `HIPKERNELPROVIDER_ENABLE_ROCKE`:
-
-- `ON`: configure fails if a DVC file is missing or its size differs from its pointer. The
-  error names the `dvc pull` command. Only the root the build packs from is checked, so a
-  build that sets `HIPKERNELPROVIDER_PRODUCTION_SOURCE_ROOT` elsewhere does not need these
-  files.
-- `OFF`: rocKE descriptors are not consumed and DVC is not needed.
-
-**Add or change a large file.**
-
-```
-cd .../descriptors/rocKE/<bundle>
+cd <this dir>/rocKE/<bundle>
 dvc add <name>.kdp.json
-printf '  remote: ingestor\n' >> <name>.kdp.json.dvc   # new pointers only; dvc add keeps it later
-dvc push -r ingestor                                   # needs S3 write access, see below
+printf '  remote: ingestor\n' >> <name>.kdp.json.dvc   # new pointers only
+dvc remote modify --local ingestor allow_anonymous_login false
+AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... dvc push -r ingestor
 git add <name>.kdp.json.dvc .gitignore
 ```
 
-Commit the `.dvc` file in the same change as the push. Any change to the file changes its
-md5, so the pointer must be updated with it. The pointer diff shows only the new md5 and
-size, not the content change; describe the change in the commit message.
-
-**Pushing needs a signed request.** The committed `.dvc/config` sets
-`allow_anonymous_login = true` on `ingestor` so that CI and `fetch_sources` can pull
-without credentials. With that setting DVC sends unsigned requests, ignores your AWS
-credentials, and every write fails with `AccessDenied`. Override it locally; the override
-goes in `.dvc/config.local`, which git ignores, so the committed value stays `true`:
-
-```
-dvc remote modify --local ingestor allow_anonymous_login false
-AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... dvc push -r ingestor
-```
-
-Pass the credentials as environment variables for the one command. Do not write them into
-any config file. The identity needs `s3:PutObject` and `s3:ListBucket` on
-`s3://therock-dvc/rocm-libraries/hipdnn/ingestor/`. `dvc push -r ingestor` uploads every
-object in your local cache, not only this bundle, so do not pull other remotes' data
-into the same worktree before pushing.
+- Commit the `.dvc` file in the same change as the push. The pointer diff shows only the new
+  md5 and size, so describe the content change in the commit message.
+- The committed `.dvc/config` sets `allow_anonymous_login = true` so readers need no
+  credentials. DVC then sends unsigned requests and ignores your credentials, so every write
+  fails with `AccessDenied`. The `--local` override goes in the git-ignored
+  `.dvc/config.local`. The identity needs `s3:PutObject` and `s3:ListBucket` on the
+  `ingestor/` prefix. Pass credentials as environment variables, never in a config file.
+- `dvc push -r ingestor` uploads everything in your local cache. Do not pull other remotes'
+  data into the same worktree first.

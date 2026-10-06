@@ -10,10 +10,10 @@ add_subdirectory(kernels)
 # Add custom data type headers to the list of kernel files to embed
 # them as string literals at build time.
 set(GPU_REF_TYPE_HEADERS
-    ${CMAKE_CURRENT_SOURCE_DIR}/types/Common.hpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/types/Fp8E4M3.hpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/types/Fp8E5M2.hpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/types/GpuRefDataTypes.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/data-types/Common.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/data-types/Fp8E4M3.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/data-types/Fp8E5M2.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/data-types/GpuRefDataTypes.hpp
 )
 list(APPEND GPU_REF_KERNEL_FILES ${GPU_REF_TYPE_HEADERS})
 
@@ -62,7 +62,7 @@ target_include_directories(
     hipdnn_gpu_ref
     PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
            $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/kernels/types>
-           $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/types>
+           $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/data-types>
     PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/kernels
 )
 

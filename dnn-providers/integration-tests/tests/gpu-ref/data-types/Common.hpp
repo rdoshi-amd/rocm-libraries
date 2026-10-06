@@ -15,7 +15,7 @@
 #include <GpuRefCommonArgs.h>
 #include <hip/hip_runtime.h>
 
-namespace gpu_ref_device_type_test
+namespace gpu_ref_device_data_type_test
 {
 
 using namespace hipdnn_data_sdk::utilities;

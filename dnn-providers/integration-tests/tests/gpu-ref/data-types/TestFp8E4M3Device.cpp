@@ -7,8 +7,8 @@
 #include "Common.hpp"
 
 using namespace hipdnn_data_sdk::types;
-using namespace gpu_ref_device_type_test;
-using namespace gpu_ref_device_type_test::detail;
+using namespace gpu_ref_device_data_type_test;
+using namespace gpu_ref_device_data_type_test::detail;
 
 // ============================================================================
 // Exact-value round trip

@@ -13,7 +13,7 @@
 #endif
 #endif
 
-namespace hipdnn_gpu_ref::types::detail
+namespace hipdnn_gpu_ref::data_types::detail
 {
 
 HOST_DEVICE inline uint32_t floatToBits(float f) noexcept
@@ -50,4 +50,4 @@ HOST_DEVICE inline float bitsToFloat(uint32_t b) noexcept
 #endif
 }
 
-} // namespace hipdnn_gpu_ref::types::detail
+} // namespace hipdnn_gpu_ref::data_types::detail

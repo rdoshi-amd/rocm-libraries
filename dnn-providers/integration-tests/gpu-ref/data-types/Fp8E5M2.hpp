@@ -7,7 +7,7 @@
 
 #include "Common.hpp"
 
-namespace hipdnn_gpu_ref::types
+namespace hipdnn_gpu_ref::data_types
 {
 
 namespace detail
@@ -352,4 +352,4 @@ HOST_DEVICE inline bool isfinite(fp8_e5m2 x)
     return !isnan(x) && !isinf(x);
 }
 
-} // namespace hipdnn_gpu_ref::types
+} // namespace hipdnn_gpu_ref::data_types

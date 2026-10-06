@@ -133,8 +133,8 @@ add_executable(hipdnn_gpu_ref_tests
     gpu-ref/TestGpuFpReferenceBatchnormFwdInfWithVariance.cpp
     gpu-ref/TestGpuFpReferenceBatchnormFwdTrain.cpp
     gpu-ref/TestGpuRefLaunch.cpp
-    gpu-ref/types/TestFp8E5M2Device.cpp
-    gpu-ref/types/TestFp8E4M3Device.cpp
+    gpu-ref/data-types/TestFp8E5M2Device.cpp
+    gpu-ref/data-types/TestFp8E4M3Device.cpp
 )
 
 target_link_libraries(hipdnn_gpu_ref_tests

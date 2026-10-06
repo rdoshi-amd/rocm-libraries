@@ -116,8 +116,8 @@
 // entries=0 skips the transition range, and factor=1.0 is the full interval.
 //
 // Scheduling knobs below default to -1 (= unset), except LockDsReadOrder, EvenSpreadFillers,
-// DsSlotFirst, WaitAluHoldStrictCount, PrefetchLeadWmmas, PrefetchLeadMinStageWmmas and
-// DagScalarInterlocks, which have fixed defaults and
+// DsSlotFirst, WaitAluHoldStrictCount, PrefetchLeadWmmas, PrefetchLeadMinStageWmmas,
+// DagScalarInterlocks and CoexecRepair, which have fixed defaults and
 // are not resolved by the heuristics. Gfx1250Backend resolves unset
 // knobs via SchedulingKnobHeuristics before DAG scheduling / cluster-barrier insertion (user value
 // wins; degenerate main-loop IR falls back to today's static HW/CDNA5/Rule3 defaults). See
@@ -137,7 +137,8 @@
     X(DsReadPerWmma, int, -1) /* deprecated alias for DsReadPerCap */                           \
     X(ClusterBarrierRule3SignalLeadCycles, int, -1)                                             \
     X(TensorLoadDsLoadGapCycles, int, 64)                                                       \
-    X(DagScalarInterlocks, bool, false) /* DAG: SALU->VALU scalar and VALU VCC interlocks */
+    X(DagScalarInterlocks, bool, false) /* DAG: SALU->VALU scalar and VALU VCC interlocks */    \
+    X(CoexecRepair, int, 0) /* 0 = WaitAwareScheduleRepairPass, 1 = CoexecSimRepairPass */
 
 namespace stinkytofu {
 /**

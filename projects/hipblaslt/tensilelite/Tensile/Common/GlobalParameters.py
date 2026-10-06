@@ -408,6 +408,12 @@ globalParameters["StinkyTofuTimePasses"] = False
 # reading VCC 8 cycles after the VALU that wrote it.
 globalParameters["StinkyTofuDagScalarInterlocks"] = False
 
+# StinkyTofu matrix co-execution repair after wait insertion in gfx1250 loop regions:
+# 0 = WaitAwareScheduleRepairPass (moves one instruction past each waited v_wmma),
+# 1 = CoexecSimRepairPass (moves SALU and VALU where a model of the matrix pipe and
+# the scalar interlocks predicts less idle).
+globalParameters["StinkyTofuCoexecRepair"] = 0
+
 # Directory for StinkyTofu per-kernel instruction-cost output files (empty = disabled).
 # When set, each kernel's StinkyTofu module writes its cost file here via
 # StinkyTofuModule.setOutputDir (see KernelWriter._convertToStinkyTofu).

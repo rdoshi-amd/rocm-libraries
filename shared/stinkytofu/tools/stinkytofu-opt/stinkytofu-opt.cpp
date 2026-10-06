@@ -194,8 +194,9 @@ std::vector<RequestedPass> parsePassNames(int argc, char** argv, int startIdx) {
                 arg.starts_with("--prefetch-lead-wmmas=") ||
                 arg.starts_with("--prefetch-lead-min-stage-wmmas=") ||
                 arg.starts_with("--war-gate-wmmas=") || arg == "--ds-slot-first" ||
-                arg == "--dag-scalar-interlocks" || arg.starts_with("--vgpr-msb-mode=") ||
-                arg == "--from-label" || arg == "--to-label" || isKernelConfigArg(arg))
+                arg == "--dag-scalar-interlocks" || arg.starts_with("--coexec-repair=") ||
+                arg.starts_with("--vgpr-msb-mode=") || arg == "--from-label" ||
+                arg == "--to-label" || isKernelConfigArg(arg))
                 continue;
             // Two-arg flags: skip both the flag and its value so the value
             // doesn't get mistaken for a pass name and the flag doesn't get
@@ -482,6 +483,9 @@ int main(int argc, char** argv) {
     }
 
     stinkytofu::PassFeatureConfig passFeatureConfig = getPassFeatureConfig();
+    // Pipeline mode: ModuleOptions::CoexecRepair (0 = WaitAwareScheduleRepairPass,
+    // 1 = CoexecSimRepairPass).
+    int coexecRepair = 0;
 
     // Parse --vgpr-msb-mode=none|msb8|msb16 (override of ToolchainCaps::probe).
     // Useful when running on a host whose comgr doesn't know the target ISA,
@@ -567,6 +571,8 @@ int main(int argc, char** argv) {
             passFeatureConfig.dagFeatures.dsSlotFirst = true;
         } else if (a == "--dag-scalar-interlocks") {
             passFeatureConfig.dagFeatures.scalarInterlocks = true;
+        } else if (a.starts_with("--coexec-repair=")) {
+            coexecRepair = std::stoi(a.substr(16));
         } else if (a.starts_with("--merge-barrier-threshold=")) {
             passFeatureConfig.dagFeatures.mergeBarrierThreshold = std::stoi(a.substr(26));
         }
@@ -836,6 +842,7 @@ int main(int argc, char** argv) {
             moduleOpts.EnableRemarks = enableRemarks;
             moduleOpts.VerifyEach = verifyEach;
             moduleOpts.TimePasses = timePasses;
+            moduleOpts.CoexecRepair = coexecRepair;
             moduleOpts.DagScalarInterlocks = passFeatureConfig.dagFeatures.scalarInterlocks;
             // The --Tile*/--NumGR*/--NumWaves flags are parsed for both modes but
             // used to be applied only in individual-pass mode, so pipeline mode

@@ -7154,6 +7154,9 @@ class KernelWriter(PersistentKernelState, StreamKKernelState, metaclass=abc.ABCM
                                # The DAG scheduler's scalar and VCC interlock rules.
                                "DagScalarInterlocks": bool(
                                    globalParameters.get("StinkyTofuDagScalarInterlocks") or False),
+                               # Schedule repair after wait insertion: 0 = WaitAwareScheduleRepairPass,
+                               # 1 = CoexecSimRepairPass.
+                               "CoexecRepair": int(globalParameters.get("StinkyTofuCoexecRepair") or 0),
                                "TileA0": kernel["ThreadTile0"],
                                "TileB0": kernel["ThreadTile1"],
                                "TileM0": kernel["MacroTile0"],

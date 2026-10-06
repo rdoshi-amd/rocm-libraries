@@ -40,8 +40,10 @@ Each parameter resolves independently, first match wins:
   WMMAs). VALU may co-issue only in the window's `coIssueWindow` slots, and
   nothing may issue in a scale WMMA's blocked (LD_SCALE) slot.
 - **Batch window**: with `WmmaBatchSize = N`, up to N independent WMMAs issue
-  back-to-back and open one window of `L + (N-1)*(L-I)` cycles (8, 15, 22, 29,
-  36 for N = 1..5). With N = 1 a batch window is a WMMA window.
+  back-to-back and open one window of `N*L` cycles (8, 16, 24, 32, 40 for
+  N = 1..5). Back-to-back WMMAs queue in the matrix pipe (each starts at
+  `max(issue, previous start + L)`), so each still takes its full L. With
+  N = 1 a batch window is a WMMA window.
 - **WMMA clock**: knobs measured "in WMMAs" count issued WMMAs, so they do not
   change meaning with batching.
 
@@ -52,10 +54,11 @@ Each parameter resolves independently, first match wins:
 | `WmmaBatchSize` | 0 → arch default 1 | `--wmma-batch-size=N` | Max independent, data-ready WMMAs issued back-to-back as one batch. A WMMA reading a batch member's D cannot join; any non-WMMA pick closes the batch. 1 = no batching. |
 
 With N > 1, window-based mechanisms follow the batch window: the ds_load cap
-span, the filler quota and co-issue slots, the global-read allowance, the
-hide budget, and the barrier thresholds (cycles convert to WMMAs at
-`batch window / N`). The knob heuristic does **not** scale with N: when you
-batch, set `DsReadPerCap` explicitly.
+span, the ds budget window, the filler quota and co-issue slots, the
+global-read allowance, and counts expressed in windows. A WMMA still advances
+the timeline by L, so cycle-to-WMMA conversions (barrier thresholds) do not
+change. The knob heuristic does **not** scale with N: when you batch, set
+`DsReadPerCap` explicitly.
 
 ## ds_load issue
 

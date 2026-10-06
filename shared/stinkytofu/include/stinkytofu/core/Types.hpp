@@ -111,18 +111,18 @@ struct PassFeatureConfig {
         /// and neither means anything without the other.
         ///
         /// 0 = use the per-kernel default: one WMMA batch window,
-        /// L + (wmmaBatchSize-1)*(L-I), where L is the region's actual WMMA
+        /// wmmaBatchSize * L, where L is the region's actual WMMA
         /// latency (wmmaIssueConfig.latency), or the arch constant
         /// (CDNA5Config::dsIssueCapSpanCycles) where no matrix op sets one.
         int dsIssueCapSpanCycles = 0;
         int tensorLoadWmmaSpace = 0;
         /// Extra cycles kept between an after-barrier and the before-side
         /// ds_loads when exclusive overlap uses gap placement. Converted to
-        /// WMMAs at the region's batch rate (rounded up). 0 disables the extra
+        /// WMMA windows by the region's matrix latency. 0 disables the extra
         /// gap. Mirrors ModuleOptions::TensorLoadDsLoadGapCycles.
         int tensorLoadDsLoadGapCycles = 64;
         /// Max independent WMMAs issued back-to-back as one batch; the window
-        /// after a batch of N is L + (N-1)*(L-I) cycles. 0 = per-arch default
+        /// after a batch of N is N*L cycles. 0 = per-arch default
         /// (CDNA5Config::wmmaBatchSize, 1 = no batching).
         int wmmaBatchSize = 0;
         /// Max cycle-distance between two adjacent barrier groups for

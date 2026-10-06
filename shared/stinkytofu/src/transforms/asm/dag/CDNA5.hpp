@@ -106,9 +106,9 @@ struct CDNA5Config {
     // Distance for PipeOps hazard rules whose table entry leaves it 0.
     // 0 here too = derive from the WMMA cost (deriveWarGateWmmas).
     int warGateWmmas;
-    // Max independent WMMAs issued back-to-back as one batch. Each WMMA after the
-    // first extends the open window by its own (latency - issue) cycles, so a batch
-    // of N opens one L + (N-1)*(L-I) window. 1 = no batching.
+    // Max independent WMMAs issued back-to-back as one batch. Each WMMA in the
+    // batch adds its full latency to the open window, so a batch of N opens one
+    // N*L window. 1 = no batching.
     int wmmaBatchSize;
 };
 
@@ -548,8 +548,8 @@ class CDNA5ReadyQueue : public ReadyQueue {
     // flight, so it still has to be defined in both cases -- falling back to 0
     // would expire every entry immediately and silently disable rule (4).
     //
-    // A WMMA batch (wmmaBatchSize N) opens one L + (N-1)*(L-I) window, so the
-    // default span is that whole window; N=1 gives L.
+    // A WMMA batch (wmmaBatchSize N) opens one N*L window, so the default span
+    // is that whole window; N=1 gives L.
     //
     // dagFeatures.dsIssueCapSpanCycles overrides both.
     int dsIssueCapSpan() const {
@@ -560,27 +560,16 @@ class CDNA5ReadyQueue : public ReadyQueue {
         return resolved;
     }
     // Cycles one batch of wmmaBatchSize() WMMAs of cost {issue, latency} opens.
-    int wmmaBatchWindowCycles(int latency, int issue) const {
-        return latency + (wmmaBatchSize() - 1) * std::max(0, latency - issue);
+    // Each WMMA occupies the matrix pipe for its full latency even when issued
+    // back-to-back (start = max(issue, prev start + L)), so a batch of N spans N*L.
+    int wmmaBatchWindowCycles(int latency) const {
+        return latency * wmmaBatchSize();
     }
     // One batch window of this region's WMMA (arch fallback latency if none).
     int regionBatchWindow() const {
         const int latency =
             wmmaIssueConfig.latency > 0 ? wmmaIssueConfig.latency : config_.dsIssueCapSpanCycles;
-        return wmmaBatchWindowCycles(latency, wmmaIssueConfig.issueCycles);
-    }
-    // Cycle <-> WMMA-count conversions. A batch of N WMMAs spans one batch window,
-    // so a WMMA advances the timeline by regionBatchWindow()/N on average; N=1
-    // reduces to cycles / L and wmmas * L.
-    int cyclesToWmmas(int cycles) const {
-        return cycles * wmmaBatchSize() / regionBatchWindow();
-    }
-    int cyclesToWmmasCeil(int cycles) const {
-        const int window = regionBatchWindow();
-        return (cycles * wmmaBatchSize() + window - 1) / window;
-    }
-    int wmmasToCycles(int wmmas) const {
-        return wmmas * regionBatchWindow() / wmmaBatchSize();
+        return wmmaBatchWindowCycles(latency);
     }
     // WMMAs in the open window (1 outside a batch), the unit per-window capacities
     // (fill quota, co-issue slots, global reads) scale by.
@@ -975,7 +964,7 @@ class CDNA5ReadyQueue : public ReadyQueue {
     int computeWmmaWindowsNeeded(int dsLoadCount) const;
     bool isValuPickable() const;
     bool isBlockedCycle(int pos) const;
-    void appendWindowSegment(const StinkyInstruction& wmma, int fromCycle);
+    void appendWindowSegment(const StinkyInstruction& wmma);
     bool canJoinWmmaBatch(const DAGNode* wmma) const;
     DAGNode* findBatchableWMMA();
     void resetActiveWindow();
@@ -1037,15 +1026,14 @@ bool CDNA5ReadyQueue::isBlockedCycle(int pos) const {
     return (activeWindowSlots_[pos] & kBlockedSlot) != 0;
 }
 
-// Append \p wmma's window cycles [fromCycle, latency) to the active window, each
-// keeping its own coIssueWindow / blockedScaleMask bit. fromCycle is 0 when the
-// WMMA opens a window, issueCycles when it joins a batch (its issue cycle is not
-// part of the extension).
-void CDNA5ReadyQueue::appendWindowSegment(const StinkyInstruction& wmma, int fromCycle) {
+// Append \p wmma's L window cycles to the active window, each keeping its own
+// coIssueWindow / blockedScaleMask bit. A WMMA joining a batch starts in the
+// matrix pipe when the previous one finishes, so its segment follows on.
+void CDNA5ReadyQueue::appendWindowSegment(const StinkyInstruction& wmma) {
     constexpr int kCoIssueBits = (int)(sizeof(wmma.coIssueWindow) * 8);
     const int latency = wmma.latencyCycles;
     const uint16_t blocked = wmma.getHwInstDesc()->blockedScaleMask;
-    for (int b = std::max(0, fromCycle); b < latency; ++b) {
+    for (int b = 0; b < latency; ++b) {
         uint8_t slot = 0;
         if (b < kCoIssueBits && ((wmma.coIssueWindow >> b) & 1u) != 0u) slot |= kValuSlot;
         if (isBlockedWindowCycle(b, latency, blocked)) slot |= kBlockedSlot;
@@ -1488,9 +1476,9 @@ DAGNode* CDNA5ReadyQueue::pickOneFromWMMA(DAGNode* pick) {
     }
 
     if (canJoinWmmaBatch(node)) {
-        // Batch: extend the open window by this WMMA's own cycles past its issue
-        // cycle, keeping the timeline position (no fill happened in between).
-        appendWindowSegment(*node->inst, node->inst->issueCycles);
+        // Batch: extend the open window by this WMMA's full latency (it queues in
+        // the matrix pipe behind the previous one), keeping the timeline position.
+        appendWindowSegment(*node->inst);
         activeWmmaNode_ = node;
         activeWmmaBatch_.push_back(node);
     } else {
@@ -1508,7 +1496,7 @@ DAGNode* CDNA5ReadyQueue::pickOneFromWMMA(DAGNode* pick) {
 
         // Built before the advanceTime() below so blocked cycles are never picked into.
         resetActiveWindow();
-        appendWindowSegment(*node->inst, /*fromCycle=*/0);
+        appendWindowSegment(*node->inst);
         activeWmmaNode_ = node;
         activeWmmaBatch_.push_back(node);
         nonWmmaFillsSinceActiveWmma_ = 0;  // new window: restart WMMA->WMMA fill count
@@ -1994,7 +1982,7 @@ CDNA5ReadyQueue::computeBarrierAfterThresholds(IRList::iterator regionStart,
             configuredDrainLatency > 0
                 ? configuredDrainLatency
                 : computeDynamicDrainLatencyForLoads(hw_, matchingDsLoads, numWaves);
-        const int latencyWmmaBudget = cyclesToWmmas(latencyForAfterThreshold) + 1;
+        const int latencyWmmaBudget = (latencyForAfterThreshold / wmmaIssueConfig.latency) + 1;
         const int wmmaWindowsNeeded = computeWmmaWindowsNeeded(matchingDsLoadCount);
         const int overlapOrWindowBase = std::max(lastOverlap, wmmaWindowsNeeded);
         int afterThreshold = overlapOrWindowBase + latencyWmmaBudget;
@@ -2204,11 +2192,12 @@ CDNA5ReadyQueue::computeBarrierBeforeThresholds(IRList::iterator regionStart,
 
         // Step 3: residualCycles = max(0, MaximumWMMAIdx * wmmaIssueConfig.latency
         //                               - targetDSLoadLatency)
-        int residualCycles = std::max(0, wmmasToCycles(maximumWMMAIdx) - targetDSLoadLatency);
+        int residualCycles =
+            std::max(0, maximumWMMAIdx * (int)wmmaIssueConfig.latency - targetDSLoadLatency);
 
         // Step 4: base before cap (in WMMA count units) from residual cycles.
-        int beforeN = cyclesToWmmas(residualCycles);
-        int maxFinalWmmaIdx = cyclesToWmmas(targetDSLoadLatency);
+        int beforeN = (residualCycles / (int)wmmaIssueConfig.latency);
+        int maxFinalWmmaIdx = targetDSLoadLatency / (int)wmmaIssueConfig.latency;
         // Step 4.1: Consider the number of ds_load to be issued in this range.
         const int dsLoadCount = static_cast<int>(matchingDSReads.size());
         for (StinkyInstruction* barrier : group.barriers)
@@ -2916,12 +2905,8 @@ void CDNA5ReadyQueue::onInitRegion(IRList::iterator regionStart, IRList::iterato
             if (!hasWmmaHideBudgetBase) {
                 const HwInstDesc* desc = inst.getHwInstDesc();
                 const int ldScaleCycles = desc != nullptr && desc->blockedScaleMask != 0 ? 1 : 0;
-                // Per WMMA: the batch window's free cycles shared by its N WMMAs.
-                const int n = wmmaBatchSize();
                 wmmaHideBudgetBase =
-                    std::max(0, (wmmaBatchWindowCycles(inst.latencyCycles, inst.issueCycles) -
-                                 n * (inst.issueCycles + ldScaleCycles)) /
-                                    n);
+                    std::max(0, inst.latencyCycles - inst.issueCycles - ldScaleCycles);
                 hasWmmaHideBudgetBase = true;
             }
         } else if (isDSRead(inst)) {
@@ -3152,10 +3137,14 @@ void CDNA5ReadyQueue::onInitRegion(IRList::iterator regionStart, IRList::iterato
                 const int separationSlack = (2 + 2 + 1) * wmmaBatchSize();
                 // Extra gap so a tensor load is not issued next to the
                 // before-side ds_loads. ModuleOptions::TensorLoadDsLoadGapCycles
-                // cycles, rounded up to whole WMMAs at this region's batch
-                // rate (cyclesToWmmasCeil). 0 disables the extra gap.
+                // cycles, rounded up to whole WMMA windows of this region's
+                // matrix latency. 0 disables the extra gap.
                 const int tensorLoadDsLoadGapCycles = this->tensorLoadDsLoadGapCycles();
-                const int tensorLoadDsLoadGapWmma = cyclesToWmmasCeil(tensorLoadDsLoadGapCycles);
+                const int wmmaLatency = wmmaIssueConfig.latency > 0
+                                            ? wmmaIssueConfig.latency
+                                            : std::max(1, config_.dsIssueCapSpanCycles);
+                const int tensorLoadDsLoadGapWmma =
+                    (tensorLoadDsLoadGapCycles + wmmaLatency - 1) / wmmaLatency;
                 const int baseAfterEnd = afterGroup.baseThreshold;
                 const int baseBeforeBegin = beforeGroup.baseThreshold;
                 const int baseAfterBegin = std::max(0, baseAfterEnd - afterGroup.claimWindow);

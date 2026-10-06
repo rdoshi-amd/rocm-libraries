@@ -1727,7 +1727,7 @@ TEST_F(DAGSchedulerPassTest, DSWindowCap_SpanDefaultsToTheRegionsRealWmmaLatency
 // opcode's base cost of {1,8} applies -- which happens to equal the arch
 // fallback, so this also covers the "no matrix op" / "unrollGemm off" cases
 // falling back to the same 8.
-// With wmmaBatchSize N the span is the whole batch window, L + (N-1)*(L-I).
+// With wmmaBatchSize N the span is the whole batch window, N*L.
 TEST_F(DAGSchedulerPassTest, DSWindowCap_SpanCoversTheWmmaBatchWindow) {
     createWmmaScaleF8(/*destStart=*/100, /*src0Start=*/0);
     createMovableDsLoad(0, 80, 1);
@@ -1750,8 +1750,8 @@ TEST_F(DAGSchedulerPassTest, DSWindowCap_SpanCoversTheWmmaBatchWindow) {
     ASSERT_NE(pos, std::string::npos) << captured.str();
     const size_t spanPos = captured.str().find("span=", pos);
     ASSERT_NE(spanPos, std::string::npos);
-    EXPECT_EQ(std::stoi(captured.str().substr(spanPos + 5)), 8 + 4 * 7)
-        << "{1,8} WMMA, batch of 5: 8 + (5-1)*(8-1)";
+    EXPECT_EQ(std::stoi(captured.str().substr(spanPos + 5)), 5 * 8)
+        << "{1,8} WMMA, batch of 5: 5*8";
 }
 
 // A batch window's ds_load budget lands on the batch's first WMMA; the rest of

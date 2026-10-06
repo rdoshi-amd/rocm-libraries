@@ -2392,8 +2392,17 @@ double compute_tile_latency(const problem_t& problem,
   const double m_edge_ratio = (!submi_gemv && M_problem > 0.0 && M_problem <= m_dd)
       ? (m_dd - M_problem) / M_problem : 0.0;
 
+  // Depth-waste charge, inert when all of K fits in one MFMA instruction
+  // (k_iters == 0 && tail_sub_iters == 1).  The unused depth is then *inside* that
+  // instruction -- MFMA K granularity, not a property of MT_K -- so it can't rank
+  // tiles, and L_tail already prices the one iteration that issues, so charging on
+  // top double-counts.  tail_sub_iters == 1 is load-bearing: k_iters == 0 alone is
+  // what selects OVERSIZE_WASTE_WEIGHT, so gating on it alone zeroes that constant.
+  const double depth_waste_charge = (k_iters == 0 && tail_sub_iters == 1)
+      ? 0.0
+      : depth_waste_ratio * heuristic_defaults_t::TAIL_WASTE_PENALTY;
   const double L_du_waste =
-      (depth_waste_ratio * heuristic_defaults_t::TAIL_WASTE_PENALTY
+      (depth_waste_charge
        + m_edge_ratio * heuristic_defaults_t::M_EDGE_PENALTY
        + no_steady_state_ratio + batched_fill_ratio)
       * (L_main_per_iter + heuristic_defaults_t::K_ITER_LOOP_OVERHEAD);

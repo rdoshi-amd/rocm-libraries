@@ -55,6 +55,12 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test_categories.yaml")
       "${PROJECT_BINARY_DIR}/staging"
       "${HIPBLASLT_CTEST_INSTALL_FILE}"
     )
+    apply_test_category_labels(
+      hipblaslt-test-online-tuner
+      "${CMAKE_CURRENT_SOURCE_DIR}/online_tuner_test_categories.yaml"
+      "${PROJECT_BINARY_DIR}/staging"
+      "${HIPBLASLT_CTEST_INSTALL_FILE}"
+    )
     # Install CTestTestfile.cmake to bin/hipblaslt/ for TheRock (relocatable tests; run ctest from that dir)
     install(
         FILES "${HIPBLASLT_CTEST_INSTALL_FILE}"

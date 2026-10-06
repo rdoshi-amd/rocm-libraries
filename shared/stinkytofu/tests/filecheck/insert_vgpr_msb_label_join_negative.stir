@@ -1,0 +1,104 @@
+# RUN: %stinkytofu-opt --arch gfx1250 %s --vgpr-msb-mode=msb16 --InsertVgprMsbPass=labelJoin --print-output
+#
+# InsertVgprMsbPass=labelJoin keeps today's label handling (s_nop + s_set_vgpr_msb after the
+# label, nothing hoisted before the s_cmp) whenever a path into the join could arrive in
+# another MSB state.
+
+# --- Case 1: the middle block has a VGPR operand ---
+# CHECK-LABEL: @middle_has_vgpr
+# CHECK: v300 = "st.v_add_f32"
+# CHECK-NEXT: "st.s_cmp_eq_u32"
+# CHECK: ^label_skip_a:
+# CHECK-NEXT: "st.s_nop"(0)
+# CHECK-NEXT: "st.s_set_vgpr_msb"(65)
+# CHECK-NEXT: v301 = "st.v_add_f32"
+
+st.func @middle_has_vgpr() {
+^entry:
+  v300 = "st.v_add_f32"(v257, v258) { issueCycles = 1, latencyCycles = 5 }
+  SCC0 = "st.s_cmp_eq_u32"(s60, 0x1) { issueCycles = 1, latencyCycles = 2 }
+  "st.s_cbranch_scc0"(label_skip_a, SCC0) { issueCycles = 1, latencyCycles = 1, mod.label = { label = "label_skip_a", alignment = 1 } }
+  Successors: ^signal_a, ^label_skip_a
+^signal_a:
+  "st.s_barrier_signal"(-3) { issueCycles = 1, latencyCycles = 1 }
+  v5 = "st.v_mov_b32"(v6) { issueCycles = 1, latencyCycles = 5 }
+  Successors: ^label_skip_a
+^label_skip_a:
+  label_skip_a:
+  v301 = "st.v_add_f32"(v260, v4) { issueCycles = 1, latencyCycles = 5 }
+}
+
+# --- Case 2: another branch also targets the join label ---
+# CHECK-LABEL: @join_has_other_branch
+# CHECK: v300 = "st.v_add_f32"
+# CHECK-NEXT: "st.s_cmp_eq_u32"
+# CHECK: ^label_skip_b:
+# CHECK-NEXT: "st.s_nop"(0)
+# CHECK-NEXT: "st.s_set_vgpr_msb"(65)
+# CHECK-NEXT: v301 = "st.v_add_f32"
+
+st.func @join_has_other_branch() {
+^entry:
+  SCC0 = "st.s_cmp_eq_u32"(s61, 0x0) { issueCycles = 1, latencyCycles = 2 }
+  "st.s_cbranch_scc1"(label_skip_b, SCC0) { issueCycles = 1, latencyCycles = 1, mod.label = { label = "label_skip_b", alignment = 1 } }
+  Successors: ^head_b, ^label_skip_b
+^head_b:
+  v300 = "st.v_add_f32"(v257, v258) { issueCycles = 1, latencyCycles = 5 }
+  SCC0 = "st.s_cmp_eq_u32"(s60, 0x1) { issueCycles = 1, latencyCycles = 2 }
+  "st.s_cbranch_scc0"(label_skip_b, SCC0) { issueCycles = 1, latencyCycles = 1, mod.label = { label = "label_skip_b", alignment = 1 } }
+  Successors: ^signal_b, ^label_skip_b
+^signal_b:
+  "st.s_barrier_signal"(-3) { issueCycles = 1, latencyCycles = 1 }
+  Successors: ^label_skip_b
+^label_skip_b:
+  label_skip_b:
+  v301 = "st.v_add_f32"(v260, v4) { issueCycles = 1, latencyCycles = 5 }
+}
+
+# --- Case 3: the middle block starts with its own label (another way in) ---
+# CHECK-LABEL: @middle_has_label
+# CHECK: v300 = "st.v_add_f32"
+# CHECK-NEXT: "st.s_cmp_eq_u32"
+# CHECK: ^label_skip_c:
+# CHECK-NEXT: "st.s_nop"(0)
+# CHECK-NEXT: "st.s_set_vgpr_msb"(65)
+# CHECK-NEXT: v301 = "st.v_add_f32"
+
+st.func @middle_has_label() {
+^entry:
+  v300 = "st.v_add_f32"(v257, v258) { issueCycles = 1, latencyCycles = 5 }
+  SCC0 = "st.s_cmp_eq_u32"(s60, 0x1) { issueCycles = 1, latencyCycles = 2 }
+  "st.s_cbranch_scc0"(label_skip_c, SCC0) { issueCycles = 1, latencyCycles = 1, mod.label = { label = "label_skip_c", alignment = 1 } }
+  Successors: ^label_signal_c, ^label_skip_c
+^label_signal_c:
+  label_signal_c:
+  "st.s_barrier_signal"(-3) { issueCycles = 1, latencyCycles = 1 }
+  Successors: ^label_skip_c
+^label_skip_c:
+  label_skip_c:
+  v301 = "st.v_add_f32"(v260, v4) { issueCycles = 1, latencyCycles = 5 }
+}
+
+# --- Case 4: a call comes before the join's first VGPR instruction ---
+# CHECK-LABEL: @join_calls_first
+# CHECK: v300 = "st.v_add_f32"
+# CHECK-NEXT: "st.s_cmp_eq_u32"
+# CHECK: ^label_skip_d:
+# CHECK-NEXT: "st.s_swappc_b64"
+# CHECK-NEXT: "st.s_set_vgpr_msb"(65)
+# CHECK-NEXT: v301 = "st.v_add_f32"
+
+st.func @join_calls_first() {
+^entry:
+  v300 = "st.v_add_f32"(v257, v258) { issueCycles = 1, latencyCycles = 5 }
+  SCC0 = "st.s_cmp_eq_u32"(s60, 0x1) { issueCycles = 1, latencyCycles = 2 }
+  "st.s_cbranch_scc0"(label_skip_d, SCC0) { issueCycles = 1, latencyCycles = 1, mod.label = { label = "label_skip_d", alignment = 1 } }
+  Successors: ^signal_d, ^label_skip_d
+^signal_d:
+  "st.s_barrier_signal"(-3) { issueCycles = 1, latencyCycles = 1 }
+  Successors: ^label_skip_d
+^label_skip_d:
+  label_skip_d:
+  s[26:27] = "st.s_swappc_b64"(s[12:13]) { issueCycles = 1, latencyCycles = 2 }
+  v301 = "st.v_add_f32"(v260, v4) { issueCycles = 1, latencyCycles = 5 }
+}

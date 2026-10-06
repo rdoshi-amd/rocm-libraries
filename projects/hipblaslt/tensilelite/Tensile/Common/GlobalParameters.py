@@ -408,6 +408,17 @@ globalParameters["StinkyTofuTimePasses"] = False
 # StinkyTofuModule.setOutputDir (see KernelWriter._convertToStinkyTofu).
 globalParameters["StinkyTofuCostOutputDir"] = ""
 
+# StinkyTofu gfx1250 MatrixCoexecRepairPass mode.
+# 0: off, WaitAwareScheduleRepairPass runs (default)
+# 1: repair, MatrixCoexecRepairPass replaces WaitAwareScheduleRepairPass
+# 2: analyze only, WaitAwareScheduleRepairPass runs and the new pass only simulates;
+#    with StinkyTofuCostOutputDir set it writes <dir>/<kernel>/matrix_coexec_repair.json
+globalParameters["StinkyTofuMatrixCoexecRepair"] = 0
+
+# StinkyTofu InsertVgprMsbPass: keep the VGPR MSB state across a cluster-signal
+# diamond's join label instead of re-emitting s_nop + s_set_vgpr_msb after it.
+globalParameters["StinkyTofuVgprMsbLabelJoin"] = False
+
 globalParameters["DisableSTWaitCnt"] = True
 
 # Internal plumbing for the --cpu-only CLI switch (see Tensile.py addCommonArguments).

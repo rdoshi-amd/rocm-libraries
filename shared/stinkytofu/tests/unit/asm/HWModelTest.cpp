@@ -97,6 +97,30 @@ TEST(HWModel, Gfx1250v0MatchesGfx1250ForNow) {
     EXPECT_EQ(v0.hazards.rules, base.hazards.rules);
 }
 
+TEST(HWModel, Gfx1250MatrixIssueModel) {
+    const HWModel::MatrixIssue& mi = hwModelForArch(kGfx1250).matrixIssue;
+
+    EXPECT_EQ(mi.queueCapacity, 4);
+    EXPECT_EQ(mi.wmmaIssueCycles, 2);
+    EXPECT_EQ(mi.saluSgprToValu, 10);
+    EXPECT_EQ(mi.valuVgprToValu, 5);
+    EXPECT_EQ(mi.sccToBranch, 9);
+    EXPECT_EQ(mi.msbAfterMemOrWait, 3);
+    EXPECT_EQ(mi.msbAfterSaluBeforeValu, 9);
+    EXPECT_EQ(mi.syncAfterMatrixCycles, 8);
+    EXPECT_EQ(mi.matrixVaVdstTailCycles, 16);
+    EXPECT_EQ(mi.dsReturnIntervalCycles, 6);
+}
+
+// Measured on gfx1250 B0 only; a zero queue keeps MatrixCoexecRepairPass inert on v0.
+TEST(HWModel, Gfx1250v0HasNoMatrixIssueModel) {
+    const HWModel::MatrixIssue& mi = hwModelForArch(kGfx1250v0).matrixIssue;
+
+    EXPECT_EQ(mi.queueCapacity, 0);
+    EXPECT_EQ(mi.wmmaIssueCycles, 0);
+    EXPECT_EQ(mi.dsReturnIntervalCycles, 0);
+}
+
 // An unlisted arch falls back to gfx1250 — and must return the *same object*, so
 // callers that cache the reference stay valid.
 TEST(HWModel, UnlistedArchFallsBackToGfx1250) {

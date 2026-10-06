@@ -29,6 +29,14 @@
 namespace stinkytofu {
 class Pass;
 
+struct InsertVgprMsbOptions {
+    /// Keep the MSB state across the join label of a diamond
+    /// `s_cmp; s_cbranch L; <block without VGPR operands>; L:` that nothing else branches
+    /// to, and emit the switch L's first VGPR instruction needs before the s_cmp, so no
+    /// s_nop / s_set_vgpr_msb follows the label.
+    bool labelJoin = false;
+};
+
 /// Creates a pass that inserts s_set_vgpr_msb instructions before VOP instructions
 /// whose VGPR operands require MSB configuration.
 ///
@@ -38,7 +46,8 @@ class Pass;
 /// s_set_vgpr_msb when the required value differs from the current state.
 ///
 /// After a label (branch target), the pass conservatively resets MSB state and
-/// inserts an s_nop before s_set_vgpr_msb to satisfy hardware constraints.
-STINKYTOFU_EXPORT std::unique_ptr<Pass> createInsertVgprMsbPass();
+/// inserts an s_nop before s_set_vgpr_msb to satisfy hardware constraints, except at
+/// the join labels InsertVgprMsbOptions::labelJoin covers.
+STINKYTOFU_EXPORT std::unique_ptr<Pass> createInsertVgprMsbPass(InsertVgprMsbOptions options = {});
 
 }  // namespace stinkytofu

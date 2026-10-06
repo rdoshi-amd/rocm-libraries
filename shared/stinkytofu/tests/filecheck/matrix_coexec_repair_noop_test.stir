@@ -1,0 +1,84 @@
+# RUN: %stinkytofu-opt --arch gfx1250 %s --MatrixCoexecRepairPass --print-output
+#
+# MatrixCoexecRepairPass leaves code alone when no move can shorten a loop iteration:
+#   - matrix_bound: the v_add stall is hidden by the WMMAs still queued from the previous
+#     iteration, so the matrix pipe never idles;
+#   - no_matrix_work: a loop without WMMAs;
+#   - straight_line: the same hole outside any loop.
+
+# CHECK-LABEL: @matrix_bound
+# CHECK: ^loop:
+# CHECK-NEXT: v[0:7] = "st.v_wmma_f32_16x16x32_bf16"
+# CHECK-NEXT: s5 = "st.s_mov_b32"
+# CHECK-NEXT: v40 = "st.v_add_f32"
+# CHECK-NEXT: v[8:15] = "st.v_wmma_f32_16x16x32_bf16"
+
+st.func @matrix_bound() {
+^entry:
+  s7 = "st.s_mov_b32"(0) { issueCycles = 1, latencyCycles = 1 }
+  Successors: ^loop
+^loop:
+  label_loop:
+  v[0:7] = "st.v_wmma_f32_16x16x32_bf16"(v[100:107], v[108:115], v[0:7]) { issueCycles = 1, latencyCycles = 8 }
+  s5 = "st.s_mov_b32"(1) { issueCycles = 1, latencyCycles = 1 }
+  v40 = "st.v_add_f32"(s5, v41) { issueCycles = 1, latencyCycles = 5 }
+  v[8:15] = "st.v_wmma_f32_16x16x32_bf16"(v[116:123], v[124:131], v[8:15]) { issueCycles = 1, latencyCycles = 8 }
+  v[16:23] = "st.v_wmma_f32_16x16x32_bf16"(v[132:139], v[140:147], v[16:23]) { issueCycles = 1, latencyCycles = 8 }
+  v[24:31] = "st.v_wmma_f32_16x16x32_bf16"(v[148:155], v[156:163], v[24:31]) { issueCycles = 1, latencyCycles = 8 }
+  v[32:39] = "st.v_wmma_f32_16x16x32_bf16"(v[164:171], v[172:179], v[32:39]) { issueCycles = 1, latencyCycles = 8 }
+  s7, SCC0 = "st.s_add_u32"(s7, 1) { issueCycles = 1, latencyCycles = 1 }
+  SCC0 = "st.s_cmp_lt_u32"(s7, 16) { issueCycles = 1, latencyCycles = 2 }
+  "st.s_cbranch_scc1"(label_loop, SCC0) { issueCycles = 1, latencyCycles = 1, mod.label = { label = "label_loop", alignment = 1 } }
+  Successors: ^loop, ^exit
+^exit:
+  "st.s_endpgm"() { issueCycles = 1, latencyCycles = 1 }
+}
+
+# CHECK-LABEL: @no_matrix_work
+# CHECK: ^loop:
+# CHECK-NEXT: s5 = "st.s_mov_b32"
+# CHECK-NEXT: v40 = "st.v_add_f32"
+# CHECK-NEXT: s6 = "st.s_mov_b32"
+# CHECK-NEXT: v42 = "st.v_add_f32"
+
+st.func @no_matrix_work() {
+^entry:
+  s7 = "st.s_mov_b32"(0) { issueCycles = 1, latencyCycles = 1 }
+  Successors: ^loop
+^loop:
+  label_loop2:
+  s5 = "st.s_mov_b32"(1) { issueCycles = 1, latencyCycles = 1 }
+  v40 = "st.v_add_f32"(s5, v41) { issueCycles = 1, latencyCycles = 5 }
+  s6 = "st.s_mov_b32"(2) { issueCycles = 1, latencyCycles = 1 }
+  v42 = "st.v_add_f32"(s6, v43) { issueCycles = 1, latencyCycles = 5 }
+  s7, SCC0 = "st.s_add_u32"(s7, 1) { issueCycles = 1, latencyCycles = 1 }
+  SCC0 = "st.s_cmp_lt_u32"(s7, 16) { issueCycles = 1, latencyCycles = 2 }
+  "st.s_cbranch_scc1"(label_loop2, SCC0) { issueCycles = 1, latencyCycles = 1, mod.label = { label = "label_loop2", alignment = 1 } }
+  Successors: ^loop, ^exit
+^exit:
+  "st.s_endpgm"() { issueCycles = 1, latencyCycles = 1 }
+}
+
+# CHECK-LABEL: @straight_line
+# CHECK: v[0:7] = "st.v_wmma_f32_16x16x32_bf16"
+# CHECK-NEXT: s5 = "st.s_mov_b32"
+# CHECK-NEXT: v40 = "st.v_add_f32"
+# CHECK-NEXT: s6 = "st.s_mov_b32"
+# CHECK-NEXT: v42 = "st.v_add_f32"
+# CHECK-NEXT: s8 = "st.s_mov_b32"
+# CHECK-NEXT: v44 = "st.v_add_f32"
+# CHECK-NEXT: v[8:15] = "st.v_wmma_f32_16x16x32_bf16"
+
+st.func @straight_line() {
+^entry:
+  v[0:7] = "st.v_wmma_f32_16x16x32_bf16"(v[100:107], v[108:115], v[0:7]) { issueCycles = 1, latencyCycles = 8 }
+  s5 = "st.s_mov_b32"(1) { issueCycles = 1, latencyCycles = 1 }
+  v40 = "st.v_add_f32"(s5, v41) { issueCycles = 1, latencyCycles = 5 }
+  s6 = "st.s_mov_b32"(2) { issueCycles = 1, latencyCycles = 1 }
+  v42 = "st.v_add_f32"(s6, v43) { issueCycles = 1, latencyCycles = 5 }
+  s8 = "st.s_mov_b32"(3) { issueCycles = 1, latencyCycles = 1 }
+  v44 = "st.v_add_f32"(s8, v45) { issueCycles = 1, latencyCycles = 5 }
+  v[8:15] = "st.v_wmma_f32_16x16x32_bf16"(v[116:123], v[124:131], v[8:15]) { issueCycles = 1, latencyCycles = 8 }
+  v[16:23] = "st.v_wmma_f32_16x16x32_bf16"(v[132:139], v[140:147], v[16:23]) { issueCycles = 1, latencyCycles = 8 }
+  "st.s_endpgm"() { issueCycles = 1, latencyCycles = 1 }
+}

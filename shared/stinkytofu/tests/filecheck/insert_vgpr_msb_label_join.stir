@@ -1,0 +1,102 @@
+# RUN: %stinkytofu-opt --arch gfx1250 %s --vgpr-msb-mode=msb16 --InsertVgprMsbPass=labelJoin --print-output
+#
+# InsertVgprMsbPass=labelJoin. A cluster-signal diamond
+#   head: ...; s_cmp; s_cbranch_scc0 L   middle: s_barrier_signal -3   L: label; ...
+# whose label only the head's branch names reaches L in the state the head exits in on
+# both paths. The switch L's first VGPR instruction needs goes before the s_cmp (Msb16
+# packs the head's state in bits [15:8]), and no s_nop / s_set_vgpr_msb follows the label.
+#
+# v300 = v257 + v258 needs 0x45 (69); v301 = v260 + v4 needs 0x41 (65).
+
+# --- Case 1: L needs another state: the switch moves before the s_cmp (0x4541) ---
+# CHECK-LABEL: @join_needs_switch
+# CHECK: "st.s_set_vgpr_msb"(69)
+# CHECK-NEXT: v300 = "st.v_add_f32"
+# CHECK-NEXT: "st.s_set_vgpr_msb"(17729)
+# CHECK-NEXT: "st.s_cmp_eq_u32"
+# CHECK-NEXT: "st.s_cbranch_scc0"
+# CHECK: ^signal_a:
+# CHECK-NEXT: "st.s_barrier_signal"(-3)
+# CHECK: ^label_skip_a:
+# CHECK-NEXT: v301 = "st.v_add_f32"
+
+st.func @join_needs_switch() {
+^entry:
+  v300 = "st.v_add_f32"(v257, v258) { issueCycles = 1, latencyCycles = 5 }
+  SCC0 = "st.s_cmp_eq_u32"(s60, 0x1) { issueCycles = 1, latencyCycles = 2 }
+  "st.s_cbranch_scc0"(label_skip_a, SCC0) { issueCycles = 1, latencyCycles = 1, mod.label = { label = "label_skip_a", alignment = 1 } }
+  Successors: ^signal_a, ^label_skip_a
+^signal_a:
+  "st.s_barrier_signal"(-3) { issueCycles = 1, latencyCycles = 1 }
+  Successors: ^label_skip_a
+^label_skip_a:
+  label_skip_a:
+  v301 = "st.v_add_f32"(v260, v4) { issueCycles = 1, latencyCycles = 5 }
+}
+
+# --- Case 2: L needs the head's state: no switch on either side of the label ---
+# CHECK-LABEL: @join_keeps_state
+# CHECK: "st.s_set_vgpr_msb"(69)
+# CHECK-NEXT: v300 = "st.v_add_f32"
+# CHECK-NEXT: "st.s_cmp_eq_u32"
+# CHECK: ^label_skip_b:
+# CHECK-NEXT: v301 = "st.v_add_f32"
+
+st.func @join_keeps_state() {
+^entry:
+  v300 = "st.v_add_f32"(v257, v258) { issueCycles = 1, latencyCycles = 5 }
+  SCC0 = "st.s_cmp_eq_u32"(s60, 0x1) { issueCycles = 1, latencyCycles = 2 }
+  "st.s_cbranch_scc0"(label_skip_b, SCC0) { issueCycles = 1, latencyCycles = 1, mod.label = { label = "label_skip_b", alignment = 1 } }
+  Successors: ^signal_b, ^label_skip_b
+^signal_b:
+  "st.s_barrier_signal"(-3) { issueCycles = 1, latencyCycles = 1 }
+  Successors: ^label_skip_b
+^label_skip_b:
+  label_skip_b:
+  v301 = "st.v_add_f32"(v260, v261) { issueCycles = 1, latencyCycles = 5 }
+}
+
+# --- Case 3: no VGPR instruction in the head: the hoisted switch has no previous state ---
+# CHECK-LABEL: @join_from_unknown_state
+# CHECK: s0 = "st.s_mov_b32"
+# CHECK-NEXT: "st.s_set_vgpr_msb"(65)
+# CHECK-NEXT: "st.s_cmp_eq_u32"
+# CHECK: ^label_skip_c:
+# CHECK-NEXT: v301 = "st.v_add_f32"
+
+st.func @join_from_unknown_state() {
+^entry:
+  s0 = "st.s_mov_b32"(1) { issueCycles = 1, latencyCycles = 1 }
+  SCC0 = "st.s_cmp_eq_u32"(s60, 0x1) { issueCycles = 1, latencyCycles = 2 }
+  "st.s_cbranch_scc0"(label_skip_c, SCC0) { issueCycles = 1, latencyCycles = 1, mod.label = { label = "label_skip_c", alignment = 1 } }
+  Successors: ^signal_c, ^label_skip_c
+^signal_c:
+  "st.s_barrier_signal"(-3) { issueCycles = 1, latencyCycles = 1 }
+  Successors: ^label_skip_c
+^label_skip_c:
+  label_skip_c:
+  v301 = "st.v_add_f32"(v260, v4) { issueCycles = 1, latencyCycles = 5 }
+}
+
+# --- Case 4: a later state change in L is an ordinary switch, without an s_nop ---
+# v2 = v5 + v6 needs 0x00; the previous state 0x41 is packed: 0x4100 = 16640.
+# CHECK-LABEL: @join_later_switch
+# CHECK: ^label_skip_d:
+# CHECK-NEXT: v301 = "st.v_add_f32"
+# CHECK-NEXT: "st.s_set_vgpr_msb"(16640)
+# CHECK-NEXT: v2 = "st.v_add_f32"
+
+st.func @join_later_switch() {
+^entry:
+  v300 = "st.v_add_f32"(v257, v258) { issueCycles = 1, latencyCycles = 5 }
+  SCC0 = "st.s_cmp_eq_u32"(s60, 0x1) { issueCycles = 1, latencyCycles = 2 }
+  "st.s_cbranch_scc0"(label_skip_d, SCC0) { issueCycles = 1, latencyCycles = 1, mod.label = { label = "label_skip_d", alignment = 1 } }
+  Successors: ^signal_d, ^label_skip_d
+^signal_d:
+  "st.s_barrier_signal"(-3) { issueCycles = 1, latencyCycles = 1 }
+  Successors: ^label_skip_d
+^label_skip_d:
+  label_skip_d:
+  v301 = "st.v_add_f32"(v260, v4) { issueCycles = 1, latencyCycles = 5 }
+  v2 = "st.v_add_f32"(v5, v6) { issueCycles = 1, latencyCycles = 5 }
+}

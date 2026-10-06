@@ -56,6 +56,14 @@
  * @note TimePasses: print a per-pass wall-time report to stderr after the
  * pipeline runs (Tensile `StinkyTofuTimePasses`, stinkytofu-opt
  * `--time-passes`).
+ * @note MatrixCoexecRepair: Gfx1250 MatrixCoexecRepairPass mode (Tensile
+ * `StinkyTofuMatrixCoexecRepair`). 0 = off (WaitAwareScheduleRepairPass runs),
+ * 1 = repair (replaces WaitAwareScheduleRepairPass), 2 = analyze only
+ * (WaitAwareScheduleRepairPass still runs; the new pass only simulates and, with
+ * an output dir, dumps matrix_coexec_repair.json).
+ * @note VgprMsbLabelJoin: InsertVgprMsbPass keeps the MSB state across a
+ * cluster-signal diamond's join label and plans the switch before the diamond
+ * (Tensile `StinkyTofuVgprMsbLabelJoin`).
  */
 #define MODULE_OPTIONS_LIST(X)                    \
     X(DebugLevel, int)                            \
@@ -110,6 +118,8 @@
     X(GlobalReadQueueDepth, int)                  \
     X(GlobalReadDrainLatency, int)                \
     X(DsReadOrder, int)                           \
+    X(MatrixCoexecRepair, int)                    \
+    X(VgprMsbLabelJoin, bool)                     \
     X(ArchName, std::string)
 
 // Keep transition disabled by default to preserve legacy full-throttle pacing:

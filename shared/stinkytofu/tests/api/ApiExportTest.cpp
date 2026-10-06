@@ -68,6 +68,7 @@
 #include "stinkytofu/transforms/asm/InsertWaitAluPass.hpp"
 #include "stinkytofu/transforms/asm/LongBranchLoweringPass.hpp"
 #include "stinkytofu/transforms/asm/LoopRegionRemarkPass.hpp"
+#include "stinkytofu/transforms/asm/MatrixCoexecRepairPass.hpp"
 #include "stinkytofu/transforms/asm/MemTokenConsistencyCheckPass.hpp"
 #include "stinkytofu/transforms/asm/PeepholeOptimizationPass.hpp"
 #include "stinkytofu/transforms/asm/RaiseVgprMsbPass.hpp"
@@ -264,6 +265,7 @@ TEST(ApiExport, PassFactories) {
     EXPECT_NE(createStinkyWaitCntInsertionPass(), nullptr);
     EXPECT_NE(createGfx1250HazardPass(), nullptr);
     EXPECT_NE(createWaitAwareScheduleRepairPass(), nullptr);
+    EXPECT_NE(createMatrixCoexecRepairPass(), nullptr);
     EXPECT_NE(createBuildUseDefChainPass(true, false), nullptr);
     EXPECT_NE(createCFGBuilderPass(), nullptr);
     EXPECT_NE(createStinkyUnreachableBlockElimPass(), nullptr);

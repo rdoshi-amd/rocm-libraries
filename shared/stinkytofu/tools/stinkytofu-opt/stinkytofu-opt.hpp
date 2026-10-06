@@ -51,6 +51,7 @@
 #include "stinkytofu/transforms/asm/InsertWaitAluPass.hpp"
 #include "stinkytofu/transforms/asm/LongBranchLoweringPass.hpp"
 #include "stinkytofu/transforms/asm/LoopRegionRemarkPass.hpp"
+#include "stinkytofu/transforms/asm/MatrixCoexecRepairPass.hpp"
 #include "stinkytofu/transforms/asm/MemTokenConsistencyCheckPass.hpp"
 #include "stinkytofu/transforms/asm/PeepholeOptimizationPass.hpp"
 #include "stinkytofu/transforms/asm/PrefetchBridgeSubstitutionPass.hpp"
@@ -250,6 +251,20 @@ const std::vector<PassInfo> availablePasses = {
          }
          return createWaitAwareScheduleRepairPass(kDefaultSlotsToMovePastAnchor);
      }},
+    // MatrixCoexecRepairPass accepts:
+    //   analyzeOnly     — simulate and report; keep the instruction order
+    //   predictWaitAlu  — charge the s_wait_alu InsertWaitAlu will add (SCHED_MODE 2)
+    //   trackValuVsrc   — with predictWaitAlu: InsertWaitAlu's enableESM2TrackValuVsrc
+    //   report=<path>   — write the per-loop prediction JSON to <path>
+    {"MatrixCoexecRepairPass",
+     [](const std::vector<std::string>& args) {
+         MatrixCoexecRepairOptions options;
+         options.analyzeOnly = hasPassArg(args, "analyzeOnly");
+         options.predictWaitAlu = hasPassArg(args, "predictWaitAlu");
+         options.waitAluTrackValuVsrc = hasPassArg(args, "trackValuVsrc");
+         options.reportPath = passArgValue(args, "report");
+         return createMatrixCoexecRepairPass(options);
+     }},
     // BuildUseDefChainPass accepts:
     //   includePseudo    — also build chains for pseudo registers (memtokens)
     //   noClearExisting  — keep any existing PHIs/chains
@@ -393,7 +408,11 @@ const std::vector<PassInfo> availablePasses = {
     {"MemTokenConsistencyCheckPass",
      [](const auto&) { return createMemTokenConsistencyCheckPass(); }},
     {"RaiseVgprMsbPass", [](const auto&) { return createRaiseVgprMsbPass(); }},
-    {"InsertVgprMsbPass", [](const auto&) { return createInsertVgprMsbPass(); }},
+    // InsertVgprMsbPass accepts optional arg: labelJoin (InsertVgprMsbOptions::labelJoin)
+    {"InsertVgprMsbPass",
+     [](const std::vector<std::string>& args) {
+         return createInsertVgprMsbPass({.labelJoin = hasPassArg(args, "labelJoin")});
+     }},
     {"InsertInitialUnclausedVmemPass",
      [](const auto&) { return createInsertInitialUnclausedVmemPass(); }},
     {"PrefetchBridgeSubstitutionPass",

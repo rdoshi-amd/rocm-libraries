@@ -23,10 +23,10 @@
 #include "stinkytofu/transforms/asm/InsertVgprMsbPass.hpp"
 
 #include <cassert>
-#include <cstdint>
-#include <iterator>
+#include <optional>
 #include <string>
-#include <utility>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "stinkytofu/analysis/AnalysisRegistration.hpp"
@@ -34,21 +34,10 @@
 #include "stinkytofu/hardware/ArchHelper.hpp"
 #include "stinkytofu/ir/asm/StinkyAsmIR.hpp"
 #include "stinkytofu/ir/asm/VgprMsbEncoding.hpp"
+#include "stinkytofu/transforms/asm/VgprMsbPlanner.hpp"
 
 namespace stinkytofu {
 namespace {
-enum VgprMsbState : int {
-    NOT_REQUIRED = -1,
-    LABEL_BEGIN = -2,
-};
-
-bool isMsbComputableClass(const StinkyInstruction& inst) {
-    return !(inst.is(InstFlag::IF_SALU) || inst.is(InstFlag::IF_SMemLoad) ||
-             inst.is(InstFlag::IF_SMemStore) || inst.is(InstFlag::IF_SMemAtomic) ||
-             inst.is(InstFlag::IF_Branch) || inst.is(InstFlag::IF_Call) ||
-             inst.is(InstFlag::IF_Barrier) || inst.is(InstFlag::IF_WaitCnt) ||
-             inst.is(InstFlag::IF_HasSideEffect));
-}
 
 // Set offset = -msb*256 on each VGPR operand so the emitter prints byte form
 // (`v[idx + offset]` evaluates to idx ≤ 255).
@@ -66,47 +55,114 @@ void encodeVgprOperands(StinkyInstruction* inst) {
     for (auto& dst : const_cast<std::vector<StinkyRegister>&>(inst->getDestRegs())) rewrite(dst);
 }
 
-bool emitVgprMsbIfNeeded(int requiredSetVal, bool hasVgpr, int& currentMsb, AsmIRBuilder& irBuilder,
-                         GfxArchID archId, IRBase* insertBefore, VgprMsbMode msbMode) {
-    if (!hasVgpr || requiredSetVal == currentMsb) {
-        if (currentMsb == VgprMsbState::LABEL_BEGIN) currentMsb = VgprMsbState::NOT_REQUIRED;
-        return false;
-    }
-
-    if (currentMsb == VgprMsbState::LABEL_BEGIN) {
+void emitVgprMsb(const PlannedMsbSwitch& planned, AsmIRBuilder& irBuilder, GfxArchID archId) {
+    IRBase* insertBefore = const_cast<StinkyInstruction*>(planned.insertBefore);
+    if (planned.withNop) {
         StinkyInstruction* nopInst =
             irBuilder.create(getMCIDByUOp(GFX::s_nop, archId), insertBefore);
         nopInst->addSrcReg(StinkyRegister(0));
     }
 
-    int combinedSetVal = requiredSetVal;
-    if (msbMode == VgprMsbMode::Msb16 && currentMsb != VgprMsbState::NOT_REQUIRED &&
-        currentMsb != VgprMsbState::LABEL_BEGIN) {
-        combinedSetVal += (currentMsb << 8);
-    }
-
     const HwInstDesc* desc = getMCIDByUOp(GFX::s_set_vgpr_msb, archId);
     assert(desc != nullptr && "s_set_vgpr_msb is not supported on this architecture");
     StinkyInstruction* msbInst = irBuilder.create(desc, insertBefore);
-    msbInst->addSrcReg(StinkyRegister(combinedSetVal));
+    msbInst->addSrcReg(StinkyRegister(planned.value));
 
-    std::string msbComment = "src0: " + std::to_string(decodeVgprMsbForSlot(requiredSetVal, 0)) +
-                             ", src1: " + std::to_string(decodeVgprMsbForSlot(requiredSetVal, 1)) +
-                             ", src2: " + std::to_string(decodeVgprMsbForSlot(requiredSetVal, 2)) +
-                             ", dst: " + std::to_string(decodeVgprMsbForSlot(requiredSetVal, 3));
+    std::string msbComment = "src0: " + std::to_string(decodeVgprMsbForSlot(planned.state, 0)) +
+                             ", src1: " + std::to_string(decodeVgprMsbForSlot(planned.state, 1)) +
+                             ", src2: " + std::to_string(decodeVgprMsbForSlot(planned.state, 2)) +
+                             ", dst: " + std::to_string(decodeVgprMsbForSlot(planned.state, 3));
     msbInst->addModifier<CommentData>(CommentData{msbComment});
-    currentMsb = requiredSetVal;
+}
+
+std::vector<StinkyInstruction*> stinkyInstructions(BasicBlock& bb) {
+    std::vector<StinkyInstruction*> insts;
+    for (IRBase& ir : bb)
+        if (auto* inst = dyn_cast<StinkyInstruction>(&ir)) insts.push_back(inst);
+    return insts;
+}
+
+/// How many instructions name each label, as a branch target or as an operand.
+std::unordered_map<std::string, int> countLabelReferences(Function& func) {
+    std::unordered_map<std::string, int> refs;
+    for (BasicBlock& bb : func) {
+        for (StinkyInstruction* inst : stinkyInstructions(bb)) {
+            if (isLabel(*inst)) continue;
+            std::unordered_set<std::string> named;
+            if (const auto* label = inst->getModifier<LabelData>()) named.insert(label->label);
+            for (const StinkyRegister& src : inst->getSrcRegs())
+                if (src.dataType == StinkyRegister::Type::LiteralString)
+                    named.insert(src.getLiteralString());
+            for (const std::string& name : named) ++refs[name];
+        }
+    }
+    return refs;
+}
+
+/// A diamond `head: ...; s_cmp; s_cbranch join` / `middle` / `join: label; ...` laid out in
+/// that order, where only head's branch names join's label and middle has no label, branch,
+/// call or VGPR operand. Both paths into join leave the state head exits in, so join can
+/// start in the state its first VGPR instruction needs once head switches to it.
+struct LabelJoin {
+    const StinkyInstruction* hoistBefore;
+    const BasicBlock* join;
+    int joinState;
+};
+
+bool isVgprFreeFallThrough(BasicBlock& bb) {
+    for (StinkyInstruction* inst : stinkyInstructions(bb)) {
+        if (isLabel(*inst) || isBranch(*inst) || isCall(*inst)) return false;
+        if (computeRequiredMsb(inst).second) return false;
+    }
     return true;
 }
 
-bool preferInsertAfter(const StinkyInstruction& inst) {
-    return isVectorALU(inst) || (isScalarALU(inst) && !isBarrier(inst)) ||
-           isMatrixInstruction(inst);
+std::optional<int> firstRequiredState(const std::vector<StinkyInstruction*>& joinInsts) {
+    for (size_t i = 1; i < joinInsts.size(); ++i) {
+        const StinkyInstruction& inst = *joinInsts[i];
+        if (isLabel(inst) || isCall(inst)) return std::nullopt;
+        auto [required, hasVgpr] = computeRequiredMsb(&inst);
+        if (hasVgpr) return required;
+    }
+    return std::nullopt;
+}
+
+std::unordered_map<const BasicBlock*, LabelJoin> findLabelJoins(Function& func) {
+    const std::unordered_map<std::string, int> refs = countLabelReferences(func);
+    std::vector<BasicBlock*> blocks;
+    for (BasicBlock& bb : func) blocks.push_back(&bb);
+
+    std::unordered_map<const BasicBlock*, LabelJoin> joins;
+    for (size_t i = 0; i + 2 < blocks.size(); ++i) {
+        const std::vector<StinkyInstruction*> head = stinkyInstructions(*blocks[i]);
+        if (head.empty() || !isConditionalBranch(*head.back())) continue;
+
+        const std::vector<StinkyInstruction*> join = stinkyInstructions(*blocks[i + 2]);
+        if (join.empty() || !isLabel(*join.front())) continue;
+        const auto* joinLabel = join.front()->getModifier<LabelData>();
+        if (!joinLabel || getBranchTarget(*head.back()) != joinLabel->label) continue;
+        auto ref = refs.find(joinLabel->label);
+        if (ref == refs.end() || ref->second != 1) continue;
+
+        if (!isVgprFreeFallThrough(*blocks[i + 1])) continue;
+        std::optional<int> joinState = firstRequiredState(join);
+        if (!joinState) continue;
+
+        const StinkyInstruction* hoistBefore = head.back();
+        if (head.size() >= 2) {
+            const StinkyInstruction& cmp = *head[head.size() - 2];
+            if (isScalarALU(cmp) && cmp.is(InstFlag::IF_ImplicitWriteSCC)) hoistBefore = &cmp;
+        }
+        joins.emplace(blocks[i], LabelJoin{hoistBefore, blocks[i + 2], *joinState});
+    }
+    return joins;
 }
 
 class InsertVgprMsbPassImpl : public Pass {
    public:
     static char ID;
+
+    explicit InsertVgprMsbPassImpl(InsertVgprMsbOptions options) : options_(options) {}
 
     const char* getName() const override {
         return "Insert VGPR MSB";
@@ -128,67 +184,52 @@ class InsertVgprMsbPassImpl : public Pass {
     }
 
    private:
-    static void runOnFunction(Function& func, GfxArchID archId, VgprMsbMode msbMode) {
-        for (auto bbIt = func.begin(); bbIt != func.end(); ++bbIt) {
-            BasicBlock& bb = *bbIt;
+    void runOnFunction(Function& func, GfxArchID archId, VgprMsbMode msbMode) const {
+        std::unordered_map<const BasicBlock*, LabelJoin> joinsByHead;
+        std::unordered_map<const BasicBlock*, int> joinEntryStates;
+        if (options_.labelJoin) {
+            joinsByHead = findLabelJoins(func);
+            for (const auto& [head, join] : joinsByHead)
+                joinEntryStates[join.join] = join.joinState;
+        }
+
+        VgprMsbPlanner planner(msbMode);
+        for (BasicBlock& bb : func) {
             AsmIRBuilder irBuilder(bb, archId);
-            int currentMsb = VgprMsbState::NOT_REQUIRED;
-            IRBase* preferredInsertBefore = nullptr;
-            auto findNextInstructionAnchor = [&](BasicBlock::iterator from) -> IRBase* {
-                for (auto scanIt = from; scanIt != bb.end(); ++scanIt) {
-                    if (dyn_cast<StinkyInstruction>(scanIt.getNodePtr()))
-                        return scanIt.getNodePtr();
-                }
-                return nullptr;
-            };
+            auto entry = joinEntryStates.find(&bb);
+            bool atJoinLabel = entry != joinEntryStates.end();
+            planner.beginBlock(atJoinLabel ? entry->second : VgprMsbPlanner::kNotRequired);
+            auto head = joinsByHead.find(&bb);
+            const LabelJoin* join = head != joinsByHead.end() ? &head->second : nullptr;
 
-            for (auto it = bb.begin(); it != bb.end(); ++it) {
-                auto* inst = dyn_cast<StinkyInstruction>(it.getNodePtr());
+            for (IRBase& ir : bb) {
+                auto* inst = dyn_cast<StinkyInstruction>(&ir);
                 if (!inst) continue;
-
-                if (inst->getUnifiedOpcode() == GFX::LABEL) {
-                    currentMsb = VgprMsbState::LABEL_BEGIN;
-                    preferredInsertBefore = nullptr;
-                    continue;
+                if (atJoinLabel) {
+                    atJoinLabel = false;
+                    if (isLabel(*inst)) continue;
                 }
-
-                if (isPseudoInst(inst)) continue;
-
-                // A call (e.g. s_swappc_b64) transfers to a callee that may leave
-                // the VGPR MSB hardware register in an unknown state. Reset the
-                // tracked value so the next VGPR op re-establishes MSB — matching
-                // the single-function pipeline, which re-established MSB after the
-                // call because the call ended a basic block.
-                if (isCall(*inst)) {
-                    currentMsb = VgprMsbState::NOT_REQUIRED;
-                    // Never carry a deferred insertion anchor across call boundaries:
-                    // call may clobber VGPR MSB state, so post-call rebuilds must stay post-call.
-                    preferredInsertBefore = nullptr;
-                    continue;
+                if (join && inst == join->hoistBefore) {
+                    if (std::optional<PlannedMsbSwitch> planned =
+                            planner.require(join->joinState, *inst))
+                        emitVgprMsb(*planned, irBuilder, archId);
                 }
-
-                IRBase* insertBefore = preferredInsertBefore ? preferredInsertBefore : inst;
-
-                auto [requiredMsb, hasVgpr] = computeRequiredMsb(inst);
-                bool emittedVgprMsb = emitVgprMsbIfNeeded(requiredMsb, hasVgpr, currentMsb,
-                                                          irBuilder, archId, insertBefore, msbMode);
-                encodeVgprOperands(inst);
-                if (emittedVgprMsb || isMsbComputableClass(*inst)) preferredInsertBefore = nullptr;
-
-                if (preferInsertAfter(*inst)) {
-                    preferredInsertBefore = findNextInstructionAnchor(std::next(it));
-                }
+                if (std::optional<PlannedMsbSwitch> planned = planner.observe(*inst))
+                    emitVgprMsb(*planned, irBuilder, archId);
+                if (!isPseudoInst(inst) && !isCall(*inst)) encodeVgprOperands(inst);
             }
         }
     }
+
+    InsertVgprMsbOptions options_;
 };
 
 char InsertVgprMsbPassImpl::ID = 0;
 
 }  // anonymous namespace
 
-std::unique_ptr<Pass> createInsertVgprMsbPass() {
-    return std::make_unique<InsertVgprMsbPassImpl>();
+std::unique_ptr<Pass> createInsertVgprMsbPass(InsertVgprMsbOptions options) {
+    return std::make_unique<InsertVgprMsbPassImpl>(options);
 }
 
 }  // namespace stinkytofu

@@ -25,6 +25,8 @@ target_sources(stinkytofu_objs PRIVATE
     dag/RegionDAG.cpp
     dag/SchedulingKnobHeuristics.cpp
     WaitAwareScheduleRepairPass.cpp
+    coexec/CoexecSimulator.cpp
+    MatrixCoexecRepairPass.cpp
     StinkyMergeBarrierPass.cpp
     SetMatrixReusePass.cpp
     StinkyWaitCntInsertionPass.cpp
@@ -37,6 +39,7 @@ target_sources(stinkytofu_objs PRIVATE
     StinkyBuildImplicitDependencyPass.cpp
     RegionClonePass.cpp
     MemTokenConsistencyCheckPass.cpp
+    VgprMsbPlanner.cpp
     InsertVgprMsbPass.cpp
     InsertInitialUnclausedVmemPass.cpp
     InsertClusterBarrierPass.cpp

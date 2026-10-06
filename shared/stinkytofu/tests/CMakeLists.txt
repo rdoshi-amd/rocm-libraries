@@ -126,6 +126,9 @@ set(UNIT_ASM_TEST_FILES
     unit/asm/StinkySignatureTest.cpp
     unit/asm/HWModelTest.cpp
     unit/asm/SchedulingKnobHeuristicsTest.cpp
+    unit/asm/VgprMsbPlannerTest.cpp
+    unit/asm/CoexecSimulatorTest.cpp
+    unit/asm/MatrixCoexecRepairPassTest.cpp
 )
 
 # High-Level IR Tests

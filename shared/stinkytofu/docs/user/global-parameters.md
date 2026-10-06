@@ -14,6 +14,9 @@ Control StinkyTofu behavior through Tensile's `GlobalParameters` system -- eithe
 | `StinkyTofuVerifyEach` | `0`, `1` | `0` | Verify StinkyTofu ASM IR after every pass |
 | `StinkyTofuEnableRemarks` | `0`, `1` | `0` | Emit optimization remarks to stderr |
 | `StinkyTofuTimePasses` | `0`, `1` | `0` | Report per-pass wall time to stderr |
+| `StinkyTofuCostOutputDir` | directory path | `""` | Per-kernel StinkyTofu output files (`<dir>/<kernel file base>/`) |
+| `StinkyTofuMatrixCoexecRepair` | `0`, `1`, `2` | `0` | gfx1250 matrix co-execution repair: off, repair, analyze only |
+| `StinkyTofuVgprMsbLabelJoin` | `False`, `True` | `False` | Keep the VGPR MSB state across cluster-signal join labels |
 
 ---
 
@@ -136,6 +139,22 @@ Rows are ordered by descending self time, so the pass to look at is the first on
 ```
 
 A pass that only appears as an adaptor name (e.g. `InsertVgprMsbPass`, wrapped by `createFunctionToModuleAdaptor`) is timed through its adaptor entry, so its self time is the pass's own cost.
+
+---
+
+## `StinkyTofuMatrixCoexecRepair` / `StinkyTofuVgprMsbLabelJoin`
+
+gfx1250 main-loop options; see [Matrix Co-execution Repair Pass](../developer/matrix-coexec-repair-pass.md).
+
+| `StinkyTofuMatrixCoexecRepair` | Effect |
+|---|---|
+| `0` (default) | `WaitAwareScheduleRepairPass` runs; `MatrixCoexecRepairPass` does not |
+| `1` | `MatrixCoexecRepairPass` replaces `WaitAwareScheduleRepairPass` |
+| `2` | `WaitAwareScheduleRepairPass` runs; `MatrixCoexecRepairPass` only replays the loops and reports |
+
+With `StinkyTofuCostOutputDir` set, modes `1` and `2` write `matrix_coexec_repair.json` into each kernel's directory there; with `StinkyTofuEnableRemarks` they print one `LoopSummary` remark per loop.
+
+`StinkyTofuVgprMsbLabelJoin=True` makes `InsertVgprMsbPass` emit the `s_set_vgpr_msb` that a cluster-signal join label needs before the diamond's `s_cmp`, instead of an `s_nop 0` + `s_set_vgpr_msb` after the label.
 
 ---
 

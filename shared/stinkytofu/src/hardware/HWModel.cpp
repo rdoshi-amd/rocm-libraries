@@ -84,13 +84,37 @@ constexpr HWModel kGfx1250Model = {
             .vmVsrcTex = 11,
             .vmVsrcBridge = 11,
         },
+    // rocprofv3 ATT of the gfx1250 B0 MXF8 / MXF4 MAF main loops (8-cycle WMMAs),
+    // replayed with analysis_repairMatrixCoexec/scripts/compare_sim_trace.py.
+    .matrixIssue =
+        {
+            .queueCapacity = 4,
+            .wmmaIssueCycles = 2,
+            .saluSgprToValu = 10,
+            .valuVgprToValu = 5,
+            .sccToBranch = 9,
+            .msbAfterMemOrWait = 3,
+            // 8.7-9.7 measured, depending on the surrounding stream.
+            .msbAfterSaluBeforeValu = 9,
+            .syncAfterMatrixCycles = 8,
+            // Fit to the s_wait_alu va_vdst stalls of the MXF4 loop.
+            .matrixVaVdstTailCycles = 16,
+            // Fit to the s_wait_dscnt releases of both loops with the 56-cycle
+            // ds_load_b128 latency.
+            .dsReturnIntervalCycles = 6,
+        },
 };
 
 // gfx1250v0: starts from the gfx1250 values. Kept as its own object so those
-// numbers can diverge without touching gfx1250.
+// numbers can diverge without touching gfx1250. matrixIssue was only measured
+// on gfx1250 B0, so it stays unmodeled here.
 // TODO(tuning): fill in gfx1250v0's real queue depths / latencies, and point
 // hazards at a gfx1250v0 rule table if its cycles or rule set diverge.
-constexpr HWModel kGfx1250v0Model = kGfx1250Model;
+constexpr HWModel kGfx1250v0Model = [] {
+    HWModel hw = kGfx1250Model;
+    hw.matrixIssue = {};
+    return hw;
+}();
 
 constexpr int kMinModeledWaves = 1;
 constexpr int kMaxModeledWaves = 4;

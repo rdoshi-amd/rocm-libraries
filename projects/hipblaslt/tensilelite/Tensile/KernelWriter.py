@@ -71,7 +71,7 @@ from .Common.GlobalParameters import globalParameters
 from .Common.Architectures import ARCH_CAP_OVERRIDES
 from .Common.ValidParameters import resolveSwInstructionPrefetch, \
   SW_INSTRUCTION_PREFETCH_AUTO
-from .SolutionStructs.Naming import getKernelNameMin
+from .SolutionStructs.Naming import getKernelFileBase, getKernelNameMin
 from .Toolchain.Component import Assembler
 
 import rocisa
@@ -7202,6 +7202,10 @@ class KernelWriter(PersistentKernelState, StreamKKernelState, metaclass=abc.ABCM
                                    self.states.archCaps["RequiresXCntForVolatileVMEM"]),
                                "EnableXnackReplay": bool(
                                    self.states.archCaps["EnableXnackReplay"]),
+                               "MatrixCoexecRepair": int(
+                                   globalParameters.get("StinkyTofuMatrixCoexecRepair") or 0),
+                               "VgprMsbLabelJoin": bool(
+                                   globalParameters.get("StinkyTofuVgprMsbLabelJoin") or False),
                               }
 
       # Region-clone jobs for StinkyTofu RegionClonePass.
@@ -7240,6 +7244,13 @@ class KernelWriter(PersistentKernelState, StreamKKernelState, metaclass=abc.ABCM
                                            options=stinky_module_options)
       t1a_end = time.perf_counter()
       print2(f"StinkyTofu (1a) toStinkyTofuModule: {t1a_end - t1a_start:.4f}s")
+
+      # Per-kernel StinkyTofu outputs land in <StinkyTofuCostOutputDir>/<kernel file base>/;
+      # the full kernel name can exceed a path component.
+      costOutputDir = str(globalParameters.get("StinkyTofuCostOutputDir") or "")
+      if costOutputDir and hasattr(stModule, "setOutputDir"):
+        stModule.setOutputName(getKernelFileBase(self.debugConfig.splitGSU, kernel))
+        stModule.setOutputDir(costOutputDir)
 
       # Run pipeline — builder handles O0 internally (skips optimization,
       # still runs required passes like InsertVgprMsb)

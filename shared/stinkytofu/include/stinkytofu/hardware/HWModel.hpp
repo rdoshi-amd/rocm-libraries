@@ -137,6 +137,37 @@ struct HWModel {
         int vmVsrcBridge;
     };
 
+    /// One wave's in-order issue next to the matrix pipe, as MatrixCoexecRepairPass replays
+    /// it. All distances are issue-to-issue cycles. queueCapacity 0 = not modeled (the pass
+    /// is inert).
+    struct MatrixIssue {
+        /// WMMAs the matrix pipe holds, executing or waiting, before the next WMMA issue
+        /// stalls. The pipe executes them one at a time for their latency.
+        int queueCapacity;
+        /// Issue slot cost of one WMMA.
+        int wmmaIssueCycles;
+        /// SALU SGPR write -> VALU read.
+        int saluSgprToValu;
+        /// VALU VGPR (or VALU-written SGPR) write -> VALU read.
+        int valuVgprToValu;
+        /// SALU SCC write -> s_cbranch.
+        int sccToBranch;
+        /// Cycles an s_set_vgpr_msb right after a DS / VMEM op or an s_wait_* adds before
+        /// the next issue. After a VALU, a WMMA, or a SALU not followed by a VALU the
+        /// switch costs nothing.
+        int msbAfterMemOrWait;
+        /// SALU -> s_set_vgpr_msb -> VALU, from the SALU to the VALU.
+        int msbAfterSaluBeforeValu;
+        /// An s_wait_* / s_barrier_* right after a WMMA, from the WMMA's issue.
+        int syncAfterMatrixCycles;
+        /// Cycles a WMMA stays counted in VA_VDST after its execution ends (s_wait_alu
+        /// va_vdst releases).
+        int matrixVaVdstTailCycles;
+        /// Minimum spacing of one wave's DS returns. A DS op returns at
+        /// max(issue + its latency, previous return + this); releases s_wait_dscnt.
+        int dsReturnIntervalCycles;
+    };
+
     Lds lds;
     Barrier barrier;
     Coexec coexec;
@@ -144,6 +175,7 @@ struct HWModel {
     DelayAlu delayAlu;
     Counters counters;
     WaitHide waitHide;
+    MatrixIssue matrixIssue;
 };
 
 /// Collapse a {major, minor, stepping} arch triple to a switchable key.

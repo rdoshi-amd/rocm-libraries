@@ -29,6 +29,8 @@
 /// picks it up for modules with arch {12, 5, 0}.
 
 #include <algorithm>
+#include <filesystem>
+#include <string>
 
 #include "stinkytofu/analysis/AnalysisRegistration.hpp"
 #include "stinkytofu/analysis/asm/AsmVerifierPass.hpp"
@@ -52,6 +54,7 @@
 #include "stinkytofu/transforms/asm/InsertVgprMsbPass.hpp"
 #include "stinkytofu/transforms/asm/InsertWaitAluPass.hpp"
 #include "stinkytofu/transforms/asm/LoopRegionRemarkPass.hpp"
+#include "stinkytofu/transforms/asm/MatrixCoexecRepairPass.hpp"
 #include "stinkytofu/transforms/asm/MemTokenConsistencyCheckPass.hpp"
 #include "stinkytofu/transforms/asm/PrefetchBridgeSubstitutionPass.hpp"
 #include "stinkytofu/transforms/asm/RegionClonePass.hpp"
@@ -230,8 +233,10 @@ bool buildGfx1250Pipeline(ModulePassManager& mpm, StinkyAsmModule& module, const
             // WMMA that consumes its loads, so that WMMA has nothing to issue behind
             // it. Repair moves this many non-WMMA instructions past each anchor to
             // refill those slots, without changing any wait immediate.
+            // MatrixCoexecRepair=1 runs MatrixCoexecRepairPass (below) in its place.
             const int waitRepairSlotsAfterAnchor = 1;
-            if (runScheduler && waitRepairSlotsAfterAnchor > 0) {
+            if (runScheduler && moduleOptions.MatrixCoexecRepair != 1 &&
+                waitRepairSlotsAfterAnchor > 0) {
                 innerPM.addPass(createWaitAwareScheduleRepairPass(waitRepairSlotsAfterAnchor));
             }
 
@@ -298,9 +303,27 @@ bool buildGfx1250Pipeline(ModulePassManager& mpm, StinkyAsmModule& module, const
 
     mpm.addPass(createFunctionToModuleAdaptor(createAsmMovePropagationPass()));
 
+    // Main-loop matrix co-execution repair (1 = repair, 2 = analyze only). Runs on the
+    // final loop layout and before the s_set_vgpr_msb / s_wait_alu it predicts exist.
+    if (runScheduler && moduleOptions.MatrixCoexecRepair != 0) {
+        MatrixCoexecRepairOptions repairOptions;
+        repairOptions.analyzeOnly = moduleOptions.MatrixCoexecRepair == 2;
+        repairOptions.predictWaitAlu = moduleOptions.EnableESM2;
+        repairOptions.waitAluTrackValuVsrc = moduleOptions.EnableESM2TrackValuVsrc;
+        if (!module.getOutputDir().empty()) {
+            const std::string name =
+                module.getOutputName().empty() ? module.getName() : module.getOutputName();
+            repairOptions.reportPath =
+                (std::filesystem::path(module.getOutputDir()) / name / "matrix_coexec_repair.json")
+                    .string();
+        }
+        mpm.addPass(createMainOnlyAdaptor(createMatrixCoexecRepairPass(std::move(repairOptions))));
+    }
+
     // MSB is materialized for the entry function and every callable function
     // (each function owns its VGPR MSB hardware state).
-    mpm.addPass(createFunctionToModuleAdaptor(createInsertVgprMsbPass()));
+    mpm.addPass(createFunctionToModuleAdaptor(
+        createInsertVgprMsbPass({.labelJoin = moduleOptions.VgprMsbLabelJoin})));
 
     // Rebuild the CFG on every function.
     mpm.addPass(createFunctionToModuleAdaptor(createCFGBuilderPass()));

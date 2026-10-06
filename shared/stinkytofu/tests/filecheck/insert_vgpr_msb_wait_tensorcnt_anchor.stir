@@ -1,0 +1,32 @@
+# RUN: %stinkytofu-opt --arch gfx1250 %s --vgpr-msb-mode=msb16 --InsertVgprMsbPass --print-output
+#
+# The deferred s_set_vgpr_msb anchor after a VALU survives an s_wait_dscnt (IF_WaitCnt), so
+# the switch the next VALU needs lands right after the first VALU. s_wait_tensorcnt carries
+# IF_WaitTensorCnt instead, so it counts as an MSB-computable instruction: it resets the
+# anchor and the switch lands after the wait, right before the VALU that needs it.
+
+# CHECK-LABEL: @wait_dscnt_keeps_anchor
+# CHECK: v300 = "st.v_add_f32"
+# CHECK-NEXT: "st.s_set_vgpr_msb"(17664)
+# CHECK-NEXT: "st.s_wait_dscnt"
+# CHECK-NEXT: v1 = "st.v_add_f32"
+
+st.func @wait_dscnt_keeps_anchor() {
+^entry:
+  v300 = "st.v_add_f32"(v257, v258) { issueCycles = 1, latencyCycles = 5 }
+  "st.s_wait_dscnt"(0) { issueCycles = 1, latencyCycles = 1, mod.swaitcnt = { vlcnt = -1, vscnt = -1, dlcnt = 0, dscnt = -1, kmcnt = -1 } }
+  v1 = "st.v_add_f32"(v2, v3) { issueCycles = 1, latencyCycles = 5 }
+}
+
+# CHECK-LABEL: @wait_tensorcnt_resets_anchor
+# CHECK: v300 = "st.v_add_f32"
+# CHECK-NEXT: "st.s_wait_tensorcnt"
+# CHECK-NEXT: "st.s_set_vgpr_msb"(17664)
+# CHECK-NEXT: v1 = "st.v_add_f32"
+
+st.func @wait_tensorcnt_resets_anchor() {
+^entry:
+  v300 = "st.v_add_f32"(v257, v258) { issueCycles = 1, latencyCycles = 5 }
+  "st.s_wait_tensorcnt"() { issueCycles = 1, latencyCycles = 1, mod.swaittensorcnt = { tlcnt = 0 } }
+  v1 = "st.v_add_f32"(v2, v3) { issueCycles = 1, latencyCycles = 5 }
+}

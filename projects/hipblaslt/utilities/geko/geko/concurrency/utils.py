@@ -115,6 +115,11 @@ def wait_process_or_stop(
     legitimately differ by an order of magnitude in runtime, but a healthy worker
     writes to its log once per solution, so "no write for N seconds" separates a
     dead worker from a slow one far better than any total-time cap.
+
+    Caveat: with Tensile's "print only winners" flag, the log is only written on
+    a new best, not per solution, so a long stretch without a better solution can
+    look identical to a stall. If stalls get reported on otherwise-healthy runs,
+    check whether that flag is enabled before assuming the detector is broken.
     """
     def _terminate_process_tree() -> None:
         if os.name == "nt":

@@ -267,6 +267,37 @@ def test_drop_mi_group_gsu_strips_and_dedupes() -> None:
     assert "GlobalSplitU" not in deduped[0]
 
 
+def test_drop_mi_group_gsu_dedupes_despite_differing_comment_metadata() -> None:
+    """Groups MIDesign emits for the same geometry carry a per-candidate comment
+    and metadata (GSU, LSU, totalGranularity, ...) on the ``MatrixInstruction``
+    ForkParameter even when the geometry itself -- the only thing left once
+    GlobalSplitU is stripped -- is identical. Real mi_groups from
+    MIDesign._to_group_dimension always have distinct, non-empty comment/metadata,
+    so a dedupe that only collapses bit-for-bit identical ForkParameters (comment
+    and metadata included) never fires in practice and every GSU/DepthU variant
+    MIDesign tried for a geometry leaks into the generic search space as a
+    separate, duplicate group.
+    """
+    d = g1250_pp._GFX1250DropMIGroupGSU()
+    entry_a = {
+        "MatrixInstruction": ForkParameter(
+            name="MatrixInstruction", values=[1],
+            comment="GSU 48 - totalGranularity 0.75000", metadata={"GSU": 48},
+        ),
+        "GlobalSplitU": ForkParameter(name="GlobalSplitU", values=[48]),
+    }
+    entry_b = {
+        "MatrixInstruction": ForkParameter(
+            name="MatrixInstruction", values=[1],
+            comment="GSU 47 - totalGranularity 0.73438", metadata={"GSU": 47},
+        ),
+        "GlobalSplitU": ForkParameter(name="GlobalSplitU", values=[47]),
+    }
+    fork = {"GlobalSplitU": ForkParameter(name="GlobalSplitU", values=[-1])}
+    _, deduped = d.drop_mi_group_gsu(fork, [entry_a, entry_b], SizeContext(M=1, N=1, B=1, K=1))
+    assert len(deduped) == 1
+
+
 # ---------------------------------------------------------------------------
 # _GFX1250ClusterDimCoupling (via the full GA post-processor; needs _make_param)
 # ---------------------------------------------------------------------------

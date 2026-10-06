@@ -6,9 +6,6 @@
 gfx1250 is a CDNA4 WMMA architecture (ISA 12,5,0, Wave32).
 
 GFX1250Params (heuristic):
-    Parameter values derived from the golden reference tensilelite YAML configs
-    (bbs_nn, bbs_nt, bbs_tn, bbs_tn_large, bbs_tn_maf, bbs_tn_batch4096,
-     bss_nt, f8_bf16out_tn, f8_tn_maf, f8bf8_bf16out_tn, f8bf8_f32out_tn).
     Non-persistent (TileProcessingStrategy None) by default.
 
 GFX1250GAParams (generic):

@@ -121,9 +121,8 @@ class ConfigSectionGenerator:
         pt['HighPrecisionAccumulate'] = val_HighPrecisionAccumulate
 
         epi_tag = "" if self._use_epilogues() else "#"
-        mx = self._mx_format()
-        if mx:
-            mx_block, scale_type = mx
+        if self._is_mx():
+            mx_block, scale_type = self._mx_format()
             pt['MXBlockA'] = mx_block
             pt['MXBlockB'] = mx_block
             if scale_type != "E8":
@@ -135,7 +134,7 @@ class ConfigSectionGenerator:
         # both. gfx1250 MX libraries never set UseScaleAB, as the block scales
         # replace it, and set UseScaleAlphaVec only in the OOB (Origami) library,
         # not in the Equality / GridBased ones.
-        gfx1250_mx = mx is not None and self.config["ARCH"].startswith("gfx1250")
+        gfx1250_mx = self._is_mx() and self.config["ARCH"].startswith("gfx1250")
         equality = str(self.config.get("LIBRARY_TYPE", "OOB")).lower() == "equality"
         if not (gfx1250_mx and equality):
             pt[f'{epi_tag}UseScaleAlphaVec'] = "1"

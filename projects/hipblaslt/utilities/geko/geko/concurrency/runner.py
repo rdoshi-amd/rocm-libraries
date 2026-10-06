@@ -176,9 +176,8 @@ class Runner(Generic[ItemT]):
 
             active_threads: dict[tuple[int, int], Thread] = {}
             active_workers: dict[tuple[int, int], Worker] = {}
-            # Consecutive failures across ALL devices. A healthy run interleaves
-            # successes with the occasional failure; a long unbroken failure streak
-            # means the node itself is gone, not that these shapes are bad.
+            # Consecutive failures across ALL devices. A long unbroken streak points
+            # to an unstable system or a bad install, not to the jobs themselves.
             consecutive_failures = 0
             assigned_workloads: dict[tuple[int, int], float] = {}
 
@@ -206,12 +205,10 @@ class Runner(Generic[ItemT]):
                         ):
                             logger.error(
                                 f"ABORTING RUN: {consecutive_failures} consecutive jobs "
-                                "failed. The node is likely unusable (on gfx1250, a "
-                                "MES/REMOVE_QUEUE failure leaves unkillable D-state "
-                                "processes that no watchdog can reclaim), and continuing "
-                                "would burn the remaining shapes without tuning any of "
-                                "them. Check the GPUs, reboot if they are wedged, then "
-                                "re-run to resume; completed shapes are skipped."
+                                "failed. This usually means the system is unstable or "
+                                "the installation isn't set up correctly, rather than the "
+                                "jobs themselves being bad. Check the system, then re-run "
+                                "to resume; completed shapes are skipped."
                             )
                             _stop_event.set()
 

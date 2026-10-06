@@ -191,9 +191,17 @@ class _GFX1250DropMIGroupGSU:
         if "GlobalSplitU" not in fork_params:
             return fork_params, mi_groups
         stripped = [{k: v for k, v in e.items() if k != "GlobalSplitU"} for e in mi_groups]
+        # Keyed on values alone: MIDesign gives each candidate's MatrixInstruction
+        # ForkParameter its own comment/metadata (GSU, LSU, totalGranularity, ...),
+        # so two groups with identical values -- the only thing left once
+        # GlobalSplitU is stripped -- would still compare unequal and defeat the
+        # dedupe if it used ForkParameter/dict equality directly.
+        seen = set()
         deduped = []
         for e in stripped:
-            if e not in deduped:
+            key = tuple(sorted((name, tuple(fp.values)) for name, fp in e.items()))
+            if key not in seen:
+                seen.add(key)
                 deduped.append(e)
         return fork_params, deduped
 

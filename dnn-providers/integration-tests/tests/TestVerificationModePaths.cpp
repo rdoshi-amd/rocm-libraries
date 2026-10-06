@@ -341,6 +341,8 @@ TEST_F(TestVerificationModePathsFixture, AutoNoGoldenDeviceOutputErrorFailsWitho
 
     EXPECT_TRUE(testing_support::anyFailed(results));
     EXPECT_TRUE(refErrors.empty());
+    EXPECT_THAT(testing_support::allMessages(results),
+                ::testing::HasSubstr("GPU reference was not run: stub: device memset failed"));
     EXPECT_THAT(_verifiers, ::testing::Not(::testing::Contains(Verifier::CPU_REFERENCE)));
 }
 

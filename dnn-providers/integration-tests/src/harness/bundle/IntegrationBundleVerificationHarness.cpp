@@ -557,6 +557,12 @@ VerificationOutcome
             referenceErrored(chain, std::move(entry), std::move(error));
             break;
         }
+        case RefStatus::HARNESS_ERROR:
+            // Not the reference's fault, so it neither falls through to the next one nor
+            // goes in the reference-error report.
+            return VerificationOutcome::failed(VerificationDepth::EXECUTED,
+                                               FailureOrigin::HARNESS,
+                                               label + " was not run: " + result.message);
         default:
             return VerificationOutcome::failed(
                 VerificationDepth::EXECUTED, FailureOrigin::HARNESS, "Unknown RefStatus");

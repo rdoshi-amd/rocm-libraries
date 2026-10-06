@@ -145,10 +145,12 @@ def _kdp(descriptors, ident=_KDP_ID, engine=_UED_ID, arch=None) -> dict:
 
 def _write_kdp(path: Path, doc: dict) -> None:
     """Write `doc` as hkp_pack ships a KDP: each inline UKD's provenance goes to the
-    `{stem}.provenance.json.gz` sidecar beside it. `doc` itself is left unchanged."""
+    `<name>.kdp.provenance.json.gz` sidecar beside it, and the packer's marker into
+    its directory; `doc` is left unchanged."""
     doc = copy.deepcopy(doc)
     name, data = provenance_sidecar.detach(path.name, doc)
     path.with_name(name).write_bytes(data)
+    path.with_name(provenance_sidecar.PACKED_MARKER).write_bytes(b"")
     path.write_text(json.dumps(doc))
 
 
@@ -208,6 +210,98 @@ class TestModeIsAlwaysStated:
         )
         assert result.returncode != 0
         assert "--mode" in result.stderr
+
+
+class TestEachRootReadsItsOwnProvenanceRoot:
+    """`--provenance-root LABEL=DIR` names where one root's sidecars live; the marker
+    beside each descriptor, not the flag, says whether the root is packed."""
+
+    @staticmethod
+    def run(gate, *flags):
+        return subprocess.run(
+            [
+                sys.executable,
+                str(_TOOL),
+                "small",
+                "small",
+                "big",
+                "big",
+                "--mode",
+                "structural",
+                *flags,
+            ],
+            cwd=gate.tmp,
+            capture_output=True,
+            text=True,
+        )
+
+    @staticmethod
+    def move_sidecar(gate, label):
+        sidecar = (
+            gate.tmp / label / provenance_sidecar.sidecar_name("test_engine.kdp.json")
+        )
+        (gate.tmp / f"provenance_{label}").mkdir()
+        sidecar.rename(gate.tmp / f"provenance_{label}" / sidecar.name)
+
+    @pytest.mark.parametrize(
+        "flags, message",
+        [
+            (["--provenance-root", "small"], "'small' is not LABEL=DIR"),
+            (["--provenance-root", "=p"], "'=p' is not LABEL=DIR"),
+            (["--provenance-root", "ghost=p"], "--provenance-root names label 'ghost'"),
+        ],
+        ids=["no-equals", "no-label", "unknown-provenance-label"],
+    )
+    def test_a_malformed_provenance_root_is_a_usage_error(self, gate, flags, message):
+        result = self.run(gate, *flags)
+        assert result.returncode == 2, result.stdout + result.stderr
+        assert message in result.stderr
+
+    def test_each_label_reads_its_own_provenance_root(self, gate):
+        """`big` holds a kernel `small` lacks, so crossing the roots binds a KDP to the
+        other pack's sidecar; a gate reading one label's root for all fails the
+        paired run the same way."""
+        for label in ("small", "big"):
+            self.move_sidecar(gate, label)
+
+        def roots(*pair):
+            flags = []
+            for label, directory in zip(("small", "big"), pair):
+                flags += ["--provenance-root", f"{label}={gate.tmp / directory}"]
+            return self.run(gate, "--profile", str(gate.profile), *flags)
+
+        paired = roots("provenance_small", "provenance_big")
+        crossed = roots("provenance_big", "provenance_small")
+        missing = roots()
+        assert paired.returncode == 0, paired.stdout + paired.stderr
+        assert crossed.returncode == 1, crossed.stdout + crossed.stderr
+        assert "'id-k_sq8192' has no entry in the sidecar" in crossed.stderr
+        assert missing.returncode == 1, missing.stdout + missing.stderr
+        assert "has no provenance sidecar" in missing.stderr
+
+    def test_a_provenance_root_for_an_unmarked_root_is_refused(self, gate):
+        """Its sidecar waits under the provenance root, so a gate taking the flag to
+        mean packed would pass."""
+        self.move_sidecar(gate, "small")
+        (gate.tmp / "small" / provenance_sidecar.PACKED_MARKER).unlink()
+        result = self.run(
+            gate,
+            "--profile",
+            str(gate.profile),
+            "--provenance-root",
+            f"small={gate.tmp / 'provenance_small'}",
+        )
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert "usage error: --provenance-root" in result.stderr
+        assert "test_engine.kdp.json" in result.stderr
+
+    def test_an_authored_root_beside_a_packed_one(self, gate):
+        kdp = gate.tmp / "small" / "test_engine.kdp.json"
+        kdp.with_name(provenance_sidecar.sidecar_name(kdp.name)).unlink()
+        kdp.with_name(provenance_sidecar.PACKED_MARKER).unlink()
+        kdp.write_text(json.dumps(_kdp(gate.small)))
+        result = self.run(gate, "--profile", str(gate.profile))
+        assert result.returncode == 0, result.stdout + result.stderr
 
 
 class TestGatePasses:
@@ -419,14 +513,13 @@ class TestGateRefusesAmbiguity:
         (root / "second_engine.kmd.json").write_text(
             json.dumps(_kmd(ident="kmd-second"))
         )
-        (root / "second_engine.kdp.json").write_text(
-            json.dumps(
-                _kdp(
-                    [_descriptor("k_other", 1024)],
-                    ident="kdp-second",
-                    engine="ued-second",
-                )
-            )
+        _write_kdp(
+            root / "second_engine.kdp.json",
+            _kdp(
+                [_descriptor("k_other", 1024)],
+                ident="kdp-second",
+                engine="ued-second",
+            ),
         )
         result = gate.run("multi", "multi", profiled=False)
         assert result.returncode == 1
@@ -971,6 +1064,35 @@ class TestFullModeCannotPassOnANarrowedRun:
         assert "NOT RUN" in out
         assert code == 1, out
         assert "GATE PASSED" not in out
+
+
+class TestFullModeReadsAnInstalledTree:
+    def test_the_arch_probe_reads_the_provenance_root(
+        self, packed, tmp_path, monkeypatch, capsys
+    ):
+        """Full mode resolves the arch from the first root before checking any, so
+        that read needs the root's sidecars too. The fixture declares no vocabulary,
+        so a run that reads its sidecars ends narrowed (NOT RUN), not passed."""
+        monkeypatch.setattr(gate_module, "Payloads", lambda *_a, **_k: _Payloads())
+        root = packed(tag="installed")
+        provenance = tmp_path / "provenance"
+        provenance.mkdir()
+        sidecar = root / provenance_sidecar.sidecar_name("test_engine.kdp.json")
+        sidecar.rename(provenance / sidecar.name)
+        code = gate_module.main(
+            [
+                "set",
+                str(root),
+                "--mode",
+                "full",
+                "--provenance-root",
+                f"set={provenance}",
+            ]
+        )
+        captured = capsys.readouterr()
+        assert "no provenance sidecar" not in captured.out + captured.err
+        assert "NOT RUN" in captured.out, captured.out + captured.err
+        assert code == 1
 
 
 class TestStructuralModeNeverClaimsCompiledAgreement:

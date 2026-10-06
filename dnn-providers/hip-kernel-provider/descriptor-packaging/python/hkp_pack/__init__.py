@@ -8,7 +8,8 @@ generic descriptors, and HIP sources), compiles each kernel via hipcc --genco
 per targeted arch, prunes each per-arch intermediate to what that arch needs,
 packs the code objects into a per-arch rocm_kpack archive, and rewrites the UKDs
 into self-describing kpack form (library/toc_key/symbol/sha256), with each UKD's
-provenance in a `{stem}.provenance.json.gz` sidecar beside its descriptor.
+provenance in a sidecar beside its descriptor (`foo.kdp.provenance.json.gz` for
+`foo.kdp.json`).
 No manifest is emitted. Provider-internal; no public API.
 """
 

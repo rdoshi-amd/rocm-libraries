@@ -37,9 +37,12 @@ class Index:
 
     Duplicate ids are refused before resolution: picking either document would
     bind a consumer to a schema it may not actually use. No ancestor is searched.
+
+    `provenance_root`, when a packed tree's sidecars live away from its
+    descriptors, mirrors `root` (see provenance_sidecar.attach).
     """
 
-    def __init__(self, root: str):
+    def __init__(self, root: str, *, provenance_root=None):
         self.root = root
         self.documents: list[Document] = []
         self.by_id: dict[str, Document] = {}
@@ -61,7 +64,9 @@ class Index:
                 # A packed tree ships each UKD's provenance in a sidecar; put it
                 # back so every reader sees the document the packer digested.
                 try:
-                    provenance_sidecar.attach(path, doc)
+                    provenance_sidecar.attach(
+                        path, doc, provenance_root=provenance_root, descriptor_root=root
+                    )
                 except HkpPackError as exc:
                     raise DescriptorContextError(str(exc)) from exc
             document = Document(path, doc, dtype)

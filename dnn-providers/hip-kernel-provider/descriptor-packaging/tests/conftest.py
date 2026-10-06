@@ -44,34 +44,48 @@ except ImportError:
 
 
 def write_shipped(path, doc):
-    """Write `doc` at `path` as the packer ships it: a copy with each UKD's
-    provenance moved to the sidecar beside it. Returns the copy as written."""
+    """Write `doc` at `path` as the packer ships it: a compact copy with each
+    UKD's provenance moved to the sidecar beside it, and the packed marker in its
+    directory. Returns the copy as written."""
     from hkp_pack import provenance_sidecar
 
     path = Path(path)
     doc = json.loads(json.dumps(doc))
     name, data = provenance_sidecar.detach(path.name, doc)
     path.with_name(name).write_bytes(data)
-    path.write_text(json.dumps(doc), encoding="utf-8")
+    path.with_name(provenance_sidecar.PACKED_MARKER).write_bytes(b"")
+    path.write_text(json.dumps(doc, separators=(",", ":")) + "\n", encoding="utf-8")
     return doc
+
+
+def is_compact(text):
+    """Whether `text` is one compact JSON value plus a trailing newline. Either
+    escaping of non-ASCII text counts; the loader reads both."""
+    doc = json.loads(text)
+    return any(
+        text == json.dumps(doc, separators=(",", ":"), ensure_ascii=ascii_only) + "\n"
+        for ascii_only in (True, False)
+    )
 
 
 def read_shipped(path):
     """A packed descriptor as its consumers read it: each UKD's provenance put
-    back from the sidecar beside it.
+    back from the sidecar beside it, which must exist.
 
-    First asserts what attach alone does not: the sidecar exists, which attach
-    requires only of a `kpack` UKD, and a KDP's `kernelDescriptors` is its last
-    key -- the layout the runtime loader reads in a single pass. With the sidecar
-    present, attach refuses any UKD that still carries provenance inline.
+    First asserts the layout the runtime loader reads fastest: compact JSON with a
+    KDP's `kernelDescriptors` last, which it reads in a single pass. Then the packed
+    marker beside it, without which attach reads the descriptor as authored. With the
+    sidecar present, attach refuses any UKD that still carries provenance inline.
     """
     from hkp_pack import provenance_sidecar
 
     path = Path(path)
-    doc = json.loads(path.read_text(encoding="utf-8"))
-    assert provenance_sidecar.sidecar_path(path).is_file(), f"{path} ships no sidecar"
+    text = path.read_text(encoding="utf-8")
+    doc = json.loads(text)
+    assert is_compact(text), f"{path}: not compact"
     if path.name.endswith(".kdp.json"):
         assert list(doc)[-1] == "kernelDescriptors", f"{path}: kernels are not last"
+    assert provenance_sidecar.is_packed(path.parent), f"{path}: no packed marker"
     return provenance_sidecar.attach(path, doc)
 
 

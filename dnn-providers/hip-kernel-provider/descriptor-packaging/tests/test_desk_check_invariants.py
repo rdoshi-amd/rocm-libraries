@@ -2,7 +2,7 @@
 set", exercising the SHIPPED `hkp_pack.desk_check` module rather than a copy.
 
 Invariant 1 reads the authored spec, which packing moves from ``kernel_source`` to
-``provenance.spec`` (shipped in the ``{stem}.provenance.json.gz`` sidecar and
+``provenance.spec`` (shipped in the ``<name>.kdp.provenance.json.gz`` sidecar and
 reattached on read), so a check reading ``kernel_source.spec`` on packed output
 always sees ``{}`` and reports "none" regardless of real drift
 (``test_runbook_scripts_invariant_1_is_dead_on_packed_output`` pins that against a

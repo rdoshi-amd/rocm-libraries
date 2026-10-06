@@ -25,6 +25,7 @@ from hkp_pack.descriptors import load_flat_input
 from hkp_pack.errors import HkpPackError
 from hkp_pack.hip_compile import hip_variant_key
 from hkp_pack.pipeline import _agreement_inputs, compile_intermediate, run_pipeline
+from hkp_pack.provenance_sidecar import PACKED_MARKER
 
 ARCH = "gfx942"
 ROCKE_ARCH = "gfx950"
@@ -1772,6 +1773,28 @@ def test_mixed_hip_and_embedded_source_root_packs_in_one_invocation(
     assert emb_kdp["kernelDescriptors"][0]["provenance"]["source_label"] == _LABEL
     assert _read(embedded / _STANDALONE_FILE)["kernel_source"] == _STANDALONE_SOURCE
     assert not (embedded / "kpack").exists()
+
+
+def test_every_directory_holding_a_packed_descriptor_holds_the_marker(
+    tmp_path, empty_arch_fixture, main_fixture, hipcc, rocm_kpack_dir
+):
+    """A reader takes a descriptor as packed only from the marker in its own
+    directory, so the compiled and the pass-through halves both need one, and
+    nothing else in the shard carries it."""
+    root = tmp_path / "root"
+    _nest(root, "hip/pointwise", main_fixture)
+    _make_embedded(_nest(root, "embedded/pointwise", empty_arch_fixture))
+
+    _run(root, tmp_path, hipcc, rocm_kpack_dir, [ARCH], source_label=_LABEL)
+
+    out = tmp_path / "out" / ARCH
+    holding = {
+        path.parent
+        for path in out.rglob("*.json")
+        if path.name.endswith((".kdp.json", ".ukd.json"))
+    }
+    assert {out / "hip" / "pointwise", out / "embedded" / "pointwise"} <= holding
+    assert {marker.parent for marker in out.rglob(PACKED_MARKER)} == holding
 
 
 def _embedded_copy(root, sub, fixture, suffix=""):

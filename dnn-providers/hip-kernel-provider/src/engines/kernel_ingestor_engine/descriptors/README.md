@@ -58,17 +58,34 @@ packs the fixtures and never this root.
 ## Large rocKE files live in DVC
 
 The KDPs (`*.kdp.json`) and any kernel objects (`*.co`, `*.hsaco`) of a rocKE bundle are in
-DVC, not git. The other descriptors are small JSON and stay in git. Each DVC file has a
-`<name>.dvc` pointer beside it (md5, size, `remote: ingestor`); the file itself is
-git-ignored. The blobs are in `s3://therock-dvc/rocm-libraries/hipdnn/ingestor`, which
-allows anonymous read.
+DVC, not git. The other descriptors are small JSON and stay in git. The blobs are in
+`s3://therock-dvc/rocm-libraries/hipdnn/ingestor`, which allows anonymous read.
+
+**Recommended layout: one DVC artifact per bundle.** Put the bundle's KDPs and kernel
+objects together in one folder and track that folder with a single pointer:
+
+```
+rocKE/<bundle>/
+  <name>.kmd.json, .udd.json, .ued.json, .uhd.json, *.umd.json   in git
+  artifacts.dvc                                                  in git: md5, nfiles, remote
+  artifacts/                                                     git-ignored, from DVC
+    <name>.kdp.json
+    *.co
+```
+
+One pointer per bundle keeps the pointer count and the pull small, and the whole bundle
+updates atomically. Files are stored uncompressed, one blob each. A single large file with
+its own `<name>.kdp.json.dvc` pointer, as `gfx950_attention_dense` does today, is also
+accepted. The packer reads only `*.json`, so check that a bundle with its KDP in a
+subfolder stages as expected before relying on this layout.
 
 ### Using the bundles
 
 - **Fetch:** TheRock's `fetch_sources.py` pulls every `*.dvc` pointer. By hand:
   `dvc pull -r ingestor <path-to-pointer>.dvc`.
-- **`HIPKERNELPROVIDER_ENABLE_ROCKE=ON`:** configure fails if a DVC file is missing or its
-  size differs from the pointer, and prints the `dvc pull` command. It checks only the root
+- **`HIPKERNELPROVIDER_ENABLE_ROCKE=ON`:** configure fails if a DVC output is missing or
+  differs from its pointer (file size, or file count for a folder), and prints the
+  `dvc pull` command. It checks only the root
   the build packs from, so a `HIPKERNELPROVIDER_PRODUCTION_SOURCE_ROOT` override does not
   need these files.
 - **`OFF`:** rocKE descriptors are not consumed. DVC is not needed.
@@ -77,11 +94,11 @@ allows anonymous read.
 
 ```
 cd <this dir>/rocKE/<bundle>
-dvc add <name>.kdp.json
-printf '  remote: ingestor\n' >> <name>.kdp.json.dvc   # new pointers only
+dvc add artifacts                       # a folder; for a single file: dvc add <name>.kdp.json
+printf '  remote: ingestor\n' >> artifacts.dvc   # new pointers only
 dvc remote modify --local ingestor allow_anonymous_login false
 AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... dvc push -r ingestor
-git add <name>.kdp.json.dvc .gitignore
+git add artifacts.dvc .gitignore
 ```
 
 - Commit the `.dvc` file in the same change as the push. The pointer diff shows only the new

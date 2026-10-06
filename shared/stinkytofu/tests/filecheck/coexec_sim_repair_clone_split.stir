@@ -1,0 +1,51 @@
+# RUN: %stinkytofu-opt --arch gfx1250 %s --CoexecSimRepairPass=noWaitAlu,patterns=4,margin=1,cloneStart=label_LoopBeginL --print-output
+#
+# The block of coexec_sim_repair_overfull.stir, starting at label_LoopBeginL, with an
+# InitCIterWmma clone job. v_wmma 4 and later reuse the accumulators of v_wmma 0 to 3, so
+# RegionClonePass splits the block after v_wmma 3. The address updates that move back to
+# window 2 without the job stay after the split.
+
+# CHECK-LABEL: ^label_LoopBeginL:
+# CHECK-NOT: "st.s_cselect_b32"
+# CHECK: v[24:31] = "st.v_wmma_scale
+# CHECK-NEXT: "st.s_barrier_signal"
+# CHECK: s6 = "st.s_cselect_b32"(141312, s6, SCC0)
+st.func @coexec_sim_repair_clone_split() {
+^label_LoopBeginL:
+  v[0:7] = "st.v_wmma_scale_f32_16x16x128_f8f6f4"(v[100:115], v[116:131], v[0:7]) { issueCycles = 1, latencyCycles = 8, mod.matrix_fmt = { fmtA = "MATRIX_FMT_FP8", fmtB = "MATRIX_FMT_FP8" }, mod.mfma = { reuseA = false, reuseB = false } }
+  v[8:15] = "st.v_wmma_scale_f32_16x16x128_f8f6f4"(v[100:115], v[116:131], v[8:15]) { issueCycles = 1, latencyCycles = 8, mod.matrix_fmt = { fmtA = "MATRIX_FMT_FP8", fmtB = "MATRIX_FMT_FP8" }, mod.mfma = { reuseA = false, reuseB = false } }
+  v[16:23] = "st.v_wmma_scale_f32_16x16x128_f8f6f4"(v[100:115], v[116:131], v[16:23]) { issueCycles = 1, latencyCycles = 8, mod.matrix_fmt = { fmtA = "MATRIX_FMT_FP8", fmtB = "MATRIX_FMT_FP8" }, mod.mfma = { reuseA = false, reuseB = false } }
+  v[24:31] = "st.v_wmma_scale_f32_16x16x128_f8f6f4"(v[100:115], v[116:131], v[24:31]) { issueCycles = 1, latencyCycles = 8, mod.matrix_fmt = { fmtA = "MATRIX_FMT_FP8", fmtB = "MATRIX_FMT_FP8" }, mod.mfma = { reuseA = false, reuseB = false } }
+  LDS0 = "st.s_barrier_signal"(-1, LDS0) { issueCycles = 1, latencyCycles = 11, mod.memtoken = { tokens = [900] } }
+  LDS0 = "st.s_barrier_wait"(-1, LDS0) { issueCycles = 1, latencyCycles = 1, mod.memtoken = { tokens = [900] } }
+  v[0:7] = "st.v_wmma_scale_f32_16x16x128_f8f6f4"(v[100:115], v[116:131], v[0:7]) { issueCycles = 1, latencyCycles = 8, mod.matrix_fmt = { fmtA = "MATRIX_FMT_FP8", fmtB = "MATRIX_FMT_FP8" }, mod.mfma = { reuseA = false, reuseB = false } }
+  SCC0 = "st.s_cmp_lt_u32"(s21, 141312) { issueCycles = 1, latencyCycles = 2 }
+  s6 = "st.s_mov_b32"(-141312) { issueCycles = 1, latencyCycles = 2 }
+  s6 = "st.s_cselect_b32"(141312, s6, SCC0) { issueCycles = 1, latencyCycles = 2 }
+  s21, SCC0 = "st.s_add_i32"(s21, s6) { issueCycles = 1, latencyCycles = 2 }
+  SCC0 = "st.s_cmp_lt_u32"(s69, 141312) { issueCycles = 1, latencyCycles = 2 }
+  s7 = "st.s_mov_b32"(-141312) { issueCycles = 1, latencyCycles = 2 }
+  s7 = "st.s_cselect_b32"(141312, s7, SCC0) { issueCycles = 1, latencyCycles = 2 }
+  s69, SCC0 = "st.s_add_i32"(s69, s7) { issueCycles = 1, latencyCycles = 2 }
+  v[200:203] = "st.ds_load_b128"(v40, LDS0) { issueCycles = 1, latencyCycles = 56, mod.ds = { na = 1, offset = 0, gds = false }, mod.memtoken = { tokens = [0] } }
+  v[204:207] = "st.ds_load_b128"(v40, LDS0) { issueCycles = 1, latencyCycles = 56, mod.ds = { na = 1, offset = 16, gds = false }, mod.memtoken = { tokens = [1] } }
+  v[8:15] = "st.v_wmma_scale_f32_16x16x128_f8f6f4"(v[100:115], v[116:131], v[8:15]) { issueCycles = 1, latencyCycles = 8, mod.matrix_fmt = { fmtA = "MATRIX_FMT_FP8", fmtB = "MATRIX_FMT_FP8" }, mod.mfma = { reuseA = false, reuseB = false } }
+  s22, SCC0 = "st.s_add_u32"(s22, s18) { issueCycles = 1, latencyCycles = 2 }
+  s23, SCC0 = "st.s_addc_u32"(s23, 0, SCC0) { issueCycles = 1, latencyCycles = 2 }
+  s70, SCC0 = "st.s_add_u32"(s70, s19) { issueCycles = 1, latencyCycles = 2 }
+  s71, SCC0 = "st.s_addc_u32"(s71, 0, SCC0) { issueCycles = 1, latencyCycles = 2 }
+  s14, SCC0 = "st.s_sub_u32"(s14, 1) { issueCycles = 1, latencyCycles = 2 }
+  s84 = "st.s_mov_b32"(0) { issueCycles = 1, latencyCycles = 2 }
+  v[208:211] = "st.ds_load_b128"(v40, LDS0) { issueCycles = 1, latencyCycles = 56, mod.ds = { na = 1, offset = 32, gds = false }, mod.memtoken = { tokens = [2] } }
+  v[212:215] = "st.ds_load_b128"(v40, LDS0) { issueCycles = 1, latencyCycles = 56, mod.ds = { na = 1, offset = 48, gds = false }, mod.memtoken = { tokens = [3] } }
+  v[16:23] = "st.v_wmma_scale_f32_16x16x128_f8f6f4"(v[100:115], v[116:131], v[16:23]) { issueCycles = 1, latencyCycles = 8, mod.matrix_fmt = { fmtA = "MATRIX_FMT_FP8", fmtB = "MATRIX_FMT_FP8" }, mod.mfma = { reuseA = false, reuseB = false } }
+  v[216:219] = "st.ds_load_b128"(v40, LDS0) { issueCycles = 1, latencyCycles = 56, mod.ds = { na = 1, offset = 64, gds = false }, mod.memtoken = { tokens = [4] } }
+  v[220:223] = "st.ds_load_b128"(v40, LDS0) { issueCycles = 1, latencyCycles = 56, mod.ds = { na = 1, offset = 80, gds = false }, mod.memtoken = { tokens = [5] } }
+  v[24:31] = "st.v_wmma_scale_f32_16x16x128_f8f6f4"(v[100:115], v[116:131], v[24:31]) { issueCycles = 1, latencyCycles = 8, mod.matrix_fmt = { fmtA = "MATRIX_FMT_FP8", fmtB = "MATRIX_FMT_FP8" }, mod.mfma = { reuseA = false, reuseB = false } }
+  v[0:7] = "st.v_wmma_scale_f32_16x16x128_f8f6f4"(v[100:115], v[116:131], v[0:7]) { issueCycles = 1, latencyCycles = 8, mod.matrix_fmt = { fmtA = "MATRIX_FMT_FP8", fmtB = "MATRIX_FMT_FP8" }, mod.mfma = { reuseA = false, reuseB = false } }
+  v[8:15] = "st.v_wmma_scale_f32_16x16x128_f8f6f4"(v[100:115], v[116:131], v[8:15]) { issueCycles = 1, latencyCycles = 8, mod.matrix_fmt = { fmtA = "MATRIX_FMT_FP8", fmtB = "MATRIX_FMT_FP8" }, mod.mfma = { reuseA = false, reuseB = false } }
+  v[16:23] = "st.v_wmma_scale_f32_16x16x128_f8f6f4"(v[100:115], v[116:131], v[16:23]) { issueCycles = 1, latencyCycles = 8, mod.matrix_fmt = { fmtA = "MATRIX_FMT_FP8", fmtB = "MATRIX_FMT_FP8" }, mod.mfma = { reuseA = false, reuseB = false } }
+  v[24:31] = "st.v_wmma_scale_f32_16x16x128_f8f6f4"(v[100:115], v[116:131], v[24:31]) { issueCycles = 1, latencyCycles = 8, mod.matrix_fmt = { fmtA = "MATRIX_FMT_FP8", fmtB = "MATRIX_FMT_FP8" }, mod.mfma = { reuseA = false, reuseB = false } }
+  v[0:7] = "st.v_wmma_scale_f32_16x16x128_f8f6f4"(v[100:115], v[116:131], v[0:7]) { issueCycles = 1, latencyCycles = 8, mod.matrix_fmt = { fmtA = "MATRIX_FMT_FP8", fmtB = "MATRIX_FMT_FP8" }, mod.mfma = { reuseA = false, reuseB = false } }
+  "st.s_endpgm"()
+}

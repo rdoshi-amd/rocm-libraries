@@ -1,0 +1,46 @@
+# RUN: %stinkytofu-opt --arch gfx1250 %s --CoexecSimRepairPass=trackValuVsrc --CoexecSimRepairPass=trackValuVsrc --remarks --print-output 2>&1
+#
+# The block of coexec_sim_repair_scalar_shadow.stir repaired twice, with every pattern and
+# InsertWaitAlu's s_wait_alu predicted: the first run makes three moves, the second finds
+# nothing to do.
+
+# CHECK: remark: CoexecSimRepairPass: entry: P1 scalar shadow: moved s_cmp_le_i32 + s_cmov_b32 + s_cmov_b32 from window 6 to window 3
+# CHECK-NEXT: remark: CoexecSimRepairPass: entry: fallback: moved s_cmp_le_u32 + s_cmov_b32 from window 6 to window 3
+# CHECK-NEXT: remark: CoexecSimRepairPass: entry: fallback: moved v_add_co_u32 from window 6 to window 4
+# CHECK-NOT: CoexecSimRepairPass
+# CHECK-LABEL: @coexec_sim_repair_idempotent
+st.func @coexec_sim_repair_idempotent() {
+^entry:
+  v[0:7] = "st.v_wmma_scale_f32_16x16x128_f8f6f4"(v[100:115], v[116:131], v[0:7]) { issueCycles = 1, latencyCycles = 8, mod.matrix_fmt = { fmtA = "MATRIX_FMT_FP8", fmtB = "MATRIX_FMT_FP8" }, mod.mfma = { reuseA = false, reuseB = false } }
+  v[8:15] = "st.v_wmma_scale_f32_16x16x128_f8f6f4"(v[100:115], v[116:131], v[8:15]) { issueCycles = 1, latencyCycles = 8, mod.matrix_fmt = { fmtA = "MATRIX_FMT_FP8", fmtB = "MATRIX_FMT_FP8" }, mod.mfma = { reuseA = false, reuseB = false } }
+  v[16:23] = "st.v_wmma_scale_f32_16x16x128_f8f6f4"(v[100:115], v[116:131], v[16:23]) { issueCycles = 1, latencyCycles = 8, mod.matrix_fmt = { fmtA = "MATRIX_FMT_FP8", fmtB = "MATRIX_FMT_FP8" }, mod.mfma = { reuseA = false, reuseB = false } }
+  v[24:31] = "st.v_wmma_scale_f32_16x16x128_f8f6f4"(v[100:115], v[116:131], v[24:31]) { issueCycles = 1, latencyCycles = 8, mod.matrix_fmt = { fmtA = "MATRIX_FMT_FP8", fmtB = "MATRIX_FMT_FP8" }, mod.mfma = { reuseA = false, reuseB = false } }
+  LDS0 = "st.s_barrier_signal"(-1, LDS0) { issueCycles = 1, latencyCycles = 11, mod.memtoken = { tokens = [900] } }
+  LDS0 = "st.s_barrier_wait"(-1, LDS0) { issueCycles = 1, latencyCycles = 1, mod.memtoken = { tokens = [900] } }
+  v[32:39] = "st.v_wmma_scale_f32_16x16x128_f8f6f4"(v[100:115], v[116:131], v[32:39]) { issueCycles = 1, latencyCycles = 8, mod.matrix_fmt = { fmtA = "MATRIX_FMT_FP8", fmtB = "MATRIX_FMT_FP8" }, mod.mfma = { reuseA = false, reuseB = false } }
+  v[200:203] = "st.ds_load_b128"(v40, LDS0) { issueCycles = 1, latencyCycles = 56, mod.ds = { na = 1, offset = 0, gds = false }, mod.memtoken = { tokens = [0] } }
+  v[204:207] = "st.ds_load_b128"(v40, LDS0) { issueCycles = 1, latencyCycles = 56, mod.ds = { na = 1, offset = 16, gds = false }, mod.memtoken = { tokens = [1] } }
+  v[208:211] = "st.ds_load_b128"(v40, LDS0) { issueCycles = 1, latencyCycles = 56, mod.ds = { na = 1, offset = 32, gds = false }, mod.memtoken = { tokens = [2] } }
+  v[212:215] = "st.ds_load_b128"(v40, LDS0) { issueCycles = 1, latencyCycles = 56, mod.ds = { na = 1, offset = 48, gds = false }, mod.memtoken = { tokens = [3] } }
+  v[216:219] = "st.ds_load_b128"(v40, LDS0) { issueCycles = 1, latencyCycles = 56, mod.ds = { na = 1, offset = 64, gds = false }, mod.memtoken = { tokens = [4] } }
+  v[220:223] = "st.ds_load_b128"(v40, LDS0) { issueCycles = 1, latencyCycles = 56, mod.ds = { na = 1, offset = 80, gds = false }, mod.memtoken = { tokens = [5] } }
+  v[40:47] = "st.v_wmma_scale_f32_16x16x128_f8f6f4"(v[100:115], v[116:131], v[40:47]) { issueCycles = 1, latencyCycles = 8, mod.matrix_fmt = { fmtA = "MATRIX_FMT_FP8", fmtB = "MATRIX_FMT_FP8" }, mod.mfma = { reuseA = false, reuseB = false } }
+  SCC0 = "st.s_cmp_le_i32"(s14, 2) { issueCycles = 1, latencyCycles = 2 }
+  s20 = "st.s_cmov_b32"(0, s20, SCC0) { issueCycles = 1, latencyCycles = 2 }
+  s68 = "st.s_cmov_b32"(0, s68, SCC0) { issueCycles = 1, latencyCycles = 2 }
+  SCC0 = "st.s_cmp_le_u32"(s14, 4) { issueCycles = 1, latencyCycles = 2 }
+  s83 = "st.s_cmov_b32"(0, s83, SCC0) { issueCycles = 1, latencyCycles = 2 }
+  v50, vcc_lo0 = "st.v_add_co_u32"(v50, s83) { issueCycles = 1, latencyCycles = 5 }
+  v[48:55] = "st.v_wmma_scale_f32_16x16x128_f8f6f4"(v[100:115], v[116:131], v[48:55]) { issueCycles = 1, latencyCycles = 8, mod.matrix_fmt = { fmtA = "MATRIX_FMT_FP8", fmtB = "MATRIX_FMT_FP8" }, mod.mfma = { reuseA = false, reuseB = false } }
+  v51, vcc_lo0 = "st.v_add_co_ci_u32"(v51, 0, vcc_lo0) { issueCycles = 1, latencyCycles = 5 }
+  v[224:227] = "st.ds_load_b128"(v40, LDS0) { issueCycles = 1, latencyCycles = 56, mod.ds = { na = 1, offset = 96, gds = false }, mod.memtoken = { tokens = [6] } }
+  v[228:231] = "st.ds_load_b128"(v40, LDS0) { issueCycles = 1, latencyCycles = 56, mod.ds = { na = 1, offset = 112, gds = false }, mod.memtoken = { tokens = [7] } }
+  v[232:235] = "st.ds_load_b128"(v40, LDS0) { issueCycles = 1, latencyCycles = 56, mod.ds = { na = 1, offset = 128, gds = false }, mod.memtoken = { tokens = [8] } }
+  v[236:239] = "st.ds_load_b128"(v40, LDS0) { issueCycles = 1, latencyCycles = 56, mod.ds = { na = 1, offset = 144, gds = false }, mod.memtoken = { tokens = [9] } }
+  v[240:243] = "st.ds_load_b128"(v40, LDS0) { issueCycles = 1, latencyCycles = 56, mod.ds = { na = 1, offset = 160, gds = false }, mod.memtoken = { tokens = [10] } }
+  v[56:63] = "st.v_wmma_scale_f32_16x16x128_f8f6f4"(v[100:115], v[116:131], v[56:63]) { issueCycles = 1, latencyCycles = 8, mod.matrix_fmt = { fmtA = "MATRIX_FMT_FP8", fmtB = "MATRIX_FMT_FP8" }, mod.mfma = { reuseA = false, reuseB = false } }
+  v[64:71] = "st.v_wmma_scale_f32_16x16x128_f8f6f4"(v[100:115], v[116:131], v[64:71]) { issueCycles = 1, latencyCycles = 8, mod.matrix_fmt = { fmtA = "MATRIX_FMT_FP8", fmtB = "MATRIX_FMT_FP8" }, mod.mfma = { reuseA = false, reuseB = false } }
+  v[72:79] = "st.v_wmma_scale_f32_16x16x128_f8f6f4"(v[100:115], v[116:131], v[72:79]) { issueCycles = 1, latencyCycles = 8, mod.matrix_fmt = { fmtA = "MATRIX_FMT_FP8", fmtB = "MATRIX_FMT_FP8" }, mod.mfma = { reuseA = false, reuseB = false } }
+  v[80:87] = "st.v_wmma_scale_f32_16x16x128_f8f6f4"(v[100:115], v[116:131], v[80:87]) { issueCycles = 1, latencyCycles = 8, mod.matrix_fmt = { fmtA = "MATRIX_FMT_FP8", fmtB = "MATRIX_FMT_FP8" }, mod.mfma = { reuseA = false, reuseB = false } }
+  "st.s_endpgm"()
+}

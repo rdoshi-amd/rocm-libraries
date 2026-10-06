@@ -39,6 +39,7 @@
 #include "stinkytofu/transforms/asm/AsmMovePropagationPass.hpp"
 #include "stinkytofu/transforms/asm/BuildDefUseChain.hpp"
 #include "stinkytofu/transforms/asm/CFGBuilderPass.hpp"
+#include "stinkytofu/transforms/asm/CoexecSimRepairPass.hpp"
 #include "stinkytofu/transforms/asm/DeadCodeEliminationPass.hpp"
 #include "stinkytofu/transforms/asm/DefUseAnalysisCleanup.hpp"
 #include "stinkytofu/transforms/asm/EpilogueStoreSinkPass.hpp"
@@ -249,6 +250,31 @@ const std::vector<PassInfo> availablePasses = {
                      std::atoi(arg.substr(prefix.size()).c_str()));
          }
          return createWaitAwareScheduleRepairPass(kDefaultSlotsToMovePastAnchor);
+     }},
+    // CoexecSimRepairPass accepts:
+    //   trackValuVsrc     — predict s_wait_alu with gfx1250InsertWaitAluOptions(true)
+    //   noWaitAlu         — InsertWaitAlu does not run, so predict no s_wait_alu
+    //   patterns=N        — CoexecRepairPattern bit mask (default: all)
+    //   margin=N          — marginCycles
+    //   marginFraction=F  — marginFraction
+    //   maxMoves=N        — maxMovesPerWindow
+    //   cloneStart=LABEL  — an InitCIterWmma RegionClonePass job starting at LABEL
+    {"CoexecSimRepairPass",
+     [](const std::vector<std::string>& args) {
+         CoexecSimRepairOptions options;
+         options.waitAlu = gfx1250InsertWaitAluOptions(hasPassArg(args, "trackValuVsrc"));
+         options.predictWaitAlu = !hasPassArg(args, "noWaitAlu");
+         if (const std::string v = passArgValue(args, "patterns"); !v.empty())
+             options.patternMask = static_cast<unsigned>(std::strtoul(v.c_str(), nullptr, 0));
+         if (const std::string v = passArgValue(args, "margin"); !v.empty())
+             options.marginCycles = std::atoi(v.c_str());
+         if (const std::string v = passArgValue(args, "marginFraction"); !v.empty())
+             options.marginFraction = std::strtof(v.c_str(), nullptr);
+         if (const std::string v = passArgValue(args, "maxMoves"); !v.empty())
+             options.maxMovesPerWindow = std::atoi(v.c_str());
+         if (const std::string v = passArgValue(args, "cloneStart"); !v.empty())
+             options.clones.push_back(CloneSpec{"InitCIterWmma", v});
+         return createCoexecSimRepairPass(std::move(options));
      }},
     // BuildUseDefChainPass accepts:
     //   includePseudo    — also build chains for pseudo registers (memtokens)

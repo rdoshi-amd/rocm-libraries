@@ -188,6 +188,8 @@ bool buildGfx1250Pipeline(ModulePassManager& mpm, StinkyAsmModule& module, const
                 passFeatureConfig.dagFeatures.wmmaBatchProfile = moduleOptions.WmmaBatchProfile;
                 passFeatureConfig.dagFeatures.wmmaBatchProfilePhase =
                     moduleOptions.WmmaBatchProfilePhase;
+                passFeatureConfig.dagFeatures.wmmaBatchProfileCarry =
+                    moduleOptions.WmmaBatchProfileCarry;
                 passFeatureConfig.dagFeatures.dsIssueCapSpanCycles =
                     moduleOptions.DsIssueCapSpanCycles;
                 passFeatureConfig.dagFeatures.dsIssueCapMode =

@@ -147,6 +147,10 @@ struct PassFeatureConfig {
         /// Entry the profile starts at in each scheduling region (mod its length):
         /// rotates the pattern relative to the stage's barrier and tensor_load.
         int wmmaBatchProfilePhase = 0;
+        /// 1 = a batch's ds quota also includes what earlier batches left unused
+        /// (ds_loads that were not ready yet), so the profile is a cumulative budget
+        /// that catches up; 0 = each batch's quota is a hard per-batch limit.
+        int wmmaBatchProfileCarry = 0;
         /// Max cycle-distance between two adjacent barrier groups for
         /// StinkyMergeBarrierPass to merge them into a single multi-token
         /// barrier group. 0 = use the CDNA5 default (kCdna5MergeBarrierThreshold).

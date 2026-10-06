@@ -1615,7 +1615,9 @@ DAGNode* CDNA5ReadyQueue::pickOneFromWMMA(DAGNode* pick) {
             autoWmmaBatch() ? autoWmmaBatchSize(node->inst->latencyCycles) : wmmaBatchSize();
         if (profileActive()) {
             batchLimit_ = profile_[profileIdx_].first;
-            profileDsQuota_ = profile_[profileIdx_].second;
+            const bool carry =
+                getPassContext().getPassFeatureConfig().dagFeatures.wmmaBatchProfileCarry != 0;
+            profileDsQuota_ = profile_[profileIdx_].second + (carry ? profileDsQuota_ : 0);
             profileIdx_ = (profileIdx_ + 1) % profile_.size();
         }
         dsAllotCarry_ = dsAllotCarryNext_;

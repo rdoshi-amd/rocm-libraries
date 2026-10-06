@@ -1918,6 +1918,24 @@ TEST_F(DAGSchedulerPassTest, WmmaBatchProfile_PhaseRotatesThePattern) {
     }
 }
 
+// The ds_loads only become ready after the 4th WMMA (they read its result as an address),
+// so the first batch's quota goes unused. Without carry the late loads follow the
+// per-batch limit and the last one waits for the end; with carry the second batch also
+// gets the first one's unused quota.
+TEST_F(DAGSchedulerPassTest, WmmaBatchProfile_CarryCatchesUpLateDs) {
+    for (int carry = 0; carry < 2; ++carry) {
+        SetUp();
+        for (int i = 0; i < 8; i++) createWmmaF32_16x16x16_bf16(8 * i, 100 + 8 * i);
+        for (int i = 0; i < 4; i++) createMovableDsLoad(200 + i * 4, /*addrReg=*/24, i + 1);
+        runWithDsCapMode(PassFeatureConfig::DsIssueCapMode::Sliding, [&](PassFeatureConfig& p) {
+            profileFeatures(p, "2:1");
+            p.dagFeatures.wmmaBatchProfileCarry = carry;
+        });
+        EXPECT_EQ(wdShape(mnemonicSequence(*bb)), carry ? "WWWWddWWdWWd" : "WWWWdWWdWWdd")
+            << "carry " << carry;
+    }
+}
+
 TEST_F(DAGSchedulerPassTest, WmmaBatchProfile_RejectsMalformedEntries) {
     createMovableDsLoad(0, 80, 1);
     createWmmaF32_16x16x16_bf16(200, 300);

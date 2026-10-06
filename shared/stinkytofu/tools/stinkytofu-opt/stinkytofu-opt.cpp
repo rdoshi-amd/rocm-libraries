@@ -188,6 +188,7 @@ std::vector<RequestedPass> parsePassNames(int argc, char** argv, int startIdx) {
                 arg.starts_with("--tensor-load-ds-load-gap-cycles=") ||
                 arg.starts_with("--wmma-batch-size=") || arg.starts_with("--wmma-batch-profile=") ||
                 arg.starts_with("--wmma-batch-profile-phase=") ||
+                arg.starts_with("--wmma-batch-profile-carry=") ||
                 arg.starts_with("--global-read-queue-depth=") ||
                 arg.starts_with("--global-read-drain-latency=") ||
                 arg.starts_with("--merge-barrier-threshold=") ||
@@ -565,6 +566,9 @@ int main(int argc, char** argv) {
         } else if (a.starts_with("--wmma-batch-size=")) {
             passFeatureConfig.dagFeatures.wmmaBatchSize =
                 std::stoi(a.substr(std::string("--wmma-batch-size=").size()));
+        } else if (a.starts_with("--wmma-batch-profile-carry=")) {
+            passFeatureConfig.dagFeatures.wmmaBatchProfileCarry =
+                std::stoi(a.substr(std::string("--wmma-batch-profile-carry=").size()));
         } else if (a.starts_with("--wmma-batch-profile-phase=")) {
             passFeatureConfig.dagFeatures.wmmaBatchProfilePhase =
                 std::stoi(a.substr(std::string("--wmma-batch-profile-phase=").size()));

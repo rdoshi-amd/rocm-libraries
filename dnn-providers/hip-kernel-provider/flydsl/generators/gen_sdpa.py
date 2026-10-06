@@ -33,7 +33,13 @@ import tempfile
 from pathlib import Path
 
 from . import _flydsl_env as env
-from ._codeobject import GeneratorError, arg_records, describe, verify_arch
+from ._codeobject import (
+    GeneratorError,
+    arg_records,
+    describe,
+    verify_arch,
+    verify_generic,
+)
 from ._extract_hsaco import hsaco_from_dump
 from ._instances import Instance, instances_for
 from ._manifest import refresh_source_md, sha256, write_op_manifest
@@ -87,6 +93,18 @@ _GRID_RULE = "batch_x_qtiles_x_heads"
 _WAVE_ROWS = 16
 _WAVE_SIZE = 32
 
+# LLVM codegen options per target, added to the kernel's own (its launcher
+# carries `compile_hints["llvm_options"]`) for every instance built for it; the
+# effective set is recorded in each manifest row. gfx11-generic has no gfx115x SALU float ops, so
+# the scalar softmax arithmetic moves to VALU and d128 tips past the 256-VGPR
+# ceiling by a few registers under the default scheduler's pressure tracking.
+# The AMDGPU trackers' tighter accounting fits every generic instance with no
+# spill (and was measured faster on gfx1151 than the default). Per target, not
+# global: on native gfx1151 the same option makes f16 d128 spill.
+_LLVM_OPTIONS = {
+    "gfx11-generic": {"amdgpu-use-amdgpu-trackers": True},
+}
+
 
 def _verify(described: dict, instance: Instance, arch: str, where: str) -> None:
     """Fail before writing, rather than shipping a mislabelled object."""
@@ -114,10 +132,13 @@ def _verify(described: dict, instance: Instance, arch: str, where: str) -> None:
         )
 
 
-def _build_one(kernel_module, instance: Instance, dump_dir: Path) -> bytes:
-    """Compile one instance and return its code object."""
+def _build_one(
+    kernel_module, instance: Instance, dump_dir: Path, llvm_options: dict
+) -> tuple[bytes, dict]:
+    """Compile one instance; return its code object and the LLVM options used."""
     import flydsl.compiler as flyc  # noqa: PLC0415  (after prepare())
     import flydsl.expr as fx  # noqa: PLC0415
+    from flydsl.compiler.kernel_function import CompilationContext  # noqa: PLC0415
 
     knobs = instance.knobs
     env.set_dump_dir(dump_dir)
@@ -137,10 +158,15 @@ def _build_one(kernel_module, instance: Instance, dump_dir: Path) -> bytes:
     args = [null] * 5 + [1, 1, 1, 1, 1, 0, -1, 0, 0, 1.0]
     args += [1] * 15
     args.append(fx.Stream(None))
-    flyc.compile(launch, *args)
+    # FlyDSL merges hint layers shallowly: an `llvm_options` passed here would
+    # *replace* the kernel's own, not extend it. Merge onto them explicitly.
+    effective = dict(getattr(launch, "compile_hints", {}).get("llvm_options") or {})
+    effective.update(llvm_options)
+    with CompilationContext.compile_hints({"llvm_options": effective}):
+        flyc.compile(launch, *args)
 
     blob, _ = hsaco_from_dump(dump_dir)
-    return blob
+    return blob, effective
 
 
 def generate(arch: str, out_root: Path, keep_ir: Path | None = None) -> Path:
@@ -153,6 +179,7 @@ def generate(arch: str, out_root: Path, keep_ir: Path | None = None) -> Path:
     op_dir.mkdir(parents=True, exist_ok=True)
 
     instances = instances_for(OP)
+    llvm_options = _LLVM_OPTIONS.get(arch, {})
     records: list[dict] = []
 
     for index, instance in enumerate(instances, start=1):
@@ -160,7 +187,9 @@ def generate(arch: str, out_root: Path, keep_ir: Path | None = None) -> Path:
         with tempfile.TemporaryDirectory(prefix=f"flydsl-{instance.name}-") as tmp:
             dump_dir = Path(keep_ir) / instance.name if keep_ir else Path(tmp)
             try:
-                blob = _build_one(flash_attn_func_gfx1151, instance, dump_dir)
+                blob, effective_options = _build_one(
+                    flash_attn_func_gfx1151, instance, dump_dir, llvm_options
+                )
             except Exception as exc:
                 raise GeneratorError(f"{instance.name}: {exc}") from exc
 
@@ -168,6 +197,7 @@ def generate(arch: str, out_root: Path, keep_ir: Path | None = None) -> Path:
         where = f"{arch}/{OP}/{filename}"
         described = describe(blob, where)
         _verify(described, instance, arch, where)
+        verify_generic(blob, arch, where)
 
         (op_dir / filename).write_bytes(blob)
 
@@ -184,13 +214,14 @@ def generate(arch: str, out_root: Path, keep_ir: Path | None = None) -> Path:
                 "grid_rule": _GRID_RULE,
                 "lds_bytes": described["group_segment_fixed_size"],
                 "vgprs": described["vgpr_count"],
+                "llvm_options": effective_options,
                 "named_args": described["named_args"],
                 "args": arg_records(_SEMANTIC_ARG_NAMES, described["signature"]),
             }
         )
         records.append(record)
 
-    write_op_manifest(op_dir, arch, OP, env.provenance(), records)
+    write_op_manifest(op_dir, arch, OP, env.provenance(arch), records)
     source_md = refresh_source_md(op_dir)
     print(f"wrote {len(records)} object(s) to {op_dir}")
     print(f"refreshed {source_md}")
@@ -202,8 +233,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--arch",
         required=True,
-        help="GPU target, e.g. gfx1151. The kernel is gfx11-only (RDNA3 / RDNA3.5 "
-        "WMMA ABI); one arch per invocation.",
+        help="GPU target, e.g. gfx11-generic (every RDNA3/RDNA3.5 part) or a "
+        "concrete gfx11 arch. The kernel is gfx11-only (RDNA3 / RDNA3.5 WMMA ABI); "
+        "one arch per invocation.",
     )
     parser.add_argument(
         "--out-dir",

@@ -1,0 +1,34 @@
+{
+  "version": "1.0",
+  "id": "ecf2baae-1efb-53f1-b4c8-e2feba3bf160",
+  "name": "flydsl sdpa kernels (gfx11-generic)",
+  "arch": [
+    "gfx1100",
+    "gfx1101",
+    "gfx1102",
+    "gfx1103",
+    "gfx1150",
+    "gfx1151",
+    "gfx1152",
+    "gfx1153"
+  ],
+  "matchers": [
+    "c293a355-3ecd-548e-947a-52342cc9511c"
+  ],
+  "engine": "bd16d7b9-50d9-57d0-ad6e-49882df64021",
+  "dispatch": "7108fe9d-26db-51a4-9d75-6770b2162dd1",
+  "kernelDescriptors": [
+    "b7f31a74-937b-5e47-888c-b7d1515a4184",
+    "4c3fa5d3-5f82-5d34-acd6-d2af13a7b97a",
+    "bfeb20fe-9abb-58f2-8e93-3dc5914fa503",
+    "4f56b667-60c7-544a-970b-80a75abe0a2f",
+    "8c9084a4-3fc4-538b-a381-f9ae8dbb7855",
+    "bd38e937-cf9b-54c8-aaa2-eaa4b2a43829",
+    "bdd02e7c-2822-5ed2-b417-37f270756840",
+    "d5cd522e-6232-5663-995c-865c00f8974b",
+    "9fcf4e98-9332-573b-8b38-598e0b3a9218",
+    "4703259d-3256-5e97-9a0e-7be9ca5f7556",
+    "a0af8e61-e2bd-5da3-a903-96e5bf5402b8",
+    "a214939b-498d-5dc3-8a7f-be0309f7affa"
+  ]
+}

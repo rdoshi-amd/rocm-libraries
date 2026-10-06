@@ -11,8 +11,10 @@ and the arch parse live here once.
 
 from __future__ import annotations
 
+import re
 import sys
 
+from . import _arch_families as families
 from . import _flydsl_env as env
 
 
@@ -77,19 +79,31 @@ def describe(blob: bytes, where: str) -> dict:
     }
 
 
+# The processor at the end of an `amdhsa.target` triple: a concrete gfx name, or
+# an LLVM generic target (`gfx11-generic`, `gfx9-4-generic`), whose name itself
+# contains dashes.
+_TARGET_ARCH = re.compile(r"(gfx[0-9a-z]+(?:-[0-9]+)*-generic|gfx[0-9a-f]+)$")
+
+# ELF header e_flags (ELF64: 16-byte ident, then type/machine/version, then
+# entry/phoff/shoff), and the two AMDGPU fields read out of it.
+_E_FLAGS_OFFSET = 48
+_EF_AMDGPU_MACH = 0x0FF
+_EF_AMDGPU_GENERIC_VERSION_SHIFT = 24
+
+
 def target_arch(targets, where: str) -> str:
-    """The gfx name out of ``amdhsa.target``, ignoring feature suffixes.
+    """The processor out of ``amdhsa.target``, ignoring feature suffixes.
 
-    Two spellings of the same triple are in circulation and both have to parse:
-    the AITER ASM objects carry an *empty* environment field,
-    ``amdgcn-amd-amdhsa--gfx950:sramecc+:xnack-``, and FlyDSL emits it as
-    ``unknown``, ``amdgcn-amd-amdhsa-unknown-gfx1151``. Splitting on ``--`` reads
-    only the first. So: drop the ``:feature`` suffixes, then take the last
-    ``-``-separated field. The suffixes come off *first* because a feature can
-    itself end in a dash (``xnack-``), which would otherwise swallow the arch.
+    Three spellings are in circulation and all have to parse: the AITER ASM
+    objects carry an *empty* environment field,
+    ``amdgcn-amd-amdhsa--gfx950:sramecc+:xnack-``; FlyDSL emits it as
+    ``unknown``, ``amdgcn-amd-amdhsa-unknown-gfx1151``; and a generic target
+    ends in a dashed name, ``amdgcn-amd-amdhsa-unknown-gfx11-generic``. So: drop
+    the ``:feature`` suffixes, then match the processor at the end. The suffixes
+    come off *first* because a feature can itself end in a dash (``xnack-``).
 
-    We compare the arch alone -- feature flags describe how the object was built,
-    while the filename claims which device it runs on.
+    We compare the processor alone -- feature flags describe how the object was
+    built, while the directory claims which devices it runs on.
     """
     if isinstance(targets, (list, tuple)):
         if len(targets) != 1:
@@ -99,12 +113,12 @@ def target_arch(targets, where: str) -> str:
         target = targets
     if not isinstance(target, str):
         raise GeneratorError(f"{where}: unreadable amdhsa.target {target!r}")
-    arch = target.split(":", 1)[0].rsplit("-", 1)[-1]
-    if not arch.startswith("gfx"):
+    match = _TARGET_ARCH.search(target.split(":", 1)[0])
+    if match is None:
         raise GeneratorError(
             f"{where}: amdhsa.target {target!r} does not end in a gfx name"
         )
-    return arch
+    return match.group(1)
 
 
 def verify_arch(described: dict, arch: str, where: str) -> None:
@@ -116,6 +130,35 @@ def verify_arch(described: dict, arch: str, where: str) -> None:
             f"{arch!r}. FlyDSL reads ARCH from the environment at each compile, so "
             "this means the env moved under the run -- not that the file is "
             "misnamed. Regenerate one arch per invocation."
+        )
+
+
+def elf_flags(blob: bytes, where: str) -> tuple[int, int]:
+    """``(EF_AMDGPU_MACH, EF_AMDGPU_GENERIC_VERSION)`` from the object's ELF header."""
+    elf = hkp_pack_module().amdgcn_object(blob, where)
+    if len(elf) < _E_FLAGS_OFFSET + 4 or elf[:4] != b"\x7fELF":
+        raise GeneratorError(f"{where}: not an ELF code object")
+    flags = int.from_bytes(elf[_E_FLAGS_OFFSET : _E_FLAGS_OFFSET + 4], "little")
+    return flags & _EF_AMDGPU_MACH, flags >> _EF_AMDGPU_GENERIC_VERSION_SHIFT
+
+
+def verify_generic(blob: bytes, arch: str, where: str) -> None:
+    """For a generic target, the ELF header must say so too.
+
+    ``amdhsa.target`` is metadata the loader does not consult; ROCr decides
+    compatibility from ``e_flags``. An object whose metadata says
+    ``gfx11-generic`` but whose header carries a concrete machine would load on
+    one member and be refused by the other seven.
+    """
+    if not families.is_generic(arch):
+        return
+    row = families.family(arch)
+    mach, version = elf_flags(blob, where)
+    if mach != row["elf_mach"] or version < row["min_generic_version"]:
+        raise GeneratorError(
+            f"{where}: ELF e_flags carry machine {mach:#05x} generic version "
+            f"{version}; {arch} needs machine {row['elf_mach']:#05x} and generic "
+            f"version >= {row['min_generic_version']}"
         )
 
 

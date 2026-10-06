@@ -25,6 +25,8 @@ import hashlib
 import json
 from pathlib import Path
 
+from . import _arch_families as families
+
 MANIFEST_NAME = "manifest.json"
 MANIFEST_VERSION = 1
 
@@ -77,6 +79,15 @@ def refresh_source_md(op_dir: Path) -> Path:
         "",
         "run from `flydsl/`; see `flydsl/REGEN.md` for the environment.",
         "",
+    ]
+    if families.is_generic(arch):
+        lines += [
+            f"`{arch}` is an LLVM generic target: these objects run unchanged on "
+            + ", ".join(f"`{member}`" for member in families.members(arch))
+            + ". The packer ships them into each of those arches' shards.",
+            "",
+        ]
+    lines += [
         "## Toolchain",
         "",
         "The toolchain is part of the artifact. Regenerating against a different FlyDSL",

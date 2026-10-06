@@ -1,0 +1,2511 @@
+{
+  "manifest_version": 1,
+  "arch": "gfx11-generic",
+  "op": "sdpa",
+  "toolchain": {
+    "flydsl_version": "0.3.4",
+    "flydsl_kernels_commit": "89ad52fbbb9e252396829a8a44b12e18b7acd970",
+    "flydsl_kernels_describe": "v0.3.4.1-19-g89ad52f",
+    "aiter_kernels_commit": "8253efc4059516f492df597b80ce5311e9fda8bd",
+    "rocm_version": "7.13.0",
+    "generic_target_shim": "chipset=gfx1100"
+  },
+  "instances": [
+    {
+      "name": "sdpa_bf16_d64_causal0_bm128_bn32",
+      "op": "sdpa",
+      "dtype": "bf16",
+      "priority": 100,
+      "tier": "specialized",
+      "knobs": {
+        "head_dim": 64,
+        "causal": 0,
+        "block_m": 128,
+        "block_n": 32
+      },
+      "file": "sdpa_bf16_d64_causal0_bm128_bn32.hsaco",
+      "symbol": "flash_attn_func_gfx1151_kernel_0",
+      "bytes": 16192,
+      "sha256": "03781923264f4e6b0ce3cdb3f2930ecf2538e131470ef80dce235976ef0289f3",
+      "kernarg_segment_size": 200,
+      "block": [
+        256,
+        1,
+        1
+      ],
+      "grid_rule": "batch_x_qtiles_x_heads",
+      "lds_bytes": 8704,
+      "vgprs": 148,
+      "llvm_options": {
+        "enable-post-misched": false,
+        "lsr-drop-solution": true,
+        "amdgpu-use-amdgpu-trackers": true
+      },
+      "named_args": 0,
+      "args": [
+        {
+          "name": "Q",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 0
+        },
+        {
+          "name": "K",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 8
+        },
+        {
+          "name": "V",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 16
+        },
+        {
+          "name": "O",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 24
+        },
+        {
+          "name": "LSE",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 32
+        },
+        {
+          "name": "seq_len_q",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 40
+        },
+        {
+          "name": "seq_len_kv",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 44
+        },
+        {
+          "name": "num_heads",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 48
+        },
+        {
+          "name": "kv_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 52
+        },
+        {
+          "name": "right_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 56
+        },
+        {
+          "name": "left_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 60
+        },
+        {
+          "name": "align_bottom_right",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 64
+        },
+        {
+          "name": "lse_on",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 68
+        },
+        {
+          "name": "scale",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 72
+        },
+        {
+          "name": "q_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 80
+        },
+        {
+          "name": "q_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 88
+        },
+        {
+          "name": "q_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 96
+        },
+        {
+          "name": "k_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 104
+        },
+        {
+          "name": "k_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 112
+        },
+        {
+          "name": "k_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 120
+        },
+        {
+          "name": "v_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 128
+        },
+        {
+          "name": "v_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 136
+        },
+        {
+          "name": "v_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 144
+        },
+        {
+          "name": "o_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 152
+        },
+        {
+          "name": "o_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 160
+        },
+        {
+          "name": "o_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 168
+        },
+        {
+          "name": "lse_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 176
+        },
+        {
+          "name": "lse_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 184
+        },
+        {
+          "name": "lse_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 192
+        }
+      ]
+    },
+    {
+      "name": "sdpa_bf16_d64_causal1_bm128_bn32",
+      "op": "sdpa",
+      "dtype": "bf16",
+      "priority": 100,
+      "tier": "specialized",
+      "knobs": {
+        "head_dim": 64,
+        "causal": 1,
+        "block_m": 128,
+        "block_n": 32
+      },
+      "file": "sdpa_bf16_d64_causal1_bm128_bn32.hsaco",
+      "symbol": "flash_attn_func_gfx1151_kernel_0",
+      "bytes": 16192,
+      "sha256": "cafe3fcb75bec91db28d4de3f58954c9e9aa05fd1fd45d71db3614151ea05662",
+      "kernarg_segment_size": 200,
+      "block": [
+        256,
+        1,
+        1
+      ],
+      "grid_rule": "batch_x_qtiles_x_heads",
+      "lds_bytes": 8704,
+      "vgprs": 168,
+      "llvm_options": {
+        "enable-post-misched": false,
+        "lsr-drop-solution": true,
+        "amdgpu-use-amdgpu-trackers": true
+      },
+      "named_args": 0,
+      "args": [
+        {
+          "name": "Q",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 0
+        },
+        {
+          "name": "K",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 8
+        },
+        {
+          "name": "V",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 16
+        },
+        {
+          "name": "O",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 24
+        },
+        {
+          "name": "LSE",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 32
+        },
+        {
+          "name": "seq_len_q",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 40
+        },
+        {
+          "name": "seq_len_kv",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 44
+        },
+        {
+          "name": "num_heads",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 48
+        },
+        {
+          "name": "kv_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 52
+        },
+        {
+          "name": "right_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 56
+        },
+        {
+          "name": "left_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 60
+        },
+        {
+          "name": "align_bottom_right",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 64
+        },
+        {
+          "name": "lse_on",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 68
+        },
+        {
+          "name": "scale",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 72
+        },
+        {
+          "name": "q_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 80
+        },
+        {
+          "name": "q_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 88
+        },
+        {
+          "name": "q_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 96
+        },
+        {
+          "name": "k_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 104
+        },
+        {
+          "name": "k_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 112
+        },
+        {
+          "name": "k_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 120
+        },
+        {
+          "name": "v_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 128
+        },
+        {
+          "name": "v_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 136
+        },
+        {
+          "name": "v_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 144
+        },
+        {
+          "name": "o_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 152
+        },
+        {
+          "name": "o_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 160
+        },
+        {
+          "name": "o_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 168
+        },
+        {
+          "name": "lse_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 176
+        },
+        {
+          "name": "lse_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 184
+        },
+        {
+          "name": "lse_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 192
+        }
+      ]
+    },
+    {
+      "name": "sdpa_bf16_d96_causal0_bm128_bn32",
+      "op": "sdpa",
+      "dtype": "bf16",
+      "priority": 100,
+      "tier": "specialized",
+      "knobs": {
+        "head_dim": 96,
+        "causal": 0,
+        "block_m": 128,
+        "block_n": 32
+      },
+      "file": "sdpa_bf16_d96_causal0_bm128_bn32.hsaco",
+      "symbol": "flash_attn_func_gfx1151_kernel_0",
+      "bytes": 18496,
+      "sha256": "9efd8968e5dba902092d1a61bc7663a59285363faa47d264836a76decfbe6673",
+      "kernarg_segment_size": 200,
+      "block": [
+        256,
+        1,
+        1
+      ],
+      "grid_rule": "batch_x_qtiles_x_heads",
+      "lds_bytes": 12800,
+      "vgprs": 222,
+      "llvm_options": {
+        "enable-post-misched": false,
+        "lsr-drop-solution": true,
+        "amdgpu-use-amdgpu-trackers": true
+      },
+      "named_args": 0,
+      "args": [
+        {
+          "name": "Q",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 0
+        },
+        {
+          "name": "K",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 8
+        },
+        {
+          "name": "V",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 16
+        },
+        {
+          "name": "O",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 24
+        },
+        {
+          "name": "LSE",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 32
+        },
+        {
+          "name": "seq_len_q",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 40
+        },
+        {
+          "name": "seq_len_kv",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 44
+        },
+        {
+          "name": "num_heads",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 48
+        },
+        {
+          "name": "kv_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 52
+        },
+        {
+          "name": "right_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 56
+        },
+        {
+          "name": "left_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 60
+        },
+        {
+          "name": "align_bottom_right",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 64
+        },
+        {
+          "name": "lse_on",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 68
+        },
+        {
+          "name": "scale",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 72
+        },
+        {
+          "name": "q_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 80
+        },
+        {
+          "name": "q_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 88
+        },
+        {
+          "name": "q_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 96
+        },
+        {
+          "name": "k_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 104
+        },
+        {
+          "name": "k_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 112
+        },
+        {
+          "name": "k_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 120
+        },
+        {
+          "name": "v_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 128
+        },
+        {
+          "name": "v_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 136
+        },
+        {
+          "name": "v_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 144
+        },
+        {
+          "name": "o_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 152
+        },
+        {
+          "name": "o_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 160
+        },
+        {
+          "name": "o_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 168
+        },
+        {
+          "name": "lse_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 176
+        },
+        {
+          "name": "lse_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 184
+        },
+        {
+          "name": "lse_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 192
+        }
+      ]
+    },
+    {
+      "name": "sdpa_bf16_d96_causal1_bm128_bn32",
+      "op": "sdpa",
+      "dtype": "bf16",
+      "priority": 100,
+      "tier": "specialized",
+      "knobs": {
+        "head_dim": 96,
+        "causal": 1,
+        "block_m": 128,
+        "block_n": 32
+      },
+      "file": "sdpa_bf16_d96_causal1_bm128_bn32.hsaco",
+      "symbol": "flash_attn_func_gfx1151_kernel_0",
+      "bytes": 18624,
+      "sha256": "3cbd6316d45f77df5526f370031cb351b097fa3a5357e599cb309dada43c8910",
+      "kernarg_segment_size": 200,
+      "block": [
+        256,
+        1,
+        1
+      ],
+      "grid_rule": "batch_x_qtiles_x_heads",
+      "lds_bytes": 12800,
+      "vgprs": 223,
+      "llvm_options": {
+        "enable-post-misched": false,
+        "lsr-drop-solution": true,
+        "amdgpu-use-amdgpu-trackers": true
+      },
+      "named_args": 0,
+      "args": [
+        {
+          "name": "Q",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 0
+        },
+        {
+          "name": "K",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 8
+        },
+        {
+          "name": "V",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 16
+        },
+        {
+          "name": "O",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 24
+        },
+        {
+          "name": "LSE",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 32
+        },
+        {
+          "name": "seq_len_q",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 40
+        },
+        {
+          "name": "seq_len_kv",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 44
+        },
+        {
+          "name": "num_heads",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 48
+        },
+        {
+          "name": "kv_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 52
+        },
+        {
+          "name": "right_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 56
+        },
+        {
+          "name": "left_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 60
+        },
+        {
+          "name": "align_bottom_right",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 64
+        },
+        {
+          "name": "lse_on",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 68
+        },
+        {
+          "name": "scale",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 72
+        },
+        {
+          "name": "q_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 80
+        },
+        {
+          "name": "q_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 88
+        },
+        {
+          "name": "q_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 96
+        },
+        {
+          "name": "k_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 104
+        },
+        {
+          "name": "k_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 112
+        },
+        {
+          "name": "k_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 120
+        },
+        {
+          "name": "v_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 128
+        },
+        {
+          "name": "v_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 136
+        },
+        {
+          "name": "v_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 144
+        },
+        {
+          "name": "o_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 152
+        },
+        {
+          "name": "o_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 160
+        },
+        {
+          "name": "o_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 168
+        },
+        {
+          "name": "lse_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 176
+        },
+        {
+          "name": "lse_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 184
+        },
+        {
+          "name": "lse_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 192
+        }
+      ]
+    },
+    {
+      "name": "sdpa_bf16_d128_causal0_bm128_bn32",
+      "op": "sdpa",
+      "dtype": "bf16",
+      "priority": 100,
+      "tier": "specialized",
+      "knobs": {
+        "head_dim": 128,
+        "causal": 0,
+        "block_m": 128,
+        "block_n": 32
+      },
+      "file": "sdpa_bf16_d128_causal0_bm128_bn32.hsaco",
+      "symbol": "flash_attn_func_gfx1151_kernel_0",
+      "bytes": 20672,
+      "sha256": "e42fdd0e812fff687470440d63ffd1d9309bc6358894974fc94300b2f3249174",
+      "kernarg_segment_size": 200,
+      "block": [
+        256,
+        1,
+        1
+      ],
+      "grid_rule": "batch_x_qtiles_x_heads",
+      "lds_bytes": 16896,
+      "vgprs": 249,
+      "llvm_options": {
+        "enable-post-misched": false,
+        "lsr-drop-solution": true,
+        "amdgpu-use-amdgpu-trackers": true
+      },
+      "named_args": 0,
+      "args": [
+        {
+          "name": "Q",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 0
+        },
+        {
+          "name": "K",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 8
+        },
+        {
+          "name": "V",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 16
+        },
+        {
+          "name": "O",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 24
+        },
+        {
+          "name": "LSE",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 32
+        },
+        {
+          "name": "seq_len_q",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 40
+        },
+        {
+          "name": "seq_len_kv",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 44
+        },
+        {
+          "name": "num_heads",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 48
+        },
+        {
+          "name": "kv_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 52
+        },
+        {
+          "name": "right_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 56
+        },
+        {
+          "name": "left_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 60
+        },
+        {
+          "name": "align_bottom_right",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 64
+        },
+        {
+          "name": "lse_on",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 68
+        },
+        {
+          "name": "scale",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 72
+        },
+        {
+          "name": "q_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 80
+        },
+        {
+          "name": "q_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 88
+        },
+        {
+          "name": "q_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 96
+        },
+        {
+          "name": "k_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 104
+        },
+        {
+          "name": "k_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 112
+        },
+        {
+          "name": "k_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 120
+        },
+        {
+          "name": "v_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 128
+        },
+        {
+          "name": "v_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 136
+        },
+        {
+          "name": "v_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 144
+        },
+        {
+          "name": "o_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 152
+        },
+        {
+          "name": "o_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 160
+        },
+        {
+          "name": "o_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 168
+        },
+        {
+          "name": "lse_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 176
+        },
+        {
+          "name": "lse_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 184
+        },
+        {
+          "name": "lse_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 192
+        }
+      ]
+    },
+    {
+      "name": "sdpa_bf16_d128_causal1_bm128_bn32",
+      "op": "sdpa",
+      "dtype": "bf16",
+      "priority": 100,
+      "tier": "specialized",
+      "knobs": {
+        "head_dim": 128,
+        "causal": 1,
+        "block_m": 128,
+        "block_n": 32
+      },
+      "file": "sdpa_bf16_d128_causal1_bm128_bn32.hsaco",
+      "symbol": "flash_attn_func_gfx1151_kernel_0",
+      "bytes": 20928,
+      "sha256": "1648bd8f36549c13eccd20f607aa58b9104217db58329e4a6af5370cc495dbd8",
+      "kernarg_segment_size": 200,
+      "block": [
+        256,
+        1,
+        1
+      ],
+      "grid_rule": "batch_x_qtiles_x_heads",
+      "lds_bytes": 16896,
+      "vgprs": 250,
+      "llvm_options": {
+        "enable-post-misched": false,
+        "lsr-drop-solution": true,
+        "amdgpu-use-amdgpu-trackers": true
+      },
+      "named_args": 0,
+      "args": [
+        {
+          "name": "Q",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 0
+        },
+        {
+          "name": "K",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 8
+        },
+        {
+          "name": "V",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 16
+        },
+        {
+          "name": "O",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 24
+        },
+        {
+          "name": "LSE",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 32
+        },
+        {
+          "name": "seq_len_q",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 40
+        },
+        {
+          "name": "seq_len_kv",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 44
+        },
+        {
+          "name": "num_heads",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 48
+        },
+        {
+          "name": "kv_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 52
+        },
+        {
+          "name": "right_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 56
+        },
+        {
+          "name": "left_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 60
+        },
+        {
+          "name": "align_bottom_right",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 64
+        },
+        {
+          "name": "lse_on",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 68
+        },
+        {
+          "name": "scale",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 72
+        },
+        {
+          "name": "q_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 80
+        },
+        {
+          "name": "q_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 88
+        },
+        {
+          "name": "q_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 96
+        },
+        {
+          "name": "k_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 104
+        },
+        {
+          "name": "k_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 112
+        },
+        {
+          "name": "k_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 120
+        },
+        {
+          "name": "v_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 128
+        },
+        {
+          "name": "v_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 136
+        },
+        {
+          "name": "v_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 144
+        },
+        {
+          "name": "o_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 152
+        },
+        {
+          "name": "o_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 160
+        },
+        {
+          "name": "o_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 168
+        },
+        {
+          "name": "lse_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 176
+        },
+        {
+          "name": "lse_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 184
+        },
+        {
+          "name": "lse_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 192
+        }
+      ]
+    },
+    {
+      "name": "sdpa_f16_d64_causal0_bm128_bn32",
+      "op": "sdpa",
+      "dtype": "f16",
+      "priority": 100,
+      "tier": "specialized",
+      "knobs": {
+        "head_dim": 64,
+        "causal": 0,
+        "block_m": 128,
+        "block_n": 32
+      },
+      "file": "sdpa_f16_d64_causal0_bm128_bn32.hsaco",
+      "symbol": "flash_attn_func_gfx1151_kernel_0",
+      "bytes": 13632,
+      "sha256": "4df665852a22b524885358f31d08a56a2cc0cce11ee8db292f7ef459b0ef384d",
+      "kernarg_segment_size": 200,
+      "block": [
+        256,
+        1,
+        1
+      ],
+      "grid_rule": "batch_x_qtiles_x_heads",
+      "lds_bytes": 8704,
+      "vgprs": 156,
+      "llvm_options": {
+        "enable-post-misched": false,
+        "lsr-drop-solution": true,
+        "amdgpu-use-amdgpu-trackers": true
+      },
+      "named_args": 0,
+      "args": [
+        {
+          "name": "Q",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 0
+        },
+        {
+          "name": "K",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 8
+        },
+        {
+          "name": "V",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 16
+        },
+        {
+          "name": "O",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 24
+        },
+        {
+          "name": "LSE",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 32
+        },
+        {
+          "name": "seq_len_q",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 40
+        },
+        {
+          "name": "seq_len_kv",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 44
+        },
+        {
+          "name": "num_heads",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 48
+        },
+        {
+          "name": "kv_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 52
+        },
+        {
+          "name": "right_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 56
+        },
+        {
+          "name": "left_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 60
+        },
+        {
+          "name": "align_bottom_right",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 64
+        },
+        {
+          "name": "lse_on",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 68
+        },
+        {
+          "name": "scale",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 72
+        },
+        {
+          "name": "q_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 80
+        },
+        {
+          "name": "q_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 88
+        },
+        {
+          "name": "q_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 96
+        },
+        {
+          "name": "k_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 104
+        },
+        {
+          "name": "k_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 112
+        },
+        {
+          "name": "k_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 120
+        },
+        {
+          "name": "v_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 128
+        },
+        {
+          "name": "v_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 136
+        },
+        {
+          "name": "v_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 144
+        },
+        {
+          "name": "o_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 152
+        },
+        {
+          "name": "o_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 160
+        },
+        {
+          "name": "o_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 168
+        },
+        {
+          "name": "lse_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 176
+        },
+        {
+          "name": "lse_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 184
+        },
+        {
+          "name": "lse_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 192
+        }
+      ]
+    },
+    {
+      "name": "sdpa_f16_d64_causal1_bm128_bn32",
+      "op": "sdpa",
+      "dtype": "f16",
+      "priority": 100,
+      "tier": "specialized",
+      "knobs": {
+        "head_dim": 64,
+        "causal": 1,
+        "block_m": 128,
+        "block_n": 32
+      },
+      "file": "sdpa_f16_d64_causal1_bm128_bn32.hsaco",
+      "symbol": "flash_attn_func_gfx1151_kernel_0",
+      "bytes": 13760,
+      "sha256": "a9a0349f4f65addc8c614f533d14e1d98e3a0aa7f899259f833482bc965b8360",
+      "kernarg_segment_size": 200,
+      "block": [
+        256,
+        1,
+        1
+      ],
+      "grid_rule": "batch_x_qtiles_x_heads",
+      "lds_bytes": 8704,
+      "vgprs": 165,
+      "llvm_options": {
+        "enable-post-misched": false,
+        "lsr-drop-solution": true,
+        "amdgpu-use-amdgpu-trackers": true
+      },
+      "named_args": 0,
+      "args": [
+        {
+          "name": "Q",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 0
+        },
+        {
+          "name": "K",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 8
+        },
+        {
+          "name": "V",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 16
+        },
+        {
+          "name": "O",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 24
+        },
+        {
+          "name": "LSE",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 32
+        },
+        {
+          "name": "seq_len_q",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 40
+        },
+        {
+          "name": "seq_len_kv",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 44
+        },
+        {
+          "name": "num_heads",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 48
+        },
+        {
+          "name": "kv_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 52
+        },
+        {
+          "name": "right_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 56
+        },
+        {
+          "name": "left_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 60
+        },
+        {
+          "name": "align_bottom_right",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 64
+        },
+        {
+          "name": "lse_on",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 68
+        },
+        {
+          "name": "scale",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 72
+        },
+        {
+          "name": "q_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 80
+        },
+        {
+          "name": "q_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 88
+        },
+        {
+          "name": "q_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 96
+        },
+        {
+          "name": "k_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 104
+        },
+        {
+          "name": "k_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 112
+        },
+        {
+          "name": "k_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 120
+        },
+        {
+          "name": "v_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 128
+        },
+        {
+          "name": "v_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 136
+        },
+        {
+          "name": "v_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 144
+        },
+        {
+          "name": "o_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 152
+        },
+        {
+          "name": "o_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 160
+        },
+        {
+          "name": "o_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 168
+        },
+        {
+          "name": "lse_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 176
+        },
+        {
+          "name": "lse_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 184
+        },
+        {
+          "name": "lse_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 192
+        }
+      ]
+    },
+    {
+      "name": "sdpa_f16_d96_causal0_bm128_bn32",
+      "op": "sdpa",
+      "dtype": "f16",
+      "priority": 100,
+      "tier": "specialized",
+      "knobs": {
+        "head_dim": 96,
+        "causal": 0,
+        "block_m": 128,
+        "block_n": 32
+      },
+      "file": "sdpa_f16_d96_causal0_bm128_bn32.hsaco",
+      "symbol": "flash_attn_func_gfx1151_kernel_0",
+      "bytes": 15168,
+      "sha256": "ee45a8e39c364a31e2fcf3c954b4ca64c94a5f0d9fe1e3f3e15cf7ee393ad785",
+      "kernarg_segment_size": 200,
+      "block": [
+        256,
+        1,
+        1
+      ],
+      "grid_rule": "batch_x_qtiles_x_heads",
+      "lds_bytes": 12800,
+      "vgprs": 222,
+      "llvm_options": {
+        "enable-post-misched": false,
+        "lsr-drop-solution": true,
+        "amdgpu-use-amdgpu-trackers": true
+      },
+      "named_args": 0,
+      "args": [
+        {
+          "name": "Q",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 0
+        },
+        {
+          "name": "K",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 8
+        },
+        {
+          "name": "V",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 16
+        },
+        {
+          "name": "O",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 24
+        },
+        {
+          "name": "LSE",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 32
+        },
+        {
+          "name": "seq_len_q",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 40
+        },
+        {
+          "name": "seq_len_kv",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 44
+        },
+        {
+          "name": "num_heads",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 48
+        },
+        {
+          "name": "kv_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 52
+        },
+        {
+          "name": "right_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 56
+        },
+        {
+          "name": "left_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 60
+        },
+        {
+          "name": "align_bottom_right",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 64
+        },
+        {
+          "name": "lse_on",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 68
+        },
+        {
+          "name": "scale",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 72
+        },
+        {
+          "name": "q_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 80
+        },
+        {
+          "name": "q_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 88
+        },
+        {
+          "name": "q_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 96
+        },
+        {
+          "name": "k_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 104
+        },
+        {
+          "name": "k_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 112
+        },
+        {
+          "name": "k_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 120
+        },
+        {
+          "name": "v_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 128
+        },
+        {
+          "name": "v_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 136
+        },
+        {
+          "name": "v_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 144
+        },
+        {
+          "name": "o_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 152
+        },
+        {
+          "name": "o_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 160
+        },
+        {
+          "name": "o_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 168
+        },
+        {
+          "name": "lse_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 176
+        },
+        {
+          "name": "lse_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 184
+        },
+        {
+          "name": "lse_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 192
+        }
+      ]
+    },
+    {
+      "name": "sdpa_f16_d96_causal1_bm128_bn32",
+      "op": "sdpa",
+      "dtype": "f16",
+      "priority": 100,
+      "tier": "specialized",
+      "knobs": {
+        "head_dim": 96,
+        "causal": 1,
+        "block_m": 128,
+        "block_n": 32
+      },
+      "file": "sdpa_f16_d96_causal1_bm128_bn32.hsaco",
+      "symbol": "flash_attn_func_gfx1151_kernel_0",
+      "bytes": 15424,
+      "sha256": "a3b9ec2dfdcb8b16c2648de1f56808ffcd727146d8be76eb4dbec546e71dcbe0",
+      "kernarg_segment_size": 200,
+      "block": [
+        256,
+        1,
+        1
+      ],
+      "grid_rule": "batch_x_qtiles_x_heads",
+      "lds_bytes": 12800,
+      "vgprs": 223,
+      "llvm_options": {
+        "enable-post-misched": false,
+        "lsr-drop-solution": true,
+        "amdgpu-use-amdgpu-trackers": true
+      },
+      "named_args": 0,
+      "args": [
+        {
+          "name": "Q",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 0
+        },
+        {
+          "name": "K",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 8
+        },
+        {
+          "name": "V",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 16
+        },
+        {
+          "name": "O",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 24
+        },
+        {
+          "name": "LSE",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 32
+        },
+        {
+          "name": "seq_len_q",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 40
+        },
+        {
+          "name": "seq_len_kv",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 44
+        },
+        {
+          "name": "num_heads",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 48
+        },
+        {
+          "name": "kv_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 52
+        },
+        {
+          "name": "right_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 56
+        },
+        {
+          "name": "left_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 60
+        },
+        {
+          "name": "align_bottom_right",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 64
+        },
+        {
+          "name": "lse_on",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 68
+        },
+        {
+          "name": "scale",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 72
+        },
+        {
+          "name": "q_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 80
+        },
+        {
+          "name": "q_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 88
+        },
+        {
+          "name": "q_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 96
+        },
+        {
+          "name": "k_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 104
+        },
+        {
+          "name": "k_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 112
+        },
+        {
+          "name": "k_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 120
+        },
+        {
+          "name": "v_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 128
+        },
+        {
+          "name": "v_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 136
+        },
+        {
+          "name": "v_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 144
+        },
+        {
+          "name": "o_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 152
+        },
+        {
+          "name": "o_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 160
+        },
+        {
+          "name": "o_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 168
+        },
+        {
+          "name": "lse_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 176
+        },
+        {
+          "name": "lse_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 184
+        },
+        {
+          "name": "lse_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 192
+        }
+      ]
+    },
+    {
+      "name": "sdpa_f16_d128_causal0_bm128_bn32",
+      "op": "sdpa",
+      "dtype": "f16",
+      "priority": 100,
+      "tier": "specialized",
+      "knobs": {
+        "head_dim": 128,
+        "causal": 0,
+        "block_m": 128,
+        "block_n": 32
+      },
+      "file": "sdpa_f16_d128_causal0_bm128_bn32.hsaco",
+      "symbol": "flash_attn_func_gfx1151_kernel_0",
+      "bytes": 16832,
+      "sha256": "93349adbf5ee89637514b04457e8a233188e4759e7b05e37fb2de116a451f922",
+      "kernarg_segment_size": 200,
+      "block": [
+        256,
+        1,
+        1
+      ],
+      "grid_rule": "batch_x_qtiles_x_heads",
+      "lds_bytes": 16896,
+      "vgprs": 242,
+      "llvm_options": {
+        "enable-post-misched": false,
+        "lsr-drop-solution": true,
+        "amdgpu-use-amdgpu-trackers": true
+      },
+      "named_args": 0,
+      "args": [
+        {
+          "name": "Q",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 0
+        },
+        {
+          "name": "K",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 8
+        },
+        {
+          "name": "V",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 16
+        },
+        {
+          "name": "O",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 24
+        },
+        {
+          "name": "LSE",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 32
+        },
+        {
+          "name": "seq_len_q",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 40
+        },
+        {
+          "name": "seq_len_kv",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 44
+        },
+        {
+          "name": "num_heads",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 48
+        },
+        {
+          "name": "kv_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 52
+        },
+        {
+          "name": "right_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 56
+        },
+        {
+          "name": "left_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 60
+        },
+        {
+          "name": "align_bottom_right",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 64
+        },
+        {
+          "name": "lse_on",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 68
+        },
+        {
+          "name": "scale",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 72
+        },
+        {
+          "name": "q_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 80
+        },
+        {
+          "name": "q_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 88
+        },
+        {
+          "name": "q_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 96
+        },
+        {
+          "name": "k_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 104
+        },
+        {
+          "name": "k_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 112
+        },
+        {
+          "name": "k_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 120
+        },
+        {
+          "name": "v_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 128
+        },
+        {
+          "name": "v_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 136
+        },
+        {
+          "name": "v_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 144
+        },
+        {
+          "name": "o_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 152
+        },
+        {
+          "name": "o_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 160
+        },
+        {
+          "name": "o_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 168
+        },
+        {
+          "name": "lse_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 176
+        },
+        {
+          "name": "lse_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 184
+        },
+        {
+          "name": "lse_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 192
+        }
+      ]
+    },
+    {
+      "name": "sdpa_f16_d128_causal1_bm128_bn32",
+      "op": "sdpa",
+      "dtype": "f16",
+      "priority": 100,
+      "tier": "specialized",
+      "knobs": {
+        "head_dim": 128,
+        "causal": 1,
+        "block_m": 128,
+        "block_n": 32
+      },
+      "file": "sdpa_f16_d128_causal1_bm128_bn32.hsaco",
+      "symbol": "flash_attn_func_gfx1151_kernel_0",
+      "bytes": 17088,
+      "sha256": "4d14529be791d55bb9ce508373856cd766b235fbd9bca9ac3bc4284f410cd87e",
+      "kernarg_segment_size": 200,
+      "block": [
+        256,
+        1,
+        1
+      ],
+      "grid_rule": "batch_x_qtiles_x_heads",
+      "lds_bytes": 16896,
+      "vgprs": 248,
+      "llvm_options": {
+        "enable-post-misched": false,
+        "lsr-drop-solution": true,
+        "amdgpu-use-amdgpu-trackers": true
+      },
+      "named_args": 0,
+      "args": [
+        {
+          "name": "Q",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 0
+        },
+        {
+          "name": "K",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 8
+        },
+        {
+          "name": "V",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 16
+        },
+        {
+          "name": "O",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 24
+        },
+        {
+          "name": "LSE",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 32
+        },
+        {
+          "name": "seq_len_q",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 40
+        },
+        {
+          "name": "seq_len_kv",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 44
+        },
+        {
+          "name": "num_heads",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 48
+        },
+        {
+          "name": "kv_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 52
+        },
+        {
+          "name": "right_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 56
+        },
+        {
+          "name": "left_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 60
+        },
+        {
+          "name": "align_bottom_right",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 64
+        },
+        {
+          "name": "lse_on",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 68
+        },
+        {
+          "name": "scale",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 72
+        },
+        {
+          "name": "q_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 80
+        },
+        {
+          "name": "q_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 88
+        },
+        {
+          "name": "q_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 96
+        },
+        {
+          "name": "k_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 104
+        },
+        {
+          "name": "k_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 112
+        },
+        {
+          "name": "k_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 120
+        },
+        {
+          "name": "v_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 128
+        },
+        {
+          "name": "v_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 136
+        },
+        {
+          "name": "v_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 144
+        },
+        {
+          "name": "o_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 152
+        },
+        {
+          "name": "o_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 160
+        },
+        {
+          "name": "o_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 168
+        },
+        {
+          "name": "lse_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 176
+        },
+        {
+          "name": "lse_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 184
+        },
+        {
+          "name": "lse_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 192
+        }
+      ]
+    }
+  ]
+}

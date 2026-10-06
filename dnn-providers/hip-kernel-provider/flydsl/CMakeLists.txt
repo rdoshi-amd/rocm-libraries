@@ -36,15 +36,45 @@ set(FLYDSL_CONTENT_DIR "${HIPKERNELPROVIDER_PRODUCTION_SOURCE_ROOT}/FlyDSL")
 # this list does not decide what is packed; it decides whether the native seams
 # and the tests are compiled, which must agree with it.
 #
+# A content directory is named for the target its objects were compiled for.
+# An LLVM generic target (gfx11-generic) stands for every member of its family:
+# the descriptors under it list them all and the packer ships the same bytes into
+# each member's shard. Membership comes from generators/arch_families.json, the
+# table the descriptor generator reads, so the two cannot disagree.
+#
 # GPU_TARGETS entries may carry target features (gfx942:sramecc+:xnack-). The
 # content tree keys on the bare arch, so match on the part before the first colon.
+set(_flydsl_families_json "${CMAKE_CURRENT_SOURCE_DIR}/generators/arch_families.json")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_flydsl_families_json}")
+file(READ "${_flydsl_families_json}" _flydsl_families)
+
 file(GLOB _flydsl_arch_dirs LIST_DIRECTORIES true RELATIVE "${FLYDSL_CONTENT_DIR}"
      CONFIGURE_DEPENDS "${FLYDSL_CONTENT_DIR}/*/gfx*")
 set(FLYDSL_AVAILABLE_ARCHS "")
 foreach(_entry IN LISTS _flydsl_arch_dirs)
-    if(IS_DIRECTORY "${FLYDSL_CONTENT_DIR}/${_entry}")
-        get_filename_component(_arch "${_entry}" NAME)
-        list(APPEND FLYDSL_AVAILABLE_ARCHS "${_arch}")
+    if(NOT IS_DIRECTORY "${FLYDSL_CONTENT_DIR}/${_entry}")
+        continue()
+    endif()
+    get_filename_component(_target "${_entry}" NAME)
+    if(_target MATCHES "-generic$")
+        string(JSON _members ERROR_VARIABLE _flydsl_json_error
+               GET "${_flydsl_families}" "${_target}" members)
+        if(_flydsl_json_error)
+            message(FATAL_ERROR
+                "flydsl: content directory '${_entry}' names generic target "
+                "'${_target}', which generators/arch_families.json does not list")
+        endif()
+        string(JSON _count LENGTH "${_flydsl_families}" "${_target}" members)
+        math(EXPR _last "${_count} - 1")
+        # cmake-lint: disable=E1120
+        foreach(_index RANGE ${_last})
+            string(JSON _member GET "${_flydsl_families}" "${_target}" members ${_index})
+            list(APPEND FLYDSL_AVAILABLE_ARCHS "${_member}")
+            list(APPEND "_flydsl_dirs_for_${_member}" "${_target}")
+        endforeach()
+    else()
+        list(APPEND FLYDSL_AVAILABLE_ARCHS "${_target}")
+        list(APPEND "_flydsl_dirs_for_${_target}" "${_target}")
     endif()
 endforeach()
 list(REMOVE_DUPLICATES FLYDSL_AVAILABLE_ARCHS)
@@ -86,17 +116,25 @@ set(HIPKERNELPROVIDER_FLYDSL_ARCHS "${_flydsl_archs}" CACHE INTERNAL
 # ============================================================================
 # Descriptors agree with the objects, before the pack reads either
 # ============================================================================
-# The packer verifies each object against the SHA256 its descriptor records, so
-# an object regenerated without its descriptors already fails the pack. This
-# catches the rest: a descriptor whose metadata, priority or symbol no longer
-# matches what the manifest says the object is. Runs whenever any file in the
-# FlyDSL folder changes, which is exactly when the two can start disagreeing.
+# The packer packs what a UKD names into every shard its `arch` lists, and checks
+# neither the object's bytes nor the processor it was built for. So this does,
+# before every pack: each object hashes to its manifest's SHA256, targets the
+# processor its directory names (and, for a generic target, carries that generic
+# machine in its ELF header), and each descriptor's metadata, priority, symbol and
+# arch list agree with the manifest. Runs whenever any file in the FlyDSL folder
+# changes, which is exactly when they can start disagreeing. One run per content
+# directory a shipped arch draws on.
 file(GLOB_RECURSE _flydsl_content CONFIGURE_DEPENDS "${FLYDSL_CONTENT_DIR}/*")
-set(_flydsl_check_commands "")
+set(_flydsl_check_dirs "")
 foreach(_arch IN LISTS _flydsl_archs)
+    list(APPEND _flydsl_check_dirs ${_flydsl_dirs_for_${_arch}})
+endforeach()
+list(REMOVE_DUPLICATES _flydsl_check_dirs)
+set(_flydsl_check_commands "")
+foreach(_target IN LISTS _flydsl_check_dirs)
     list(APPEND _flydsl_check_commands
         COMMAND ${Python3_EXECUTABLE} "${FLYDSL_GEN_SCRIPT}"
-                --content-dir "${FLYDSL_CONTENT_DIR}" --arch ${_arch} --check)
+                --content-dir "${FLYDSL_CONTENT_DIR}" --arch ${_target} --check)
 endforeach()
 
 set(_flydsl_check_stamp "${CMAKE_CURRENT_BINARY_DIR}/flydsl-descriptors.checked")
@@ -104,7 +142,7 @@ add_custom_command(
     OUTPUT "${_flydsl_check_stamp}"
     ${_flydsl_check_commands}
     COMMAND ${CMAKE_COMMAND} -E touch "${_flydsl_check_stamp}"
-    DEPENDS ${_flydsl_content} "${FLYDSL_GEN_SCRIPT}"
+    DEPENDS ${_flydsl_content} "${FLYDSL_GEN_SCRIPT}" "${_flydsl_families_json}"
     COMMENT "flydsl: checking descriptors against the checked-in objects"
     VERBATIM
 )
@@ -112,6 +150,27 @@ add_custom_target(flydsl_descriptor_check
     DEPENDS "${_flydsl_check_stamp}"
     COMMENT "Check FlyDSL descriptors against the checked-in objects")
 add_dependencies(hkp_packaging_product flydsl_descriptor_check)
+
+# ============================================================================
+# The pack shipped what is checked in, into every shard that should have it
+# ============================================================================
+# The other half of the check above: after the product pack, every arch in the
+# intersection must have a shard holding one shipped UKD per checked-in object,
+# packed from that object and carrying its SHA256. For a generic target that is
+# what shows each member ships the one shared object set. Fails the build, as
+# the descriptor check does, rather than leaving it to a test someone has to run.
+get_property(_flydsl_product_root GLOBAL PROPERTY HKP_PACK_OUT_ROOT_product)
+if(_flydsl_product_root)
+    add_custom_target(flydsl_shard_check ALL
+        COMMAND ${Python3_EXECUTABLE} "${CMAKE_CURRENT_SOURCE_DIR}/tools/check_shards.py"
+                --content-dir "${FLYDSL_CONTENT_DIR}"
+                --out-root "${_flydsl_product_root}"
+                --arches ${_flydsl_archs}
+        COMMENT "flydsl: checking the packed shards against the checked-in objects"
+        VERBATIM
+    )
+    add_dependencies(flydsl_shard_check hkp_packaging_product)
+endif()
 
 string(REPLACE ";" ", " _flydsl_arch_csv "${_flydsl_archs}")
 message(STATUS "flydsl: shipping through the product pack for ${_flydsl_arch_csv}")

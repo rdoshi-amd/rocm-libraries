@@ -4,8 +4,8 @@
 """Generate (or verify) the authored descriptors for one arch's FlyDSL kernels.
 
 Usage:
-    python gen_descriptors.py --arch gfx1151
-    python gen_descriptors.py --arch gfx1151 --check     # verify, write nothing
+    python gen_descriptors.py --arch gfx11-generic
+    python gen_descriptors.py --arch gfx11-generic --check     # verify, write nothing
 
 **Generated, not hand-written, and checked in.** Every field is derived from
 ``<content>/<op>/<arch>/manifest.json`` and the code objects it names, so a
@@ -16,13 +16,27 @@ authored in.
 
 **We author the input form; the shared packer produces the shipped form.** Each
 UKD is ``kind: "hsaco"`` and names its object, which sits beside it, by file
-name and SHA256. At build time the packer that packs every other bundle in the
-root resolves the object, verifies that SHA256, packs it into the per-arch
+name. At build time the packer that packs every other bundle in the root
+resolves the object, packs it into the per-arch
 ``hip_kernel_provider_<arch>.kpack``, reads the argument signature out of the
 object, and rewrites the UKD to ``kind: "kpack"``. So the archive path, TOC key
 and signature are deliberately *not* written here: the packer derives all three
 from the object and is the single place they are computed, for FlyDSL as for
 every other producer.
+
+**The packer checks neither an object's bytes nor its target processor**; it
+packs what a UKD names into every shard the UKD's ``arch`` lists. Both checks
+live here instead, and ``--check`` runs before every pack: each object must hash
+to its manifest's SHA256, its ``amdhsa.target`` must be the arch its directory
+names, and for a generic target its ELF ``e_flags`` must carry that generic
+machine.
+
+**Generic targets.** ``<arch>`` may be an LLVM generic target
+(``gfx11-generic``): one object set that runs on every member of the family
+(``generators/arch_families.json``). Its KDP and UKDs then list every member in
+``arch``, so the packer copies the same bytes into each member's own shard and
+each device finds them under its own ``gcnArchName`` -- no runtime support for
+generic names is needed.
 
 Layout, per op:
 
@@ -56,6 +70,13 @@ from hkp_pack.descriptors import (  # noqa: E402
     type_from_filename,
 )
 
+from generators import _arch_families as families  # noqa: E402
+from generators._codeobject import (  # noqa: E402
+    GeneratorError,
+    describe,
+    verify_arch,
+    verify_generic,
+)
 from generators._flydsl_env import CONTENT_DIR  # noqa: E402
 
 # Descriptor schema version, as the loader spells it: UKD_VERSION_MAJOR = 1,
@@ -113,7 +134,8 @@ def collect(content_dir: Path, arch: str) -> list[KernelEntry]:
     """Every object the manifests under ``<content>/*/<arch>/`` name.
 
     Raises on a manifest that disagrees with its own location, on a named object
-    that is absent, and on one whose bytes do not hash to the recorded SHA256.
+    that is absent, on one whose bytes do not hash to the recorded SHA256, and on
+    one built for a processor other than the one its directory names.
     """
     manifests = sorted(content_dir.glob(f"*/{arch}/{MANIFEST_NAME}"))
     if not manifests:
@@ -153,6 +175,11 @@ def collect(content_dir: Path, arch: str) -> list[KernelEntry]:
                     f"recorded in {manifest_path}. Regenerate the object rather than "
                     "editing the manifest."
                 )
+            # The directory is the claim the descriptors turn into `arch`; the
+            # object's own target is the fact. The packer compares neither.
+            where = str(path)
+            verify_arch(describe(data, where), arch, where)
+            verify_generic(data, arch, where)
             entries.append(KernelEntry(op, path, data, record))
     return entries
 
@@ -316,6 +343,9 @@ def _arch_documents(
     provenance = op.provenance()
     documents: dict[str, dict[str, Any]] = {}
     ids: list[str] = []
+    # A generic target's objects run on every member, so the pack and each UKD
+    # list them all and the packer ships the bytes into each member's shard.
+    runs_on = list(families.members(arch))
 
     for entry in entries:
         record = entry.record
@@ -332,14 +362,13 @@ def _arch_documents(
             "version": DESCRIPTOR_VERSION,
             "id": ukd_id,
             "name": record["name"],
-            "arch": [arch],
+            "arch": runs_on,
             "kernel_source": {
                 "kind": "hsaco",
                 # Beside the descriptor: the packer resolves it relative to the
                 # folder this file is in.
                 "file": record["file"],
                 "symbol": record["symbol"],
-                "sha256": record["sha256"],
             },
             "metadata": metadata,
             "priority": record["priority"],
@@ -350,7 +379,7 @@ def _arch_documents(
         "version": DESCRIPTOR_VERSION,
         "id": _uuid(f"kdp/{op.op}/{arch}"),
         "name": f"flydsl {op.op} kernels ({arch})",
-        "arch": [arch],
+        "arch": runs_on,
         "matchers": [op.umd_id],
         "engine": op.ued_id,
         "dispatch": op.udd_id,
@@ -431,7 +460,11 @@ def main() -> int:
         description="Generate or verify the authored descriptors for FlyDSL kernels"
     )
     parser.add_argument(
-        "--arch", type=str, required=True, help="GPU architecture (e.g. gfx1151)"
+        "--arch",
+        type=str,
+        required=True,
+        help="Content directory arch: an LLVM generic target (gfx11-generic) or a "
+        "concrete one",
     )
     parser.add_argument(
         "--content-dir",
@@ -449,7 +482,13 @@ def main() -> int:
     try:
         entries = collect(args.content_dir, args.arch)
         folders = build_documents(entries, args.arch)
-    except (FileNotFoundError, ValueError, KeyError, HkpPackError) as exc:
+    except (
+        FileNotFoundError,
+        ValueError,
+        KeyError,
+        HkpPackError,
+        GeneratorError,
+    ) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 
@@ -470,8 +509,7 @@ def main() -> int:
         return 1
 
     # The packer's own authoring validator, over the whole FlyDSL folder: shapes,
-    # enums, reserved names, that every id a KDP references resolves, and that
-    # each hsaco UKD's recorded digest is well formed.
+    # enums, reserved names, and that every id a KDP references resolves.
     try:
         load_flat_input(args.content_dir, log=lambda *a, **k: None)
     except HkpPackError as exc:

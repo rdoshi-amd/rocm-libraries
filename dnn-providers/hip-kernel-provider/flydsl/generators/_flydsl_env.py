@@ -133,8 +133,19 @@ def prepare(arch: str) -> None:
         sys.path.insert(0, src)
 
     os.environ["ARCH"] = arch
+    # FlyDSL's codegen-time arch queries -- the WMMA atom, s_waitcnt encoding,
+    # buffer-descriptor flags, and the vendored kernels' own feature checks --
+    # read `get_rocm_arch()`, which is FLYDSL_GPU_ARCH or else the *host GPU*,
+    # never ARCH. Unpinned, a gfx950 object built on an RDNA laptop carries RDNA
+    # buffer descriptors. Pin it to the compile target.
+    os.environ["FLYDSL_GPU_ARCH"] = arch
     os.environ["COMPILE_ONLY"] = "1"
     os.environ["FLYDSL_DUMP_IR"] = "1"
+
+    if arch.endswith("-generic"):
+        from . import _generic_targets  # noqa: PLC0415
+
+        _generic_targets.install(arch)
 
 
 def set_dump_dir(dump_dir: Path) -> None:
@@ -149,12 +160,20 @@ def set_dump_dir(dump_dir: Path) -> None:
     os.environ["FLYDSL_DUMP_DIR"] = str(dump_dir)
 
 
-def provenance() -> dict:
-    """The toolchain record embedded in manifests and SOURCE.md."""
-    return {
+def provenance(arch: str) -> dict:
+    """The toolchain record embedded in manifests and SOURCE.md.
+
+    A generic target also records the shim it was built through, since that is
+    part of how the bytes came to be.
+    """
+    from . import _generic_targets  # noqa: PLC0415
+
+    record = {
         "flydsl_version": FLYDSL_VERSION,
         "flydsl_kernels_commit": FLYDSL_KERNELS_COMMIT,
         "flydsl_kernels_describe": FLYDSL_KERNELS_DESCRIBE,
         "aiter_kernels_commit": AITER_KERNELS_COMMIT,
         "rocm_version": rocm_version(),
     }
+    record.update(_generic_targets.record(arch) or {})
+    return record

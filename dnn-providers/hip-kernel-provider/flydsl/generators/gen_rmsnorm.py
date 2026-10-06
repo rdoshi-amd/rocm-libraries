@@ -36,7 +36,13 @@ import tempfile
 from pathlib import Path
 
 from . import _flydsl_env as env
-from ._codeobject import GeneratorError, arg_records, describe, verify_arch
+from ._codeobject import (
+    GeneratorError,
+    arg_records,
+    describe,
+    verify_arch,
+    verify_generic,
+)
 from ._extract_hsaco import hsaco_from_dump
 from ._instances import RMSNORM_SMALL_N_THRESHOLD, Instance, instances_for
 from ._manifest import refresh_source_md, sha256, write_op_manifest
@@ -188,6 +194,7 @@ def generate(arch: str, out_root: Path, keep_ir: Path | None = None) -> Path:
         where = f"{arch}/{OP}/{filename}"
         described = describe(blob, where)
         _verify(described, instance, arch, where)
+        verify_generic(blob, arch, where)
 
         (op_dir / filename).write_bytes(blob)
 
@@ -210,7 +217,7 @@ def generate(arch: str, out_root: Path, keep_ir: Path | None = None) -> Path:
         )
         records.append(record)
 
-    write_op_manifest(op_dir, arch, OP, env.provenance(), records)
+    write_op_manifest(op_dir, arch, OP, env.provenance(arch), records)
     source_md = refresh_source_md(op_dir)
     print(f"wrote {len(records)} object(s) to {op_dir}")
     print(f"refreshed {source_md}")

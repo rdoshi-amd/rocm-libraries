@@ -102,7 +102,7 @@ cd dnn-providers/hip-kernel-provider/flydsl
 # by an earlier run with a different instance list would survive and be compared.
 for op in rmsnorm sdpa; do
   PYTHONDONTWRITEBYTECODE=1 \
-    $PY -m generators.gen_$op --arch gfx1151 --out-dir "$REGEN_OUT"
+    $PY -m generators.gen_$op --arch gfx11-generic --out-dir "$REGEN_OUT"
 done
 ```
 
@@ -114,8 +114,8 @@ import hashlib, json, os, pathlib, sys
 
 bad = total = 0
 for op in ("rmsnorm", "sdpa"):
-    manifest = json.loads((pathlib.Path(os.environ["CONTENT"]) / f"{op}/gfx1151/manifest.json").read_text())
-    regen = pathlib.Path(os.environ["REGEN_OUT"]) / f"{op}/gfx1151"
+    manifest = json.loads((pathlib.Path(os.environ["CONTENT"]) / f"{op}/gfx11-generic/manifest.json").read_text())
+    regen = pathlib.Path(os.environ["REGEN_OUT"]) / f"{op}/gfx11-generic"
     for instance in manifest["instances"]:
         total += 1
         obj = regen / instance["file"]
@@ -132,8 +132,8 @@ The manifests and the provenance record must also come out identical:
 
 ```bash
 for op in rmsnorm sdpa; do
-  diff "$CONTENT/$op/gfx1151/manifest.json" "$REGEN_OUT/$op/gfx1151/manifest.json"
-  diff "$CONTENT/$op/gfx1151/SOURCE.md"     "$REGEN_OUT/$op/gfx1151/SOURCE.md"
+  diff "$CONTENT/$op/gfx11-generic/manifest.json" "$REGEN_OUT/$op/gfx11-generic/manifest.json"
+  diff "$CONTENT/$op/gfx11-generic/SOURCE.md"     "$REGEN_OUT/$op/gfx11-generic/SOURCE.md"
 done
 ```
 
@@ -165,26 +165,51 @@ cd dnn-providers/hip-kernel-provider/flydsl
 # (1) Compile. Writes $CONTENT/<op>/<arch>/*.hsaco + manifest.json + SOURCE.md
 #     for each op. The SDPA kernel is gfx11-only (RDNA3 / RDNA3.5 WMMA ABI);
 #     gen_sdpa refuses any other arch.
-$PY -m generators.gen_rmsnorm --arch gfx1151
-$PY -m generators.gen_sdpa --arch gfx1151
+$PY -m generators.gen_rmsnorm --arch gfx11-generic
+$PY -m generators.gen_sdpa --arch gfx11-generic
 
 # (2) Descriptors. Every field is derived from the manifest and the objects it
 #     names, so a descriptor cannot disagree with the object it describes.
-$PY gen_descriptors.py --arch gfx1151
+$PY gen_descriptors.py --arch gfx11-generic
 
 # (3) Verify the set. This is the same invocation the build runs before packing.
-$PY gen_descriptors.py --arch gfx1151 --check
+$PY gen_descriptors.py --arch gfx11-generic --check
 ```
+
+**Why `gfx11-generic`.** It is an LLVM *generic* target: one object set that the
+loader accepts on every RDNA3 and RDNA3.5 part -- gfx1100, gfx1101, gfx1102,
+gfx1103, gfx1150, gfx1151, gfx1152 and gfx1153 (`generators/arch_families.json`;
+gfx1170/gfx1171 belong to `gfx11-7-generic` and are not covered). The
+descriptors list all eight, and the packer copies the same bytes into each of
+those arches' shards, so every device finds them under its own name with no
+runtime support for generic names. It needs code object v6 and ROCm 6.4 or
+later at load time.
+
+FlyDSL 0.3.4 cannot name a generic target to MLIR, so `prepare()` installs
+`generators/_generic_targets.py`, a shim pinned to that release, which hands
+MLIR the family's lowest member (`gfx1100`) as its chipset while the object is
+still built for, and stamped as, `gfx11-generic`. The manifest's toolchain block
+records it (`generic_target_shim`). `gen_sdpa` also builds the generic objects
+with `amdgpu-use-amdgpu-trackers`, added to the kernel's own LLVM options (the
+effective set is recorded per instance as `llvm_options`):
+without it the d128 causal objects spill a few VGPRs, because the generic ISA
+has no gfx115x scalar-float instructions.
+
+A concrete gfx11 arch still works (`--arch gfx1151`) if a part ever needs its own
+objects; its directory then ships only to that arch.
 
 Steps 1 and 2 are per-arch and **one arch per invocation** — FlyDSL reads `ARCH`
 from the environment at each compile, so a multi-arch run could file an object
 under a name it was not built for. The generator additionally re-reads each
-object's own `amdhsa.target` and refuses a mismatch.
+object's own `amdhsa.target` and refuses a mismatch, and for a generic target
+checks the ELF header carries the generic machine too.
 
 Commit the objects, the manifest, `SOURCE.md` and the descriptors **together**.
 They are one unit: the build's `--check` fails on a descriptor that disagrees
-with its manifest, and the packer fails on an object whose bytes no longer match
-the SHA256 its descriptor records.
+with its manifest, on an object whose bytes no longer match the SHA256 its
+manifest records, and on one built for a processor other than its directory's.
+The shared packer itself checks neither bytes nor target; that is why `--check`
+runs before every pack.
 
 ### Packing
 
@@ -199,9 +224,12 @@ ls build/lib/hipdnn_plugins/engines/arch_content/hip-kernel-provider/gfx1151/kpa
 ```
 
 Every producer's objects for an arch share that one
-`hip_kernel_provider_<arch>.kpack`. The packer verifies each FlyDSL object
-against the SHA256 its descriptor records and reads the argument signature out
-of the object itself, so the descriptors never carry a hand-written one.
+`hip_kernel_provider_<arch>.kpack`, and the `gfx11-generic` objects land in the
+shard of every member arch the build packs for. The packer reads the argument
+signature out of the object itself, so the descriptors never carry a
+hand-written one. After the pack, the build runs `tools/check_shards.py`
+(target `flydsl_shard_check`): every packed arch's shard must hold one shipped
+UKD per checked-in object, packed from that object and carrying its SHA256.
 
 ---
 

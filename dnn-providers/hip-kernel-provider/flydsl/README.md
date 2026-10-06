@@ -32,7 +32,11 @@ way to check it, or it is just bytes someone once vouched for.
 
 ## What ships
 
-Two ops, one architecture (**gfx1151**), 24 kernel objects in one archive.
+Two ops, 24 kernel objects, built once for the LLVM generic target
+**`gfx11-generic`** and shipped to every RDNA3 / RDNA3.5 part it covers:
+gfx1100, gfx1101, gfx1102, gfx1103, gfx1150, gfx1151, gfx1152 and gfx1153. Each
+of those arches' shards carries the same bytes (see
+[REGEN.md §3](REGEN.md) for why one object set is enough, and what it needs).
 
 **RMSNorm forward** (`hipkernel:flydsl_rmsnorm`), 12 objects, bf16 and f16:
 
@@ -64,19 +68,20 @@ descriptor root**, beside rocKE's, and ship through the same packer:
 src/engines/kernel_ingestor_engine/descriptors/
   rocKE/…                         authored rocKE bundles (compiled at pack time)
   FlyDSL/<op>/*.json              descriptors shared by every arch of the op
-  FlyDSL/<op>/<arch>/             the pack (KDP), one `hsaco` UKD per object,
-                                  the objects, manifest.json, SOURCE.md
+  FlyDSL/<op>/gfx11-generic/      the pack (KDP), one `hsaco` UKD per object,
+                                  the objects, manifest.json, SOURCE.md;
+                                  `arch` lists all eight members
         │
         │  shared packer (descriptor-packaging), product root
         ▼
-lib/hipdnn_plugins/engines/arch_content/hip-kernel-provider/<arch>/
+lib/hipdnn_plugins/engines/arch_content/hip-kernel-provider/<arch>/   one per member
   FlyDSL/…                        descriptors, rewritten to kind "kpack"
   kpack/hip_kernel_provider_<arch>.kpack   every producer's objects, one archive
 ```
 
-Each authored UKD is `kind: "hsaco"` and names its object by file name and
-SHA256. The packer resolves the object, verifies that digest, packs it into the
-per-arch archive, reads the argument signature out of the object and rewrites
+Each authored UKD is `kind: "hsaco"` and names its object by file name. The
+packer resolves the object, packs it into the archive of every arch the UKD
+lists, reads the argument signature out of the object and rewrites
 the UKD to `kind: "kpack"` — the same path a rocKE kernel takes after it is
 compiled. The shard is installed with everything else under
 `arch_content/hip-kernel-provider/`, which the plugin finds beside its own
@@ -91,9 +96,10 @@ by then these are ordinary code objects in an archive.
 
 The descriptors are **generated from the objects they describe**
 (`gen_descriptors.py`, from each `manifest.json`), so a descriptor cannot drift
-from its kernel; the build re-runs `gen_descriptors.py --check` before the pack,
-and the packer refuses an object whose bytes no longer match the SHA256 its
-descriptor records.
+from its kernel. The build re-runs `gen_descriptors.py --check` before the pack
+-- every object must match its manifest's SHA256 and be built for the target its
+directory names -- and `tools/check_shards.py` after it, which shows every
+member's shard ships exactly the checked-in objects.
 
 ## Building it
 
@@ -149,10 +155,13 @@ provider tree; everything else is relative to this directory.
 | `kernels_src/kernels/**` | vendored kernel sources; each file's header names its upstream (FlyDSL or AITER), commit and path |
 | `generators/_instances.py` | **the instance table** — one row per shipped object, every op |
 | `generators/_flydsl_env.py` | the pins: wheel version, upstream commits, ROCm recording |
-| `generators/_codeobject.py` | reads and verifies a compiled object, shared by every generator |
+| `generators/_codeobject.py` | reads and verifies a compiled object (target, ELF generic machine), shared by every generator |
+| `generators/arch_families.json`, `_arch_families.py` | the generic targets and their member arches; read by the generators and `CMakeLists.txt` |
+| `generators/_generic_targets.py` | the FlyDSL 0.3.4 shim that lets MLIR lower for a generic target |
 | `generators/gen_rmsnorm.py`, `gen_sdpa.py` | compile one op's rows into objects + manifest + `SOURCE.md` |
 | `gen_descriptors.py` | derives descriptors from the objects; `--check` re-verifies |
 | `tools/diff_upstream.py` | vendored sources vs. their upstream checkouts, black-normalized |
+| `tools/check_shards.py` | after the pack: every member's shard ships exactly the checked-in objects |
 
 Adding an instance is a **row in `_instances.py`** plus a regeneration — the
 compiler, the packer and the descriptor emitter all read that table, so there is
@@ -168,9 +177,9 @@ upstream FlyDSL @ 89ad52fbbb9e, AITER @ 8253efc40595
 kernels_src/
    │  gen_<op>.py (flydsl 0.3.4)      — byte-reproducible: currently 24/24 identical
 <content>/<op>/<arch>/*.hsaco + manifest.json
-   │  gen_descriptors.py --check      — descriptors agree with the objects they name
+   │  gen_descriptors.py --check      — objects match manifest SHA256 and target; descriptors agree
 <content>/<op>/**/*.json (hsaco UKDs)
-   │  shared packer                   — each object re-verified against its descriptor's SHA256
+   │  shared packer, then tools/check_shards.py — every member shard ships those bytes
 arch_content/hip-kernel-provider/<arch>/
    │  TestFlydsl*Packs + census       — the shard is really there, and is what the suite read
 ```

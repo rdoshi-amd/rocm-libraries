@@ -9,8 +9,10 @@ under `HIPKERNELPROVIDER_ENABLE_TESTS`. It holds two producers' bundles:
   has rocKE enabled (`HIPKERNELPROVIDER_ENABLE_ROCKE=ON`, which keeps the `rocKE/`
   folder in the walk).
 - `FlyDSL/<op>/`, one bundle per op, whose kernels are **pre-built** and checked in
-  beside their descriptors as `kind: "hsaco"` UKDs under `FlyDSL/<op>/<arch>/`; it packs
-  for a build whose GPU targets include an arch objects are checked in for and that has
+  beside their descriptors as `kind: "hsaco"` UKDs under `FlyDSL/<op>/<target>/`. The
+  target is the generic `gfx11-generic`, whose UKDs list all eight member arches
+  (gfx1100–gfx1103, gfx1150–gfx1153), so the same objects pack into each member's shard.
+  It packs for a build whose GPU targets include one of those arches and that has
   FlyDSL enabled (`HIPKERNELPROVIDER_ENABLE_FLYDSL=ON`). The objects and descriptors are
   generated, not hand-written: see `flydsl/REGEN.md` in the provider tree.
 

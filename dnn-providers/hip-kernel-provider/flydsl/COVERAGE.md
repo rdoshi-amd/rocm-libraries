@@ -5,8 +5,9 @@ SPDX-License-Identifier:  MIT
 
 # What the FlyDSL packs cover
 
-Two packs, one architecture (gfx1151): **RMSNorm forward** (12 kernel objects,
-§1–§4) and **SDPA forward** (8 kernel objects, §5). Every graph a pack accepts is
+Two packs, built once for `gfx11-generic` and shipped to all eight RDNA3 /
+RDNA3.5 arches it covers (gfx1100–gfx1103, gfx1150–gfx1153): **RMSNorm forward**
+(12 kernel objects, §1–§4) and **SDPA forward** (12 kernel objects, §5). Every graph a pack accepts is
 computed by one of its objects; everything else is **declined**, so another
 engine gets the plan.
 
@@ -172,7 +173,7 @@ do not compute, declined rather than approximated.
 | **Rank < 2 on x or y** | No row to reduce over. |
 | **Broadcast gamma that is not the normalised axis** | Not a broadcast the kernel performs. |
 | **Multi-node graphs, fused add+RMSNorm** | One node per kernel. Fusion would be its own pack. |
-| **Architectures other than gfx1151** | Objects are checked in for one arch. With `GPU_TARGETS` naming no arch we ship kernels for, the integration reports dormant at configure time and stages nothing — it does not fail, and it does not silently produce an empty shard. Adding an arch is a regeneration ([REGEN.md](REGEN.md) §3), not a code change. |
+| **Architectures outside gfx11-generic** | Objects are checked in for the gfx11 generic family (gfx1100–gfx1103, gfx1150–gfx1153). gfx1170/gfx1171 belong to `gfx11-7-generic`, and CDNA / gfx12 are other families. With `GPU_TARGETS` naming no arch we ship kernels for, the integration reports dormant at configure time and stages nothing — it does not fail, and it does not silently produce an empty shard. Adding a family is a regeneration ([REGEN.md](REGEN.md) §3), not a code change. |
 | **Ops other than RMSNorm** | `OPS` in `_instances.py` has one entry. |
 
 ---
@@ -183,7 +184,8 @@ do not compute, declined rather than approximated.
 |---|---|
 | The 12 objects are what the pinned toolchain produces | [REGEN.md](REGEN.md) §2 — SHA256 against `manifest.json`, currently 12/12 |
 | Descriptors agree with the objects they describe | `gen_descriptors.py --check`, run by the build before staging |
-| The archive holds exactly the checked-in objects | The shared packer verifies each object against the SHA256 its descriptor records |
+| Each object is built for the target its directory names | `gen_descriptors.py --check` reads `amdhsa.target` and, for a generic target, the ELF machine |
+| Every member arch's shard holds exactly the checked-in objects | `tools/check_shards.py`, run by the build after the product pack |
 | The vendored sources match upstream but for recorded modifications | `tools/diff_upstream.py` ([REGEN.md](REGEN.md) §5) |
 | The pack ships both tiers for both dtypes, and every kernel declares the 8-slot signature | `TestFlydslRmsNormPacks` — and the shard census that runs it, which fails when the suite is green against an empty shard |
 | The accept/refuse rules above hold | The matcher-acceptance suites in `TestFlydslRmsNormEngine.cpp` |
@@ -283,17 +285,17 @@ at `check_support()`, never at `execute()`.
 | `Hk ≠ Hv` | small, low value | A second group size. |
 | fp32 I/O, FP8, dropout, paged KV, block masks, sinks, ALiBi, softcap | out of scope | As hipDNN's requirements state; ALiBi and softcap have no reference semantics. |
 | **Backward** | out of scope here | Inference-only, as for hipDNN's Tier 0/1. LSE is emitted so a backward can be added without an ABI break. |
-| **Other architectures** | see below | The objects are gfx1151 builds of a gfx11 kernel. |
+| **Other architectures** | see below | The objects are `gfx11-generic` builds, so every RDNA3 / RDNA3.5 part is served. |
 
-**Other gfx11 parts** need no kernel change: `gfx11-generic` objects compiled
-from this source were verified to load and compute correctly on gfx1151, at a
-cost inside measurement noise. Shipping them needs a FlyDSL change (its
-`convert-gpu-to-rocdl` chipset parse rejects generic names) and a hipDNN-side
-arch mapping (`gfx1151` never matches `gfx11-generic` today). The d128 objects
-tip into small spills as generic builds, since a generic target assumes the
-smaller register file. **gfx12** needs per-family WMMA codegen: its operand ABI
-differs, so one object cannot span both; the kernel source can, behind four
-small helpers.
+**Every gfx11 generic member** (gfx1100–gfx1103, gfx1150–gfx1153) is served by
+the one object set; execution is verified on gfx1151, and the other seven rest on
+the loader's generic-target rule, the ELF machine check and the shard check.
+FlyDSL 0.3.4 needs the `_generic_targets.py` shim to lower for a generic target
+(REGEN.md §3), and the SDPA objects are built with `amdgpu-use-amdgpu-trackers`,
+without which d128 causal spills a few VGPRs: the generic ISA lacks gfx115x's
+scalar-float instructions. **gfx1170/gfx1171** need `gfx11-7-generic` objects.
+**gfx12** needs per-family WMMA codegen: its operand ABI differs, so one object
+cannot span both; the kernel source can, behind four small helpers.
 
 ### 5.5 Where each claim is checked
 
@@ -305,3 +307,60 @@ small helpers.
 | The shard ships exactly one object per `dtype × head_dim × causal` class, each with the 29-slot signature | `TestFlydslSdpaPacks`, and the shard census that runs it |
 | The accept/decline rules above, the bindings, and candidate selection | `TestFlydslSdpaGraphAccepts`, `TestFlydslSdpaGraphDeclines`, `TestFlydslSdpaBinding`, `TestFlydslSdpaKernelMatch` |
 | The staged objects compute attention and LSE — GQA, ragged lengths, cross-attention, both causal corners, windows, bands, keyless rows, decode, `head_dim` 96, runtime and default scale — against a double-precision reference | `TestGpuFlydslSdpaDispatch` |
+
+---
+
+## 6. The instance budget: what is baked, what is runtime, and why
+
+Every feature is either a **runtime argument** (one object serves it, at whatever
+cost it adds when unused) or a **compile-time axis** (more objects, each paying
+only for what it computes). The count of objects is a cost too — every one is
+built, reviewed, packed into every member shard and verified — so neither side
+wins by default. The rule this provider follows:
+
+1. **Default classification.** A per-launch scalar that changes only loop
+   bounds, addresses or the epilogue is a runtime argument: lengths, head
+   counts, strides, scale, mask offsets and bounds, `lse_on`. Anything that adds
+   work per score in the inner loop or keeps extra state live in registers (an
+   additive bias tile, softcap, ALiBi), or that changes the schedule (a
+   `head_dim` 256 layout, a decode tile), is a compile-time axis.
+2. **The gate.** A runtime feature stays runtime only if, with the feature
+   unused, the shipped object matches a build with the feature compiled out: no
+   spill, no lost occupancy, and time within the measurement noise on a fixed
+   shape set (repeated, interleaved runs; a difference counts only when its sign
+   repeats). One that fails becomes a compile-time axis or is restructured.
+3. **Axes are model-determined, never request-determined.** `dtype`,
+   `head_dim`, `causal`, a future `has_bias` — properties of the model a graph
+   comes from. Never a sequence length, head count or window width: those stay
+   runtime, so the count does not grow with the shapes a model is run at.
+4. **An axis splits only what needs it.** A bias variant adds bias objects; it
+   does not double the table. Specialized fast objects are added beside a
+   generic one only where they measurably win, ranked by `priority` (the RMSNorm
+   pattern, §1).
+
+The measurements behind each decision are kept outside the repository; what is
+recorded here is the decision and the gate it passed.
+
+### 6.1 Runtime features audited against compiled-out builds
+
+| Feature (SDPA) | Where its cost would be | Result | Decision |
+|---|---|---|---|
+| Bottom-right alignment, right-side bands, sliding windows | scalar setup, the KV loop's start; the per-score compare exists without them | ≤ 9 VGPRs, ~10 SGPRs; time within noise on every shape | runtime |
+| Keyless-row guard (O = 0, LSE = −inf) | one select per KV step, one in the epilogue | 0 VGPRs; time within noise | runtime |
+| LSE output (`lse_on`) | epilogue only | 0 VGPRs; time within noise | runtime |
+| Idle-wave skip (rows past `seq_len_q`) | one branch per KV tile | removing it doubles decode time and slows ragged tails; it costs a few percent on small f16 non-causal prefill (`head_dim` 64, S ≈ 1K) — over the gate on that one class | kept: the cost moves to the decode instance family when one exists, which takes the skip with it |
+
+### 6.2 Instance ledger
+
+Objects per generic family; each family's set is packed into every member arch's
+shard, so the shipped count per arch is the same as the authored count.
+
+| Op | Axes (compile-time) | Objects | Status |
+|---|---|---|---|
+| RMSNorm forward | dtype (2) × {generic N, N ∈ 3072/3584/4096/5120/8192} | 12 | shipped, `gfx11-generic` |
+| SDPA forward | dtype (2) × head_dim {64, 96, 128} × causal (2) | 12 | shipped, `gfx11-generic` |
+| **Total, gfx11-generic** | | **24** | |
+| SDPA `head_dim` 256 | dtype (2) × causal (2), own schedule | +4 | planned |
+
+Adding a row here, with its gate result in §6.1 where it introduces a runtime
+feature, is part of adding the feature.

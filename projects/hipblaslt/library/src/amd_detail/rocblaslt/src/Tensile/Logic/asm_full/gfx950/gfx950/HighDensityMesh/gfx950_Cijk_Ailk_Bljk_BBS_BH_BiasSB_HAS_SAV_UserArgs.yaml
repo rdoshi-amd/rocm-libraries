@@ -173,7 +173,7 @@ DefaultSolution:
 DeviceNames: [Device 75a0]
 ExactLogic: null
 IndexOrder: [2, 3, 0, 1]
-LibraryType: MeshBased
+LibraryType: Prediction
 MinimumRequiredVersion: 5.0.0
 PerfMetric: DeviceEfficiency
 ProblemType:

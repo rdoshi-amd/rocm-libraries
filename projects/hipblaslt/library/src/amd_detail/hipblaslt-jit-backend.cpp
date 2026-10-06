@@ -3,15 +3,24 @@
 
 #include "hipblaslt-jit-component.hpp"
 #include "hipblaslt-jit-gemm-internal.hpp"
+#include "hipblaslt-jit-loader.hpp"
+#include "hipblaslt-jit-hash.hpp"
+#include "hipblaslt-jit-heuristic.hpp"
+#include "hipblaslt-jit-mode.hpp"
 #include "hipblaslt_internal.hpp"
+#include "rocblaslt_secure_env.hpp"
+#include "hipblaslt-jit-replay.hpp"
 #include "rocblaslt.h"
 #include "rocblaslt_arch_revision.hpp"
 #include <Tensile/hip/HipHardware.hpp>
 #include <algorithm>
+#include <cstring>
+#include <iostream>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <random>
+#include <sstream>
 #include <stdexcept>
 #include <unordered_map>
 #ifdef _WIN32
@@ -391,6 +400,296 @@ namespace hipblaslt_ext::experimental
             {
                 return finish(HIPBLAS_STATUS_INTERNAL_ERROR);
             }
+        }
+    }
+}
+
+namespace hipblaslt_jit
+{
+    namespace
+    {
+        using GemmRequest = hipblaslt_ext::experimental::jit::detail::GemmRequest;
+        using Compiled    = hipblaslt_ext::experimental::jit::detail::CompiledSolution;
+
+        // Device, workspace limit and the GEMM problem the request already carries.
+        // Buffer addresses are not part of it: two queries of one problem share a build.
+        std::string requestKey(int device, size_t workspace, const GemmRequest& request)
+        {
+            const auto& problem = request.problem;
+            Fnv1a       hash;
+            auto        add = [&](auto value) { hash.add(std::to_string(value)); };
+            add(device);
+            add(workspace);
+            add(problem.m);
+            add(problem.n);
+            add(problem.k);
+            add(problem.batch_count);
+            add(static_cast<int>(problem.trans_a));
+            add(static_cast<int>(problem.trans_b));
+            add(static_cast<int>(problem.a_type));
+            add(static_cast<int>(problem.b_type));
+            add(static_cast<int>(problem.c_type));
+            add(static_cast<int>(problem.d_type));
+            add(static_cast<int>(problem.compute_type));
+            add(static_cast<int>(problem.scale_type));
+            add(static_cast<int>(problem.epilogue));
+            add(static_cast<int>(problem.bias_type));
+            add(static_cast<int>(problem.aux_type));
+            add(static_cast<int>(problem.scaleAType));
+            add(static_cast<int>(problem.scaleBType));
+            add(problem.row_stride_a);
+            add(problem.col_stride_a);
+            add(problem.batch_stride_a);
+            add(problem.row_stride_b);
+            add(problem.col_stride_b);
+            add(problem.batch_stride_b);
+            add(problem.row_stride_c);
+            add(problem.col_stride_c);
+            add(problem.batch_stride_c);
+            add(problem.row_stride_d);
+            add(problem.col_stride_d);
+            add(problem.batch_stride_d);
+            add(problem.strided_batch);
+            add(problem.grouped_gemm);
+            add(problem.gradient);
+            add(problem.swizzleA);
+            add(problem.swizzleB);
+            add(problem.act0);
+            add(problem.act1);
+            add(problem.streamk_tile_scheduling_ext);
+            add(problem.sm_count_target);
+            add(problem.uniform_summation_order);
+            add(problem.bias != nullptr);
+            add(problem.scaleA != nullptr);
+            add(problem.scaleB != nullptr);
+            add(problem.scaleC != nullptr);
+            add(problem.scaleD != nullptr);
+            add(problem.scaleE != nullptr);
+            add(problem.scaleAlphaVec != nullptr);
+            add(problem.amaxD != nullptr);
+            add(static_cast<int>(problem.batchMode));
+            add(problem.bias_stride);
+            hash.add(std::string_view(reinterpret_cast<const char*>(request.alpha.data()),
+                                      request.alpha.size()));
+            hash.add(std::string_view(reinterpret_cast<const char*>(request.beta.data()),
+                                      request.beta.size()));
+            return hash.hex();
+        }
+
+        struct CacheEntry
+        {
+            std::vector<std::shared_ptr<const Compiled>> solutions;
+            bool                                         complete = false;
+        };
+
+        bool named(const std::vector<std::string>& names, const std::string& kernel)
+        {
+            return std::find(names.begin(), names.end(), kernel) != names.end();
+        }
+
+        uint64_t processId()
+        {
+#ifdef _WIN32
+            return _getpid();
+#else
+            return getpid();
+#endif
+        }
+
+        // The process-wide Jit: replay backend, comgr builder, TensileLite loader.
+        // Null when HIPBLASLT_JIT_TEST_REPLAY names no bundle.
+        std::shared_ptr<const Jit> replayProcess()
+        {
+            static std::once_flag                 once;
+            static std::shared_ptr<const Jit>     jit;
+            std::call_once(once, [] {
+                const char* value = rocblaslt_secure_getenv("HIPBLASLT_JIT_TEST_REPLAY");
+                if(!value || !*value)
+                    return;
+                hipblaslt_ext::experimental::jit::replay::Options options;
+                std::istringstream                                paths(value);
+                std::string                                       path;
+                while(paths >> path)
+                    options.replay.push_back(std::move(path));
+                if(options.replay.empty())
+                    return;
+                try
+                {
+                    jit = std::make_shared<const Jit>(Jit::Components{
+                        hipblaslt_ext::experimental::jit::replay::makeBackend(options),
+                        makeComgrBuilder(),
+                        makeTensileLoader()});
+                }
+                catch(const std::exception& error)
+                {
+                    std::cerr << "hipblaslt warning: HIPBLASLT_JIT_TEST_REPLAY could not be read: "
+                              << error.what() << std::endl;
+                }
+            });
+            return jit;
+        }
+    }
+
+    bool jitHeuristicLibrary()
+    {
+        return static_cast<bool>(replayProcess());
+    }
+
+    void warnJitHeuristicUnavailable()
+    {
+        static std::once_flag once;
+        std::call_once(once, [] {
+            const char* value = rocblaslt_secure_getenv("HIPBLASLT_JIT");
+            std::cerr << "hipblaslt warning: HIPBLASLT_JIT=" << (value ? value : "");
+            if(mode() == Mode::Forced)
+                std::cerr << " has no JIT library; heuristic queries return no solutions"
+                          << std::endl;
+            else
+                std::cerr << " has no JIT library; heuristic queries are unchanged" << std::endl;
+        });
+    }
+
+    int appendJitHeuristic(rocblaslt_handle                   handle,
+                           const RocblasltContractionProblem& problem,
+                           size_t                             workspaceLimit,
+                           const std::vector<std::string>&    excludeKernels,
+                           rocblaslt_matmul_heuristic_result* results,
+                           int                                room)
+    {
+        if(room <= 0 || results == nullptr || handle == nullptr)
+            return 0;
+        const auto jit = replayProcess();
+        if(!jit)
+        {
+            warnJitHeuristicUnavailable();
+            return 0;
+        }
+        try
+        {
+            int current = -1;
+            if(hipGetDevice(&current) != hipSuccess || current != handle->device)
+                return 0;
+            std::shared_ptr<const GemmRequest> owned = std::make_shared<GemmRequest>(problem);
+            DeviceTarget target;
+            if(!DeviceTarget::make(handle->device, target).ok() || !target.hardware)
+                return 0;
+
+            static auto*                    cache = new std::map<std::string, CacheEntry>;
+            static std::mutex               guard;
+            const auto                      key = requestKey(handle->device, workspaceLimit, *owned);
+            std::lock_guard<std::mutex>     lock(guard);
+            auto&                           entry = (*cache)[key];
+            std::vector<std::shared_ptr<const Compiled>> chosen;
+            auto kernelChosen = [&](const std::string& name) {
+                return !name.empty()
+                       && std::any_of(chosen.begin(),
+                                      chosen.end(),
+                                      [&](const std::shared_ptr<const Compiled>& solution) {
+                                          return solution->bundle->kernelNames() == name;
+                                      });
+            };
+            for(const auto& solution : entry.solutions)
+            {
+                const auto name = solution->bundle->kernelNames();
+                if(named(excludeKernels, name) || kernelChosen(name))
+                    continue;
+                chosen.push_back(solution);
+                if(static_cast<int>(chosen.size()) == room)
+                    break;
+            }
+            if(static_cast<int>(chosen.size()) < room && !entry.complete)
+            {
+                bool callerExcludesOnlyCached = true;
+                for(const auto& name : excludeKernels)
+                {
+                    const bool cached = std::any_of(
+                        entry.solutions.begin(),
+                        entry.solutions.end(),
+                        [&](const std::shared_ptr<const Compiled>& solution) {
+                            return solution->bundle->kernelNames() == name;
+                        });
+                    if(!cached)
+                        callerExcludesOnlyCached = false;
+                }
+                std::vector<std::string> exclude = excludeKernels;
+                for(const auto& solution : entry.solutions)
+                {
+                    auto name = solution->bundle->kernelNames();
+                    if(!name.empty() && !named(exclude, name))
+                        exclude.push_back(std::move(name));
+                }
+                const auto need    = static_cast<size_t>(room) - chosen.size();
+                auto       outcome = jit->generate(*owned, target, need, workspaceLimit, exclude);
+                for(auto& bundle : outcome.bundles)
+                {
+                    hipblaslt_ext::experimental::jit::Diagnostics diagnostics;
+                    size_t                                        required = 0;
+                    if(bundle->support(*owned, workspaceLimit, required, diagnostics)
+                       != HIPBLAS_STATUS_SUCCESS)
+                        continue;
+                    const auto name = bundle->kernelNames();
+                    if(named(excludeKernels, name) || kernelChosen(name)
+                       || std::any_of(entry.solutions.begin(),
+                                      entry.solutions.end(),
+                                      [&](const std::shared_ptr<const Compiled>& solution) {
+                                          return solution->bundle->kernelNames() == name;
+                                      }))
+                        continue;
+                    auto compiled            = std::make_shared<Compiled>();
+                    compiled->target         = target;
+                    compiled->request        = owned;
+                    compiled->jit            = jit;
+                    compiled->bundle         = std::move(bundle);
+                    compiled->process        = processId();
+                    compiled->workspaceLimit = workspaceLimit;
+                    compiled->workspaceBytes = required;
+                    entry.solutions.push_back(compiled);
+                    if(!named(excludeKernels, compiled->bundle->kernelNames())
+                       && static_cast<int>(chosen.size()) < room)
+                        chosen.push_back(compiled);
+                }
+                if(outcome.bundles.size() < need && callerExcludesOnlyCached)
+                    entry.complete = true;
+                for(const auto& failure : outcome.failures)
+                {
+                    if(failure.code == Status::Code::NotSupported
+                       || failure.code == Status::Code::TargetMismatch)
+                        continue;
+                    std::cerr << "hipblaslt warning: JIT heuristic " << failure.message << std::endl;
+                    break;
+                }
+            }
+
+            namespace detail = hipblaslt_ext::experimental::jit::detail;
+            namespace jitapi = hipblaslt_ext::experimental::jit;
+            int written = 0;
+            for(const auto& compiled : chosen)
+            {
+                jitapi::Solution  solution = detail::SolutionAccess::make(compiled);
+                jitapi::Diagnostics diagnostics;
+                hipblasLtMatmulHeuristicResult_t hipResult{};
+                if(jitapi::getGemmAlgo(solution, hipResult, diagnostics) != HIPBLAS_STATUS_SUCCESS)
+                    continue;
+                auto& result = results[written];
+                std::memset(&result, 0, sizeof(result));
+                static_assert(sizeof(hipResult.algo) == sizeof(result.algo),
+                              "JIT heuristic results share the matmul algorithm layout");
+                std::memcpy(&result.algo, &hipResult.algo, sizeof(result.algo));
+                result.workspaceSize = hipResult.workspaceSize;
+                result.state         = rocblaslt_status_success;
+                result.wavesCount    = 1.0f;
+                ++written;
+            }
+            return written;
+        }
+        catch(const std::exception& error)
+        {
+            std::cerr << "hipblaslt warning: JIT heuristic " << error.what() << std::endl;
+            return 0;
+        }
+        catch(...)
+        {
+            return 0;
         }
     }
 }

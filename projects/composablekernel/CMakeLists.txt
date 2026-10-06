@@ -55,6 +55,7 @@ include(CTest)
 
 option(ENABLE_CLANG_CPP_CHECKS "Enables clang tidy, cppcheck" ON)
 option(MIOPEN_REQ_LIBS_ONLY "Build only the MIOpen required libraries" OFF)
+option(MIOPEN_SPLIT_LIBS "Build separate convolution library for each GPU architecture" OFF)
 option(HIPTENSOR_REQ_LIBS_ONLY "Build only the HipTensor required libraries" OFF)
 option(CK_EXPERIMENTAL_BUILDER "Enable experimental builder" OFF)
 option(CK_TILE_DISPATCHER "Use CK Tile Dispatcher for profiler convolution kernels" OFF)
@@ -433,7 +434,14 @@ endif()
 rocm_check_target_ids(SUPPORTED_GPU_TARGETS
         TARGETS ${CK_GPU_TARGETS})
 
+set(SANITIZED_SUPPORTED_GPU_TARGETS)
+foreach(_ck_arch IN LISTS SUPPORTED_GPU_TARGETS)
+    string(REGEX REPLACE ":xnack[+-]$" "" _ck_arch_base "${_ck_arch}")
+    list(APPEND SANITIZED_SUPPORTED_GPU_TARGETS "${_ck_arch_base}")
+endforeach()
+list(REMOVE_DUPLICATES SANITIZED_SUPPORTED_GPU_TARGETS)
 message(STATUS "Building CK for the following targets: ${SUPPORTED_GPU_TARGETS}")
+message(STATUS "Sanitized GPU target list: ${SANITIZED_SUPPORTED_GPU_TARGETS}")
 
 # Cache SUPPORTED_GPU_TARGETS for debug
 set(SUPPORTED_GPU_TARGETS "${SUPPORTED_GPU_TARGETS}" CACHE STRING "List of supported GPU targets")

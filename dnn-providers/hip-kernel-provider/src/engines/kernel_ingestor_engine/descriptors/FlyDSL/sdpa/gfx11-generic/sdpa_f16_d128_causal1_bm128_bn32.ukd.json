@@ -22,7 +22,10 @@
     "head_dim": 128,
     "causal": 1,
     "block_m": 128,
-    "block_n": 32
+    "block_n": 32,
+    "dv_split": 1,
+    "has_bias": 0,
+    "head_dim_max": 128
   },
   "priority": 100,
   "provenance": {
@@ -38,7 +41,10 @@
             "head_dim",
             "causal",
             "block_m",
-            "block_n"
+            "block_n",
+            "dv_split",
+            "has_bias",
+            "head_dim_max"
           ],
           "bindings": {},
           "vocabulary": {}

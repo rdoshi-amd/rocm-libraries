@@ -7,7 +7,7 @@ SPDX-License-Identifier:  MIT
 
 Two packs, built once for `gfx11-generic` and shipped to all eight RDNA3 /
 RDNA3.5 arches it covers (gfx1100–gfx1103, gfx1150–gfx1153): **RMSNorm forward**
-(12 kernel objects, §1–§4) and **SDPA forward** (12 kernel objects, §5). Every graph a pack accepts is
+(12 kernel objects, §1–§4) and **SDPA forward** (40 kernel objects, §5). Every graph a pack accepts is
 computed by one of its objects; everything else is **declined**, so another
 engine gets the plan.
 
@@ -207,19 +207,43 @@ whose header lists every modification). The native half is
 | dtype (`bf16`, `f16`) | batch |
 | `head_dim` | `seq_len_q`, `seq_len_kv` — independently, any value |
 | causal variant: a right bound is applied, or not | query heads, and the GQA/MQA group size |
-| tile (`block_m` 128, `block_n` 32) | every operand's (batch, sequence, head) stride |
+| tile (`block_m` 128, `block_n` 32), and at `head_dim` 256 the output-column split (`dv_split` 2) | every operand's (batch, sequence, head) stride |
+| whether an additive bias is applied (`has_bias`) | the bias's (batch, head, query, key) strides — 0 on a broadcast axis |
 | | softmax scale |
 | | `right_bound`, `left_bound`, diagonal alignment |
 | | whether to write the LSE output, and its strides |
 
-So the instance key is `dtype × head_dim × causal`, and every axis it
-enumerates is **model-determined**, never request-determined. That is what
-keeps the table at 12 rows:
+So the instance key is `dtype × head_dim × causal × has_bias`, and every axis
+it enumerates is **model-determined**, never request-determined. That is what
+keeps the table at 32 rows — each cell below is one object without a bias and
+one with:
 
-| | `head_dim` 64 | `head_dim` 96 | `head_dim` 128 |
-|---|---|---|---|
-| bf16 | causal, non-causal | causal, non-causal | causal, non-causal |
-| f16 | causal, non-causal | causal, non-causal | causal, non-causal |
+| | `head_dim` 64 | `head_dim` 96 | `head_dim` 128 | `head_dim` 256 |
+|---|---|---|---|---|
+| bf16 | causal, non-causal | causal, non-causal | causal, non-causal | causal, non-causal |
+| f16 | causal, non-causal | causal, non-causal | causal, non-causal | causal, non-causal |
+
+`head_dim` 256 is a schedule of its own (kernel modification 13). Up to 128 each
+wave holds its Q rows and every O accumulator in registers; at 256 those two
+alone would fill the 256-VGPR file. So the 256 objects re-read Q from memory one
+K-step ahead instead of holding it, and split the output columns across two
+workgroups (`dv_split`), each computing the whole of QK^T and the softmax but
+half of O. The grid doubles; the dispatcher reads `dv_split` from the metadata.
+The cost is the repeated QK^T and Q reads, so 256 runs below 128's throughput;
+splitting the head dimension across a pair of waves instead would avoid the
+recompute.
+
+**Every other head_dim** that is a multiple of 8, up to 256, is served by a
+generic tier (kernel modification 15): eight more objects, bf16 and f16 ×
+causal × largest head (128 or 256), without a bias. The actual head_dim is a
+runtime argument; Q and K columns past it are zeroed as they load and O columns
+past it are not stored, so the tensors are read exactly as wide as they are.
+They rank below the specialized objects (`priority` 20 for the 128 tier, 10 for
+256), so 64/96/128/256 always run their own object and the narrowest generic
+tier takes the rest. A generic object computes at its largest width, and the
+256 tier splits its output columns four ways to fit the register file, so it is
+for coverage rather than speed. A bias on a head no specialized object serves
+declines.
 
 The causal variant is the one that applies a right bound — top-left or
 bottom-right causal, and any band to the right of the diagonal. It is two
@@ -238,10 +262,11 @@ One SDPA-forward node, and:
 | One dtype for all four, `BFLOAT16` or `HALF` | One element type throughout; no fp32 WMMA operand form exists. |
 | Head-dim stride 1 on all four; other strides positive | Each lane reads a row's head-dim values as one contiguous vector. Every other stride is a kernel argument, so BSHD, BHSD and packed-QKV views are all served. |
 | K and V share every extent; O has Q's; V's head dim equals Q/K's | The kernel has one `head_dim` and does not broadcast. |
-| `Hq % Hkv == 0` | The kv head is the query head divided by the group size. |
+| `Hq % Hk == 0` and `Hq % Hv == 0`; K and V may differ in head count | The K head and the V head are each the query head divided by its own group size. |
 | Any `left_bound`/`right_bound` ≥ −1, either alignment, or the deprecated causal booleans (not both) | The kernel applies the reference's two-sided rule (`CpuFpReferenceSdpa` `isMasked`) directly. |
 | Scale: `attn_scale_value` (> 0), a pass-by-value scalar tensor, or absent | Absent is `1/√head_dim`, the reference's default. The running max is over unscaled scores, which orders them correctly only for a positive scale. |
 | Stats, if requested: a named f32 `[B, H, Sq, 1]` device tensor | The kernel writes the natural-log LSE of the scaled scores there. |
+| Bias (`attn_mask`), if present: an f32 device tensor of rank 1–4 whose dims, right-aligned to `[B, H, Sq, Skv]`, are each that extent or 1; positive strides on real axes; one (batch, head) slice under 2³⁰ elements | Added to the scaled scores before the mask, as the reference does; a size-1 or absent axis broadcasts. The kernel reads it through a 32-bit buffer descriptor with 32-bit offsets. |
 | `Sq`, `Skv` < 2²⁹; one (batch, kv head) slice of K or V under 2 GiB; grid under 2³¹ | int32 mask arithmetic, and 32-bit bounds-checked buffer descriptors. |
 
 Any sequence length is correct: K and V reads past `seq_len_kv` return zero and
@@ -254,19 +279,19 @@ queries than keys — gets O = 0 and LSE = −inf, as the reference defines it.
 | # | Requirement | Status |
 |---|---|---|
 | 1 | fp16, bf16; fp32 accumulate | **served** |
-| 2 | BSHD, BHSD, general B/S/H strides, packed QKV | **served** |
-| 3 | MHA, MQA, GQA | **served** (`Hk == Hv`) |
+| 2 | BSHD, BHSD, general B/S/H strides, packed QKV | **served**; packed QKV checked on the GPU as strided views into one buffer |
+| 3 | MHA, MQA, GQA (`Hq % Hk == 0 && Hq % Hv == 0`) | **served**, including K and V with different head counts |
 | 4 | attention scale | **served** (positive) |
 | 5 | causal, top-left | **served** |
 | 6 | causal, bottom-right, `Sq ≠ Skv` | **served** |
 | 7 | softmax stats / LSE | **served** |
 | 8 | arbitrary sequence lengths | **served** |
-| 9 | head dims 64, 128, 256 | **64, 128 served (and 96)**; 256 missing |
+| 9 | head dims 64, 128, 256; `d % 8 == 0` | **served**: 64/96/128/256 specialized, every other multiple of 8 up to 256 by the generic tier (not with a bias) |
 | 10 | padding mask via `SEQ_LEN_Q`/`SEQ_LEN_KV` | missing |
 | 11 | sliding window (`left_bound`) | **served** (and right-side bands) |
 | 12 | varlen / THD | missing (declined) |
 | 13 | decode (`Sq == 1`) | **served**; idle waves skip the matrix work, but one query row still occupies a 128-row tile |
-| 14 | additive bias | missing |
+| 14 | additive bias | **served**: f32, broadcast over any of B, H, Sq, Skv; with every mask, the LSE output and every head dim |
 
 ### 5.4 What is still missing, and what closing it takes
 
@@ -275,14 +300,12 @@ at `check_support()`, never at `execute()`.
 
 | | Effort | What it takes |
 |---|---|---|
-| **`head_dim` 256** (Tier 0) | large | Its O accumulators and register-resident Q operands alone fill the 256-VGPR ceiling, and the object spills. Needs a schedule that stages Q through LDS, or splits O into two passes. |
-| **Additive bias** (Tier 1; `F.sdpa(attn_mask=)`) | medium | A bias pointer and four broadcast strides, two bounds-checked loads per tile, and an add before the mask. The d128 objects sit at 255–256 VGPRs, so it may need a baked `has_bias` variant rather than a runtime flag. |
+| **fp16 / bf16 bias** | small | A second bias dtype axis (+16 objects); today a non-f32 bias declines. |
 | **Padding mask** (Tier 1) | medium | Two per-batch length pointers read once per workgroup. The diagonal offset is already computed in-kernel from the lengths for exactly this. hipDNN's CPU reference does not implement padding yet, so its semantics must be defined there first. |
 | **Varlen / THD** (Tier 1) | medium, after padding | Ragged offsets replace the batch stride; the grid stays over the longest sequence and tiles past a sequence's end exit early. |
 | **Decode throughput** | medium / large | Pack the GQA group into the 128 query rows (medium), then split-KV with an LSE-combine pass (large). |
-| `head_dim` 80, 112 | small–medium | The kernel asserts `head_dim % 32`; 16 should suffice but the cooperative loads must be re-verified. 40/72/104 (`% 8`) need a WMMA K-tail. |
+| Bias on a generic head_dim | small | A `has_bias` variant of the eight generic objects (+8). |
 | `Dv ≠ Dqk` (MLA) | medium–large | A second head dim for V's LDS tile, the O accumulators and the store. |
-| `Hk ≠ Hv` | small, low value | A second group size. |
 | fp32 I/O, FP8, dropout, paged KV, block masks, sinks, ALiBi, softcap | out of scope | As hipDNN's requirements state; ALiBi and softcap have no reference semantics. |
 | **Backward** | out of scope here | Inference-only, as for hipDNN's Tier 0/1. LSE is emitted so a backward can be added without an ABI break. |
 | **Other architectures** | see below | The objects are `gfx11-generic` builds, so every RDNA3 / RDNA3.5 part is served. |
@@ -301,10 +324,10 @@ cannot span both; the kernel source can, behind four small helpers.
 
 | Claim | Checked by |
 |---|---|
-| The 12 objects are what the pinned toolchain produces | [REGEN.md](REGEN.md) §2 — 12/12 byte-identical |
-| Each object has the declared 29-argument layout and spills no registers | `gen_sdpa.py`, before the object is written |
+| The 40 objects are what the pinned toolchain produces | [REGEN.md](REGEN.md) §2 — 40/40 byte-identical |
+| Each object has the declared 36-argument layout and spills no registers | `gen_sdpa.py`, before the object is written |
 | The vendored kernel matches AITER but for its recorded modifications | `tools/diff_upstream.py --aiter` ([REGEN.md](REGEN.md) §5) |
-| The shard ships exactly one object per `dtype × head_dim × causal` class, each with the 29-slot signature | `TestFlydslSdpaPacks`, and the shard census that runs it |
+| The shard ships exactly one object per `dtype × head_dim × causal × has_bias × head_dim_max` class, each with the 36-slot signature | `TestFlydslSdpaPacks`, and the shard census that runs it |
 | The accept/decline rules above, the bindings, and candidate selection | `TestFlydslSdpaGraphAccepts`, `TestFlydslSdpaGraphDeclines`, `TestFlydslSdpaBinding`, `TestFlydslSdpaKernelMatch` |
 | The staged objects compute attention and LSE — GQA, ragged lengths, cross-attention, both causal corners, windows, bands, keyless rows, decode, `head_dim` 96, runtime and default scale — against a double-precision reference | `TestGpuFlydslSdpaDispatch` |
 
@@ -348,6 +371,9 @@ recorded here is the decision and the gate it passed.
 | Bottom-right alignment, right-side bands, sliding windows | scalar setup, the KV loop's start; the per-score compare exists without them | ≤ 9 VGPRs, ~10 SGPRs; time within noise on every shape | runtime |
 | Keyless-row guard (O = 0, LSE = −inf) | one select per KV step, one in the epilogue | 0 VGPRs; time within noise | runtime |
 | LSE output (`lse_on`) | epilogue only | 0 VGPRs; time within noise | runtime |
+| Separate V head group (`Hk ≠ Hv`) | one scalar divide for V's slice | 0 VGPRs, up to ~15 SGPRs; time within noise on every shape | runtime |
+| Runtime head_dim | masked loads and stores in every K step | compile-time by the rule (a generic tier beside the specialized objects); the specialized objects' instructions are unchanged | baked axis, +8 |
+| Additive bias | per-score loads and an add in the inner loop | compile-time by the rule (`has_bias`); its arguments are appended to every object's list, and the plain objects' instructions are unchanged | baked axis, +16 |
 | Idle-wave skip (rows past `seq_len_q`) | one branch per KV tile | removing it doubles decode time and slows ragged tails; it costs a few percent on small f16 non-causal prefill (`head_dim` 64, S ≈ 1K) — over the gate on that one class | kept: the cost moves to the decode instance family when one exists, which takes the skip with it |
 
 ### 6.2 Instance ledger
@@ -359,8 +385,10 @@ shard, so the shipped count per arch is the same as the authored count.
 |---|---|---|---|
 | RMSNorm forward | dtype (2) × {generic N, N ∈ 3072/3584/4096/5120/8192} | 12 | shipped, `gfx11-generic` |
 | SDPA forward | dtype (2) × head_dim {64, 96, 128} × causal (2) | 12 | shipped, `gfx11-generic` |
-| **Total, gfx11-generic** | | **24** | |
-| SDPA `head_dim` 256 | dtype (2) × causal (2), own schedule | +4 | planned |
+| SDPA forward, `head_dim` 256 | dtype (2) × causal (2); own schedule (Q re-read, `dv_split` 2) | 4 | shipped, `gfx11-generic`; the 12 above rebuilt byte-identical with it in the source |
+| SDPA forward, additive f32 bias | one bias object beside each of the 16 above (`has_bias`) | 16 | shipped, `gfx11-generic`; the 16 plain objects compile to identical code with the bias arguments appended |
+| SDPA forward, generic head_dim | dtype (2) × causal (2) × largest head {128, 256}; head_dim a runtime argument; no bias | 8 | shipped, `gfx11-generic`; the 32 above compile to identical code with the head_dim argument appended |
+| **Total, gfx11-generic** | | **52** | |
 
 Adding a row here, with its gate result in §6.1 where it introduces a runtime
 feature, is part of adding the feature.

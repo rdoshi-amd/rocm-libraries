@@ -32,7 +32,7 @@ way to check it, or it is just bytes someone once vouched for.
 
 ## What ships
 
-Two ops, 24 kernel objects, built once for the LLVM generic target
+Two ops, 52 kernel objects, built once for the LLVM generic target
 **`gfx11-generic`** and shipped to every RDNA3 / RDNA3.5 part it covers:
 gfx1100, gfx1101, gfx1102, gfx1103, gfx1150, gfx1151, gfx1152 and gfx1153. Each
 of those arches' shards carries the same bytes (see
@@ -50,12 +50,14 @@ phase, bias, other dtypes, non-packed operands — are enumerated in
 [COVERAGE.md §3](COVERAGE.md), each with the reason the shipped objects cannot
 compute it.
 
-**SDPA forward** (`hipkernel:flydsl_sdpa`), 12 objects: bf16 and f16 ×
-`head_dim` 64, 96 and 128 × causal on and off. Batch, both sequence lengths,
+**SDPA forward** (`hipkernel:flydsl_sdpa`), 40 objects: bf16 and f16 ×
+`head_dim` 64, 96, 128 and 256 × causal on and off × with and without an
+additive f32 bias (`attn_mask`, broadcast over any axis), plus a generic tier
+that serves every other `head_dim` that is a multiple of 8 up to 256. Batch, both sequence lengths,
 head counts (MHA, GQA, MQA), every stride, the scale, the mask bounds (causal at
 either corner, right-side bands, sliding windows) and the LSE output are runtime
 arguments, so each object serves every shape and layout of its class. Inference
-only; not yet served: `head_dim` 256, additive bias, padding / varlen. Status
+only; not yet served: padding / varlen. Status
 against hipDNN's Tier 0 / Tier 1 and every declined feature with its effort are
 in [COVERAGE.md §5](COVERAGE.md).
 
@@ -175,7 +177,7 @@ Each link is checkable by a command, and [REGEN.md](REGEN.md) gives each command
 upstream FlyDSL @ 89ad52fbbb9e, AITER @ 8253efc40595
    │  tools/diff_upstream.py          — vendored copy == upstream, but for recorded modifications
 kernels_src/
-   │  gen_<op>.py (flydsl 0.3.4)      — byte-reproducible: currently 24/24 identical
+   │  gen_<op>.py (flydsl 0.3.4)      — byte-reproducible: currently 52/52 identical
 <content>/<op>/<arch>/*.hsaco + manifest.json
    │  gen_descriptors.py --check      — objects match manifest SHA256 and target; descriptors agree
 <content>/<op>/**/*.json (hsaco UKDs)

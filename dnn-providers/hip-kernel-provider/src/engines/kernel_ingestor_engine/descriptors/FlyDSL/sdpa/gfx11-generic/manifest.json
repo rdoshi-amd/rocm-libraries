@@ -21,19 +21,22 @@
         "head_dim": 64,
         "causal": 0,
         "block_m": 128,
-        "block_n": 32
+        "block_n": 32,
+        "dv_split": 1,
+        "has_bias": 0,
+        "head_dim_max": 64
       },
       "file": "sdpa_bf16_d64_causal0_bm128_bn32.hsaco",
       "symbol": "flash_attn_func_gfx1151_kernel_0",
-      "bytes": 16192,
-      "sha256": "03781923264f4e6b0ce3cdb3f2930ecf2538e131470ef80dce235976ef0289f3",
-      "kernarg_segment_size": 200,
+      "bytes": 16576,
+      "sha256": "a52d77f9cfa1451591d2a8fc09b4d11ebced2f10f8081d666b2639a4594b90e6",
+      "kernarg_segment_size": 248,
       "block": [
         256,
         1,
         1
       ],
-      "grid_rule": "batch_x_qtiles_x_heads",
+      "grid_rule": "batch_x_qtiles_x_heads_x_dv_split",
       "lds_bytes": 8704,
       "vgprs": 148,
       "llvm_options": {
@@ -216,6 +219,301 @@
           "kind": "by_value",
           "size": 8,
           "offset": 192
+        },
+        {
+          "name": "BIAS",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 200
+        },
+        {
+          "name": "bias_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 208
+        },
+        {
+          "name": "bias_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 216
+        },
+        {
+          "name": "bias_stride_q",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 224
+        },
+        {
+          "name": "bias_stride_k",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 232
+        },
+        {
+          "name": "head_dim_rt",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 240
+        },
+        {
+          "name": "v_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 244
+        }
+      ]
+    },
+    {
+      "name": "sdpa_bf16_d64_causal0_bm128_bn32_bias1",
+      "op": "sdpa",
+      "dtype": "bf16",
+      "priority": 100,
+      "tier": "specialized",
+      "knobs": {
+        "head_dim": 64,
+        "causal": 0,
+        "block_m": 128,
+        "block_n": 32,
+        "dv_split": 1,
+        "has_bias": 1,
+        "head_dim_max": 64
+      },
+      "file": "sdpa_bf16_d64_causal0_bm128_bn32_bias1.hsaco",
+      "symbol": "flash_attn_func_gfx1151_kernel_0",
+      "bytes": 17088,
+      "sha256": "ba16d8806862f692f2ea42cda8d80f55f697e96c9a544b00f80a3c226275efce",
+      "kernarg_segment_size": 248,
+      "block": [
+        256,
+        1,
+        1
+      ],
+      "grid_rule": "batch_x_qtiles_x_heads_x_dv_split",
+      "lds_bytes": 8704,
+      "vgprs": 163,
+      "llvm_options": {
+        "enable-post-misched": false,
+        "lsr-drop-solution": true,
+        "amdgpu-use-amdgpu-trackers": true
+      },
+      "named_args": 0,
+      "args": [
+        {
+          "name": "Q",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 0
+        },
+        {
+          "name": "K",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 8
+        },
+        {
+          "name": "V",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 16
+        },
+        {
+          "name": "O",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 24
+        },
+        {
+          "name": "LSE",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 32
+        },
+        {
+          "name": "seq_len_q",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 40
+        },
+        {
+          "name": "seq_len_kv",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 44
+        },
+        {
+          "name": "num_heads",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 48
+        },
+        {
+          "name": "kv_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 52
+        },
+        {
+          "name": "right_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 56
+        },
+        {
+          "name": "left_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 60
+        },
+        {
+          "name": "align_bottom_right",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 64
+        },
+        {
+          "name": "lse_on",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 68
+        },
+        {
+          "name": "scale",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 72
+        },
+        {
+          "name": "q_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 80
+        },
+        {
+          "name": "q_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 88
+        },
+        {
+          "name": "q_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 96
+        },
+        {
+          "name": "k_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 104
+        },
+        {
+          "name": "k_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 112
+        },
+        {
+          "name": "k_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 120
+        },
+        {
+          "name": "v_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 128
+        },
+        {
+          "name": "v_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 136
+        },
+        {
+          "name": "v_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 144
+        },
+        {
+          "name": "o_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 152
+        },
+        {
+          "name": "o_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 160
+        },
+        {
+          "name": "o_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 168
+        },
+        {
+          "name": "lse_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 176
+        },
+        {
+          "name": "lse_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 184
+        },
+        {
+          "name": "lse_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 192
+        },
+        {
+          "name": "BIAS",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 200
+        },
+        {
+          "name": "bias_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 208
+        },
+        {
+          "name": "bias_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 216
+        },
+        {
+          "name": "bias_stride_q",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 224
+        },
+        {
+          "name": "bias_stride_k",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 232
+        },
+        {
+          "name": "head_dim_rt",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 240
+        },
+        {
+          "name": "v_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 244
         }
       ]
     },
@@ -229,19 +527,22 @@
         "head_dim": 64,
         "causal": 1,
         "block_m": 128,
-        "block_n": 32
+        "block_n": 32,
+        "dv_split": 1,
+        "has_bias": 0,
+        "head_dim_max": 64
       },
       "file": "sdpa_bf16_d64_causal1_bm128_bn32.hsaco",
       "symbol": "flash_attn_func_gfx1151_kernel_0",
-      "bytes": 16192,
-      "sha256": "cafe3fcb75bec91db28d4de3f58954c9e9aa05fd1fd45d71db3614151ea05662",
-      "kernarg_segment_size": 200,
+      "bytes": 16704,
+      "sha256": "208346f231d0f9dcc6e357f6f9d7f61d746599ffade7ac8a55ee93d130dcfc4a",
+      "kernarg_segment_size": 248,
       "block": [
         256,
         1,
         1
       ],
-      "grid_rule": "batch_x_qtiles_x_heads",
+      "grid_rule": "batch_x_qtiles_x_heads_x_dv_split",
       "lds_bytes": 8704,
       "vgprs": 168,
       "llvm_options": {
@@ -424,6 +725,301 @@
           "kind": "by_value",
           "size": 8,
           "offset": 192
+        },
+        {
+          "name": "BIAS",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 200
+        },
+        {
+          "name": "bias_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 208
+        },
+        {
+          "name": "bias_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 216
+        },
+        {
+          "name": "bias_stride_q",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 224
+        },
+        {
+          "name": "bias_stride_k",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 232
+        },
+        {
+          "name": "head_dim_rt",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 240
+        },
+        {
+          "name": "v_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 244
+        }
+      ]
+    },
+    {
+      "name": "sdpa_bf16_d64_causal1_bm128_bn32_bias1",
+      "op": "sdpa",
+      "dtype": "bf16",
+      "priority": 100,
+      "tier": "specialized",
+      "knobs": {
+        "head_dim": 64,
+        "causal": 1,
+        "block_m": 128,
+        "block_n": 32,
+        "dv_split": 1,
+        "has_bias": 1,
+        "head_dim_max": 64
+      },
+      "file": "sdpa_bf16_d64_causal1_bm128_bn32_bias1.hsaco",
+      "symbol": "flash_attn_func_gfx1151_kernel_0",
+      "bytes": 17216,
+      "sha256": "15f216c11049b3d4acc943e811d0d6987a13c4edf21f83c5e0dc49cb55f63b6a",
+      "kernarg_segment_size": 248,
+      "block": [
+        256,
+        1,
+        1
+      ],
+      "grid_rule": "batch_x_qtiles_x_heads_x_dv_split",
+      "lds_bytes": 8704,
+      "vgprs": 164,
+      "llvm_options": {
+        "enable-post-misched": false,
+        "lsr-drop-solution": true,
+        "amdgpu-use-amdgpu-trackers": true
+      },
+      "named_args": 0,
+      "args": [
+        {
+          "name": "Q",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 0
+        },
+        {
+          "name": "K",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 8
+        },
+        {
+          "name": "V",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 16
+        },
+        {
+          "name": "O",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 24
+        },
+        {
+          "name": "LSE",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 32
+        },
+        {
+          "name": "seq_len_q",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 40
+        },
+        {
+          "name": "seq_len_kv",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 44
+        },
+        {
+          "name": "num_heads",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 48
+        },
+        {
+          "name": "kv_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 52
+        },
+        {
+          "name": "right_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 56
+        },
+        {
+          "name": "left_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 60
+        },
+        {
+          "name": "align_bottom_right",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 64
+        },
+        {
+          "name": "lse_on",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 68
+        },
+        {
+          "name": "scale",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 72
+        },
+        {
+          "name": "q_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 80
+        },
+        {
+          "name": "q_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 88
+        },
+        {
+          "name": "q_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 96
+        },
+        {
+          "name": "k_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 104
+        },
+        {
+          "name": "k_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 112
+        },
+        {
+          "name": "k_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 120
+        },
+        {
+          "name": "v_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 128
+        },
+        {
+          "name": "v_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 136
+        },
+        {
+          "name": "v_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 144
+        },
+        {
+          "name": "o_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 152
+        },
+        {
+          "name": "o_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 160
+        },
+        {
+          "name": "o_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 168
+        },
+        {
+          "name": "lse_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 176
+        },
+        {
+          "name": "lse_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 184
+        },
+        {
+          "name": "lse_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 192
+        },
+        {
+          "name": "BIAS",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 200
+        },
+        {
+          "name": "bias_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 208
+        },
+        {
+          "name": "bias_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 216
+        },
+        {
+          "name": "bias_stride_q",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 224
+        },
+        {
+          "name": "bias_stride_k",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 232
+        },
+        {
+          "name": "head_dim_rt",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 240
+        },
+        {
+          "name": "v_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 244
         }
       ]
     },
@@ -437,19 +1033,22 @@
         "head_dim": 96,
         "causal": 0,
         "block_m": 128,
-        "block_n": 32
+        "block_n": 32,
+        "dv_split": 1,
+        "has_bias": 0,
+        "head_dim_max": 96
       },
       "file": "sdpa_bf16_d96_causal0_bm128_bn32.hsaco",
       "symbol": "flash_attn_func_gfx1151_kernel_0",
-      "bytes": 18496,
-      "sha256": "9efd8968e5dba902092d1a61bc7663a59285363faa47d264836a76decfbe6673",
-      "kernarg_segment_size": 200,
+      "bytes": 18880,
+      "sha256": "8fccf001220f702398f0dc983ce4acd3c3cb40415c734e63ad601be6c82fe03d",
+      "kernarg_segment_size": 248,
       "block": [
         256,
         1,
         1
       ],
-      "grid_rule": "batch_x_qtiles_x_heads",
+      "grid_rule": "batch_x_qtiles_x_heads_x_dv_split",
       "lds_bytes": 12800,
       "vgprs": 222,
       "llvm_options": {
@@ -632,6 +1231,301 @@
           "kind": "by_value",
           "size": 8,
           "offset": 192
+        },
+        {
+          "name": "BIAS",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 200
+        },
+        {
+          "name": "bias_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 208
+        },
+        {
+          "name": "bias_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 216
+        },
+        {
+          "name": "bias_stride_q",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 224
+        },
+        {
+          "name": "bias_stride_k",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 232
+        },
+        {
+          "name": "head_dim_rt",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 240
+        },
+        {
+          "name": "v_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 244
+        }
+      ]
+    },
+    {
+      "name": "sdpa_bf16_d96_causal0_bm128_bn32_bias1",
+      "op": "sdpa",
+      "dtype": "bf16",
+      "priority": 100,
+      "tier": "specialized",
+      "knobs": {
+        "head_dim": 96,
+        "causal": 0,
+        "block_m": 128,
+        "block_n": 32,
+        "dv_split": 1,
+        "has_bias": 1,
+        "head_dim_max": 96
+      },
+      "file": "sdpa_bf16_d96_causal0_bm128_bn32_bias1.hsaco",
+      "symbol": "flash_attn_func_gfx1151_kernel_0",
+      "bytes": 19520,
+      "sha256": "f69e18447cb09200a885881931a0f5834c63098509b2ea0ded49e03152d2a535",
+      "kernarg_segment_size": 248,
+      "block": [
+        256,
+        1,
+        1
+      ],
+      "grid_rule": "batch_x_qtiles_x_heads_x_dv_split",
+      "lds_bytes": 12800,
+      "vgprs": 228,
+      "llvm_options": {
+        "enable-post-misched": false,
+        "lsr-drop-solution": true,
+        "amdgpu-use-amdgpu-trackers": true
+      },
+      "named_args": 0,
+      "args": [
+        {
+          "name": "Q",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 0
+        },
+        {
+          "name": "K",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 8
+        },
+        {
+          "name": "V",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 16
+        },
+        {
+          "name": "O",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 24
+        },
+        {
+          "name": "LSE",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 32
+        },
+        {
+          "name": "seq_len_q",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 40
+        },
+        {
+          "name": "seq_len_kv",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 44
+        },
+        {
+          "name": "num_heads",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 48
+        },
+        {
+          "name": "kv_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 52
+        },
+        {
+          "name": "right_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 56
+        },
+        {
+          "name": "left_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 60
+        },
+        {
+          "name": "align_bottom_right",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 64
+        },
+        {
+          "name": "lse_on",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 68
+        },
+        {
+          "name": "scale",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 72
+        },
+        {
+          "name": "q_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 80
+        },
+        {
+          "name": "q_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 88
+        },
+        {
+          "name": "q_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 96
+        },
+        {
+          "name": "k_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 104
+        },
+        {
+          "name": "k_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 112
+        },
+        {
+          "name": "k_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 120
+        },
+        {
+          "name": "v_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 128
+        },
+        {
+          "name": "v_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 136
+        },
+        {
+          "name": "v_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 144
+        },
+        {
+          "name": "o_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 152
+        },
+        {
+          "name": "o_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 160
+        },
+        {
+          "name": "o_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 168
+        },
+        {
+          "name": "lse_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 176
+        },
+        {
+          "name": "lse_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 184
+        },
+        {
+          "name": "lse_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 192
+        },
+        {
+          "name": "BIAS",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 200
+        },
+        {
+          "name": "bias_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 208
+        },
+        {
+          "name": "bias_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 216
+        },
+        {
+          "name": "bias_stride_q",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 224
+        },
+        {
+          "name": "bias_stride_k",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 232
+        },
+        {
+          "name": "head_dim_rt",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 240
+        },
+        {
+          "name": "v_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 244
         }
       ]
     },
@@ -645,19 +1539,22 @@
         "head_dim": 96,
         "causal": 1,
         "block_m": 128,
-        "block_n": 32
+        "block_n": 32,
+        "dv_split": 1,
+        "has_bias": 0,
+        "head_dim_max": 96
       },
       "file": "sdpa_bf16_d96_causal1_bm128_bn32.hsaco",
       "symbol": "flash_attn_func_gfx1151_kernel_0",
-      "bytes": 18624,
-      "sha256": "3cbd6316d45f77df5526f370031cb351b097fa3a5357e599cb309dada43c8910",
-      "kernarg_segment_size": 200,
+      "bytes": 19008,
+      "sha256": "9a7b33e043dd19bbd69ee4857b6a4d88885c3f9bf05a9df9c447c8fba66df835",
+      "kernarg_segment_size": 248,
       "block": [
         256,
         1,
         1
       ],
-      "grid_rule": "batch_x_qtiles_x_heads",
+      "grid_rule": "batch_x_qtiles_x_heads_x_dv_split",
       "lds_bytes": 12800,
       "vgprs": 223,
       "llvm_options": {
@@ -840,6 +1737,301 @@
           "kind": "by_value",
           "size": 8,
           "offset": 192
+        },
+        {
+          "name": "BIAS",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 200
+        },
+        {
+          "name": "bias_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 208
+        },
+        {
+          "name": "bias_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 216
+        },
+        {
+          "name": "bias_stride_q",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 224
+        },
+        {
+          "name": "bias_stride_k",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 232
+        },
+        {
+          "name": "head_dim_rt",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 240
+        },
+        {
+          "name": "v_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 244
+        }
+      ]
+    },
+    {
+      "name": "sdpa_bf16_d96_causal1_bm128_bn32_bias1",
+      "op": "sdpa",
+      "dtype": "bf16",
+      "priority": 100,
+      "tier": "specialized",
+      "knobs": {
+        "head_dim": 96,
+        "causal": 1,
+        "block_m": 128,
+        "block_n": 32,
+        "dv_split": 1,
+        "has_bias": 1,
+        "head_dim_max": 96
+      },
+      "file": "sdpa_bf16_d96_causal1_bm128_bn32_bias1.hsaco",
+      "symbol": "flash_attn_func_gfx1151_kernel_0",
+      "bytes": 19520,
+      "sha256": "efd354ddc949ce376c16f9049272384cf7ed1e5d54a0322c2343514a033aed89",
+      "kernarg_segment_size": 248,
+      "block": [
+        256,
+        1,
+        1
+      ],
+      "grid_rule": "batch_x_qtiles_x_heads_x_dv_split",
+      "lds_bytes": 12800,
+      "vgprs": 229,
+      "llvm_options": {
+        "enable-post-misched": false,
+        "lsr-drop-solution": true,
+        "amdgpu-use-amdgpu-trackers": true
+      },
+      "named_args": 0,
+      "args": [
+        {
+          "name": "Q",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 0
+        },
+        {
+          "name": "K",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 8
+        },
+        {
+          "name": "V",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 16
+        },
+        {
+          "name": "O",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 24
+        },
+        {
+          "name": "LSE",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 32
+        },
+        {
+          "name": "seq_len_q",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 40
+        },
+        {
+          "name": "seq_len_kv",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 44
+        },
+        {
+          "name": "num_heads",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 48
+        },
+        {
+          "name": "kv_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 52
+        },
+        {
+          "name": "right_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 56
+        },
+        {
+          "name": "left_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 60
+        },
+        {
+          "name": "align_bottom_right",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 64
+        },
+        {
+          "name": "lse_on",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 68
+        },
+        {
+          "name": "scale",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 72
+        },
+        {
+          "name": "q_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 80
+        },
+        {
+          "name": "q_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 88
+        },
+        {
+          "name": "q_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 96
+        },
+        {
+          "name": "k_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 104
+        },
+        {
+          "name": "k_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 112
+        },
+        {
+          "name": "k_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 120
+        },
+        {
+          "name": "v_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 128
+        },
+        {
+          "name": "v_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 136
+        },
+        {
+          "name": "v_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 144
+        },
+        {
+          "name": "o_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 152
+        },
+        {
+          "name": "o_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 160
+        },
+        {
+          "name": "o_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 168
+        },
+        {
+          "name": "lse_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 176
+        },
+        {
+          "name": "lse_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 184
+        },
+        {
+          "name": "lse_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 192
+        },
+        {
+          "name": "BIAS",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 200
+        },
+        {
+          "name": "bias_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 208
+        },
+        {
+          "name": "bias_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 216
+        },
+        {
+          "name": "bias_stride_q",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 224
+        },
+        {
+          "name": "bias_stride_k",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 232
+        },
+        {
+          "name": "head_dim_rt",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 240
+        },
+        {
+          "name": "v_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 244
         }
       ]
     },
@@ -853,19 +2045,22 @@
         "head_dim": 128,
         "causal": 0,
         "block_m": 128,
-        "block_n": 32
+        "block_n": 32,
+        "dv_split": 1,
+        "has_bias": 0,
+        "head_dim_max": 128
       },
       "file": "sdpa_bf16_d128_causal0_bm128_bn32.hsaco",
       "symbol": "flash_attn_func_gfx1151_kernel_0",
-      "bytes": 20672,
-      "sha256": "e42fdd0e812fff687470440d63ffd1d9309bc6358894974fc94300b2f3249174",
-      "kernarg_segment_size": 200,
+      "bytes": 21056,
+      "sha256": "dbc4728cf34b662c98442b921479bb094316fbd2192c92d6044d25fcfc1fb47e",
+      "kernarg_segment_size": 248,
       "block": [
         256,
         1,
         1
       ],
-      "grid_rule": "batch_x_qtiles_x_heads",
+      "grid_rule": "batch_x_qtiles_x_heads_x_dv_split",
       "lds_bytes": 16896,
       "vgprs": 249,
       "llvm_options": {
@@ -1048,6 +2243,301 @@
           "kind": "by_value",
           "size": 8,
           "offset": 192
+        },
+        {
+          "name": "BIAS",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 200
+        },
+        {
+          "name": "bias_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 208
+        },
+        {
+          "name": "bias_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 216
+        },
+        {
+          "name": "bias_stride_q",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 224
+        },
+        {
+          "name": "bias_stride_k",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 232
+        },
+        {
+          "name": "head_dim_rt",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 240
+        },
+        {
+          "name": "v_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 244
+        }
+      ]
+    },
+    {
+      "name": "sdpa_bf16_d128_causal0_bm128_bn32_bias1",
+      "op": "sdpa",
+      "dtype": "bf16",
+      "priority": 100,
+      "tier": "specialized",
+      "knobs": {
+        "head_dim": 128,
+        "causal": 0,
+        "block_m": 128,
+        "block_n": 32,
+        "dv_split": 1,
+        "has_bias": 1,
+        "head_dim_max": 128
+      },
+      "file": "sdpa_bf16_d128_causal0_bm128_bn32_bias1.hsaco",
+      "symbol": "flash_attn_func_gfx1151_kernel_0",
+      "bytes": 21952,
+      "sha256": "46db1ccd1600719dd3acdedc1db9d3e44b65b5b5d58cc86216329a27916c3f89",
+      "kernarg_segment_size": 248,
+      "block": [
+        256,
+        1,
+        1
+      ],
+      "grid_rule": "batch_x_qtiles_x_heads_x_dv_split",
+      "lds_bytes": 16896,
+      "vgprs": 222,
+      "llvm_options": {
+        "enable-post-misched": false,
+        "lsr-drop-solution": true,
+        "amdgpu-use-amdgpu-trackers": true
+      },
+      "named_args": 0,
+      "args": [
+        {
+          "name": "Q",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 0
+        },
+        {
+          "name": "K",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 8
+        },
+        {
+          "name": "V",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 16
+        },
+        {
+          "name": "O",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 24
+        },
+        {
+          "name": "LSE",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 32
+        },
+        {
+          "name": "seq_len_q",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 40
+        },
+        {
+          "name": "seq_len_kv",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 44
+        },
+        {
+          "name": "num_heads",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 48
+        },
+        {
+          "name": "kv_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 52
+        },
+        {
+          "name": "right_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 56
+        },
+        {
+          "name": "left_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 60
+        },
+        {
+          "name": "align_bottom_right",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 64
+        },
+        {
+          "name": "lse_on",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 68
+        },
+        {
+          "name": "scale",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 72
+        },
+        {
+          "name": "q_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 80
+        },
+        {
+          "name": "q_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 88
+        },
+        {
+          "name": "q_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 96
+        },
+        {
+          "name": "k_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 104
+        },
+        {
+          "name": "k_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 112
+        },
+        {
+          "name": "k_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 120
+        },
+        {
+          "name": "v_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 128
+        },
+        {
+          "name": "v_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 136
+        },
+        {
+          "name": "v_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 144
+        },
+        {
+          "name": "o_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 152
+        },
+        {
+          "name": "o_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 160
+        },
+        {
+          "name": "o_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 168
+        },
+        {
+          "name": "lse_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 176
+        },
+        {
+          "name": "lse_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 184
+        },
+        {
+          "name": "lse_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 192
+        },
+        {
+          "name": "BIAS",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 200
+        },
+        {
+          "name": "bias_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 208
+        },
+        {
+          "name": "bias_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 216
+        },
+        {
+          "name": "bias_stride_q",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 224
+        },
+        {
+          "name": "bias_stride_k",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 232
+        },
+        {
+          "name": "head_dim_rt",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 240
+        },
+        {
+          "name": "v_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 244
         }
       ]
     },
@@ -1061,19 +2551,22 @@
         "head_dim": 128,
         "causal": 1,
         "block_m": 128,
-        "block_n": 32
+        "block_n": 32,
+        "dv_split": 1,
+        "has_bias": 0,
+        "head_dim_max": 128
       },
       "file": "sdpa_bf16_d128_causal1_bm128_bn32.hsaco",
       "symbol": "flash_attn_func_gfx1151_kernel_0",
-      "bytes": 20928,
-      "sha256": "1648bd8f36549c13eccd20f607aa58b9104217db58329e4a6af5370cc495dbd8",
-      "kernarg_segment_size": 200,
+      "bytes": 21440,
+      "sha256": "9341db6cd89c29cc1b671ea4c6fe48ad8e0f00d9685f04a93f04b170d3d7199d",
+      "kernarg_segment_size": 248,
       "block": [
         256,
         1,
         1
       ],
-      "grid_rule": "batch_x_qtiles_x_heads",
+      "grid_rule": "batch_x_qtiles_x_heads_x_dv_split",
       "lds_bytes": 16896,
       "vgprs": 250,
       "llvm_options": {
@@ -1256,6 +2749,2325 @@
           "kind": "by_value",
           "size": 8,
           "offset": 192
+        },
+        {
+          "name": "BIAS",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 200
+        },
+        {
+          "name": "bias_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 208
+        },
+        {
+          "name": "bias_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 216
+        },
+        {
+          "name": "bias_stride_q",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 224
+        },
+        {
+          "name": "bias_stride_k",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 232
+        },
+        {
+          "name": "head_dim_rt",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 240
+        },
+        {
+          "name": "v_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 244
+        }
+      ]
+    },
+    {
+      "name": "sdpa_bf16_d128_causal1_bm128_bn32_bias1",
+      "op": "sdpa",
+      "dtype": "bf16",
+      "priority": 100,
+      "tier": "specialized",
+      "knobs": {
+        "head_dim": 128,
+        "causal": 1,
+        "block_m": 128,
+        "block_n": 32,
+        "dv_split": 1,
+        "has_bias": 1,
+        "head_dim_max": 128
+      },
+      "file": "sdpa_bf16_d128_causal1_bm128_bn32_bias1.hsaco",
+      "symbol": "flash_attn_func_gfx1151_kernel_0",
+      "bytes": 21824,
+      "sha256": "cf1748067d354270083b84cbb19ea031c89a8a99d6ddcbf0a1b112c315cd02f4",
+      "kernarg_segment_size": 248,
+      "block": [
+        256,
+        1,
+        1
+      ],
+      "grid_rule": "batch_x_qtiles_x_heads_x_dv_split",
+      "lds_bytes": 16896,
+      "vgprs": 198,
+      "llvm_options": {
+        "enable-post-misched": false,
+        "lsr-drop-solution": true,
+        "amdgpu-use-amdgpu-trackers": true
+      },
+      "named_args": 0,
+      "args": [
+        {
+          "name": "Q",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 0
+        },
+        {
+          "name": "K",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 8
+        },
+        {
+          "name": "V",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 16
+        },
+        {
+          "name": "O",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 24
+        },
+        {
+          "name": "LSE",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 32
+        },
+        {
+          "name": "seq_len_q",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 40
+        },
+        {
+          "name": "seq_len_kv",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 44
+        },
+        {
+          "name": "num_heads",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 48
+        },
+        {
+          "name": "kv_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 52
+        },
+        {
+          "name": "right_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 56
+        },
+        {
+          "name": "left_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 60
+        },
+        {
+          "name": "align_bottom_right",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 64
+        },
+        {
+          "name": "lse_on",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 68
+        },
+        {
+          "name": "scale",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 72
+        },
+        {
+          "name": "q_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 80
+        },
+        {
+          "name": "q_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 88
+        },
+        {
+          "name": "q_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 96
+        },
+        {
+          "name": "k_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 104
+        },
+        {
+          "name": "k_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 112
+        },
+        {
+          "name": "k_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 120
+        },
+        {
+          "name": "v_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 128
+        },
+        {
+          "name": "v_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 136
+        },
+        {
+          "name": "v_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 144
+        },
+        {
+          "name": "o_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 152
+        },
+        {
+          "name": "o_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 160
+        },
+        {
+          "name": "o_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 168
+        },
+        {
+          "name": "lse_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 176
+        },
+        {
+          "name": "lse_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 184
+        },
+        {
+          "name": "lse_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 192
+        },
+        {
+          "name": "BIAS",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 200
+        },
+        {
+          "name": "bias_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 208
+        },
+        {
+          "name": "bias_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 216
+        },
+        {
+          "name": "bias_stride_q",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 224
+        },
+        {
+          "name": "bias_stride_k",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 232
+        },
+        {
+          "name": "head_dim_rt",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 240
+        },
+        {
+          "name": "v_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 244
+        }
+      ]
+    },
+    {
+      "name": "sdpa_bf16_d256_causal0_bm128_bn32_dv2",
+      "op": "sdpa",
+      "dtype": "bf16",
+      "priority": 100,
+      "tier": "specialized",
+      "knobs": {
+        "head_dim": 256,
+        "causal": 0,
+        "block_m": 128,
+        "block_n": 32,
+        "dv_split": 2,
+        "has_bias": 0,
+        "head_dim_max": 256
+      },
+      "file": "sdpa_bf16_d256_causal0_bm128_bn32_dv2.hsaco",
+      "symbol": "flash_attn_func_gfx1151_kernel_0",
+      "bytes": 21696,
+      "sha256": "368ce7823f56ecebe16350997d83e35a7376f737073797b20f0b27a02ed96ab8",
+      "kernarg_segment_size": 248,
+      "block": [
+        256,
+        1,
+        1
+      ],
+      "grid_rule": "batch_x_qtiles_x_heads_x_dv_split",
+      "lds_bytes": 33280,
+      "vgprs": 191,
+      "llvm_options": {
+        "enable-post-misched": false,
+        "lsr-drop-solution": true,
+        "amdgpu-use-amdgpu-trackers": true
+      },
+      "named_args": 0,
+      "args": [
+        {
+          "name": "Q",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 0
+        },
+        {
+          "name": "K",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 8
+        },
+        {
+          "name": "V",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 16
+        },
+        {
+          "name": "O",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 24
+        },
+        {
+          "name": "LSE",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 32
+        },
+        {
+          "name": "seq_len_q",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 40
+        },
+        {
+          "name": "seq_len_kv",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 44
+        },
+        {
+          "name": "num_heads",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 48
+        },
+        {
+          "name": "kv_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 52
+        },
+        {
+          "name": "right_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 56
+        },
+        {
+          "name": "left_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 60
+        },
+        {
+          "name": "align_bottom_right",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 64
+        },
+        {
+          "name": "lse_on",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 68
+        },
+        {
+          "name": "scale",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 72
+        },
+        {
+          "name": "q_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 80
+        },
+        {
+          "name": "q_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 88
+        },
+        {
+          "name": "q_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 96
+        },
+        {
+          "name": "k_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 104
+        },
+        {
+          "name": "k_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 112
+        },
+        {
+          "name": "k_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 120
+        },
+        {
+          "name": "v_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 128
+        },
+        {
+          "name": "v_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 136
+        },
+        {
+          "name": "v_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 144
+        },
+        {
+          "name": "o_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 152
+        },
+        {
+          "name": "o_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 160
+        },
+        {
+          "name": "o_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 168
+        },
+        {
+          "name": "lse_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 176
+        },
+        {
+          "name": "lse_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 184
+        },
+        {
+          "name": "lse_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 192
+        },
+        {
+          "name": "BIAS",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 200
+        },
+        {
+          "name": "bias_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 208
+        },
+        {
+          "name": "bias_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 216
+        },
+        {
+          "name": "bias_stride_q",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 224
+        },
+        {
+          "name": "bias_stride_k",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 232
+        },
+        {
+          "name": "head_dim_rt",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 240
+        },
+        {
+          "name": "v_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 244
+        }
+      ]
+    },
+    {
+      "name": "sdpa_bf16_d256_causal0_bm128_bn32_dv2_bias1",
+      "op": "sdpa",
+      "dtype": "bf16",
+      "priority": 100,
+      "tier": "specialized",
+      "knobs": {
+        "head_dim": 256,
+        "causal": 0,
+        "block_m": 128,
+        "block_n": 32,
+        "dv_split": 2,
+        "has_bias": 1,
+        "head_dim_max": 256
+      },
+      "file": "sdpa_bf16_d256_causal0_bm128_bn32_dv2_bias1.hsaco",
+      "symbol": "flash_attn_func_gfx1151_kernel_0",
+      "bytes": 22208,
+      "sha256": "81bf6ebc3685aa68c3fb0eb2d9ec597383269d34a0b93db6be3657f9f0d35112",
+      "kernarg_segment_size": 248,
+      "block": [
+        256,
+        1,
+        1
+      ],
+      "grid_rule": "batch_x_qtiles_x_heads_x_dv_split",
+      "lds_bytes": 33280,
+      "vgprs": 191,
+      "llvm_options": {
+        "enable-post-misched": false,
+        "lsr-drop-solution": true,
+        "amdgpu-use-amdgpu-trackers": true
+      },
+      "named_args": 0,
+      "args": [
+        {
+          "name": "Q",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 0
+        },
+        {
+          "name": "K",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 8
+        },
+        {
+          "name": "V",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 16
+        },
+        {
+          "name": "O",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 24
+        },
+        {
+          "name": "LSE",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 32
+        },
+        {
+          "name": "seq_len_q",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 40
+        },
+        {
+          "name": "seq_len_kv",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 44
+        },
+        {
+          "name": "num_heads",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 48
+        },
+        {
+          "name": "kv_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 52
+        },
+        {
+          "name": "right_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 56
+        },
+        {
+          "name": "left_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 60
+        },
+        {
+          "name": "align_bottom_right",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 64
+        },
+        {
+          "name": "lse_on",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 68
+        },
+        {
+          "name": "scale",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 72
+        },
+        {
+          "name": "q_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 80
+        },
+        {
+          "name": "q_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 88
+        },
+        {
+          "name": "q_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 96
+        },
+        {
+          "name": "k_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 104
+        },
+        {
+          "name": "k_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 112
+        },
+        {
+          "name": "k_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 120
+        },
+        {
+          "name": "v_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 128
+        },
+        {
+          "name": "v_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 136
+        },
+        {
+          "name": "v_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 144
+        },
+        {
+          "name": "o_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 152
+        },
+        {
+          "name": "o_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 160
+        },
+        {
+          "name": "o_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 168
+        },
+        {
+          "name": "lse_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 176
+        },
+        {
+          "name": "lse_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 184
+        },
+        {
+          "name": "lse_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 192
+        },
+        {
+          "name": "BIAS",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 200
+        },
+        {
+          "name": "bias_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 208
+        },
+        {
+          "name": "bias_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 216
+        },
+        {
+          "name": "bias_stride_q",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 224
+        },
+        {
+          "name": "bias_stride_k",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 232
+        },
+        {
+          "name": "head_dim_rt",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 240
+        },
+        {
+          "name": "v_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 244
+        }
+      ]
+    },
+    {
+      "name": "sdpa_bf16_d256_causal1_bm128_bn32_dv2",
+      "op": "sdpa",
+      "dtype": "bf16",
+      "priority": 100,
+      "tier": "specialized",
+      "knobs": {
+        "head_dim": 256,
+        "causal": 1,
+        "block_m": 128,
+        "block_n": 32,
+        "dv_split": 2,
+        "has_bias": 0,
+        "head_dim_max": 256
+      },
+      "file": "sdpa_bf16_d256_causal1_bm128_bn32_dv2.hsaco",
+      "symbol": "flash_attn_func_gfx1151_kernel_0",
+      "bytes": 21696,
+      "sha256": "09d866256969a601480271ca5999a6659965da61080c702c82bff3c9755c75e8",
+      "kernarg_segment_size": 248,
+      "block": [
+        256,
+        1,
+        1
+      ],
+      "grid_rule": "batch_x_qtiles_x_heads_x_dv_split",
+      "lds_bytes": 33280,
+      "vgprs": 185,
+      "llvm_options": {
+        "enable-post-misched": false,
+        "lsr-drop-solution": true,
+        "amdgpu-use-amdgpu-trackers": true
+      },
+      "named_args": 0,
+      "args": [
+        {
+          "name": "Q",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 0
+        },
+        {
+          "name": "K",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 8
+        },
+        {
+          "name": "V",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 16
+        },
+        {
+          "name": "O",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 24
+        },
+        {
+          "name": "LSE",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 32
+        },
+        {
+          "name": "seq_len_q",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 40
+        },
+        {
+          "name": "seq_len_kv",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 44
+        },
+        {
+          "name": "num_heads",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 48
+        },
+        {
+          "name": "kv_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 52
+        },
+        {
+          "name": "right_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 56
+        },
+        {
+          "name": "left_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 60
+        },
+        {
+          "name": "align_bottom_right",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 64
+        },
+        {
+          "name": "lse_on",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 68
+        },
+        {
+          "name": "scale",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 72
+        },
+        {
+          "name": "q_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 80
+        },
+        {
+          "name": "q_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 88
+        },
+        {
+          "name": "q_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 96
+        },
+        {
+          "name": "k_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 104
+        },
+        {
+          "name": "k_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 112
+        },
+        {
+          "name": "k_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 120
+        },
+        {
+          "name": "v_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 128
+        },
+        {
+          "name": "v_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 136
+        },
+        {
+          "name": "v_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 144
+        },
+        {
+          "name": "o_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 152
+        },
+        {
+          "name": "o_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 160
+        },
+        {
+          "name": "o_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 168
+        },
+        {
+          "name": "lse_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 176
+        },
+        {
+          "name": "lse_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 184
+        },
+        {
+          "name": "lse_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 192
+        },
+        {
+          "name": "BIAS",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 200
+        },
+        {
+          "name": "bias_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 208
+        },
+        {
+          "name": "bias_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 216
+        },
+        {
+          "name": "bias_stride_q",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 224
+        },
+        {
+          "name": "bias_stride_k",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 232
+        },
+        {
+          "name": "head_dim_rt",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 240
+        },
+        {
+          "name": "v_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 244
+        }
+      ]
+    },
+    {
+      "name": "sdpa_bf16_d256_causal1_bm128_bn32_dv2_bias1",
+      "op": "sdpa",
+      "dtype": "bf16",
+      "priority": 100,
+      "tier": "specialized",
+      "knobs": {
+        "head_dim": 256,
+        "causal": 1,
+        "block_m": 128,
+        "block_n": 32,
+        "dv_split": 2,
+        "has_bias": 1,
+        "head_dim_max": 256
+      },
+      "file": "sdpa_bf16_d256_causal1_bm128_bn32_dv2_bias1.hsaco",
+      "symbol": "flash_attn_func_gfx1151_kernel_0",
+      "bytes": 22208,
+      "sha256": "f4a57ee3bda25d33cb667e2a5651b2107114ebdfa806bbbf68c8001acc877417",
+      "kernarg_segment_size": 248,
+      "block": [
+        256,
+        1,
+        1
+      ],
+      "grid_rule": "batch_x_qtiles_x_heads_x_dv_split",
+      "lds_bytes": 33280,
+      "vgprs": 191,
+      "llvm_options": {
+        "enable-post-misched": false,
+        "lsr-drop-solution": true,
+        "amdgpu-use-amdgpu-trackers": true
+      },
+      "named_args": 0,
+      "args": [
+        {
+          "name": "Q",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 0
+        },
+        {
+          "name": "K",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 8
+        },
+        {
+          "name": "V",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 16
+        },
+        {
+          "name": "O",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 24
+        },
+        {
+          "name": "LSE",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 32
+        },
+        {
+          "name": "seq_len_q",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 40
+        },
+        {
+          "name": "seq_len_kv",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 44
+        },
+        {
+          "name": "num_heads",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 48
+        },
+        {
+          "name": "kv_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 52
+        },
+        {
+          "name": "right_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 56
+        },
+        {
+          "name": "left_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 60
+        },
+        {
+          "name": "align_bottom_right",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 64
+        },
+        {
+          "name": "lse_on",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 68
+        },
+        {
+          "name": "scale",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 72
+        },
+        {
+          "name": "q_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 80
+        },
+        {
+          "name": "q_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 88
+        },
+        {
+          "name": "q_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 96
+        },
+        {
+          "name": "k_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 104
+        },
+        {
+          "name": "k_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 112
+        },
+        {
+          "name": "k_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 120
+        },
+        {
+          "name": "v_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 128
+        },
+        {
+          "name": "v_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 136
+        },
+        {
+          "name": "v_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 144
+        },
+        {
+          "name": "o_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 152
+        },
+        {
+          "name": "o_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 160
+        },
+        {
+          "name": "o_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 168
+        },
+        {
+          "name": "lse_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 176
+        },
+        {
+          "name": "lse_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 184
+        },
+        {
+          "name": "lse_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 192
+        },
+        {
+          "name": "BIAS",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 200
+        },
+        {
+          "name": "bias_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 208
+        },
+        {
+          "name": "bias_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 216
+        },
+        {
+          "name": "bias_stride_q",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 224
+        },
+        {
+          "name": "bias_stride_k",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 232
+        },
+        {
+          "name": "head_dim_rt",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 240
+        },
+        {
+          "name": "v_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 244
+        }
+      ]
+    },
+    {
+      "name": "sdpa_bf16_dgeneric_causal0_bm128_bn32_dmax128",
+      "op": "sdpa",
+      "dtype": "bf16",
+      "priority": 20,
+      "tier": "generic",
+      "knobs": {
+        "head_dim": null,
+        "causal": 0,
+        "block_m": 128,
+        "block_n": 32,
+        "dv_split": 1,
+        "has_bias": 0,
+        "head_dim_max": 128
+      },
+      "file": "sdpa_bf16_dgeneric_causal0_bm128_bn32_dmax128.hsaco",
+      "symbol": "flash_attn_func_gfx1151_kernel_0",
+      "bytes": 22720,
+      "sha256": "9ab4aa362fbdb7b3c036151be44d7cd09627049e2d3a706afbd8cab7852b7c8c",
+      "kernarg_segment_size": 248,
+      "block": [
+        256,
+        1,
+        1
+      ],
+      "grid_rule": "batch_x_qtiles_x_heads_x_dv_split",
+      "lds_bytes": 16896,
+      "vgprs": 249,
+      "llvm_options": {
+        "enable-post-misched": false,
+        "lsr-drop-solution": true,
+        "amdgpu-use-amdgpu-trackers": true
+      },
+      "named_args": 0,
+      "args": [
+        {
+          "name": "Q",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 0
+        },
+        {
+          "name": "K",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 8
+        },
+        {
+          "name": "V",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 16
+        },
+        {
+          "name": "O",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 24
+        },
+        {
+          "name": "LSE",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 32
+        },
+        {
+          "name": "seq_len_q",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 40
+        },
+        {
+          "name": "seq_len_kv",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 44
+        },
+        {
+          "name": "num_heads",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 48
+        },
+        {
+          "name": "kv_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 52
+        },
+        {
+          "name": "right_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 56
+        },
+        {
+          "name": "left_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 60
+        },
+        {
+          "name": "align_bottom_right",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 64
+        },
+        {
+          "name": "lse_on",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 68
+        },
+        {
+          "name": "scale",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 72
+        },
+        {
+          "name": "q_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 80
+        },
+        {
+          "name": "q_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 88
+        },
+        {
+          "name": "q_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 96
+        },
+        {
+          "name": "k_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 104
+        },
+        {
+          "name": "k_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 112
+        },
+        {
+          "name": "k_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 120
+        },
+        {
+          "name": "v_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 128
+        },
+        {
+          "name": "v_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 136
+        },
+        {
+          "name": "v_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 144
+        },
+        {
+          "name": "o_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 152
+        },
+        {
+          "name": "o_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 160
+        },
+        {
+          "name": "o_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 168
+        },
+        {
+          "name": "lse_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 176
+        },
+        {
+          "name": "lse_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 184
+        },
+        {
+          "name": "lse_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 192
+        },
+        {
+          "name": "BIAS",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 200
+        },
+        {
+          "name": "bias_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 208
+        },
+        {
+          "name": "bias_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 216
+        },
+        {
+          "name": "bias_stride_q",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 224
+        },
+        {
+          "name": "bias_stride_k",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 232
+        },
+        {
+          "name": "head_dim_rt",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 240
+        },
+        {
+          "name": "v_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 244
+        }
+      ]
+    },
+    {
+      "name": "sdpa_bf16_dgeneric_causal1_bm128_bn32_dmax128",
+      "op": "sdpa",
+      "dtype": "bf16",
+      "priority": 20,
+      "tier": "generic",
+      "knobs": {
+        "head_dim": null,
+        "causal": 1,
+        "block_m": 128,
+        "block_n": 32,
+        "dv_split": 1,
+        "has_bias": 0,
+        "head_dim_max": 128
+      },
+      "file": "sdpa_bf16_dgeneric_causal1_bm128_bn32_dmax128.hsaco",
+      "symbol": "flash_attn_func_gfx1151_kernel_0",
+      "bytes": 22976,
+      "sha256": "79bb5a92e892e3b26e41a072c8179c3d32d1d4e175e5e85696b6d964e33dc481",
+      "kernarg_segment_size": 248,
+      "block": [
+        256,
+        1,
+        1
+      ],
+      "grid_rule": "batch_x_qtiles_x_heads_x_dv_split",
+      "lds_bytes": 16896,
+      "vgprs": 250,
+      "llvm_options": {
+        "enable-post-misched": false,
+        "lsr-drop-solution": true,
+        "amdgpu-use-amdgpu-trackers": true
+      },
+      "named_args": 0,
+      "args": [
+        {
+          "name": "Q",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 0
+        },
+        {
+          "name": "K",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 8
+        },
+        {
+          "name": "V",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 16
+        },
+        {
+          "name": "O",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 24
+        },
+        {
+          "name": "LSE",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 32
+        },
+        {
+          "name": "seq_len_q",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 40
+        },
+        {
+          "name": "seq_len_kv",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 44
+        },
+        {
+          "name": "num_heads",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 48
+        },
+        {
+          "name": "kv_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 52
+        },
+        {
+          "name": "right_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 56
+        },
+        {
+          "name": "left_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 60
+        },
+        {
+          "name": "align_bottom_right",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 64
+        },
+        {
+          "name": "lse_on",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 68
+        },
+        {
+          "name": "scale",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 72
+        },
+        {
+          "name": "q_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 80
+        },
+        {
+          "name": "q_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 88
+        },
+        {
+          "name": "q_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 96
+        },
+        {
+          "name": "k_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 104
+        },
+        {
+          "name": "k_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 112
+        },
+        {
+          "name": "k_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 120
+        },
+        {
+          "name": "v_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 128
+        },
+        {
+          "name": "v_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 136
+        },
+        {
+          "name": "v_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 144
+        },
+        {
+          "name": "o_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 152
+        },
+        {
+          "name": "o_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 160
+        },
+        {
+          "name": "o_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 168
+        },
+        {
+          "name": "lse_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 176
+        },
+        {
+          "name": "lse_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 184
+        },
+        {
+          "name": "lse_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 192
+        },
+        {
+          "name": "BIAS",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 200
+        },
+        {
+          "name": "bias_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 208
+        },
+        {
+          "name": "bias_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 216
+        },
+        {
+          "name": "bias_stride_q",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 224
+        },
+        {
+          "name": "bias_stride_k",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 232
+        },
+        {
+          "name": "head_dim_rt",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 240
+        },
+        {
+          "name": "v_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 244
+        }
+      ]
+    },
+    {
+      "name": "sdpa_bf16_dgeneric_causal0_bm128_bn32_dv4_dmax256",
+      "op": "sdpa",
+      "dtype": "bf16",
+      "priority": 10,
+      "tier": "generic",
+      "knobs": {
+        "head_dim": null,
+        "causal": 0,
+        "block_m": 128,
+        "block_n": 32,
+        "dv_split": 4,
+        "has_bias": 0,
+        "head_dim_max": 256
+      },
+      "file": "sdpa_bf16_dgeneric_causal0_bm128_bn32_dv4_dmax256.hsaco",
+      "symbol": "flash_attn_func_gfx1151_kernel_0",
+      "bytes": 19776,
+      "sha256": "54670d6a537fa0fc52e690d0e0433a0b22fd7051c3e7c6aa4577ffde9def5527",
+      "kernarg_segment_size": 248,
+      "block": [
+        256,
+        1,
+        1
+      ],
+      "grid_rule": "batch_x_qtiles_x_heads_x_dv_split",
+      "lds_bytes": 33280,
+      "vgprs": 166,
+      "llvm_options": {
+        "enable-post-misched": false,
+        "lsr-drop-solution": true,
+        "amdgpu-use-amdgpu-trackers": true
+      },
+      "named_args": 0,
+      "args": [
+        {
+          "name": "Q",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 0
+        },
+        {
+          "name": "K",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 8
+        },
+        {
+          "name": "V",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 16
+        },
+        {
+          "name": "O",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 24
+        },
+        {
+          "name": "LSE",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 32
+        },
+        {
+          "name": "seq_len_q",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 40
+        },
+        {
+          "name": "seq_len_kv",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 44
+        },
+        {
+          "name": "num_heads",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 48
+        },
+        {
+          "name": "kv_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 52
+        },
+        {
+          "name": "right_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 56
+        },
+        {
+          "name": "left_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 60
+        },
+        {
+          "name": "align_bottom_right",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 64
+        },
+        {
+          "name": "lse_on",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 68
+        },
+        {
+          "name": "scale",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 72
+        },
+        {
+          "name": "q_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 80
+        },
+        {
+          "name": "q_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 88
+        },
+        {
+          "name": "q_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 96
+        },
+        {
+          "name": "k_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 104
+        },
+        {
+          "name": "k_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 112
+        },
+        {
+          "name": "k_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 120
+        },
+        {
+          "name": "v_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 128
+        },
+        {
+          "name": "v_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 136
+        },
+        {
+          "name": "v_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 144
+        },
+        {
+          "name": "o_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 152
+        },
+        {
+          "name": "o_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 160
+        },
+        {
+          "name": "o_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 168
+        },
+        {
+          "name": "lse_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 176
+        },
+        {
+          "name": "lse_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 184
+        },
+        {
+          "name": "lse_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 192
+        },
+        {
+          "name": "BIAS",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 200
+        },
+        {
+          "name": "bias_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 208
+        },
+        {
+          "name": "bias_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 216
+        },
+        {
+          "name": "bias_stride_q",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 224
+        },
+        {
+          "name": "bias_stride_k",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 232
+        },
+        {
+          "name": "head_dim_rt",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 240
+        },
+        {
+          "name": "v_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 244
+        }
+      ]
+    },
+    {
+      "name": "sdpa_bf16_dgeneric_causal1_bm128_bn32_dv4_dmax256",
+      "op": "sdpa",
+      "dtype": "bf16",
+      "priority": 10,
+      "tier": "generic",
+      "knobs": {
+        "head_dim": null,
+        "causal": 1,
+        "block_m": 128,
+        "block_n": 32,
+        "dv_split": 4,
+        "has_bias": 0,
+        "head_dim_max": 256
+      },
+      "file": "sdpa_bf16_dgeneric_causal1_bm128_bn32_dv4_dmax256.hsaco",
+      "symbol": "flash_attn_func_gfx1151_kernel_0",
+      "bytes": 19648,
+      "sha256": "e86352a2b4480f7cd72302ca977a81322da81d7513de2ebab6f425e807a9e2aa",
+      "kernarg_segment_size": 248,
+      "block": [
+        256,
+        1,
+        1
+      ],
+      "grid_rule": "batch_x_qtiles_x_heads_x_dv_split",
+      "lds_bytes": 33280,
+      "vgprs": 164,
+      "llvm_options": {
+        "enable-post-misched": false,
+        "lsr-drop-solution": true,
+        "amdgpu-use-amdgpu-trackers": true
+      },
+      "named_args": 0,
+      "args": [
+        {
+          "name": "Q",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 0
+        },
+        {
+          "name": "K",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 8
+        },
+        {
+          "name": "V",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 16
+        },
+        {
+          "name": "O",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 24
+        },
+        {
+          "name": "LSE",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 32
+        },
+        {
+          "name": "seq_len_q",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 40
+        },
+        {
+          "name": "seq_len_kv",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 44
+        },
+        {
+          "name": "num_heads",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 48
+        },
+        {
+          "name": "kv_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 52
+        },
+        {
+          "name": "right_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 56
+        },
+        {
+          "name": "left_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 60
+        },
+        {
+          "name": "align_bottom_right",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 64
+        },
+        {
+          "name": "lse_on",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 68
+        },
+        {
+          "name": "scale",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 72
+        },
+        {
+          "name": "q_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 80
+        },
+        {
+          "name": "q_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 88
+        },
+        {
+          "name": "q_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 96
+        },
+        {
+          "name": "k_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 104
+        },
+        {
+          "name": "k_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 112
+        },
+        {
+          "name": "k_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 120
+        },
+        {
+          "name": "v_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 128
+        },
+        {
+          "name": "v_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 136
+        },
+        {
+          "name": "v_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 144
+        },
+        {
+          "name": "o_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 152
+        },
+        {
+          "name": "o_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 160
+        },
+        {
+          "name": "o_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 168
+        },
+        {
+          "name": "lse_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 176
+        },
+        {
+          "name": "lse_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 184
+        },
+        {
+          "name": "lse_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 192
+        },
+        {
+          "name": "BIAS",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 200
+        },
+        {
+          "name": "bias_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 208
+        },
+        {
+          "name": "bias_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 216
+        },
+        {
+          "name": "bias_stride_q",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 224
+        },
+        {
+          "name": "bias_stride_k",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 232
+        },
+        {
+          "name": "head_dim_rt",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 240
+        },
+        {
+          "name": "v_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 244
         }
       ]
     },
@@ -1269,19 +5081,22 @@
         "head_dim": 64,
         "causal": 0,
         "block_m": 128,
-        "block_n": 32
+        "block_n": 32,
+        "dv_split": 1,
+        "has_bias": 0,
+        "head_dim_max": 64
       },
       "file": "sdpa_f16_d64_causal0_bm128_bn32.hsaco",
       "symbol": "flash_attn_func_gfx1151_kernel_0",
-      "bytes": 13632,
-      "sha256": "4df665852a22b524885358f31d08a56a2cc0cce11ee8db292f7ef459b0ef384d",
-      "kernarg_segment_size": 200,
+      "bytes": 14016,
+      "sha256": "0f09a4e93552915c4e2d4d1eb2fddaabf1c8140750c12293441b5cacb6d1a696",
+      "kernarg_segment_size": 248,
       "block": [
         256,
         1,
         1
       ],
-      "grid_rule": "batch_x_qtiles_x_heads",
+      "grid_rule": "batch_x_qtiles_x_heads_x_dv_split",
       "lds_bytes": 8704,
       "vgprs": 156,
       "llvm_options": {
@@ -1464,6 +5279,301 @@
           "kind": "by_value",
           "size": 8,
           "offset": 192
+        },
+        {
+          "name": "BIAS",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 200
+        },
+        {
+          "name": "bias_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 208
+        },
+        {
+          "name": "bias_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 216
+        },
+        {
+          "name": "bias_stride_q",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 224
+        },
+        {
+          "name": "bias_stride_k",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 232
+        },
+        {
+          "name": "head_dim_rt",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 240
+        },
+        {
+          "name": "v_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 244
+        }
+      ]
+    },
+    {
+      "name": "sdpa_f16_d64_causal0_bm128_bn32_bias1",
+      "op": "sdpa",
+      "dtype": "f16",
+      "priority": 100,
+      "tier": "specialized",
+      "knobs": {
+        "head_dim": 64,
+        "causal": 0,
+        "block_m": 128,
+        "block_n": 32,
+        "dv_split": 1,
+        "has_bias": 1,
+        "head_dim_max": 64
+      },
+      "file": "sdpa_f16_d64_causal0_bm128_bn32_bias1.hsaco",
+      "symbol": "flash_attn_func_gfx1151_kernel_0",
+      "bytes": 14656,
+      "sha256": "41fdea835daa056de389f45dfbae6db81de3551c59c15044d2db7db1e940ac24",
+      "kernarg_segment_size": 248,
+      "block": [
+        256,
+        1,
+        1
+      ],
+      "grid_rule": "batch_x_qtiles_x_heads_x_dv_split",
+      "lds_bytes": 8704,
+      "vgprs": 166,
+      "llvm_options": {
+        "enable-post-misched": false,
+        "lsr-drop-solution": true,
+        "amdgpu-use-amdgpu-trackers": true
+      },
+      "named_args": 0,
+      "args": [
+        {
+          "name": "Q",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 0
+        },
+        {
+          "name": "K",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 8
+        },
+        {
+          "name": "V",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 16
+        },
+        {
+          "name": "O",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 24
+        },
+        {
+          "name": "LSE",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 32
+        },
+        {
+          "name": "seq_len_q",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 40
+        },
+        {
+          "name": "seq_len_kv",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 44
+        },
+        {
+          "name": "num_heads",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 48
+        },
+        {
+          "name": "kv_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 52
+        },
+        {
+          "name": "right_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 56
+        },
+        {
+          "name": "left_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 60
+        },
+        {
+          "name": "align_bottom_right",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 64
+        },
+        {
+          "name": "lse_on",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 68
+        },
+        {
+          "name": "scale",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 72
+        },
+        {
+          "name": "q_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 80
+        },
+        {
+          "name": "q_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 88
+        },
+        {
+          "name": "q_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 96
+        },
+        {
+          "name": "k_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 104
+        },
+        {
+          "name": "k_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 112
+        },
+        {
+          "name": "k_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 120
+        },
+        {
+          "name": "v_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 128
+        },
+        {
+          "name": "v_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 136
+        },
+        {
+          "name": "v_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 144
+        },
+        {
+          "name": "o_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 152
+        },
+        {
+          "name": "o_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 160
+        },
+        {
+          "name": "o_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 168
+        },
+        {
+          "name": "lse_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 176
+        },
+        {
+          "name": "lse_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 184
+        },
+        {
+          "name": "lse_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 192
+        },
+        {
+          "name": "BIAS",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 200
+        },
+        {
+          "name": "bias_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 208
+        },
+        {
+          "name": "bias_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 216
+        },
+        {
+          "name": "bias_stride_q",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 224
+        },
+        {
+          "name": "bias_stride_k",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 232
+        },
+        {
+          "name": "head_dim_rt",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 240
+        },
+        {
+          "name": "v_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 244
         }
       ]
     },
@@ -1477,19 +5587,22 @@
         "head_dim": 64,
         "causal": 1,
         "block_m": 128,
-        "block_n": 32
+        "block_n": 32,
+        "dv_split": 1,
+        "has_bias": 0,
+        "head_dim_max": 64
       },
       "file": "sdpa_f16_d64_causal1_bm128_bn32.hsaco",
       "symbol": "flash_attn_func_gfx1151_kernel_0",
-      "bytes": 13760,
-      "sha256": "a9a0349f4f65addc8c614f533d14e1d98e3a0aa7f899259f833482bc965b8360",
-      "kernarg_segment_size": 200,
+      "bytes": 14272,
+      "sha256": "1b474f2c85d6e033d53c714e522529bfc279d22d51d50ed26ab4eb5a46d59c1f",
+      "kernarg_segment_size": 248,
       "block": [
         256,
         1,
         1
       ],
-      "grid_rule": "batch_x_qtiles_x_heads",
+      "grid_rule": "batch_x_qtiles_x_heads_x_dv_split",
       "lds_bytes": 8704,
       "vgprs": 165,
       "llvm_options": {
@@ -1672,6 +5785,301 @@
           "kind": "by_value",
           "size": 8,
           "offset": 192
+        },
+        {
+          "name": "BIAS",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 200
+        },
+        {
+          "name": "bias_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 208
+        },
+        {
+          "name": "bias_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 216
+        },
+        {
+          "name": "bias_stride_q",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 224
+        },
+        {
+          "name": "bias_stride_k",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 232
+        },
+        {
+          "name": "head_dim_rt",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 240
+        },
+        {
+          "name": "v_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 244
+        }
+      ]
+    },
+    {
+      "name": "sdpa_f16_d64_causal1_bm128_bn32_bias1",
+      "op": "sdpa",
+      "dtype": "f16",
+      "priority": 100,
+      "tier": "specialized",
+      "knobs": {
+        "head_dim": 64,
+        "causal": 1,
+        "block_m": 128,
+        "block_n": 32,
+        "dv_split": 1,
+        "has_bias": 1,
+        "head_dim_max": 64
+      },
+      "file": "sdpa_f16_d64_causal1_bm128_bn32_bias1.hsaco",
+      "symbol": "flash_attn_func_gfx1151_kernel_0",
+      "bytes": 14656,
+      "sha256": "da5f8347bb2af45162c53f317f6691e6167ffb5d3f8a2301b0ae202077787ba2",
+      "kernarg_segment_size": 248,
+      "block": [
+        256,
+        1,
+        1
+      ],
+      "grid_rule": "batch_x_qtiles_x_heads_x_dv_split",
+      "lds_bytes": 8704,
+      "vgprs": 167,
+      "llvm_options": {
+        "enable-post-misched": false,
+        "lsr-drop-solution": true,
+        "amdgpu-use-amdgpu-trackers": true
+      },
+      "named_args": 0,
+      "args": [
+        {
+          "name": "Q",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 0
+        },
+        {
+          "name": "K",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 8
+        },
+        {
+          "name": "V",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 16
+        },
+        {
+          "name": "O",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 24
+        },
+        {
+          "name": "LSE",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 32
+        },
+        {
+          "name": "seq_len_q",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 40
+        },
+        {
+          "name": "seq_len_kv",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 44
+        },
+        {
+          "name": "num_heads",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 48
+        },
+        {
+          "name": "kv_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 52
+        },
+        {
+          "name": "right_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 56
+        },
+        {
+          "name": "left_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 60
+        },
+        {
+          "name": "align_bottom_right",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 64
+        },
+        {
+          "name": "lse_on",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 68
+        },
+        {
+          "name": "scale",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 72
+        },
+        {
+          "name": "q_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 80
+        },
+        {
+          "name": "q_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 88
+        },
+        {
+          "name": "q_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 96
+        },
+        {
+          "name": "k_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 104
+        },
+        {
+          "name": "k_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 112
+        },
+        {
+          "name": "k_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 120
+        },
+        {
+          "name": "v_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 128
+        },
+        {
+          "name": "v_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 136
+        },
+        {
+          "name": "v_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 144
+        },
+        {
+          "name": "o_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 152
+        },
+        {
+          "name": "o_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 160
+        },
+        {
+          "name": "o_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 168
+        },
+        {
+          "name": "lse_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 176
+        },
+        {
+          "name": "lse_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 184
+        },
+        {
+          "name": "lse_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 192
+        },
+        {
+          "name": "BIAS",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 200
+        },
+        {
+          "name": "bias_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 208
+        },
+        {
+          "name": "bias_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 216
+        },
+        {
+          "name": "bias_stride_q",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 224
+        },
+        {
+          "name": "bias_stride_k",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 232
+        },
+        {
+          "name": "head_dim_rt",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 240
+        },
+        {
+          "name": "v_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 244
         }
       ]
     },
@@ -1685,19 +6093,22 @@
         "head_dim": 96,
         "causal": 0,
         "block_m": 128,
-        "block_n": 32
+        "block_n": 32,
+        "dv_split": 1,
+        "has_bias": 0,
+        "head_dim_max": 96
       },
       "file": "sdpa_f16_d96_causal0_bm128_bn32.hsaco",
       "symbol": "flash_attn_func_gfx1151_kernel_0",
-      "bytes": 15168,
-      "sha256": "ee45a8e39c364a31e2fcf3c954b4ca64c94a5f0d9fe1e3f3e15cf7ee393ad785",
-      "kernarg_segment_size": 200,
+      "bytes": 15680,
+      "sha256": "6c4a045b759178f616eef2d4ce3d04d3a17d629347764a01f9b0683e4a7e9cb9",
+      "kernarg_segment_size": 248,
       "block": [
         256,
         1,
         1
       ],
-      "grid_rule": "batch_x_qtiles_x_heads",
+      "grid_rule": "batch_x_qtiles_x_heads_x_dv_split",
       "lds_bytes": 12800,
       "vgprs": 222,
       "llvm_options": {
@@ -1880,6 +6291,301 @@
           "kind": "by_value",
           "size": 8,
           "offset": 192
+        },
+        {
+          "name": "BIAS",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 200
+        },
+        {
+          "name": "bias_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 208
+        },
+        {
+          "name": "bias_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 216
+        },
+        {
+          "name": "bias_stride_q",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 224
+        },
+        {
+          "name": "bias_stride_k",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 232
+        },
+        {
+          "name": "head_dim_rt",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 240
+        },
+        {
+          "name": "v_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 244
+        }
+      ]
+    },
+    {
+      "name": "sdpa_f16_d96_causal0_bm128_bn32_bias1",
+      "op": "sdpa",
+      "dtype": "f16",
+      "priority": 100,
+      "tier": "specialized",
+      "knobs": {
+        "head_dim": 96,
+        "causal": 0,
+        "block_m": 128,
+        "block_n": 32,
+        "dv_split": 1,
+        "has_bias": 1,
+        "head_dim_max": 96
+      },
+      "file": "sdpa_f16_d96_causal0_bm128_bn32_bias1.hsaco",
+      "symbol": "flash_attn_func_gfx1151_kernel_0",
+      "bytes": 16320,
+      "sha256": "2ed258250e9c536bcf77d8c8978b63fb90f5006f27e800e51daa8b4f92b07afd",
+      "kernarg_segment_size": 248,
+      "block": [
+        256,
+        1,
+        1
+      ],
+      "grid_rule": "batch_x_qtiles_x_heads_x_dv_split",
+      "lds_bytes": 12800,
+      "vgprs": 225,
+      "llvm_options": {
+        "enable-post-misched": false,
+        "lsr-drop-solution": true,
+        "amdgpu-use-amdgpu-trackers": true
+      },
+      "named_args": 0,
+      "args": [
+        {
+          "name": "Q",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 0
+        },
+        {
+          "name": "K",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 8
+        },
+        {
+          "name": "V",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 16
+        },
+        {
+          "name": "O",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 24
+        },
+        {
+          "name": "LSE",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 32
+        },
+        {
+          "name": "seq_len_q",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 40
+        },
+        {
+          "name": "seq_len_kv",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 44
+        },
+        {
+          "name": "num_heads",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 48
+        },
+        {
+          "name": "kv_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 52
+        },
+        {
+          "name": "right_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 56
+        },
+        {
+          "name": "left_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 60
+        },
+        {
+          "name": "align_bottom_right",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 64
+        },
+        {
+          "name": "lse_on",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 68
+        },
+        {
+          "name": "scale",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 72
+        },
+        {
+          "name": "q_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 80
+        },
+        {
+          "name": "q_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 88
+        },
+        {
+          "name": "q_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 96
+        },
+        {
+          "name": "k_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 104
+        },
+        {
+          "name": "k_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 112
+        },
+        {
+          "name": "k_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 120
+        },
+        {
+          "name": "v_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 128
+        },
+        {
+          "name": "v_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 136
+        },
+        {
+          "name": "v_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 144
+        },
+        {
+          "name": "o_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 152
+        },
+        {
+          "name": "o_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 160
+        },
+        {
+          "name": "o_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 168
+        },
+        {
+          "name": "lse_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 176
+        },
+        {
+          "name": "lse_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 184
+        },
+        {
+          "name": "lse_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 192
+        },
+        {
+          "name": "BIAS",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 200
+        },
+        {
+          "name": "bias_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 208
+        },
+        {
+          "name": "bias_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 216
+        },
+        {
+          "name": "bias_stride_q",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 224
+        },
+        {
+          "name": "bias_stride_k",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 232
+        },
+        {
+          "name": "head_dim_rt",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 240
+        },
+        {
+          "name": "v_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 244
         }
       ]
     },
@@ -1893,19 +6599,22 @@
         "head_dim": 96,
         "causal": 1,
         "block_m": 128,
-        "block_n": 32
+        "block_n": 32,
+        "dv_split": 1,
+        "has_bias": 0,
+        "head_dim_max": 96
       },
       "file": "sdpa_f16_d96_causal1_bm128_bn32.hsaco",
       "symbol": "flash_attn_func_gfx1151_kernel_0",
-      "bytes": 15424,
-      "sha256": "a3b9ec2dfdcb8b16c2648de1f56808ffcd727146d8be76eb4dbec546e71dcbe0",
-      "kernarg_segment_size": 200,
+      "bytes": 15808,
+      "sha256": "93f56bf665bd8e76cf13e55ac7a58434cc30cb17f2a7a8c5b3af695552ab7545",
+      "kernarg_segment_size": 248,
       "block": [
         256,
         1,
         1
       ],
-      "grid_rule": "batch_x_qtiles_x_heads",
+      "grid_rule": "batch_x_qtiles_x_heads_x_dv_split",
       "lds_bytes": 12800,
       "vgprs": 223,
       "llvm_options": {
@@ -2088,6 +6797,301 @@
           "kind": "by_value",
           "size": 8,
           "offset": 192
+        },
+        {
+          "name": "BIAS",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 200
+        },
+        {
+          "name": "bias_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 208
+        },
+        {
+          "name": "bias_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 216
+        },
+        {
+          "name": "bias_stride_q",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 224
+        },
+        {
+          "name": "bias_stride_k",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 232
+        },
+        {
+          "name": "head_dim_rt",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 240
+        },
+        {
+          "name": "v_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 244
+        }
+      ]
+    },
+    {
+      "name": "sdpa_f16_d96_causal1_bm128_bn32_bias1",
+      "op": "sdpa",
+      "dtype": "f16",
+      "priority": 100,
+      "tier": "specialized",
+      "knobs": {
+        "head_dim": 96,
+        "causal": 1,
+        "block_m": 128,
+        "block_n": 32,
+        "dv_split": 1,
+        "has_bias": 1,
+        "head_dim_max": 96
+      },
+      "file": "sdpa_f16_d96_causal1_bm128_bn32_bias1.hsaco",
+      "symbol": "flash_attn_func_gfx1151_kernel_0",
+      "bytes": 16320,
+      "sha256": "c0cfa634ac1687ad44c385243379c63dd2f3aedb3218120c7ef06f5bd2205f22",
+      "kernarg_segment_size": 248,
+      "block": [
+        256,
+        1,
+        1
+      ],
+      "grid_rule": "batch_x_qtiles_x_heads_x_dv_split",
+      "lds_bytes": 12800,
+      "vgprs": 230,
+      "llvm_options": {
+        "enable-post-misched": false,
+        "lsr-drop-solution": true,
+        "amdgpu-use-amdgpu-trackers": true
+      },
+      "named_args": 0,
+      "args": [
+        {
+          "name": "Q",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 0
+        },
+        {
+          "name": "K",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 8
+        },
+        {
+          "name": "V",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 16
+        },
+        {
+          "name": "O",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 24
+        },
+        {
+          "name": "LSE",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 32
+        },
+        {
+          "name": "seq_len_q",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 40
+        },
+        {
+          "name": "seq_len_kv",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 44
+        },
+        {
+          "name": "num_heads",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 48
+        },
+        {
+          "name": "kv_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 52
+        },
+        {
+          "name": "right_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 56
+        },
+        {
+          "name": "left_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 60
+        },
+        {
+          "name": "align_bottom_right",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 64
+        },
+        {
+          "name": "lse_on",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 68
+        },
+        {
+          "name": "scale",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 72
+        },
+        {
+          "name": "q_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 80
+        },
+        {
+          "name": "q_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 88
+        },
+        {
+          "name": "q_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 96
+        },
+        {
+          "name": "k_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 104
+        },
+        {
+          "name": "k_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 112
+        },
+        {
+          "name": "k_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 120
+        },
+        {
+          "name": "v_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 128
+        },
+        {
+          "name": "v_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 136
+        },
+        {
+          "name": "v_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 144
+        },
+        {
+          "name": "o_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 152
+        },
+        {
+          "name": "o_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 160
+        },
+        {
+          "name": "o_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 168
+        },
+        {
+          "name": "lse_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 176
+        },
+        {
+          "name": "lse_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 184
+        },
+        {
+          "name": "lse_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 192
+        },
+        {
+          "name": "BIAS",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 200
+        },
+        {
+          "name": "bias_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 208
+        },
+        {
+          "name": "bias_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 216
+        },
+        {
+          "name": "bias_stride_q",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 224
+        },
+        {
+          "name": "bias_stride_k",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 232
+        },
+        {
+          "name": "head_dim_rt",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 240
+        },
+        {
+          "name": "v_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 244
         }
       ]
     },
@@ -2101,19 +7105,22 @@
         "head_dim": 128,
         "causal": 0,
         "block_m": 128,
-        "block_n": 32
+        "block_n": 32,
+        "dv_split": 1,
+        "has_bias": 0,
+        "head_dim_max": 128
       },
       "file": "sdpa_f16_d128_causal0_bm128_bn32.hsaco",
       "symbol": "flash_attn_func_gfx1151_kernel_0",
-      "bytes": 16832,
-      "sha256": "93349adbf5ee89637514b04457e8a233188e4759e7b05e37fb2de116a451f922",
-      "kernarg_segment_size": 200,
+      "bytes": 17344,
+      "sha256": "8b809205f0eb1c9f6c8b9c9def0eae6b6853b596cbeb03e1dca691c7280c5eca",
+      "kernarg_segment_size": 248,
       "block": [
         256,
         1,
         1
       ],
-      "grid_rule": "batch_x_qtiles_x_heads",
+      "grid_rule": "batch_x_qtiles_x_heads_x_dv_split",
       "lds_bytes": 16896,
       "vgprs": 242,
       "llvm_options": {
@@ -2296,6 +7303,301 @@
           "kind": "by_value",
           "size": 8,
           "offset": 192
+        },
+        {
+          "name": "BIAS",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 200
+        },
+        {
+          "name": "bias_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 208
+        },
+        {
+          "name": "bias_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 216
+        },
+        {
+          "name": "bias_stride_q",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 224
+        },
+        {
+          "name": "bias_stride_k",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 232
+        },
+        {
+          "name": "head_dim_rt",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 240
+        },
+        {
+          "name": "v_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 244
+        }
+      ]
+    },
+    {
+      "name": "sdpa_f16_d128_causal0_bm128_bn32_bias1",
+      "op": "sdpa",
+      "dtype": "f16",
+      "priority": 100,
+      "tier": "specialized",
+      "knobs": {
+        "head_dim": 128,
+        "causal": 0,
+        "block_m": 128,
+        "block_n": 32,
+        "dv_split": 1,
+        "has_bias": 1,
+        "head_dim_max": 128
+      },
+      "file": "sdpa_f16_d128_causal0_bm128_bn32_bias1.hsaco",
+      "symbol": "flash_attn_func_gfx1151_kernel_0",
+      "bytes": 17856,
+      "sha256": "25c35fbd90dcca6b1b3eef4951d95adfe4d3093a01a367c4fb8ad908514d9fa7",
+      "kernarg_segment_size": 248,
+      "block": [
+        256,
+        1,
+        1
+      ],
+      "grid_rule": "batch_x_qtiles_x_heads_x_dv_split",
+      "lds_bytes": 16896,
+      "vgprs": 191,
+      "llvm_options": {
+        "enable-post-misched": false,
+        "lsr-drop-solution": true,
+        "amdgpu-use-amdgpu-trackers": true
+      },
+      "named_args": 0,
+      "args": [
+        {
+          "name": "Q",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 0
+        },
+        {
+          "name": "K",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 8
+        },
+        {
+          "name": "V",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 16
+        },
+        {
+          "name": "O",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 24
+        },
+        {
+          "name": "LSE",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 32
+        },
+        {
+          "name": "seq_len_q",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 40
+        },
+        {
+          "name": "seq_len_kv",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 44
+        },
+        {
+          "name": "num_heads",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 48
+        },
+        {
+          "name": "kv_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 52
+        },
+        {
+          "name": "right_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 56
+        },
+        {
+          "name": "left_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 60
+        },
+        {
+          "name": "align_bottom_right",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 64
+        },
+        {
+          "name": "lse_on",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 68
+        },
+        {
+          "name": "scale",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 72
+        },
+        {
+          "name": "q_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 80
+        },
+        {
+          "name": "q_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 88
+        },
+        {
+          "name": "q_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 96
+        },
+        {
+          "name": "k_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 104
+        },
+        {
+          "name": "k_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 112
+        },
+        {
+          "name": "k_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 120
+        },
+        {
+          "name": "v_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 128
+        },
+        {
+          "name": "v_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 136
+        },
+        {
+          "name": "v_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 144
+        },
+        {
+          "name": "o_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 152
+        },
+        {
+          "name": "o_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 160
+        },
+        {
+          "name": "o_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 168
+        },
+        {
+          "name": "lse_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 176
+        },
+        {
+          "name": "lse_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 184
+        },
+        {
+          "name": "lse_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 192
+        },
+        {
+          "name": "BIAS",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 200
+        },
+        {
+          "name": "bias_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 208
+        },
+        {
+          "name": "bias_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 216
+        },
+        {
+          "name": "bias_stride_q",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 224
+        },
+        {
+          "name": "bias_stride_k",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 232
+        },
+        {
+          "name": "head_dim_rt",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 240
+        },
+        {
+          "name": "v_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 244
         }
       ]
     },
@@ -2309,19 +7611,22 @@
         "head_dim": 128,
         "causal": 1,
         "block_m": 128,
-        "block_n": 32
+        "block_n": 32,
+        "dv_split": 1,
+        "has_bias": 0,
+        "head_dim_max": 128
       },
       "file": "sdpa_f16_d128_causal1_bm128_bn32.hsaco",
       "symbol": "flash_attn_func_gfx1151_kernel_0",
-      "bytes": 17088,
-      "sha256": "4d14529be791d55bb9ce508373856cd766b235fbd9bca9ac3bc4284f410cd87e",
-      "kernarg_segment_size": 200,
+      "bytes": 17472,
+      "sha256": "4e6e9afca670486fcdb4273958fb3fe22d7da8412e359b977935717b481ec9ea",
+      "kernarg_segment_size": 248,
       "block": [
         256,
         1,
         1
       ],
-      "grid_rule": "batch_x_qtiles_x_heads",
+      "grid_rule": "batch_x_qtiles_x_heads_x_dv_split",
       "lds_bytes": 16896,
       "vgprs": 248,
       "llvm_options": {
@@ -2504,6 +7809,2325 @@
           "kind": "by_value",
           "size": 8,
           "offset": 192
+        },
+        {
+          "name": "BIAS",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 200
+        },
+        {
+          "name": "bias_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 208
+        },
+        {
+          "name": "bias_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 216
+        },
+        {
+          "name": "bias_stride_q",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 224
+        },
+        {
+          "name": "bias_stride_k",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 232
+        },
+        {
+          "name": "head_dim_rt",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 240
+        },
+        {
+          "name": "v_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 244
+        }
+      ]
+    },
+    {
+      "name": "sdpa_f16_d128_causal1_bm128_bn32_bias1",
+      "op": "sdpa",
+      "dtype": "f16",
+      "priority": 100,
+      "tier": "specialized",
+      "knobs": {
+        "head_dim": 128,
+        "causal": 1,
+        "block_m": 128,
+        "block_n": 32,
+        "dv_split": 1,
+        "has_bias": 1,
+        "head_dim_max": 128
+      },
+      "file": "sdpa_f16_d128_causal1_bm128_bn32_bias1.hsaco",
+      "symbol": "flash_attn_func_gfx1151_kernel_0",
+      "bytes": 17856,
+      "sha256": "c60e5e400b0f62c176a903f5f4fe6abae36b6acb3d5a5bfed820025bdc3d47a1",
+      "kernarg_segment_size": 248,
+      "block": [
+        256,
+        1,
+        1
+      ],
+      "grid_rule": "batch_x_qtiles_x_heads_x_dv_split",
+      "lds_bytes": 16896,
+      "vgprs": 196,
+      "llvm_options": {
+        "enable-post-misched": false,
+        "lsr-drop-solution": true,
+        "amdgpu-use-amdgpu-trackers": true
+      },
+      "named_args": 0,
+      "args": [
+        {
+          "name": "Q",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 0
+        },
+        {
+          "name": "K",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 8
+        },
+        {
+          "name": "V",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 16
+        },
+        {
+          "name": "O",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 24
+        },
+        {
+          "name": "LSE",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 32
+        },
+        {
+          "name": "seq_len_q",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 40
+        },
+        {
+          "name": "seq_len_kv",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 44
+        },
+        {
+          "name": "num_heads",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 48
+        },
+        {
+          "name": "kv_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 52
+        },
+        {
+          "name": "right_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 56
+        },
+        {
+          "name": "left_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 60
+        },
+        {
+          "name": "align_bottom_right",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 64
+        },
+        {
+          "name": "lse_on",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 68
+        },
+        {
+          "name": "scale",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 72
+        },
+        {
+          "name": "q_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 80
+        },
+        {
+          "name": "q_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 88
+        },
+        {
+          "name": "q_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 96
+        },
+        {
+          "name": "k_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 104
+        },
+        {
+          "name": "k_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 112
+        },
+        {
+          "name": "k_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 120
+        },
+        {
+          "name": "v_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 128
+        },
+        {
+          "name": "v_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 136
+        },
+        {
+          "name": "v_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 144
+        },
+        {
+          "name": "o_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 152
+        },
+        {
+          "name": "o_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 160
+        },
+        {
+          "name": "o_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 168
+        },
+        {
+          "name": "lse_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 176
+        },
+        {
+          "name": "lse_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 184
+        },
+        {
+          "name": "lse_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 192
+        },
+        {
+          "name": "BIAS",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 200
+        },
+        {
+          "name": "bias_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 208
+        },
+        {
+          "name": "bias_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 216
+        },
+        {
+          "name": "bias_stride_q",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 224
+        },
+        {
+          "name": "bias_stride_k",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 232
+        },
+        {
+          "name": "head_dim_rt",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 240
+        },
+        {
+          "name": "v_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 244
+        }
+      ]
+    },
+    {
+      "name": "sdpa_f16_d256_causal0_bm128_bn32_dv2",
+      "op": "sdpa",
+      "dtype": "f16",
+      "priority": 100,
+      "tier": "specialized",
+      "knobs": {
+        "head_dim": 256,
+        "causal": 0,
+        "block_m": 128,
+        "block_n": 32,
+        "dv_split": 2,
+        "has_bias": 0,
+        "head_dim_max": 256
+      },
+      "file": "sdpa_f16_d256_causal0_bm128_bn32_dv2.hsaco",
+      "symbol": "flash_attn_func_gfx1151_kernel_0",
+      "bytes": 17600,
+      "sha256": "5b8b821e6129dcbe1f8746d126a782a9027f443a8c22eb2cf8c555e16e4205d1",
+      "kernarg_segment_size": 248,
+      "block": [
+        256,
+        1,
+        1
+      ],
+      "grid_rule": "batch_x_qtiles_x_heads_x_dv_split",
+      "lds_bytes": 33280,
+      "vgprs": 198,
+      "llvm_options": {
+        "enable-post-misched": false,
+        "lsr-drop-solution": true,
+        "amdgpu-use-amdgpu-trackers": true
+      },
+      "named_args": 0,
+      "args": [
+        {
+          "name": "Q",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 0
+        },
+        {
+          "name": "K",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 8
+        },
+        {
+          "name": "V",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 16
+        },
+        {
+          "name": "O",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 24
+        },
+        {
+          "name": "LSE",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 32
+        },
+        {
+          "name": "seq_len_q",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 40
+        },
+        {
+          "name": "seq_len_kv",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 44
+        },
+        {
+          "name": "num_heads",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 48
+        },
+        {
+          "name": "kv_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 52
+        },
+        {
+          "name": "right_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 56
+        },
+        {
+          "name": "left_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 60
+        },
+        {
+          "name": "align_bottom_right",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 64
+        },
+        {
+          "name": "lse_on",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 68
+        },
+        {
+          "name": "scale",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 72
+        },
+        {
+          "name": "q_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 80
+        },
+        {
+          "name": "q_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 88
+        },
+        {
+          "name": "q_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 96
+        },
+        {
+          "name": "k_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 104
+        },
+        {
+          "name": "k_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 112
+        },
+        {
+          "name": "k_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 120
+        },
+        {
+          "name": "v_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 128
+        },
+        {
+          "name": "v_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 136
+        },
+        {
+          "name": "v_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 144
+        },
+        {
+          "name": "o_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 152
+        },
+        {
+          "name": "o_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 160
+        },
+        {
+          "name": "o_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 168
+        },
+        {
+          "name": "lse_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 176
+        },
+        {
+          "name": "lse_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 184
+        },
+        {
+          "name": "lse_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 192
+        },
+        {
+          "name": "BIAS",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 200
+        },
+        {
+          "name": "bias_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 208
+        },
+        {
+          "name": "bias_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 216
+        },
+        {
+          "name": "bias_stride_q",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 224
+        },
+        {
+          "name": "bias_stride_k",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 232
+        },
+        {
+          "name": "head_dim_rt",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 240
+        },
+        {
+          "name": "v_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 244
+        }
+      ]
+    },
+    {
+      "name": "sdpa_f16_d256_causal0_bm128_bn32_dv2_bias1",
+      "op": "sdpa",
+      "dtype": "f16",
+      "priority": 100,
+      "tier": "specialized",
+      "knobs": {
+        "head_dim": 256,
+        "causal": 0,
+        "block_m": 128,
+        "block_n": 32,
+        "dv_split": 2,
+        "has_bias": 1,
+        "head_dim_max": 256
+      },
+      "file": "sdpa_f16_d256_causal0_bm128_bn32_dv2_bias1.hsaco",
+      "symbol": "flash_attn_func_gfx1151_kernel_0",
+      "bytes": 18368,
+      "sha256": "8e048a9cb58adad0bf0f8be7fed4c3b2a92268c3ee1ba87c134cbd781a860966",
+      "kernarg_segment_size": 248,
+      "block": [
+        256,
+        1,
+        1
+      ],
+      "grid_rule": "batch_x_qtiles_x_heads_x_dv_split",
+      "lds_bytes": 33280,
+      "vgprs": 213,
+      "llvm_options": {
+        "enable-post-misched": false,
+        "lsr-drop-solution": true,
+        "amdgpu-use-amdgpu-trackers": true
+      },
+      "named_args": 0,
+      "args": [
+        {
+          "name": "Q",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 0
+        },
+        {
+          "name": "K",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 8
+        },
+        {
+          "name": "V",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 16
+        },
+        {
+          "name": "O",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 24
+        },
+        {
+          "name": "LSE",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 32
+        },
+        {
+          "name": "seq_len_q",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 40
+        },
+        {
+          "name": "seq_len_kv",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 44
+        },
+        {
+          "name": "num_heads",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 48
+        },
+        {
+          "name": "kv_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 52
+        },
+        {
+          "name": "right_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 56
+        },
+        {
+          "name": "left_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 60
+        },
+        {
+          "name": "align_bottom_right",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 64
+        },
+        {
+          "name": "lse_on",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 68
+        },
+        {
+          "name": "scale",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 72
+        },
+        {
+          "name": "q_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 80
+        },
+        {
+          "name": "q_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 88
+        },
+        {
+          "name": "q_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 96
+        },
+        {
+          "name": "k_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 104
+        },
+        {
+          "name": "k_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 112
+        },
+        {
+          "name": "k_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 120
+        },
+        {
+          "name": "v_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 128
+        },
+        {
+          "name": "v_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 136
+        },
+        {
+          "name": "v_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 144
+        },
+        {
+          "name": "o_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 152
+        },
+        {
+          "name": "o_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 160
+        },
+        {
+          "name": "o_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 168
+        },
+        {
+          "name": "lse_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 176
+        },
+        {
+          "name": "lse_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 184
+        },
+        {
+          "name": "lse_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 192
+        },
+        {
+          "name": "BIAS",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 200
+        },
+        {
+          "name": "bias_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 208
+        },
+        {
+          "name": "bias_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 216
+        },
+        {
+          "name": "bias_stride_q",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 224
+        },
+        {
+          "name": "bias_stride_k",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 232
+        },
+        {
+          "name": "head_dim_rt",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 240
+        },
+        {
+          "name": "v_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 244
+        }
+      ]
+    },
+    {
+      "name": "sdpa_f16_d256_causal1_bm128_bn32_dv2",
+      "op": "sdpa",
+      "dtype": "f16",
+      "priority": 100,
+      "tier": "specialized",
+      "knobs": {
+        "head_dim": 256,
+        "causal": 1,
+        "block_m": 128,
+        "block_n": 32,
+        "dv_split": 2,
+        "has_bias": 0,
+        "head_dim_max": 256
+      },
+      "file": "sdpa_f16_d256_causal1_bm128_bn32_dv2.hsaco",
+      "symbol": "flash_attn_func_gfx1151_kernel_0",
+      "bytes": 17600,
+      "sha256": "109a8e207433e1e3e27912b65aa780df5a5381859496c8693fd004b2f33892c0",
+      "kernarg_segment_size": 248,
+      "block": [
+        256,
+        1,
+        1
+      ],
+      "grid_rule": "batch_x_qtiles_x_heads_x_dv_split",
+      "lds_bytes": 33280,
+      "vgprs": 199,
+      "llvm_options": {
+        "enable-post-misched": false,
+        "lsr-drop-solution": true,
+        "amdgpu-use-amdgpu-trackers": true
+      },
+      "named_args": 0,
+      "args": [
+        {
+          "name": "Q",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 0
+        },
+        {
+          "name": "K",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 8
+        },
+        {
+          "name": "V",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 16
+        },
+        {
+          "name": "O",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 24
+        },
+        {
+          "name": "LSE",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 32
+        },
+        {
+          "name": "seq_len_q",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 40
+        },
+        {
+          "name": "seq_len_kv",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 44
+        },
+        {
+          "name": "num_heads",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 48
+        },
+        {
+          "name": "kv_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 52
+        },
+        {
+          "name": "right_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 56
+        },
+        {
+          "name": "left_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 60
+        },
+        {
+          "name": "align_bottom_right",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 64
+        },
+        {
+          "name": "lse_on",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 68
+        },
+        {
+          "name": "scale",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 72
+        },
+        {
+          "name": "q_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 80
+        },
+        {
+          "name": "q_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 88
+        },
+        {
+          "name": "q_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 96
+        },
+        {
+          "name": "k_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 104
+        },
+        {
+          "name": "k_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 112
+        },
+        {
+          "name": "k_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 120
+        },
+        {
+          "name": "v_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 128
+        },
+        {
+          "name": "v_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 136
+        },
+        {
+          "name": "v_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 144
+        },
+        {
+          "name": "o_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 152
+        },
+        {
+          "name": "o_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 160
+        },
+        {
+          "name": "o_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 168
+        },
+        {
+          "name": "lse_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 176
+        },
+        {
+          "name": "lse_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 184
+        },
+        {
+          "name": "lse_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 192
+        },
+        {
+          "name": "BIAS",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 200
+        },
+        {
+          "name": "bias_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 208
+        },
+        {
+          "name": "bias_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 216
+        },
+        {
+          "name": "bias_stride_q",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 224
+        },
+        {
+          "name": "bias_stride_k",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 232
+        },
+        {
+          "name": "head_dim_rt",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 240
+        },
+        {
+          "name": "v_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 244
+        }
+      ]
+    },
+    {
+      "name": "sdpa_f16_d256_causal1_bm128_bn32_dv2_bias1",
+      "op": "sdpa",
+      "dtype": "f16",
+      "priority": 100,
+      "tier": "specialized",
+      "knobs": {
+        "head_dim": 256,
+        "causal": 1,
+        "block_m": 128,
+        "block_n": 32,
+        "dv_split": 2,
+        "has_bias": 1,
+        "head_dim_max": 256
+      },
+      "file": "sdpa_f16_d256_causal1_bm128_bn32_dv2_bias1.hsaco",
+      "symbol": "flash_attn_func_gfx1151_kernel_0",
+      "bytes": 18240,
+      "sha256": "14437e422c80dcf1f40073bea3f1e06d850d133fd87e82e1b0dfbd73fe8dcd59",
+      "kernarg_segment_size": 248,
+      "block": [
+        256,
+        1,
+        1
+      ],
+      "grid_rule": "batch_x_qtiles_x_heads_x_dv_split",
+      "lds_bytes": 33280,
+      "vgprs": 214,
+      "llvm_options": {
+        "enable-post-misched": false,
+        "lsr-drop-solution": true,
+        "amdgpu-use-amdgpu-trackers": true
+      },
+      "named_args": 0,
+      "args": [
+        {
+          "name": "Q",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 0
+        },
+        {
+          "name": "K",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 8
+        },
+        {
+          "name": "V",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 16
+        },
+        {
+          "name": "O",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 24
+        },
+        {
+          "name": "LSE",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 32
+        },
+        {
+          "name": "seq_len_q",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 40
+        },
+        {
+          "name": "seq_len_kv",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 44
+        },
+        {
+          "name": "num_heads",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 48
+        },
+        {
+          "name": "kv_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 52
+        },
+        {
+          "name": "right_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 56
+        },
+        {
+          "name": "left_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 60
+        },
+        {
+          "name": "align_bottom_right",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 64
+        },
+        {
+          "name": "lse_on",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 68
+        },
+        {
+          "name": "scale",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 72
+        },
+        {
+          "name": "q_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 80
+        },
+        {
+          "name": "q_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 88
+        },
+        {
+          "name": "q_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 96
+        },
+        {
+          "name": "k_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 104
+        },
+        {
+          "name": "k_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 112
+        },
+        {
+          "name": "k_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 120
+        },
+        {
+          "name": "v_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 128
+        },
+        {
+          "name": "v_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 136
+        },
+        {
+          "name": "v_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 144
+        },
+        {
+          "name": "o_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 152
+        },
+        {
+          "name": "o_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 160
+        },
+        {
+          "name": "o_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 168
+        },
+        {
+          "name": "lse_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 176
+        },
+        {
+          "name": "lse_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 184
+        },
+        {
+          "name": "lse_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 192
+        },
+        {
+          "name": "BIAS",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 200
+        },
+        {
+          "name": "bias_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 208
+        },
+        {
+          "name": "bias_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 216
+        },
+        {
+          "name": "bias_stride_q",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 224
+        },
+        {
+          "name": "bias_stride_k",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 232
+        },
+        {
+          "name": "head_dim_rt",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 240
+        },
+        {
+          "name": "v_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 244
+        }
+      ]
+    },
+    {
+      "name": "sdpa_f16_dgeneric_causal0_bm128_bn32_dmax128",
+      "op": "sdpa",
+      "dtype": "f16",
+      "priority": 20,
+      "tier": "generic",
+      "knobs": {
+        "head_dim": null,
+        "causal": 0,
+        "block_m": 128,
+        "block_n": 32,
+        "dv_split": 1,
+        "has_bias": 0,
+        "head_dim_max": 128
+      },
+      "file": "sdpa_f16_dgeneric_causal0_bm128_bn32_dmax128.hsaco",
+      "symbol": "flash_attn_func_gfx1151_kernel_0",
+      "bytes": 18880,
+      "sha256": "168d5740fca81e812328feb1b9370a1f0ec044d062c0710aed1d519e46c2f05f",
+      "kernarg_segment_size": 248,
+      "block": [
+        256,
+        1,
+        1
+      ],
+      "grid_rule": "batch_x_qtiles_x_heads_x_dv_split",
+      "lds_bytes": 16896,
+      "vgprs": 242,
+      "llvm_options": {
+        "enable-post-misched": false,
+        "lsr-drop-solution": true,
+        "amdgpu-use-amdgpu-trackers": true
+      },
+      "named_args": 0,
+      "args": [
+        {
+          "name": "Q",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 0
+        },
+        {
+          "name": "K",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 8
+        },
+        {
+          "name": "V",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 16
+        },
+        {
+          "name": "O",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 24
+        },
+        {
+          "name": "LSE",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 32
+        },
+        {
+          "name": "seq_len_q",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 40
+        },
+        {
+          "name": "seq_len_kv",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 44
+        },
+        {
+          "name": "num_heads",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 48
+        },
+        {
+          "name": "kv_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 52
+        },
+        {
+          "name": "right_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 56
+        },
+        {
+          "name": "left_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 60
+        },
+        {
+          "name": "align_bottom_right",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 64
+        },
+        {
+          "name": "lse_on",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 68
+        },
+        {
+          "name": "scale",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 72
+        },
+        {
+          "name": "q_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 80
+        },
+        {
+          "name": "q_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 88
+        },
+        {
+          "name": "q_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 96
+        },
+        {
+          "name": "k_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 104
+        },
+        {
+          "name": "k_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 112
+        },
+        {
+          "name": "k_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 120
+        },
+        {
+          "name": "v_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 128
+        },
+        {
+          "name": "v_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 136
+        },
+        {
+          "name": "v_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 144
+        },
+        {
+          "name": "o_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 152
+        },
+        {
+          "name": "o_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 160
+        },
+        {
+          "name": "o_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 168
+        },
+        {
+          "name": "lse_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 176
+        },
+        {
+          "name": "lse_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 184
+        },
+        {
+          "name": "lse_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 192
+        },
+        {
+          "name": "BIAS",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 200
+        },
+        {
+          "name": "bias_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 208
+        },
+        {
+          "name": "bias_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 216
+        },
+        {
+          "name": "bias_stride_q",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 224
+        },
+        {
+          "name": "bias_stride_k",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 232
+        },
+        {
+          "name": "head_dim_rt",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 240
+        },
+        {
+          "name": "v_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 244
+        }
+      ]
+    },
+    {
+      "name": "sdpa_f16_dgeneric_causal1_bm128_bn32_dmax128",
+      "op": "sdpa",
+      "dtype": "f16",
+      "priority": 20,
+      "tier": "generic",
+      "knobs": {
+        "head_dim": null,
+        "causal": 1,
+        "block_m": 128,
+        "block_n": 32,
+        "dv_split": 1,
+        "has_bias": 0,
+        "head_dim_max": 128
+      },
+      "file": "sdpa_f16_dgeneric_causal1_bm128_bn32_dmax128.hsaco",
+      "symbol": "flash_attn_func_gfx1151_kernel_0",
+      "bytes": 19008,
+      "sha256": "41ee3b6b2e8b7e11dbe2d06a1942d7c2b6e05a3548b589a78e495729447bc5a0",
+      "kernarg_segment_size": 248,
+      "block": [
+        256,
+        1,
+        1
+      ],
+      "grid_rule": "batch_x_qtiles_x_heads_x_dv_split",
+      "lds_bytes": 16896,
+      "vgprs": 248,
+      "llvm_options": {
+        "enable-post-misched": false,
+        "lsr-drop-solution": true,
+        "amdgpu-use-amdgpu-trackers": true
+      },
+      "named_args": 0,
+      "args": [
+        {
+          "name": "Q",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 0
+        },
+        {
+          "name": "K",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 8
+        },
+        {
+          "name": "V",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 16
+        },
+        {
+          "name": "O",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 24
+        },
+        {
+          "name": "LSE",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 32
+        },
+        {
+          "name": "seq_len_q",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 40
+        },
+        {
+          "name": "seq_len_kv",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 44
+        },
+        {
+          "name": "num_heads",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 48
+        },
+        {
+          "name": "kv_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 52
+        },
+        {
+          "name": "right_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 56
+        },
+        {
+          "name": "left_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 60
+        },
+        {
+          "name": "align_bottom_right",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 64
+        },
+        {
+          "name": "lse_on",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 68
+        },
+        {
+          "name": "scale",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 72
+        },
+        {
+          "name": "q_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 80
+        },
+        {
+          "name": "q_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 88
+        },
+        {
+          "name": "q_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 96
+        },
+        {
+          "name": "k_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 104
+        },
+        {
+          "name": "k_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 112
+        },
+        {
+          "name": "k_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 120
+        },
+        {
+          "name": "v_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 128
+        },
+        {
+          "name": "v_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 136
+        },
+        {
+          "name": "v_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 144
+        },
+        {
+          "name": "o_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 152
+        },
+        {
+          "name": "o_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 160
+        },
+        {
+          "name": "o_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 168
+        },
+        {
+          "name": "lse_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 176
+        },
+        {
+          "name": "lse_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 184
+        },
+        {
+          "name": "lse_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 192
+        },
+        {
+          "name": "BIAS",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 200
+        },
+        {
+          "name": "bias_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 208
+        },
+        {
+          "name": "bias_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 216
+        },
+        {
+          "name": "bias_stride_q",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 224
+        },
+        {
+          "name": "bias_stride_k",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 232
+        },
+        {
+          "name": "head_dim_rt",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 240
+        },
+        {
+          "name": "v_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 244
+        }
+      ]
+    },
+    {
+      "name": "sdpa_f16_dgeneric_causal0_bm128_bn32_dv4_dmax256",
+      "op": "sdpa",
+      "dtype": "f16",
+      "priority": 10,
+      "tier": "generic",
+      "knobs": {
+        "head_dim": null,
+        "causal": 0,
+        "block_m": 128,
+        "block_n": 32,
+        "dv_split": 4,
+        "has_bias": 0,
+        "head_dim_max": 256
+      },
+      "file": "sdpa_f16_dgeneric_causal0_bm128_bn32_dv4_dmax256.hsaco",
+      "symbol": "flash_attn_func_gfx1151_kernel_0",
+      "bytes": 17088,
+      "sha256": "2c8bcbdf5ddc1d504023d1b2ef1680063b28fcec7a30e3dcfb10e816f9bc3903",
+      "kernarg_segment_size": 248,
+      "block": [
+        256,
+        1,
+        1
+      ],
+      "grid_rule": "batch_x_qtiles_x_heads_x_dv_split",
+      "lds_bytes": 33280,
+      "vgprs": 170,
+      "llvm_options": {
+        "enable-post-misched": false,
+        "lsr-drop-solution": true,
+        "amdgpu-use-amdgpu-trackers": true
+      },
+      "named_args": 0,
+      "args": [
+        {
+          "name": "Q",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 0
+        },
+        {
+          "name": "K",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 8
+        },
+        {
+          "name": "V",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 16
+        },
+        {
+          "name": "O",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 24
+        },
+        {
+          "name": "LSE",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 32
+        },
+        {
+          "name": "seq_len_q",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 40
+        },
+        {
+          "name": "seq_len_kv",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 44
+        },
+        {
+          "name": "num_heads",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 48
+        },
+        {
+          "name": "kv_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 52
+        },
+        {
+          "name": "right_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 56
+        },
+        {
+          "name": "left_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 60
+        },
+        {
+          "name": "align_bottom_right",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 64
+        },
+        {
+          "name": "lse_on",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 68
+        },
+        {
+          "name": "scale",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 72
+        },
+        {
+          "name": "q_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 80
+        },
+        {
+          "name": "q_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 88
+        },
+        {
+          "name": "q_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 96
+        },
+        {
+          "name": "k_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 104
+        },
+        {
+          "name": "k_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 112
+        },
+        {
+          "name": "k_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 120
+        },
+        {
+          "name": "v_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 128
+        },
+        {
+          "name": "v_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 136
+        },
+        {
+          "name": "v_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 144
+        },
+        {
+          "name": "o_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 152
+        },
+        {
+          "name": "o_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 160
+        },
+        {
+          "name": "o_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 168
+        },
+        {
+          "name": "lse_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 176
+        },
+        {
+          "name": "lse_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 184
+        },
+        {
+          "name": "lse_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 192
+        },
+        {
+          "name": "BIAS",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 200
+        },
+        {
+          "name": "bias_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 208
+        },
+        {
+          "name": "bias_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 216
+        },
+        {
+          "name": "bias_stride_q",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 224
+        },
+        {
+          "name": "bias_stride_k",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 232
+        },
+        {
+          "name": "head_dim_rt",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 240
+        },
+        {
+          "name": "v_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 244
+        }
+      ]
+    },
+    {
+      "name": "sdpa_f16_dgeneric_causal1_bm128_bn32_dv4_dmax256",
+      "op": "sdpa",
+      "dtype": "f16",
+      "priority": 10,
+      "tier": "generic",
+      "knobs": {
+        "head_dim": null,
+        "causal": 1,
+        "block_m": 128,
+        "block_n": 32,
+        "dv_split": 4,
+        "has_bias": 0,
+        "head_dim_max": 256
+      },
+      "file": "sdpa_f16_dgeneric_causal1_bm128_bn32_dv4_dmax256.hsaco",
+      "symbol": "flash_attn_func_gfx1151_kernel_0",
+      "bytes": 16960,
+      "sha256": "3c9d40402e575936c9cbfb8f0bb635d58240340b5d90149482dbf9c7d37607de",
+      "kernarg_segment_size": 248,
+      "block": [
+        256,
+        1,
+        1
+      ],
+      "grid_rule": "batch_x_qtiles_x_heads_x_dv_split",
+      "lds_bytes": 33280,
+      "vgprs": 167,
+      "llvm_options": {
+        "enable-post-misched": false,
+        "lsr-drop-solution": true,
+        "amdgpu-use-amdgpu-trackers": true
+      },
+      "named_args": 0,
+      "args": [
+        {
+          "name": "Q",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 0
+        },
+        {
+          "name": "K",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 8
+        },
+        {
+          "name": "V",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 16
+        },
+        {
+          "name": "O",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 24
+        },
+        {
+          "name": "LSE",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 32
+        },
+        {
+          "name": "seq_len_q",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 40
+        },
+        {
+          "name": "seq_len_kv",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 44
+        },
+        {
+          "name": "num_heads",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 48
+        },
+        {
+          "name": "kv_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 52
+        },
+        {
+          "name": "right_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 56
+        },
+        {
+          "name": "left_bound",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 60
+        },
+        {
+          "name": "align_bottom_right",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 64
+        },
+        {
+          "name": "lse_on",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 68
+        },
+        {
+          "name": "scale",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 72
+        },
+        {
+          "name": "q_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 80
+        },
+        {
+          "name": "q_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 88
+        },
+        {
+          "name": "q_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 96
+        },
+        {
+          "name": "k_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 104
+        },
+        {
+          "name": "k_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 112
+        },
+        {
+          "name": "k_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 120
+        },
+        {
+          "name": "v_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 128
+        },
+        {
+          "name": "v_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 136
+        },
+        {
+          "name": "v_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 144
+        },
+        {
+          "name": "o_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 152
+        },
+        {
+          "name": "o_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 160
+        },
+        {
+          "name": "o_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 168
+        },
+        {
+          "name": "lse_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 176
+        },
+        {
+          "name": "lse_stride_s",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 184
+        },
+        {
+          "name": "lse_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 192
+        },
+        {
+          "name": "BIAS",
+          "kind": "global_buffer",
+          "size": 8,
+          "offset": 200
+        },
+        {
+          "name": "bias_stride_b",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 208
+        },
+        {
+          "name": "bias_stride_h",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 216
+        },
+        {
+          "name": "bias_stride_q",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 224
+        },
+        {
+          "name": "bias_stride_k",
+          "kind": "by_value",
+          "size": 8,
+          "offset": 232
+        },
+        {
+          "name": "head_dim_rt",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 240
+        },
+        {
+          "name": "v_group",
+          "kind": "by_value",
+          "size": 4,
+          "offset": 244
         }
       ]
     }

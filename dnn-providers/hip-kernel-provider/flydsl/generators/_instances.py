@@ -59,6 +59,10 @@ class Instance:
         for key, value in self.knobs.items():
             if key == "dtype":
                 continue
+            # A knob added after objects shipped is left out of the name at its
+            # default, so existing names -- filenames, TOC keys -- do not move.
+            if key in _NAME_OMITTED_WHEN and _NAME_OMITTED_WHEN[key](self.knobs):
+                continue
             parts.append(f"{_abbrev(key)}{'generic' if value is None else value}")
         return "_".join(parts)
 
@@ -79,6 +83,17 @@ _ABBREV = {
     "head_dim": "d",
     "block_m": "bm",
     "block_n": "bn",
+    "dv_split": "dv",
+    "has_bias": "bias",
+    "head_dim_max": "dmax",
+}
+
+# Knobs omitted from an instance's name when they add nothing to it; see
+# Instance.name. Each was added after objects shipped.
+_NAME_OMITTED_WHEN = {
+    "dv_split": lambda knobs: knobs["dv_split"] == 1,
+    "has_bias": lambda knobs: knobs["has_bias"] == 0,
+    "head_dim_max": lambda knobs: knobs["head_dim_max"] == knobs["head_dim"],
 }
 
 
@@ -156,11 +171,30 @@ def rmsnorm_instances() -> list[Instance]:
 # small: the axes it enumerates are model-determined, never request-determined.
 #
 # head_dim: 64 and 128 cover the large majority of current LLM and diffusion
-# attention; 96 is the Phi-family width. The kernel builds for any multiple of
-# 32 from 64 up, but 256 does not fit: its O accumulators and register-resident
-# Q operands alone fill the 256-VGPR ceiling and the object spills, so it needs
-# a schedule that stages Q through LDS (COVERAGE.md, what is missing).
-SDPA_HEAD_DIMS = (64, 96, 128)
+# attention; 96 is the Phi-family width; 256 is Gemma's. Up to 128 the kernel
+# holds Q and every O accumulator in registers. At 256 those alone would fill
+# the 256-VGPR file, so its objects re-read Q per K-step and split the output
+# columns across SDPA_DV_SPLIT workgroups (kernel modification 13). That is a
+# schedule of its own, baked per head_dim like the rest, so the 64-128 objects
+# are built exactly as before and pay nothing for it.
+SDPA_HEAD_DIMS = (64, 96, 128, 256)
+
+
+def sdpa_dv_split(head_dim: int) -> int:
+    """Workgroups sharing one Q tile's output columns: 2 above 128, else 1."""
+    return 2 if head_dim > 128 else 1
+
+
+# The generic tier: any head_dim that is a multiple of 8, read at runtime, by an
+# object built for the largest it serves (kernel modification 15). Two, so a
+# small head is not run at 256's cost: up to 128, and above 128 up to 256. Each
+# maps to its output-column split; the 256 one splits four ways, because its
+# masked loads on top of the d256 schedule do not fit the register file at two.
+# Below the specialized tier in priority, and the smaller one above the larger,
+# so the narrowest object that serves a head is the one chosen.
+SDPA_GENERIC_HEAD_DIM_MAX = {128: 1, 256: 4}
+PRIORITY_SDPA_GENERIC = {128: 20, 256: PRIORITY_GENERIC}
+
 
 # Two variants of one kernel rather than a runtime flag: causal changes the KV
 # loop bound and skips fully-masked tiles, and the non-causal variant carries a
@@ -174,23 +208,53 @@ SDPA_CAUSAL = (0, 1)
 SDPA_BLOCK_M = 128
 SDPA_BLOCK_N = 32
 
+# An additive f32 bias (`attn_mask`, what `F.sdpa(attn_mask=)` lowers to) is
+# per-score work in the inner loop, so it is a baked axis: every (dtype,
+# head_dim, causal) class has a bias object beside its plain one, and the plain
+# objects compile to the same code as before bias existed (COVERAGE.md §6).
+SDPA_HAS_BIAS = (0, 1)
+
 
 def sdpa_instances() -> list[Instance]:
-    """The SDPA-forward instance table: one row per (dtype, head_dim, causal)."""
+    """The SDPA-forward instance table: (dtype, head_dim, causal, has_bias)."""
     instances: list[Instance] = []
     for dtype in DTYPES:
         for head_dim in SDPA_HEAD_DIMS:
+            for causal in SDPA_CAUSAL:
+                for has_bias in SDPA_HAS_BIAS:
+                    instances.append(
+                        Instance(
+                            op="sdpa",
+                            dtype=dtype,
+                            priority=PRIORITY_SPECIALIZED,
+                            knobs={
+                                "head_dim": head_dim,
+                                "causal": causal,
+                                "block_m": SDPA_BLOCK_M,
+                                "block_n": SDPA_BLOCK_N,
+                                "dv_split": sdpa_dv_split(head_dim),
+                                "has_bias": has_bias,
+                                "head_dim_max": head_dim,
+                            },
+                        )
+                    )
+        # Generic head_dim, without a bias: a bias on a head no specialized
+        # object serves declines.
+        for head_dim_max, dv_split in SDPA_GENERIC_HEAD_DIM_MAX.items():
             for causal in SDPA_CAUSAL:
                 instances.append(
                     Instance(
                         op="sdpa",
                         dtype=dtype,
-                        priority=PRIORITY_SPECIALIZED,
+                        priority=PRIORITY_SDPA_GENERIC[head_dim_max],
                         knobs={
-                            "head_dim": head_dim,
+                            "head_dim": None,
                             "causal": causal,
                             "block_m": SDPA_BLOCK_M,
                             "block_n": SDPA_BLOCK_N,
+                            "dv_split": dv_split,
+                            "has_bias": 0,
+                            "head_dim_max": head_dim_max,
                         },
                     )
                 )

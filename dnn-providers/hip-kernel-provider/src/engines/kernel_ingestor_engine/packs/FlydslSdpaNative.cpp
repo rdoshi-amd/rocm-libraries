@@ -83,6 +83,21 @@ constexpr std::string_view HEAD_DIM_FIELD = "head_dim";
 constexpr std::string_view CAUSAL_FIELD = "causal";
 constexpr std::string_view BLOCK_M_FIELD = "block_m";
 constexpr std::string_view BLOCK_N_FIELD = "block_n";
+/// Workgroups that share one query tile's output columns, each computing head_dim /
+/// dv_split of them; the grid grows by it. 1 up to head_dim 128, 2 above.
+constexpr std::string_view DV_SPLIT_FIELD = "dv_split";
+/// 0 or 1: whether the object adds an additive bias to the scores. Baked, so a graph with
+/// a bias and one without each select their own object.
+constexpr std::string_view HAS_BIAS_FIELD = "has_bias";
+/// The largest head_dim the object serves. Equal to head_dim for a specialized object; for
+/// a generic one (head_dim 0, read at runtime) it bounds the heads it takes.
+constexpr std::string_view HEAD_DIM_MAX_FIELD = "head_dim_max";
+
+/// A generic object's head_dim: it reads the real one at runtime.
+constexpr int64_t GENERIC_HEAD_DIM = 0;
+
+/// A generic object zeroes and skips whole 8-column groups, so the head must be made of them.
+constexpr int64_t GENERIC_HEAD_DIM_ALIGN = 8;
 
 constexpr std::string_view Q_TOKEN = "flydsl_sdpa.q.uid";
 constexpr std::string_view K_TOKEN = "flydsl_sdpa.k.uid";
@@ -98,6 +113,8 @@ constexpr std::string_view LEFT_BOUND_TOKEN = "flydsl_sdpa.left_bound";
 constexpr std::string_view ALIGN_BOTTOM_RIGHT_TOKEN = "flydsl_sdpa.align_bottom_right";
 /// The uid of the softmax-statistics (LSE) output, or NO_STATS when the graph wants none.
 constexpr std::string_view STATS_TOKEN = "flydsl_sdpa.stats.uid";
+/// The uid of the additive bias (`attn_mask`), or NO_BIAS when the graph has none.
+constexpr std::string_view BIAS_TOKEN = "flydsl_sdpa.bias.uid";
 /// Where the softmax scale comes from; see ScaleSource.
 constexpr std::string_view SCALE_SOURCE_TOKEN = "flydsl_sdpa.scale_source";
 /// The scale's f32 bit pattern when baked (BoundTokens carry int64_t), else the uid of
@@ -116,6 +133,19 @@ constexpr int64_t UNBOUNDED = -1;
 
 /// The stats token's value when the graph asks for no LSE output.
 constexpr int64_t NO_STATS = -1;
+
+/// The bias token's value when the graph has no additive bias.
+constexpr int64_t NO_BIAS = -1;
+
+/// The bias's (batch, head, query, key) element strides as the kernel takes them.
+using BiasStrides = std::array<int64_t, 4>;
+
+/// The bias is read through a 32-bit buffer descriptor per (batch, head) slice, with 32-bit
+/// element offsets inside it.
+constexpr int64_t BIAS_SLICE_ELEMENT_LIMIT = (1LL << 30) - 1;
+
+/// Keys past the last one the kernel may read in a partial final tile.
+constexpr int64_t KV_TILE_OVERREAD = 31;
 
 /// Sequence lengths the kernel's int32 mask arithmetic is sound for: a row's attendable
 /// range is computed as q + offset + bound with every term below 2^29, so the sum stays
@@ -325,6 +355,62 @@ bool isServableStats(const data_objects::TensorAttributes& stats,
            && !stats.ragged_offset_tensor_uid().has_value();
 }
 
+/// The additive bias, right-aligned to `[B, H, Sq, Skv]` as the reference reads it (rank 1 to
+/// 4, a size-1 or absent axis broadcast), as the kernel's (batch, head, query, key) strides:
+/// 0 on a broadcast axis. nullopt when the kernel cannot read it: not f32, a dimension that
+/// is neither the target's nor 1, a non-positive stride on a real axis, a slice past the
+/// kernel's 32-bit offsets, or not a plain device tensor.
+std::optional<BiasStrides> servableBiasStrides(const data_objects::TensorAttributes& bias,
+                                               int64_t batch,
+                                               int64_t heads,
+                                               int64_t seqLenQ,
+                                               int64_t seqLenKv)
+{
+    const auto* dims = bias.dims();
+    const auto* strides = bias.strides();
+    if(dims == nullptr || strides == nullptr || dims->empty() || dims->size() > SDPA_RANK
+       || strides->size() != dims->size())
+    {
+        return std::nullopt;
+    }
+    if(bias.data_type() != data_objects::DataType::FLOAT || bias.virtual_()
+       || hipdnn_flatbuffers_sdk::utilities::isPassByValueTensor(&bias)
+       || bias.ragged_offset_tensor_uid().has_value())
+    {
+        return std::nullopt;
+    }
+
+    const std::array<int64_t, SDPA_RANK> target{batch, heads, seqLenQ, seqLenKv};
+    BiasStrides result{0, 0, 0, 0};
+    const auto rank = static_cast<size_t>(dims->size());
+    for(size_t axis = 0; axis < rank; ++axis)
+    {
+        const auto targetAxis = SDPA_RANK - rank + axis;
+        const auto dim = dims->Get(static_cast<flatbuffers::uoffset_t>(axis));
+        const auto stride = strides->Get(static_cast<flatbuffers::uoffset_t>(axis));
+        if(dim == 1)
+        {
+            continue;
+        }
+        if(dim != target[targetAxis] || stride <= 0)
+        {
+            return std::nullopt;
+        }
+        result[targetAxis] = stride;
+    }
+
+    // The kernel reads whole KV tiles, up to one tile past the last key (those reads come
+    // back as zero), so the offsets it forms reach that far.
+    const auto lastQuery = checkedProduct({seqLenQ - 1, result[2]});
+    const auto lastKey = checkedProduct({seqLenKv - 1 + KV_TILE_OVERREAD, result[3]});
+    if(!lastQuery.has_value() || !lastKey.has_value()
+       || *lastQuery > BIAS_SLICE_ELEMENT_LIMIT - *lastKey)
+    {
+        return std::nullopt;
+    }
+    return result;
+}
+
 /// The kernel metadata spelling of a graph dtype. Descriptors say `bf16`/`f16`, the
 /// flatbuffer enum says `BFLOAT16`/`HALF`, and this is the one place the two meet.
 std::optional<std::string> kernelDataTypeName(data_objects::DataType dataType)
@@ -346,6 +432,8 @@ struct SdpaProblem
     int64_t batch = 0;
     int64_t numHeads = 0;
     int64_t numKvHeads = 0;
+    /// V's head count; K's unless set from V, which may differ (each divides numHeads).
+    int64_t numVHeads = 0;
     int64_t seqLenQ = 0;
     int64_t seqLenKv = 0;
     int64_t headDim = 0;
@@ -361,6 +449,7 @@ SdpaProblem problemFor(const data_objects::TensorAttributes& q,
     problem.seqLenQ = q.dims()->Get(SEQ_AXIS);
     problem.headDim = q.dims()->Get(HEAD_DIM_AXIS);
     problem.numKvHeads = k.dims()->Get(HEAD_AXIS);
+    problem.numVHeads = problem.numKvHeads;
     problem.seqLenKv = k.dims()->Get(SEQ_AXIS);
     problem.dataType = q.data_type();
     return problem;
@@ -437,17 +526,19 @@ std::optional<BoundTokens> flydslSdpaGraphMatches(const MatchContext& context)
     }
 
     // --- 4. Cross-tensor shape. No broadcasting: K and V share every extent, O is Q's
-    // shape, and V's head dim must equal Q/K's -- the kernel has one head_dim.
+    // shape, and V's head dim must equal Q/K's -- the kernel has one head_dim. V's head count
+    // may differ from K's.
+    const auto numVHeads = v->dims()->Get(HEAD_AXIS);
     if(!hasDims(*k, problem.batch, problem.numKvHeads, problem.seqLenKv, problem.headDim)
-       || !hasDims(*v, problem.batch, problem.numKvHeads, problem.seqLenKv, problem.headDim)
+       || !hasDims(*v, problem.batch, numVHeads, problem.seqLenKv, problem.headDim)
        || !hasDims(*o, problem.batch, problem.numHeads, problem.seqLenQ, problem.headDim))
     {
         return std::nullopt;
     }
 
-    // GQA/MQA: the kernel maps a query head to its kv head by integer division, so a
-    // non-divisible pair would silently attend to the wrong heads.
-    if(problem.numHeads % problem.numKvHeads != 0)
+    // GQA/MQA: the kernel maps a query head to its K head and to its V head by integer
+    // division, so a non-divisible pair would silently attend to the wrong heads.
+    if(problem.numHeads % problem.numKvHeads != 0 || problem.numHeads % numVHeads != 0)
     {
         return std::nullopt;
     }
@@ -486,10 +577,19 @@ std::optional<BoundTokens> flydslSdpaGraphMatches(const MatchContext& context)
 
     // --- 7. Every optional feature the kernel does not implement, declined explicitly.
 
-    // Additive attention bias.
+    // Additive attention bias: served by the has_bias objects.
+    int64_t biasUid = NO_BIAS;
     if(attributes.attn_mask_tensor_uid().has_value())
     {
-        return std::nullopt;
+        const auto* bias = findTensor(context, attributes.attn_mask_tensor_uid().value());
+        if(bias == nullptr
+           || !servableBiasStrides(
+                   *bias, problem.batch, problem.numHeads, problem.seqLenQ, problem.seqLenKv)
+                   .has_value())
+        {
+            return std::nullopt;
+        }
+        biasUid = attributes.attn_mask_tensor_uid().value();
     }
     // varlen, both spellings.
     if(attributes.seq_len_q_tensor_uid().has_value()
@@ -624,6 +724,7 @@ std::optional<BoundTokens> flydslSdpaGraphMatches(const MatchContext& context)
     bound[std::string(LEFT_BOUND_TOKEN)] = leftBound;
     bound[std::string(ALIGN_BOTTOM_RIGHT_TOKEN)] = mask->alignBottomRight ? 1 : 0;
     bound[std::string(STATS_TOKEN)] = statsUid;
+    bound[std::string(BIAS_TOKEN)] = biasUid;
     bound[std::string(SCALE_SOURCE_TOKEN)] = static_cast<int64_t>(scaleSource);
     bound[std::string(SCALE_TOKEN)] = scaleToken;
     return bound;
@@ -640,6 +741,7 @@ struct FlydslSdpaBinding
     int64_t leftBound = UNBOUNDED;
     int64_t alignBottomRight = 0;
     int64_t stats = NO_STATS;
+    int64_t bias = NO_BIAS;
     ScaleSource scaleSource = ScaleSource::BAKED;
     int64_t scale = 0;
 };
@@ -667,6 +769,7 @@ FlydslSdpaBinding flydslSdpaBinding(const BoundTokens& bound)
     binding.leftBound = read(LEFT_BOUND_TOKEN);
     binding.alignBottomRight = read(ALIGN_BOTTOM_RIGHT_TOKEN);
     binding.stats = read(STATS_TOKEN);
+    binding.bias = read(BIAS_TOKEN);
     binding.scaleSource = static_cast<ScaleSource>(read(SCALE_SOURCE_TOKEN));
     binding.scale = read(SCALE_TOKEN);
     return binding;
@@ -704,24 +807,39 @@ struct SdpaTile
 {
     int64_t blockM = 0;
     int64_t blockN = 0;
+    int64_t dvSplit = 1;
 };
 
 std::optional<SdpaTile> candidateTile(const KernelDefinition& kernel)
 {
     const auto blockM = integerMetadata(kernel, BLOCK_M_FIELD);
     const auto blockN = integerMetadata(kernel, BLOCK_N_FIELD);
-    if(!blockM.has_value() || !blockN.has_value() || *blockM <= 0 || *blockM % WAVE_ROWS != 0
-       || *blockN <= 0 || *blockN % KV_SUB_TILE != 0)
+    const auto dvSplit = integerMetadata(kernel, DV_SPLIT_FIELD);
+    if(!blockM.has_value() || !blockN.has_value() || !dvSplit.has_value() || *blockM <= 0
+       || *blockM % WAVE_ROWS != 0 || *blockN <= 0 || *blockN % KV_SUB_TILE != 0 || *dvSplit <= 0)
     {
         return std::nullopt;
     }
-    return SdpaTile{*blockM, *blockN};
+    return SdpaTile{*blockM, *blockN, *dvSplit};
+}
+
+/// The workgroup count `batch_x_qtiles_x_heads_x_dv_split`, or nullopt past int32.
+std::optional<int64_t> candidateGrid(const SdpaProblem& problem, const SdpaTile& tile)
+{
+    const auto queryTiles = (problem.seqLenQ + tile.blockM - 1) / tile.blockM;
+    const auto grid = checkedProduct({problem.batch, queryTiles, problem.numHeads, tile.dvSplit});
+    if(!grid.has_value() || *grid > INT32_LIMIT)
+    {
+        return std::nullopt;
+    }
+    return grid;
 }
 
 /**
  * @brief Kernel-scoped applicability: does THIS candidate's baked metadata fit the graph?
  *
- * dtype, head_dim and the causal variant are baked; everything else is a runtime
+ * dtype, head_dim (or, for a generic object, its largest), the causal variant and the bias are
+ * baked; everything else is a runtime
  * argument, so they are the whole comparison.
  */
 bool flydslSdpaKernelMatches(const MatchContext& context,
@@ -741,7 +859,8 @@ bool flydslSdpaKernelMatches(const MatchContext& context,
     }
     const auto problem = problemFor(*q, *k);
 
-    if(!candidateTile(kernel).has_value())
+    const auto tile = candidateTile(kernel);
+    if(!tile.has_value())
     {
         return false;
     }
@@ -752,7 +871,33 @@ bool flydslSdpaKernelMatches(const MatchContext& context,
         return false;
     }
 
-    if(integerMetadata(kernel, HEAD_DIM_FIELD) != problem.headDim)
+    // A specialized object serves exactly its head_dim; a generic one any multiple of 8 up
+    // to its head_dim_max, which priority ranks below the specialized ones.
+    const auto bakedHeadDim = integerMetadata(kernel, HEAD_DIM_FIELD);
+    const auto headDimMax = integerMetadata(kernel, HEAD_DIM_MAX_FIELD);
+    if(!bakedHeadDim.has_value() || !headDimMax.has_value() || *headDimMax <= 0)
+    {
+        return false;
+    }
+    const bool servesHead
+        = *bakedHeadDim == GENERIC_HEAD_DIM
+              ? problem.headDim % GENERIC_HEAD_DIM_ALIGN == 0 && problem.headDim <= *headDimMax
+              : *bakedHeadDim == problem.headDim && *headDimMax == problem.headDim;
+    if(!servesHead)
+    {
+        return false;
+    }
+
+    // The column split must divide the object's head into whole tiles, and the split grid --
+    // larger than the graph-scoped bound assumed -- must still fit the launch.
+    if(*headDimMax % tile->dvSplit != 0 || !candidateGrid(problem, *tile).has_value())
+    {
+        return false;
+    }
+
+    // A bias object for a graph with a bias, a plain one for a graph without.
+    const auto bias = tryGetBoundInt(bound, BIAS_TOKEN);
+    if(!bias.has_value() || integerMetadata(kernel, HAS_BIAS_FIELD) != (*bias == NO_BIAS ? 0 : 1))
     {
         return false;
     }
@@ -784,8 +929,11 @@ double flydslSdpaScore(const MatchContext& /*context*/,
  *        the `signature` block every one of this pack's UKDs carries.
  *
  * Q, K, V, O, LSE pointers; seq_len_q, seq_len_kv, num_heads, kv_group, right_bound,
- * left_bound, align_bottom_right, lse_on (i32); scale (f32); then the (batch, sequence,
- * head) element strides of Q, K, V, O and LSE (i64).
+ * left_bound, align_bottom_right, lse_on (i32); scale (f32); the (batch, sequence, head)
+ * element strides of Q, K, V, O and LSE (i64); then the BIAS pointer and its (batch, head,
+ * query, key) element strides (i64), the runtime head_dim (i32, read only by a generic
+ * object), and the query heads per V head (i32) -- each appended so the arguments before
+ * them kept their offsets.
  *
  * Names are empty and offsets zero because neither is compared for this producer -- FlyDSL
  * emits no argument names; see requireSignatureMatch. The semantic names are recorded per
@@ -799,9 +947,10 @@ const std::vector<KernelArgument>& flydslSdpaKernelSignature()
     static const KernelArgument s_f32{"by_value", static_cast<uint32_t>(sizeof(float)), 0, ""};
     static const KernelArgument s_i64{"by_value", static_cast<uint32_t>(sizeof(int64_t)), 0, ""};
     static const std::vector<KernelArgument> s_signature{
-        s_pointer, s_pointer, s_pointer, s_pointer, s_pointer, s_i32, s_i32, s_i32, s_i32, s_i32,
-        s_i32,     s_i32,     s_i32,     s_f32,     s_i64,     s_i64, s_i64, s_i64, s_i64, s_i64,
-        s_i64,     s_i64,     s_i64,     s_i64,     s_i64,     s_i64, s_i64, s_i64, s_i64};
+        s_pointer, s_pointer, s_pointer, s_pointer, s_pointer, s_i32, s_i32, s_i32, s_i32,
+        s_i32,     s_i32,     s_i32,     s_i32,     s_f32,     s_i64, s_i64, s_i64, s_i64,
+        s_i64,     s_i64,     s_i64,     s_i64,     s_i64,     s_i64, s_i64, s_i64, s_i64,
+        s_i64,     s_i64,     s_pointer, s_i64,     s_i64,     s_i64, s_i64, s_i32, s_i32};
     return s_signature;
 }
 
@@ -841,12 +990,14 @@ public:
                        FlydslSdpaBinding binding,
                        SdpaProblem problem,
                        std::optional<hipdnn_plugin_sdk::ScalarOperand> scaleOperand,
-                       std::array<OperandStrides, 5> strides)
+                       std::array<OperandStrides, 5> strides,
+                       BiasStrides biasStrides)
         : _code(std::move(code))
         , _binding(binding)
         , _problem(problem)
         , _scaleOperand(scaleOperand)
         , _strides(strides)
+        , _biasStrides(biasStrides)
     {
     }
 
@@ -876,12 +1027,19 @@ public:
         return _strides;
     }
 
+    /// The bias's (batch, head, query, key) strides; zeros when there is none.
+    const BiasStrides& biasStrides() const
+    {
+        return _biasStrides;
+    }
+
 private:
     IngestorKernelCode _code;
     FlydslSdpaBinding _binding;
     SdpaProblem _problem;
     std::optional<hipdnn_plugin_sdk::ScalarOperand> _scaleOperand;
     std::array<OperandStrides, 5> _strides;
+    BiasStrides _biasStrides;
 };
 
 /**
@@ -933,7 +1091,8 @@ public:
         const auto& k = requireTensor(context, binding.k);
         const auto& v = requireTensor(context, binding.v);
         const auto& o = requireTensor(context, binding.o);
-        const auto problem = problemFor(q, k);
+        auto problem = problemFor(q, k);
+        problem.numVHeads = v.dims()->Get(HEAD_AXIS);
 
         // Build defines are ignored on the kpack path, but the signature still wants an
         // options object. Built from the arch alone: the tensor overload classifies a 4-D
@@ -944,18 +1103,41 @@ public:
         auto code = buildIngestorKernelCode(
             _kernelCompiler, _kpackLoader, context, kernel, options, flydslSdpaKernelSignature());
 
-        // `batch_x_qtiles_x_heads`: one workgroup per (batch, query tile, head), each
-        // block_m / 16 waves of 32. The match bounded this product for the smallest tile.
-        const auto queryTiles = (problem.seqLenQ + tile->blockM - 1) / tile->blockM;
-        const auto gridX = problem.batch * queryTiles * problem.numHeads;
+        // `batch_x_qtiles_x_heads_x_dv_split`: one workgroup per (batch, query tile, head,
+        // output-column tile), each block_m / 16 waves of 32. kernel_match bounded it.
+        const auto gridX = candidateGrid(problem, *tile);
+        if(!gridX.has_value())
+        {
+            throw hipdnn_plugin_sdk::HipdnnPluginException(
+                HIPDNN_PLUGIN_STATUS_BAD_PARAM,
+                "flydsl_sdpa: launch grid exceeds int32 for kernel '" + toString(kernel.kernelId)
+                    + "'");
+        }
         code.setBlockSize(static_cast<unsigned int>(tile->blockM / WAVE_ROWS * WAVE_SIZE), 1, 1);
-        code.setGridSize(static_cast<unsigned int>(gridX), 1, 1);
+        code.setGridSize(static_cast<unsigned int>(*gridX), 1, 1);
 
         std::optional<hipdnn_plugin_sdk::ScalarOperand> scaleOperand;
         if(binding.scaleSource == ScaleSource::TENSOR)
         {
             scaleOperand = hipdnn_plugin_sdk::makeScalarOperand(
                 context.graph.getTensorMap(), binding.scale, "scale");
+        }
+
+        BiasStrides biasStrides{0, 0, 0, 0};
+        if(binding.bias != NO_BIAS)
+        {
+            const auto strides = servableBiasStrides(requireTensor(context, binding.bias),
+                                                     problem.batch,
+                                                     problem.numHeads,
+                                                     problem.seqLenQ,
+                                                     problem.seqLenKv);
+            if(!strides.has_value())
+            {
+                throw hipdnn_plugin_sdk::HipdnnPluginException(
+                    HIPDNN_PLUGIN_STATUS_BAD_PARAM,
+                    "flydsl_sdpa: the bound bias is not one the kernel can read");
+            }
+            biasStrides = *strides;
         }
 
         return std::make_unique<PreparedFlydslSdpa>(
@@ -969,7 +1151,8 @@ public:
                                           stridesOf(o),
                                           binding.stats == NO_STATS
                                               ? OperandStrides{}
-                                              : stridesOf(requireTensor(context, binding.stats))});
+                                              : stridesOf(requireTensor(context, binding.stats))},
+            biasStrides);
     }
 
     void launch(const Handle& handle,
@@ -1011,7 +1194,14 @@ public:
                                 binding.stats, deviceBuffers, numDeviceBuffers)
                                 .ptr;
 
+        // Read only by the has_bias objects, which kernel_match pairs with a bound bias.
+        void* bias = binding.bias == NO_BIAS ? nullptr
+                                             : hipdnn_plugin_sdk::findDeviceBuffer(
+                                                   binding.bias, deviceBuffers, numDeviceBuffers)
+                                                   .ptr;
+
         const auto& s = preparedSdpa.strides();
+        const auto& b = preparedSdpa.biasStrides();
 
         // Changing this argument list means changing flydslSdpaKernelSignature() with it.
         preparedSdpa.kernelForStream(handle.getStream())
@@ -1044,7 +1234,14 @@ public:
                     s[3].head,
                     s[4].batch,
                     s[4].sequence,
-                    s[4].head);
+                    s[4].head,
+                    bias,
+                    b[0],
+                    b[1],
+                    b[2],
+                    b[3],
+                    static_cast<int32_t>(problem.headDim),
+                    static_cast<int32_t>(problem.numHeads / problem.numVHeads));
     }
 
 private:

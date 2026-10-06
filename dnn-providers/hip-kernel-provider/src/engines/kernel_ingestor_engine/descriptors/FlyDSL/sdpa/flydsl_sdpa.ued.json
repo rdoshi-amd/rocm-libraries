@@ -9,6 +9,9 @@
   "metadata": "2a85df69-0618-5c61-ba87-0de0901f0a63",
   "knobs": [
     "block_m",
-    "block_n"
+    "block_n",
+    "dv_split",
+    "has_bias",
+    "head_dim_max"
   ]
 }

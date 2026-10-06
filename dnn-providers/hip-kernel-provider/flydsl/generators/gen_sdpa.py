@@ -20,8 +20,8 @@ As with RMSNorm, every object's kernarg layout is asserted against the layout
 recorded below before it is written, and the semantic argument names are
 carried into the manifest. FlyDSL emits no argument names, so the loader's
 signature check can see a change of kind, size or offset but not a permutation
-of two same-sized arguments -- and this ABI has many of those (four pointers,
-five i32, twelve i64 strides). The names here are what make a permutation
+of two same-sized arguments -- and this ABI has many of those (six pointers,
+ten i32, nineteen i64 strides). The names here are what make a permutation
 answerable by reading the manifest.
 """
 
@@ -78,18 +78,30 @@ _SEMANTIC_ARG_NAMES = (
     "lse_stride_b",
     "lse_stride_s",
     "lse_stride_h",
+    "BIAS",
+    "bias_stride_b",
+    "bias_stride_h",
+    "bias_stride_q",
+    "bias_stride_k",
+    "head_dim_rt",
+    "v_group",
 )
 
-_KERNARG_SEGMENT_SIZE = 200
+_KERNARG_SEGMENT_SIZE = 248
 _EXPECTED_SIGNATURE = (
     *(("global_buffer", 8, 8 * i) for i in range(5)),
     *(("by_value", 4, 40 + 4 * i) for i in range(9)),
     *(("by_value", 8, 80 + 8 * i) for i in range(15)),
+    ("global_buffer", 8, 200),
+    *(("by_value", 8, 208 + 8 * i) for i in range(4)),
+    ("by_value", 4, 240),
+    ("by_value", 4, 244),
 )
 
 # Launch geometry the native dispatch handler reproduces: one workgroup per
-# (batch, query tile of block_m rows, query head), `block_m / 16` waves of 32.
-_GRID_RULE = "batch_x_qtiles_x_heads"
+# (batch, query tile of block_m rows, query head, output-column tile of
+# head_dim / dv_split), `block_m / 16` waves of 32.
+_GRID_RULE = "batch_x_qtiles_x_heads_x_dv_split"
 _WAVE_ROWS = 16
 _WAVE_SIZE = 32
 
@@ -142,13 +154,22 @@ def _build_one(
 
     knobs = instance.knobs
     env.set_dump_dir(dump_dir)
+    generic = knobs["head_dim"] is None
     launch = kernel_module.build_flash_attn_func_module(
-        knobs["head_dim"],
+        knobs["head_dim_max"],
         causal=bool(knobs["causal"]),
         dtype_str=instance.dtype,
         block_m=knobs["block_m"],
         block_n=knobs["block_n"],
+        dv_split=knobs["dv_split"],
+        has_bias=bool(knobs["has_bias"]),
+        generic_head_dim=generic,
     )
+    if launch.dv_split != knobs["dv_split"]:
+        raise GeneratorError(
+            f"{instance.name}: kernel built with dv_split {launch.dv_split}, "
+            f"instance declares {knobs['dv_split']}"
+        )
 
     # Placeholders only: every value below is a runtime kernel argument, so none
     # is baked, and COMPILE_ONLY never dispatches through the null pointers.
@@ -157,6 +178,10 @@ def _build_one(
     # align_bottom_right, lse_on; then the scale.
     args = [null] * 5 + [1, 1, 1, 1, 1, 0, -1, 0, 0, 1.0]
     args += [1] * 15
+    # The bias pointer and its (batch, head, query, key) strides.
+    args += [null] + [1] * 4
+    # The runtime head_dim (read only by a generic object), then the V group.
+    args += [1, 1]
     args.append(fx.Stream(None))
     # FlyDSL merges hint layers shallowly: an `llvm_options` passed here would
     # *replace* the kernel's own, not extend it. Merge onto them explicitly.

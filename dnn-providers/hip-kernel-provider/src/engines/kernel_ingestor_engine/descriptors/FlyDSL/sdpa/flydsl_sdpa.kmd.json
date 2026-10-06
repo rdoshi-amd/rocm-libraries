@@ -22,6 +22,18 @@
     {
       "name": "block_n",
       "type": "int"
+    },
+    {
+      "name": "dv_split",
+      "type": "int"
+    },
+    {
+      "name": "has_bias",
+      "type": "int"
+    },
+    {
+      "name": "head_dim_max",
+      "type": "int"
     }
   ]
 }

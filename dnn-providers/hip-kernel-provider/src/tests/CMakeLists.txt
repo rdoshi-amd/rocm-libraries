@@ -285,8 +285,8 @@ if(HIPDNN_ENABLE_KERNEL_INGESTOR)
             SUITES TestFlydslSdpaPacks
             EXPECTED_CASES
                 IsOnePackWithAGraphMatchAndOneKernelScopedMatcher
-                ShipsEveryDtypeHeadDimAndCausalVariantOnce
-                EveryKernelDeclaresTheTwentyNineSlotSignature
+                ShipsEverySpecializedAndGenericVariantOnce
+                EveryKernelDeclaresTheThirtySixSlotSignature
         )
     endif()
 

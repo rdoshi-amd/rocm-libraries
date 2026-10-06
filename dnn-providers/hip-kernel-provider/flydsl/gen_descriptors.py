@@ -93,7 +93,7 @@ GENERIC_N = 0
 
 # Manifest knobs carried as null when not baked in. Only these may take the
 # `GENERIC_N` sentinel; a null anywhere else is a generator bug, not a tier.
-SHAPE_KNOBS = {"N"}
+SHAPE_KNOBS = {"N", "head_dim"}
 
 # Fields the graph fixes rather than the tuner choosing. They belong in the
 # metadata schema -- the matcher needs every one of them to pick a variant --

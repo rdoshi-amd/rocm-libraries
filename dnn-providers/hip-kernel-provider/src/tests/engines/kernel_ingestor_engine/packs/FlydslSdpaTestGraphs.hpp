@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <hipdnn_flatbuffers_sdk/data_objects/graph_generated.h>
@@ -53,6 +54,9 @@ constexpr const char* FLYDSL_SDPA_HEAD_DIM_FIELD = "head_dim";
 constexpr const char* FLYDSL_SDPA_CAUSAL_FIELD = "causal";
 constexpr const char* FLYDSL_SDPA_BLOCK_M_FIELD = "block_m";
 constexpr const char* FLYDSL_SDPA_BLOCK_N_FIELD = "block_n";
+constexpr const char* FLYDSL_SDPA_DV_SPLIT_FIELD = "dv_split";
+constexpr const char* FLYDSL_SDPA_HAS_BIAS_FIELD = "has_bias";
+constexpr const char* FLYDSL_SDPA_HEAD_DIM_MAX_FIELD = "head_dim_max";
 
 /// The stats token's value when the graph asks for no LSE output.
 constexpr int64_t FLYDSL_SDPA_NO_STATS = -1;
@@ -140,6 +144,11 @@ struct SdpaGraphSpec
 
     /// V's head dim, when it should differ from Q/K's.
     std::optional<int64_t> valueHeadDim;
+    /// V's head count, when it should differ from K's.
+    std::optional<int64_t> valueHeads;
+    /// Q, K and V as strided views into one [B, S, 3, H, D] buffer, as a fused QKV
+    /// projection lays them out. Needs equal head counts and sequence lengths.
+    bool packedQkv = false;
     /// K's dtype, when it should differ from Q's.
     std::optional<hipdnn_flatbuffers_sdk::data_objects::DataType> keyDataType;
     /// Q's head-dim stride, when it should not be 1.
@@ -151,10 +160,34 @@ struct SdpaGraphSpec
 
     SdpaStats stats = SdpaStats::NONE;
     bool withBias = false;
+    /// The bias as the graph declares it: rank 1 to 4, right-aligned to [B, H, Sq, Skv].
+    /// Empty dims mean a packed [1, 1, Sq, Skv]; empty strides mean packed row-major.
+    std::vector<int64_t> biasDims;
+    std::vector<int64_t> biasStrides;
+    hipdnn_flatbuffers_sdk::data_objects::DataType biasDataType
+        = hipdnn_flatbuffers_sdk::data_objects::DataType::FLOAT;
     bool withDropout = false;
     /// Marks Q as ragged (THD), which the kernel would read as dense.
     bool raggedQuery = false;
 };
+
+/// The bias's dims and strides as @p spec declares them to the graph.
+inline std::pair<std::vector<int64_t>, std::vector<int64_t>>
+    sdpaBiasLayout(const SdpaGraphSpec& spec)
+{
+    auto dims = spec.biasDims.empty() ? std::vector<int64_t>{1, 1, spec.seqLenQ, spec.seqLenKv}
+                                      : spec.biasDims;
+    auto strides = spec.biasStrides;
+    if(strides.empty())
+    {
+        strides.assign(dims.size(), 1);
+        for(size_t axis = dims.size() - 1; axis > 0; --axis)
+        {
+            strides[axis - 1] = strides[axis] * dims[axis];
+        }
+    }
+    return {dims, strides};
+}
 
 /// Element strides of a (B, H, S, D) logical tensor laid out as @p layout.
 inline std::vector<int64_t>
@@ -167,6 +200,14 @@ inline std::vector<int64_t>
     return {heads * sequence * headDim, sequence * headDim, headDim, 1};
 }
 
+/// Element strides of Q, K and V as views into one packed [B, S, 3, H, D] buffer, in the
+/// logical (B, H, S, D) order: each is the buffer offset by its third of a token's row.
+inline std::vector<int64_t> sdpaPackedQkvStrides(const SdpaGraphSpec& spec)
+{
+    const int64_t row = 3 * spec.heads * spec.headDim;
+    return {spec.seqLenQ * row, spec.headDim, row, 1};
+}
+
 /// A single SDPA-forward node built to @p spec.
 inline flatbuffers::FlatBufferBuilder buildFlydslSdpaGraph(const SdpaGraphSpec& spec = {})
 {
@@ -176,16 +217,23 @@ inline flatbuffers::FlatBufferBuilder buildFlydslSdpaGraph(const SdpaGraphSpec& 
 
     const std::vector<int64_t> qDims{spec.batch, spec.heads, spec.seqLenQ, spec.headDim};
     const std::vector<int64_t> kDims{spec.batch, spec.kvHeads, spec.seqLenKv, spec.headDim};
-    const std::vector<int64_t> vDims{spec.batch, spec.kvHeads, spec.seqLenKv, valueHeadDim};
+    const int64_t valueHeads = spec.valueHeads.value_or(spec.kvHeads);
+    const std::vector<int64_t> vDims{spec.batch, valueHeads, spec.seqLenKv, valueHeadDim};
     const std::vector<int64_t> oDims{spec.batch, spec.heads, spec.seqLenQ, valueHeadDim};
 
-    auto qStrides = sdpaStrides(spec.layout, spec.heads, spec.seqLenQ, spec.headDim);
+    auto qStrides = spec.packedQkv
+                        ? sdpaPackedQkvStrides(spec)
+                        : sdpaStrides(spec.layout, spec.heads, spec.seqLenQ, spec.headDim);
     if(spec.queryHeadDimStride.has_value())
     {
         qStrides[3] = *spec.queryHeadDimStride;
     }
-    const auto kStrides = sdpaStrides(spec.layout, spec.kvHeads, spec.seqLenKv, spec.headDim);
-    const auto vStrides = sdpaStrides(spec.layout, spec.kvHeads, spec.seqLenKv, valueHeadDim);
+    const auto kStrides = spec.packedQkv
+                              ? sdpaPackedQkvStrides(spec)
+                              : sdpaStrides(spec.layout, spec.kvHeads, spec.seqLenKv, spec.headDim);
+    const auto vStrides = spec.packedQkv
+                              ? sdpaPackedQkvStrides(spec)
+                              : sdpaStrides(spec.layout, valueHeads, spec.seqLenKv, valueHeadDim);
     const auto oStrides = sdpaStrides(spec.layout, spec.heads, spec.seqLenQ, valueHeadDim);
 
     flatbuffers::FlatBufferBuilder builder;
@@ -242,13 +290,11 @@ inline flatbuffers::FlatBufferBuilder buildFlydslSdpaGraph(const SdpaGraphSpec& 
                                                                      &scalarDims));
     }
 
-    const std::vector<int64_t> biasDims{1, 1, spec.seqLenQ, spec.seqLenKv};
-    const std::vector<int64_t> biasStrides{
-        spec.seqLenQ * spec.seqLenKv, spec.seqLenQ * spec.seqLenKv, spec.seqLenKv, 1};
+    const auto [biasDims, biasStrides] = sdpaBiasLayout(spec);
     if(spec.withBias)
     {
         tensors.push_back(data_objects::CreateTensorAttributesDirect(
-            builder, FLYDSL_SDPA_BIAS_UID, "bias", spec.dataType, &biasStrides, &biasDims));
+            builder, FLYDSL_SDPA_BIAS_UID, "bias", spec.biasDataType, &biasStrides, &biasDims));
     }
     const int64_t statsLast = spec.stats == SdpaStats::LSE_WRONG_SHAPE ? 2 : 1;
     const std::vector<int64_t> statsDims{spec.batch, spec.heads, spec.seqLenQ, statsLast};

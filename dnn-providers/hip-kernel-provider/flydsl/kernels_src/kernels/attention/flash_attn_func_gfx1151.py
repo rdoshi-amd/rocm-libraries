@@ -29,7 +29,8 @@
 #      used only for the token stride and the grid decomposition, and baking it
 #      meant one object per model head count.
 #   3. GQA/MQA: a runtime kv_group (query heads per kv head) maps a query head
-#      to its kv head. Upstream is MHA only.
+#      to its K head, and a runtime v_group (appended last) to its V head, so K
+#      and V may have different head counts. Upstream is MHA only.
 #   4. Q, K, V and O each take runtime batch / sequence / head strides, in
 #      elements. Upstream assumed packed BSHD. Only the head-dim stride must be
 #      1, so BSHD, BHSD and packed-QKV views all run on one object.
@@ -68,6 +69,23 @@
 #      barriers).
 #  12. P is narrowed to bf16 by round-to-nearest rather than truncation
 #      (truncate_p=False by default), which halves the bf16 output error.
+#  13. head_dim above 128 (256): Q is re-read per K-step, one step ahead and
+#      fenced by a scheduling barrier, instead of held for the whole KV loop
+#      (q_resident), and the output columns are split across DV_SPLIT
+#      workgroups that each recompute QK^T (dv_split). Together they bring the
+#      register demand under 256 VGPRs; 128 and below are built as before.
+#  14. Additive bias (has_bias): an f32 tensor, broadcast through its (batch,
+#      head, query, key) element strides -- 0 on a broadcast axis -- added to
+#      the scaled scores before the mask, as the reference does. Its pointer
+#      and strides are appended after the LSE strides, so the arguments before
+#      them keep their offsets; objects without bias ignore them and compile to
+#      the same code. At head_dim 128 a bias object re-reads Q per K-step.
+#  15. A runtime head_dim (generic_head_dim): head_dim is then the largest
+#      served, and the actual one -- any multiple of 8 up to it -- is a last,
+#      appended argument. Q and K columns at or past it are zeroed as they are
+#      loaded (both: 0 * NaN read from a neighbouring row is still NaN), the
+#      K/V slice and every Q read stop at it, and O columns past it are not
+#      stored. Objects built without it ignore the argument.
 #
 # Upstream-first: prefer landing these changes in AITER/FlyDSL; this copy exists
 # so the provider is not blocked on that.
@@ -78,7 +96,9 @@ Uses 16x16x16 WMMA, online softmax and pipelined V loads. Requires
 ``head_dim >= 64`` and ``head_dim % 32 == 0``.
 
 Baked per object: ``head_dim``, ``causal`` (whether a right bound is applied),
-``dtype``, tile sizes. Runtime: batch, both sequence lengths, head counts,
+``dtype``, tile sizes, whether an additive bias is applied, and the
+output-column split (the grid is
+``batch * ceil(seq_len_q / block_m) * num_heads * dv_split``). Runtime: batch, both sequence lengths, head counts,
 strides, scale, mask bounds and alignment, and the optional LSE output.
 """
 
@@ -112,6 +132,10 @@ def build_flash_attn_func_module(
     block_n=None,
     daz=True,
     truncate_p=False,
+    q_resident=None,
+    dv_split=None,
+    has_bias=False,
+    generic_head_dim=False,
 ):
     """Build the gfx11 Flash Attention launcher.
 
@@ -119,10 +143,29 @@ def build_flash_attn_func_module(
     ``Q, K, V, O, LSE`` (pointers), ``batch_size, seq_len_q, seq_len_kv,
     num_heads, kv_group, right_bound, left_bound, align_br, lse_on`` (Int32),
     ``scale`` (Float32), then the fifteen element strides ``(batch, seq, head)``
-    of Q, K, V, O and LSE (Int64), then the stream. The kernel itself takes the
+    of Q, K, V, O and LSE (Int64), the ``BIAS`` pointer and its four element
+    strides ``(batch, head, query, key)`` (Int64), the runtime ``head_dim``
+    (Int32; read only by a ``generic_head_dim`` build), ``v_group`` (Int32: query
+    heads per V head), then the stream. The kernel itself takes the
     same list without ``batch_size``.
     """
 
+    # Q is the B operand of every QK WMMA. Held in registers for the whole KV loop
+    # it costs head_dim / 2 VGPRs per lane; above 128 that and the O accumulators
+    # fill the register file, so wider heads re-read it per K-step instead.
+    # An additive f32 bias, broadcast by strides, added to the scaled scores
+    # before the mask. Baked: it is per-score work in the inner loop, and its
+    # per-tile values (16 VGPRs) tip a register-resident Q past the file at 128.
+    HAS_BIAS = bool(has_bias)
+    # head_dim is then the largest served; the actual one (a multiple of 8) is a
+    # runtime argument. Columns at or past it are zeroed as Q and K are loaded --
+    # both, since 0 * NaN read from a neighbouring row is still NaN -- and not
+    # stored from O.
+    GENERIC_D = bool(generic_head_dim)
+    if q_resident is None:
+        Q_RESIDENT = head_dim < 128 or (head_dim == 128 and not HAS_BIAS)
+    else:
+        Q_RESIDENT = bool(q_resident)
     WARP_SIZE = 32
     WMMA_M = 16
     WMMA_N = 16
@@ -159,6 +202,14 @@ def build_flash_attn_func_module(
 
     D_CHUNK = WMMA_N
     D_CHUNKS = head_dim // D_CHUNK
+    # The output columns may be split across workgroups: each computes the whole
+    # of QK^T and the softmax but only DV_TILE columns of O, so it holds O_CHUNKS
+    # accumulators instead of D_CHUNKS, and the grid grows by DV_SPLIT. Above 128
+    # that, with Q re-read per K-step, is what fits the register file.
+    DV_SPLIT = (2 if head_dim > 128 else 1) if dv_split is None else int(dv_split)
+    assert D_CHUNKS % DV_SPLIT == 0
+    O_CHUNKS = D_CHUNKS // DV_SPLIT
+    DV_TILE = O_CHUNKS * D_CHUNK
 
     PV_K_STEP = WMMA_K
     PV_K_STEPS = K_SUB_N // PV_K_STEP
@@ -243,6 +294,13 @@ def build_flash_attn_func_module(
         lse_sb: fx.Int64,
         lse_ss: fx.Int64,
         lse_sh: fx.Int64,
+        BIAS: fx.Pointer,
+        bias_sb: fx.Int64,
+        bias_sh: fx.Int64,
+        bias_sq: fx.Int64,
+        bias_skv: fx.Int64,
+        head_dim_rt: fx.Int32,
+        v_group: fx.Int32,
     ):
         elem_dtype = elem_numeric_cls
 
@@ -332,8 +390,13 @@ def build_flash_attn_func_module(
 
         wave_q_offset = wave_id * ROWS_PER_WAVE
 
-        head_idx = block_id % num_heads_v
-        batch_q_tile_id = block_id // num_heads_v
+        # Output-column tile innermost: the workgroups sharing a Q tile run back to
+        # back and share its K/V reads in L2.
+        dv_idx = block_id % DV_SPLIT
+        dv_col_base = dv_idx * DV_TILE
+        block_rest = block_id // DV_SPLIT
+        head_idx = block_rest % num_heads_v
+        batch_q_tile_id = block_rest // num_heads_v
         num_q_tiles = (seq_q_v + BLOCK_M - 1) // BLOCK_M
         _q_tile_linear = batch_q_tile_id % num_q_tiles
         if const_expr(CAUSAL):
@@ -343,6 +406,7 @@ def build_flash_attn_func_module(
             q_tile_idx = _q_tile_linear
         batch_idx = batch_q_tile_id // num_q_tiles
         kv_head_idx = head_idx // kv_group_v
+        v_head_idx = head_idx // fx.Int64(v_group)
         q_start = q_tile_idx * BLOCK_M
 
         load_row_in_batch = tid // THREADS_PER_ROW_LOAD
@@ -362,16 +426,19 @@ def build_flash_attn_func_module(
         # (batch, kv head) slice, so a row at or past seq_len_kv -- including a
         # tail prefetch -- reads zero instead of a neighbouring head or past the
         # allocation. The slice must fit the descriptor's 32-bit num_records.
-        def _kv_buf_ptr(elem_ptr, sb, ss, sh):
-            slice_base = batch_idx * sb + kv_head_idx * sh
-            slice_elems = (seq_kv_v - fx.Int64(1)) * ss + fx.Int64(HEAD_DIM)
+        def _kv_buf_ptr(elem_ptr, sb, ss, sh, slice_head):
+            slice_base = batch_idx * sb + slice_head * sh
+            if const_expr(GENERIC_D):
+                slice_elems = (seq_kv_v - fx.Int64(1)) * ss + fx.Int64(head_dim_rt)
+            else:
+                slice_elems = (seq_kv_v - fx.Int64(1)) * ss + fx.Int64(HEAD_DIM)
             return _bounds_checked_buf_ptr(
                 fx.add_offset(elem_ptr, fx.Int64(slice_base)),
                 fx.Int64(slice_elems) * fx.Int64(ELEM_BYTES),
             )
 
-        k_buf_ptr = _kv_buf_ptr(k_elem_ptr, k_sb, k_ss, k_sh)
-        v_buf_ptr = _kv_buf_ptr(v_elem_ptr, v_sb, v_ss, v_sh)
+        k_buf_ptr = _kv_buf_ptr(k_elem_ptr, k_sb, k_ss, k_sh, kv_head_idx)
+        v_buf_ptr = _kv_buf_ptr(v_elem_ptr, v_sb, v_ss, v_sh, v_head_idx)
 
         def k_idx(token_idx, col):
             return token_idx * k_ss + col
@@ -444,7 +511,13 @@ def build_flash_attn_func_module(
                 row_idx = tile_start + load_row_kv + row_offset
                 for sv in range_constexpr(KV_SUBVECS):
                     g_idx = idx_fn(row_idx, load_col_base + fx.Int64(sv * 8))
-                    vecs.append(_load_global_half_vec(buf_ptr, g_idx, 8))
+                    raw = _load_global_half_vec(buf_ptr, g_idx, 8)
+                    if const_expr(GENERIC_D):
+                        col_ok = (load_col_base + fx.Int64(sv * 8)) < fx.Int64(
+                            head_dim_rt
+                        )
+                        raw = col_ok.select(raw, Vec.filled(8, 0.0, elem_dtype))
+                    vecs.append(raw)
             return vecs
 
         def _store_row_major(base, stride, lds_row, col_extra, vec):
@@ -539,16 +612,62 @@ def build_flash_attn_func_module(
         # B operand of S^T = K @ Q^T: lane l carries query row l%16, all 16
         # head-dim values of the K-step (lanes 16-31 duplicate lanes 0-15).
         c_zero_v16 = Vec.filled(16, 0.0, elem_dtype)
-        q_b_packs = []
-        for ks in range_constexpr(K_STEPS_QK):
+
+        def load_q_pack(ks):
+            if const_expr(GENERIC_D):
+                # Two 8-column halves, each wholly in or out (head_dim % 8 == 0);
+                # an out half reads column 0 instead, so nothing reads past a row.
+                halves = []
+                for half in range_constexpr(2):
+                    col = fx.Int64(ks * K_STEP_QK + half * 8)
+                    col_ok = q_in_bounds & (col < fx.Int64(head_dim_rt))
+                    safe = col_ok.select(col, fx.Int64(0))
+                    raw = Vec(
+                        _load_global_half_vec(q_elem_ptr, q_idx(q_row_safe, safe), 8)
+                    )
+                    halves.append(col_ok.select(raw, Vec.filled(8, 0.0, elem_dtype)))
+                return Vec.from_elements(
+                    [Vec(halves[0])[i] for i in range(8)]
+                    + [Vec(halves[1])[i] for i in range(8)],
+                    elem_dtype,
+                )
             q_col = fx.Int64(ks * K_STEP_QK)
             raw = _load_global_half_vec(q_elem_ptr, q_idx(q_row_safe, q_col), 16)
-            q_b_packs.append(q_in_bounds.select(raw, c_zero_v16))
+            return q_in_bounds.select(raw, c_zero_v16)
+
+        q_b_packs = []
+        if const_expr(Q_RESIDENT):
+            for ks in range_constexpr(K_STEPS_QK):
+                q_b_packs.append(load_q_pack(ks))
 
         c_neg_inf = fx.Float32(float("-inf"))
         c_zero_f = fx.Float32(0.0)
         c_one_f = fx.Float32(1.0)
-        c_sm_scale_log2e = fx.Float32(scale) * fx.Float32(_LOG2E)
+        if const_expr(HAS_BIAS):
+            # Scores are scaled (and biased) before the softmax, so the
+            # exponent and the running max are in the scaled domain already.
+            c_scale_f = fx.Float32(scale)
+            c_sm_scale_log2e = fx.Float32(_LOG2E)
+            bias_f32_ptr = fx.recast_iter(
+                fx.PointerType.get(fx.Float32.ir_type, BIAS.address_space), BIAS
+            )
+            # One (batch, head) slice of the broadcast bias; a size-1 axis has
+            # stride 0. Reads past it -- the kv tail -- come back as zero.
+            _bias_slice_elems = (
+                (seq_q_v - fx.Int64(1)) * bias_sq
+                + (seq_kv_v - fx.Int64(1)) * bias_skv
+                + fx.Int64(1)
+            )
+            bias_buf_ptr = _bounds_checked_buf_ptr(
+                fx.add_offset(
+                    bias_f32_ptr, fx.Int64(batch_idx * bias_sb + head_idx * bias_sh)
+                ),
+                fx.Int64(_bias_slice_elems) * fx.Int64(4),
+            )
+            bias_skv_i32 = fx.Int32(bias_skv)
+            bias_row_i32 = fx.Int32(q_row_safe * bias_sq)
+        else:
+            c_sm_scale_log2e = fx.Float32(scale) * fx.Float32(_LOG2E)
         c_zero_v8f32 = Vec.filled(8, 0.0, fx.Float32)
         width_i32 = fx.Int32(WARP_SIZE)
         shuf_16_i32 = fx.Int32(16)
@@ -580,7 +699,7 @@ def build_flash_attn_func_module(
             _v_vecs_init = coop_load_v_global(kv_lower)
 
         init_args = [c_neg_inf, c_zero_f]
-        for _ in range_constexpr(D_CHUNKS):
+        for _ in range_constexpr(O_CHUNKS):
             init_args.append(c_zero_v8f32)
         if const_expr(PREFETCH_V_ACROSS_ITERS):
             for vi in range_constexpr(NUM_V_VECS):
@@ -592,10 +711,10 @@ def build_flash_attn_func_module(
         ):
             m_running = inner_iter_args[0]
             l_running = inner_iter_args[1]
-            o_accs = [inner_iter_args[2 + i] for i in range_constexpr(D_CHUNKS)]
+            o_accs = [inner_iter_args[2 + i] for i in range_constexpr(O_CHUNKS)]
             if const_expr(PREFETCH_V_ACROSS_ITERS):
                 _v_vecs_tile = [
-                    inner_iter_args[2 + D_CHUNKS + b]
+                    inner_iter_args[2 + O_CHUNKS + b]
                     for b in range_constexpr(NUM_V_VECS)
                 ]
 
@@ -618,9 +737,33 @@ def build_flash_attn_func_module(
             # sub-tile, all 16 head-dim values of the K-step.
             s_accs = [c_zero_v8f32 for _ in range(NUM_S_ACCS)]
 
+            if const_expr(HAS_BIAS):
+                # Issued before the QK product so its latency hides behind it.
+                # Element (st, r) is kv = kv_start + 16 st + 2 r + klane.
+                _bias_tile_i32 = (
+                    bias_row_i32
+                    + (fx.Int32(kv_block_start) + fx.Int32(klane)) * bias_skv_i32
+                )
+                bias_vals = []
+                for st in range_constexpr(NUM_S_ACCS):
+                    for r in range_constexpr(8):
+                        _off = _bias_tile_i32 + fx.Int32(st * 16 + 2 * r) * bias_skv_i32
+                        bias_vals.append(fx.ptr_load(bias_buf_ptr + _off))
+
             if wave_needs_kv_tile:
+                if const_expr(not Q_RESIDENT):
+                    q_next = load_q_pack(0)
                 for ks in range_constexpr(K_STEPS_QK):
                     k_col = fx.Int64(ks * K_STEP_QK)
+                    if const_expr(Q_RESIDENT):
+                        q_pack = q_b_packs[ks]
+                    else:
+                        # One step ahead, and fenced: left to itself the
+                        # scheduler issues all of Q's loads at once and holds
+                        # them, which is the register cost this path avoids.
+                        q_pack = q_next
+                        if const_expr(ks + 1 < K_STEPS_QK):
+                            q_next = load_q_pack(ks + 1)
 
                     for st_idx in range_constexpr(N_SUB_TILES):
                         st_base_row = st_idx * K_SUB_N
@@ -636,11 +779,13 @@ def build_flash_attn_func_module(
                         acc_idx_a = st_idx * 2
                         acc_idx_b = st_idx * 2 + 1
                         s_accs[acc_idx_a] = wmma_acc(
-                            k_pack_a, q_b_packs[ks], s_accs[acc_idx_a]
+                            k_pack_a, q_pack, s_accs[acc_idx_a]
                         )
                         s_accs[acc_idx_b] = wmma_acc(
-                            k_pack_b, q_b_packs[ks], s_accs[acc_idx_b]
+                            k_pack_b, q_pack, s_accs[acc_idx_b]
                         )
+                    if const_expr(not Q_RESIDENT):
+                        fx.rocdl.sched_barrier(0)
 
             # Element r of accumulator a holds kv = kv_start + 16a + 2r + klane
             # for this lane's query row. Mask the kv tail and, when causal, the
@@ -656,6 +801,8 @@ def build_flash_attn_func_module(
             for st in range_constexpr(NUM_S_ACCS):
                 for r in range_constexpr(8):
                     s_val = Vec(s_accs[st])[r]
+                    if const_expr(HAS_BIAS):
+                        s_val = fx.math.fma(s_val, c_scale_f, bias_vals[st * 8 + r])
                     kv_rel_u32 = fx.Uint32(kv_rel_base_i32 + fx.Int32(st * 16 + 2 * r))
                     s_val = (kv_rel_u32 < q_kv_span_u32).select(s_val, c_neg_inf)
                     s_raw.append(s_val)
@@ -700,7 +847,7 @@ def build_flash_attn_func_module(
             l_new = _fadd(l_corr, tile_sum)
 
             corr_vec = Vec.from_elements([corr], fx.Float32).broadcast_to(8)
-            for dc in range_constexpr(D_CHUNKS):
+            for dc in range_constexpr(O_CHUNKS):
                 o_accs[dc] = _fmul(o_accs[dc], corr_vec)
 
             coop_store_v_lds(_v_vecs_tile, 0)
@@ -729,7 +876,7 @@ def build_flash_attn_func_module(
             # A operand: lane l carries head-dim row dc*16 + l%16 and all 16 kv
             # values of the step, read transposed out of the row-major V tile.
             def _load_v_rowmajor(st_kv_base_val, pks_val, dc_val, v_base=v_base):
-                d_pos = fx.Int64(dc_val * D_CHUNK) + lane16
+                d_pos = dv_col_base + fx.Int64(dc_val * D_CHUNK) + lane16
                 v_elems = []
                 for k_sub in range_constexpr(16):
                     kv_row = fx.Int64(st_kv_base_val + pks_val * PV_K_STEP + k_sub)
@@ -745,10 +892,10 @@ def build_flash_attn_func_module(
                     cur_v_packs.append(_load_v_rowmajor(st_idx * K_SUB_N, 0, 0))
 
                 for pks in range_constexpr(PV_K_STEPS):
-                    for dc in range_constexpr(D_CHUNKS):
+                    for dc in range_constexpr(O_CHUNKS):
                         next_dc = dc + 1
                         next_pks = pks
-                        if const_expr(next_dc >= D_CHUNKS):
+                        if const_expr(next_dc >= O_CHUNKS):
                             next_dc = 0
                             next_pks = pks + 1
                         has_next = const_expr(next_pks < PV_K_STEPS)
@@ -789,7 +936,7 @@ def build_flash_attn_func_module(
 
         m_final = loop_results[0]
         l_final = loop_results[1]
-        o_finals = [loop_results[2 + dc] for dc in range_constexpr(D_CHUNKS)]
+        o_finals = [loop_results[2 + dc] for dc in range_constexpr(O_CHUNKS)]
 
         # A row no key reaches -- possible with a window, or bottom-right causal
         # with more queries than keys -- has l = 0. Its output is zero and its LSE
@@ -801,7 +948,7 @@ def build_flash_attn_func_module(
         # Element r of an O accumulator is head-dim row 2r + klane. Trade with
         # the xor-16 peer so lane klane writes rows [8*klane, 8*klane + 8).
         o_rows = []
-        for dc in range_constexpr(D_CHUNKS):
+        for dc in range_constexpr(O_CHUNKS):
             o_norm = Vec(_fmul(o_finals[dc], inv_l_vec))
             own = [o_norm[r] for r in range(8)]
             peer = [reduction_peer(own[r]) for r in range(8)]
@@ -818,16 +965,25 @@ def build_flash_attn_func_module(
         # Natural-log log-sum-exp of the scaled scores, [B, H, Sq, 1] f32: the
         # running max is unscaled, and l is a sum of exp((s - m) * scale).
         lse_val = row_has_keys.select(
-            fx.Float32(scale) * fx.Float32(m_final) + fx.math.log(l_final),
+            (
+                fx.Float32(m_final)
+                if const_expr(HAS_BIAS)
+                else fx.Float32(scale) * fx.Float32(m_final)
+            )
+            + fx.math.log(l_final),
             c_neg_inf,
         )
         write_lse = q_in_bounds & (fx.Int32(lse_on) != fx.Int32(0))
 
         if q_in_bounds:
-            for dc in range_constexpr(D_CHUNKS):
+            for dc in range_constexpr(O_CHUNKS):
                 o_trunc = Vec.from_elements(o_rows[dc], fx.Float32).to(elem_dtype)
-                d_col = fx.Int64(dc * D_CHUNK) + klane * 8
-                _store_global_half(o_elem_ptr, o_idx(q_row, d_col), o_trunc)
+                d_col = dv_col_base + fx.Int64(dc * D_CHUNK) + klane * 8
+                if const_expr(GENERIC_D):
+                    if d_col < fx.Int64(head_dim_rt):
+                        _store_global_half(o_elem_ptr, o_idx(q_row, d_col), o_trunc)
+                else:
+                    _store_global_half(o_elem_ptr, o_idx(q_row, d_col), o_trunc)
 
         # Both lanes holding a row write the same value to the same address.
         if write_lse:
@@ -871,6 +1027,13 @@ def build_flash_attn_func_module(
         lse_sb: fx.Int64,
         lse_ss: fx.Int64,
         lse_sh: fx.Int64,
+        BIAS: fx.Pointer,
+        bias_sb: fx.Int64,
+        bias_sh: fx.Int64,
+        bias_sq: fx.Int64,
+        bias_skv: fx.Int64,
+        head_dim_rt: fx.Int32,
+        v_group: fx.Int32,
         stream: fx.Stream = fx.Stream(  # noqa: B008  framework idiom: default is evaluated once at import on purpose
             None
         ),
@@ -881,7 +1044,7 @@ def build_flash_attn_func_module(
         sl_idx = fx.Uint64(seq_len_q)
         nh_idx = fx.Uint64(num_heads)
         num_q_tiles = (sl_idx + BLOCK_M - 1) // BLOCK_M
-        grid_x = bs_idx * num_q_tiles * nh_idx
+        grid_x = bs_idx * num_q_tiles * nh_idx * DV_SPLIT
 
         launcher = flash_attn_func_gfx1151_kernel(
             Q,
@@ -913,6 +1076,13 @@ def build_flash_attn_func_module(
             lse_sb,
             lse_ss,
             lse_sh,
+            BIAS,
+            bias_sb,
+            bias_sh,
+            bias_sq,
+            bias_skv,
+            head_dim_rt,
+            v_group,
         )
 
         if const_expr(waves_per_eu is not None):
@@ -954,4 +1124,5 @@ def build_flash_attn_func_module(
     # Tile geometry the dispatcher must reproduce; see the generator.
     launch_flash_attn_func.block_m = BLOCK_M
     launch_flash_attn_func.block_size = BLOCK_SIZE
+    launch_flash_attn_func.dv_split = DV_SPLIT
     return launch_flash_attn_func

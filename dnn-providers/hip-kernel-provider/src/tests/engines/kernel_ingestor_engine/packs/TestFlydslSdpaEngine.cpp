@@ -88,7 +88,10 @@ KernelDefinition makeFlydslSdpaKernel(const std::string& dtype,
                                       int64_t headDim,
                                       int64_t causal,
                                       int64_t blockM = 128,
-                                      int64_t blockN = 32)
+                                      int64_t blockN = 32,
+                                      int64_t dvSplit = 1,
+                                      int64_t hasBias = 0,
+                                      std::optional<int64_t> headDimMax = std::nullopt)
 {
     KernelDefinition kernel;
     kernel.name = "sdpa_" + dtype + "_d" + std::to_string(headDim);
@@ -96,7 +99,10 @@ KernelDefinition makeFlydslSdpaKernel(const std::string& dtype,
                        {FLYDSL_SDPA_HEAD_DIM_FIELD, headDim},
                        {FLYDSL_SDPA_CAUSAL_FIELD, causal},
                        {FLYDSL_SDPA_BLOCK_M_FIELD, blockM},
-                       {FLYDSL_SDPA_BLOCK_N_FIELD, blockN}};
+                       {FLYDSL_SDPA_BLOCK_N_FIELD, blockN},
+                       {FLYDSL_SDPA_DV_SPLIT_FIELD, dvSplit},
+                       {FLYDSL_SDPA_HAS_BIAS_FIELD, hasBias},
+                       {FLYDSL_SDPA_HEAD_DIM_MAX_FIELD, headDimMax.value_or(headDim)}};
     kernel.priority = 100;
     return kernel;
 }
@@ -142,6 +148,30 @@ INSTANTIATE_TEST_SUITE_P(
         // The kernel takes any head_dim that is a multiple of 32 from 64 up. Whether
         // an object was SHIPPED for one is kernel_match's question, not this one's.
         AcceptedCase{"HeadDim96", accepted([](SdpaGraphSpec& s) { s.headDim = 96; })},
+        AcceptedCase{"HeadDim256", accepted([](SdpaGraphSpec& s) { s.headDim = 256; })},
+        // Served by the generic tier, which reads head_dim at runtime.
+        AcceptedCase{"HeadDim80", accepted([](SdpaGraphSpec& s) { s.headDim = 80; })},
+        // K and V may have different head counts, each dividing Q's.
+        AcceptedCase{"ValueHeadsDifferFromKeyHeads", accepted([](SdpaGraphSpec& s) {
+                         s.heads = 8;
+                         s.kvHeads = 2;
+                         s.valueHeads = 4;
+                     })},
+        AcceptedCase{"PackedQkv", accepted([](SdpaGraphSpec& s) { s.packedQkv = true; })},
+        // An additive f32 bias, broadcast the ways the reference reads it.
+        AcceptedCase{"AdditiveBias", accepted([](SdpaGraphSpec& s) { s.withBias = true; })},
+        AcceptedCase{"BiasPerBatchAndHead", accepted([](SdpaGraphSpec& s) {
+                         s.withBias = true;
+                         s.biasDims = {s.batch, s.heads, s.seqLenQ, s.seqLenKv};
+                     })},
+        AcceptedCase{"BiasRankTwo", accepted([](SdpaGraphSpec& s) {
+                         s.withBias = true;
+                         s.biasDims = {s.seqLenQ, s.seqLenKv};
+                     })},
+        AcceptedCase{"BiasOverKeysOnly", accepted([](SdpaGraphSpec& s) {
+                         s.withBias = true;
+                         s.biasDims = {s.seqLenKv};
+                     })},
         AcceptedCase{"GroupedQueryHeads", accepted([](SdpaGraphSpec& s) {
                          s.heads = 8;
                          s.kvHeads = 2;
@@ -222,10 +252,27 @@ INSTANTIATE_TEST_SUITE_P(
                          s.heads = 6;
                          s.kvHeads = 4;
                      })},
+        AcceptedCase{"HeadsNotAMultipleOfValueHeads", accepted([](SdpaGraphSpec& s) {
+                         s.heads = 6;
+                         s.kvHeads = 2;
+                         s.valueHeads = 4;
+                     })},
         // A bound below -1 has no meaning in the reference's convention.
         AcceptedCase{"LeftBoundBelowMinusOne",
                      accepted([](SdpaGraphSpec& s) { s.leftBound = -2; })},
-        AcceptedCase{"AdditiveBias", accepted([](SdpaGraphSpec& s) { s.withBias = true; })},
+        // The kernel reads an f32 bias, and only one that broadcasts to [B, H, Sq, Skv].
+        AcceptedCase{"BiasNotF32", accepted([](SdpaGraphSpec& s) {
+                         s.withBias = true;
+                         s.biasDataType = DataType::BFLOAT16;
+                     })},
+        AcceptedCase{"BiasThatDoesNotBroadcast", accepted([](SdpaGraphSpec& s) {
+                         s.withBias = true;
+                         s.biasDims = {1, 1, s.seqLenQ, s.seqLenKv + 1};
+                     })},
+        AcceptedCase{"BiasOfRankFive", accepted([](SdpaGraphSpec& s) {
+                         s.withBias = true;
+                         s.biasDims = {1, 1, 1, s.seqLenQ, s.seqLenKv};
+                     })},
         // The LSE output the kernel writes is f32 [B, H, Sq, 1], and only when named.
         AcceptedCase{"StatsBf16",
                      accepted([](SdpaGraphSpec& s) { s.stats = SdpaStats::LSE_BF16; })},
@@ -395,6 +442,79 @@ TEST(TestFlydslSdpaKernelMatch, DeclinesACandidateWhoseTileIsNotOneTheKernelBuil
         FLYDSL_SDPA, fixture.context(), makeFlydslSdpaKernel("bf16", 64, 0, 128, 48), bound));
 }
 
+TEST(TestFlydslSdpaKernelMatch, AdmitsAColumnSplitThatDividesTheHead)
+{
+    SdpaGraphSpec spec;
+    spec.headDim = 256;
+    const GraphFixture fixture(buildFlydslSdpaGraph(spec));
+    const auto bound = bindingsFor(spec);
+
+    EXPECT_TRUE(matchesKernel(
+        FLYDSL_SDPA, fixture.context(), makeFlydslSdpaKernel("bf16", 256, 0, 128, 32, 2), bound));
+}
+
+TEST(TestFlydslSdpaKernelMatch, DeclinesAColumnSplitThatDoesNotDivideTheHead)
+{
+    const GraphFixture fixture(buildFlydslSdpaGraph());
+    const auto bound = bindingsFor();
+
+    // head_dim 64 into 3 column tiles, and a split of none at all.
+    EXPECT_FALSE(matchesKernel(
+        FLYDSL_SDPA, fixture.context(), makeFlydslSdpaKernel("bf16", 64, 0, 128, 32, 3), bound));
+    EXPECT_FALSE(matchesKernel(
+        FLYDSL_SDPA, fixture.context(), makeFlydslSdpaKernel("bf16", 64, 0, 128, 32, 0), bound));
+}
+
+TEST(TestFlydslSdpaKernelMatch, AGenericObjectServesMultiplesOfEightUpToItsLargest)
+{
+    // head_dim 0 is the generic object's: it reads the real one at runtime.
+    const auto generic128 = makeFlydslSdpaKernel("bf16", 0, 0, 128, 32, 1, 0, 128);
+    const auto generic256 = makeFlydslSdpaKernel("bf16", 0, 0, 128, 32, 4, 0, 256);
+    const auto matches = [](int64_t headDim, const KernelDefinition& kernel) {
+        SdpaGraphSpec spec;
+        spec.headDim = headDim;
+        const GraphFixture fixture(buildFlydslSdpaGraph(spec));
+        return matchesKernel(FLYDSL_SDPA, fixture.context(), kernel, bindingsFor(spec));
+    };
+
+    EXPECT_TRUE(matches(8, generic128));
+    EXPECT_TRUE(matches(80, generic128));
+    EXPECT_TRUE(matches(128, generic128));
+    EXPECT_FALSE(matches(84, generic128)) << "not a multiple of 8";
+    EXPECT_FALSE(matches(136, generic128)) << "past its largest";
+    EXPECT_TRUE(matches(136, generic256));
+    EXPECT_TRUE(matches(248, generic256));
+}
+
+TEST(TestFlydslSdpaKernelMatch, ASpecializedObjectServesOnlyItsOwnHead)
+{
+    SdpaGraphSpec spec;
+    spec.headDim = 80;
+    const GraphFixture fixture(buildFlydslSdpaGraph(spec));
+    // A record claiming head_dim 64 but a larger maximum is malformed, not generic.
+    EXPECT_FALSE(matchesKernel(FLYDSL_SDPA,
+                               fixture.context(),
+                               makeFlydslSdpaKernel("bf16", 64, 0, 128, 32, 1, 0, 128),
+                               bindingsFor(spec)));
+}
+
+TEST(TestFlydslSdpaKernelMatch, PairsTheBiasVariantWithAGraphThatHasABias)
+{
+    SdpaGraphSpec biased;
+    biased.withBias = true;
+    const GraphFixture withBias(buildFlydslSdpaGraph(biased));
+    const auto biasBound = bindingsFor(biased);
+    const GraphFixture without(buildFlydslSdpaGraph());
+    const auto plainBound = bindingsFor();
+
+    const auto plain = makeFlydslSdpaKernel("bf16", 64, 0);
+    const auto bias = makeFlydslSdpaKernel("bf16", 64, 0, 128, 32, 1, 1);
+    EXPECT_TRUE(matchesKernel(FLYDSL_SDPA, withBias.context(), bias, biasBound));
+    EXPECT_FALSE(matchesKernel(FLYDSL_SDPA, withBias.context(), plain, biasBound));
+    EXPECT_TRUE(matchesKernel(FLYDSL_SDPA, without.context(), plain, plainBound));
+    EXPECT_FALSE(matchesKernel(FLYDSL_SDPA, without.context(), bias, plainBound));
+}
+
 TEST(TestFlydslSdpaKernelMatch, DeclinesARecordMissingAFieldRatherThanThrowing)
 {
     const GraphFixture fixture(buildFlydslSdpaGraph());
@@ -406,6 +526,18 @@ TEST(TestFlydslSdpaKernelMatch, DeclinesARecordMissingAFieldRatherThanThrowing)
 
     kernel = makeFlydslSdpaKernel("bf16", 64, 0);
     kernel.metadata[FLYDSL_SDPA_HEAD_DIM_FIELD] = std::string("64");
+    EXPECT_FALSE(matchesKernel(FLYDSL_SDPA, fixture.context(), kernel, bound));
+
+    kernel = makeFlydslSdpaKernel("bf16", 64, 0);
+    kernel.metadata.erase(FLYDSL_SDPA_DV_SPLIT_FIELD);
+    EXPECT_FALSE(matchesKernel(FLYDSL_SDPA, fixture.context(), kernel, bound));
+
+    kernel = makeFlydslSdpaKernel("bf16", 64, 0);
+    kernel.metadata.erase(FLYDSL_SDPA_HAS_BIAS_FIELD);
+    EXPECT_FALSE(matchesKernel(FLYDSL_SDPA, fixture.context(), kernel, bound));
+
+    kernel = makeFlydslSdpaKernel("bf16", 64, 0);
+    kernel.metadata.erase(FLYDSL_SDPA_HEAD_DIM_MAX_FIELD);
     EXPECT_FALSE(matchesKernel(FLYDSL_SDPA, fixture.context(), kernel, bound));
 }
 
@@ -461,11 +593,14 @@ DeviceProperties packedArchDeviceProperties()
     return properties;
 }
 
-/// The staged candidate for (@p dtype, @p headDim, @p causal), if this build packed one.
+/// The staged candidate for (@p dtype, @p headDim, @p causal, @p hasBias), if this build
+/// packed one: the object built for that head_dim, else the narrowest generic one serving it.
 std::optional<KernelDefinition>
-    findStagedKernel(const std::string& dtype, int64_t headDim, int64_t causal)
+    findStagedKernel(const std::string& dtype, int64_t headDim, int64_t causal, int64_t hasBias)
 {
     const auto& set = loadedSet(FLYDSL_SDPA.engineName);
+    std::optional<KernelDefinition> best;
+    int64_t bestMax = 0;
     for(const auto& pack : set.packs)
     {
         for(const auto& kernel : pack.kernels)
@@ -476,24 +611,43 @@ std::optional<KernelDefinition>
                 = tryGetMetadataField<int64_t>(kernel.metadata, FLYDSL_SDPA_HEAD_DIM_FIELD);
             const auto* isCausal
                 = tryGetMetadataField<int64_t>(kernel.metadata, FLYDSL_SDPA_CAUSAL_FIELD);
-            if(name == nullptr || dim == nullptr || isCausal == nullptr || *name != dtype
-               || *dim != headDim || *isCausal != causal)
+            const auto* bias
+                = tryGetMetadataField<int64_t>(kernel.metadata, FLYDSL_SDPA_HAS_BIAS_FIELD);
+            const auto* dimMax
+                = tryGetMetadataField<int64_t>(kernel.metadata, FLYDSL_SDPA_HEAD_DIM_MAX_FIELD);
+            if(name == nullptr || dim == nullptr || isCausal == nullptr || bias == nullptr
+               || dimMax == nullptr || *name != dtype || *isCausal != causal || *bias != hasBias)
             {
                 continue;
             }
-            return KernelDefinition{kernel.id,
-                                    pack.id,
-                                    pack.dispatchId,
-                                    kernel.source,
-                                    kernel.metadata,
-                                    kernel.priority,
-                                    kernel.arch.empty() ? pack.arch : kernel.arch,
-                                    kernel.originDirectory,
-                                    kernel.name,
-                                    kernel.treeRoot};
+            const bool exact = *dim == headDim;
+            const bool generic = *dim == 0 && headDim % 8 == 0 && headDim <= *dimMax;
+            if(!exact && !generic)
+            {
+                continue;
+            }
+            KernelDefinition definition{kernel.id,
+                                        pack.id,
+                                        pack.dispatchId,
+                                        kernel.source,
+                                        kernel.metadata,
+                                        kernel.priority,
+                                        kernel.arch.empty() ? pack.arch : kernel.arch,
+                                        kernel.originDirectory,
+                                        kernel.name,
+                                        kernel.treeRoot};
+            if(exact)
+            {
+                return definition;
+            }
+            if(!best.has_value() || *dimMax < bestMax)
+            {
+                best = definition;
+                bestMax = *dimMax;
+            }
         }
     }
-    return std::nullopt;
+    return best;
 }
 
 /// One operand's host values and device copy, laid out per the graph spec's strides.
@@ -601,7 +755,8 @@ void expectSdpaMatchesReference(const SdpaGraphSpec& spec, double absoluteTolera
 
     const std::string dtype = spec.dataType == DataType::BFLOAT16 ? "bf16" : "f16";
     const bool causal = right >= 0;
-    const auto kernel = findStagedKernel(dtype, spec.headDim, causal ? 1 : 0);
+    const auto kernel
+        = findStagedKernel(dtype, spec.headDim, causal ? 1 : 0, spec.withBias ? 1 : 0);
     if(!kernel.has_value())
     {
         GTEST_SKIP() << "nothing packed for dtype=" << dtype << " head_dim=" << spec.headDim
@@ -618,18 +773,50 @@ void expectSdpaMatchesReference(const SdpaGraphSpec& spec, double absoluteTolera
     ASSERT_NE(prepared, nullptr);
 
     const int64_t d = spec.headDim;
-    const DeviceTensor<T> q({spec.batch, spec.heads, spec.seqLenQ, d},
-                            sdpaStrides(spec.layout, spec.heads, spec.seqLenQ, d),
-                            1U,
-                            true);
-    const DeviceTensor<T> k({spec.batch, spec.kvHeads, spec.seqLenKv, d},
-                            sdpaStrides(spec.layout, spec.kvHeads, spec.seqLenKv, d),
-                            2U,
-                            true);
-    const DeviceTensor<T> v({spec.batch, spec.kvHeads, spec.seqLenKv, d},
-                            sdpaStrides(spec.layout, spec.kvHeads, spec.seqLenKv, d),
-                            3U,
-                            true);
+    const int64_t valueHeads = spec.valueHeads.value_or(spec.kvHeads);
+    // Packed: one [B, S, 3, H, D] buffer, read as a (B, 3H, S, D) tensor whose head ranges
+    // [0, H), [H, 2H) and [2H, 3H) are Q, K and V.
+    std::optional<DeviceTensor<T>> qkv;
+    std::optional<DeviceTensor<T>> qTensor;
+    std::optional<DeviceTensor<T>> kTensor;
+    std::optional<DeviceTensor<T>> vTensor;
+    if(spec.packedQkv)
+    {
+        qkv.emplace(std::vector<int64_t>{spec.batch, 3 * spec.heads, spec.seqLenQ, d},
+                    sdpaPackedQkvStrides(spec),
+                    1U,
+                    true);
+    }
+    else
+    {
+        qTensor.emplace(std::vector<int64_t>{spec.batch, spec.heads, spec.seqLenQ, d},
+                        sdpaStrides(spec.layout, spec.heads, spec.seqLenQ, d),
+                        1U,
+                        true);
+        kTensor.emplace(std::vector<int64_t>{spec.batch, spec.kvHeads, spec.seqLenKv, d},
+                        sdpaStrides(spec.layout, spec.kvHeads, spec.seqLenKv, d),
+                        2U,
+                        true);
+        vTensor.emplace(std::vector<int64_t>{spec.batch, valueHeads, spec.seqLenKv, d},
+                        sdpaStrides(spec.layout, valueHeads, spec.seqLenKv, d),
+                        3U,
+                        true);
+    }
+    const auto qAt = [&](int64_t b, int64_t h, int64_t s, int64_t e) {
+        return spec.packedQkv ? qkv->at(b, h, s, e) : qTensor->at(b, h, s, e);
+    };
+    const auto kAt = [&](int64_t b, int64_t h, int64_t s, int64_t e) {
+        return spec.packedQkv ? qkv->at(b, spec.heads + h, s, e) : kTensor->at(b, h, s, e);
+    };
+    const auto vAt = [&](int64_t b, int64_t h, int64_t s, int64_t e) {
+        return spec.packedQkv ? qkv->at(b, 2 * spec.heads + h, s, e) : vTensor->at(b, h, s, e);
+    };
+    const auto third = static_cast<size_t>(spec.heads * d) * sizeof(T);
+    void* qPtr = spec.packedQkv ? qkv->device() : qTensor->device();
+    void* kPtr = spec.packedQkv ? static_cast<void*>(static_cast<char*>(qkv->device()) + third)
+                                : kTensor->device();
+    void* vPtr = spec.packedQkv ? static_cast<void*>(static_cast<char*>(qkv->device()) + 2 * third)
+                                : vTensor->device();
     DeviceTensor<T> o({spec.batch, spec.heads, spec.seqLenQ, d},
                       sdpaStrides(spec.layout, spec.heads, spec.seqLenQ, d),
                       4U,
@@ -642,14 +829,34 @@ void expectSdpaMatchesReference(const SdpaGraphSpec& spec, double absoluteTolera
                               false);
     const bool wantStats = spec.stats == SdpaStats::LSE;
 
+    // The bias as the device holds it, indexed as [B, H, Sq, Skv]: the graph's right-aligned
+    // dims padded with 1s, and stride 0 on every broadcast axis.
+    std::vector<int64_t> biasDims4{1, 1, 1, 1};
+    std::vector<int64_t> biasStrides4{0, 0, 0, 0};
+    if(spec.withBias)
+    {
+        const auto [dims, strides] = sdpaBiasLayout(spec);
+        for(size_t axis = 0; axis < dims.size(); ++axis)
+        {
+            const auto target = 4 - dims.size() + axis;
+            biasDims4[target] = dims[axis];
+            biasStrides4[target] = dims[axis] == 1 ? 0 : strides[axis];
+        }
+    }
+    const DeviceTensor<float> bias(biasDims4, biasStrides4, 6U, true);
+
     float runtimeScale = spec.scale;
-    std::vector<hipdnnPluginDeviceBuffer_t> buffers{{FLYDSL_SDPA_Q_UID, q.device()},
-                                                    {FLYDSL_SDPA_K_UID, k.device()},
-                                                    {FLYDSL_SDPA_V_UID, v.device()},
+    std::vector<hipdnnPluginDeviceBuffer_t> buffers{{FLYDSL_SDPA_Q_UID, qPtr},
+                                                    {FLYDSL_SDPA_K_UID, kPtr},
+                                                    {FLYDSL_SDPA_V_UID, vPtr},
                                                     {FLYDSL_SDPA_O_UID, o.device()}};
     if(wantStats)
     {
         buffers.push_back({FLYDSL_SDPA_STATS_UID, stats.device()});
+    }
+    if(spec.withBias)
+    {
+        buffers.push_back({FLYDSL_SDPA_BIAS_UID, bias.device()});
     }
     if(spec.scaleKind == SdpaScale::RUNTIME_TENSOR)
     {
@@ -678,6 +885,7 @@ void expectSdpaMatchesReference(const SdpaGraphSpec& spec, double absoluteTolera
         for(int64_t h = 0; h < spec.heads; ++h)
         {
             const int64_t kvHead = h / group;
+            const int64_t vHead = h / (spec.heads / valueHeads);
             for(int64_t s = 0; s < spec.seqLenQ; ++s)
             {
                 double maxScore = -std::numeric_limits<double>::infinity();
@@ -690,9 +898,10 @@ void expectSdpaMatchesReference(const SdpaGraphSpec& spec, double absoluteTolera
                     double dot = 0.0;
                     for(int64_t e = 0; e < d; ++e)
                     {
-                        dot += q.at(b, h, s, e) * k.at(b, kvHead, j, e);
+                        dot += qAt(b, h, s, e) * kAt(b, kvHead, j, e);
                     }
-                    scores[static_cast<size_t>(j)] = dot * scale;
+                    scores[static_cast<size_t>(j)]
+                        = dot * scale + (spec.withBias ? bias.at(b, h, s, j) : 0.0);
                     maxScore = std::max(maxScore, scores[static_cast<size_t>(j)]);
                 }
                 double sum = 0.0;
@@ -734,7 +943,7 @@ void expectSdpaMatchesReference(const SdpaGraphSpec& spec, double absoluteTolera
                     double expected = 0.0;
                     for(int64_t j = 0; j < spec.seqLenKv; ++j)
                     {
-                        expected += scores[static_cast<size_t>(j)] * v.at(b, kvHead, j, e);
+                        expected += scores[static_cast<size_t>(j)] * vAt(b, vHead, j, e);
                     }
                     expected = hasKeys ? expected / sum : 0.0;
                     const double error = std::abs(o.at(b, h, s, e) - expected);
@@ -896,6 +1105,177 @@ TEST(TestGpuFlydslSdpaDispatch, ComputesHeadDim96)
     spec.seqLenQ = 113;
     spec.seqLenKv = 113;
     expectSdpaMatchesReference<hipdnn_data_sdk::types::bfloat16>(spec, BF16_TOLERANCE);
+}
+
+// head_dim 256 runs a schedule of its own: Q re-read per K-step and the output columns
+// split across two workgroups, so the grid doubles. Cover both variants, GQA, a ragged
+// length, the LSE output and a bottom-right decode step against the reference.
+TEST(TestGpuFlydslSdpaDispatch, ComputesHeadDim256CausalGroupedQueryAttention)
+{
+    SKIP_IF_NO_DEVICES();
+    SdpaGraphSpec spec;
+    spec.headDim = 256;
+    spec.mask = SdpaMask::TOP_LEFT_CAUSAL;
+    spec.heads = 8;
+    spec.kvHeads = 2;
+    spec.seqLenQ = 150;
+    spec.seqLenKv = 150;
+    spec.stats = SdpaStats::LSE;
+    expectSdpaMatchesReference<hipdnn_data_sdk::types::bfloat16>(spec, BF16_TOLERANCE);
+}
+
+TEST(TestGpuFlydslSdpaDispatch, ComputesHeadDim256NonCausalBhsd)
+{
+    SKIP_IF_NO_DEVICES();
+    SdpaGraphSpec spec;
+    spec.dataType = DataType::HALF;
+    spec.layout = SdpaLayout::BHSD;
+    spec.headDim = 256;
+    spec.seqLenQ = 70;
+    spec.seqLenKv = 200;
+    expectSdpaMatchesReference<hipdnn_data_sdk::types::half>(spec, F16_TOLERANCE);
+}
+
+TEST(TestGpuFlydslSdpaDispatch, ComputesHeadDim256BottomRightDecode)
+{
+    SKIP_IF_NO_DEVICES();
+    SdpaGraphSpec spec;
+    spec.headDim = 256;
+    spec.mask = SdpaMask::BOTTOM_RIGHT_CAUSAL;
+    spec.batch = 2;
+    spec.heads = 8;
+    spec.kvHeads = 2;
+    spec.seqLenQ = 1;
+    spec.seqLenKv = 500;
+    expectSdpaMatchesReference<hipdnn_data_sdk::types::bfloat16>(spec, BF16_TOLERANCE);
+}
+
+// An additive f32 bias, added to the scaled scores before the mask, in each broadcast shape
+// the reference reads: one [Sq, Skv] plane for every batch and head, one per head, a rank-2
+// tensor read through a transposed view, and with a window and the LSE output.
+TEST(TestGpuFlydslSdpaDispatch, AddsABiasBroadcastOverBatchAndHeads)
+{
+    SKIP_IF_NO_DEVICES();
+    SdpaGraphSpec spec;
+    spec.withBias = true;
+    spec.mask = SdpaMask::TOP_LEFT_CAUSAL;
+    spec.heads = 8;
+    spec.kvHeads = 2;
+    spec.seqLenQ = 77;
+    spec.seqLenKv = 77;
+    spec.stats = SdpaStats::LSE;
+    expectSdpaMatchesReference<hipdnn_data_sdk::types::bfloat16>(spec, BF16_TOLERANCE);
+}
+
+TEST(TestGpuFlydslSdpaDispatch, AddsAPerHeadBiasAtHeadDim128)
+{
+    SKIP_IF_NO_DEVICES();
+    SdpaGraphSpec spec;
+    spec.withBias = true;
+    spec.dataType = DataType::HALF;
+    spec.layout = SdpaLayout::BHSD;
+    spec.headDim = 128;
+    spec.seqLenQ = 70;
+    spec.seqLenKv = 150;
+    spec.biasDims = {1, spec.heads, spec.seqLenQ, spec.seqLenKv};
+    expectSdpaMatchesReference<hipdnn_data_sdk::types::half>(spec, F16_TOLERANCE);
+}
+
+TEST(TestGpuFlydslSdpaDispatch, AddsARankTwoTransposedBiasAtHeadDim256)
+{
+    SKIP_IF_NO_DEVICES();
+    SdpaGraphSpec spec;
+    spec.withBias = true;
+    spec.headDim = 256;
+    spec.mask = SdpaMask::BOTTOM_RIGHT_CAUSAL;
+    spec.seqLenQ = 90;
+    spec.seqLenKv = 130;
+    spec.biasDims = {spec.seqLenQ, spec.seqLenKv};
+    spec.biasStrides = {1, spec.seqLenQ};
+    expectSdpaMatchesReference<hipdnn_data_sdk::types::bfloat16>(spec, BF16_TOLERANCE);
+}
+
+TEST(TestGpuFlydslSdpaDispatch, AddsABiasWithinASlidingWindow)
+{
+    SKIP_IF_NO_DEVICES();
+    SdpaGraphSpec spec;
+    spec.withBias = true;
+    spec.headDim = 96;
+    spec.mask = SdpaMask::SLIDING_WINDOW;
+    spec.seqLenQ = 200;
+    spec.seqLenKv = 200;
+    spec.biasDims = {spec.batch, spec.heads, spec.seqLenQ, spec.seqLenKv};
+    spec.stats = SdpaStats::LSE;
+    expectSdpaMatchesReference<hipdnn_data_sdk::types::bfloat16>(spec, BF16_TOLERANCE);
+}
+
+// A head_dim no specialized object is built for runs on the generic tier, which reads it at
+// runtime from tensors that really are that wide: any read past a row would show up here.
+TEST(TestGpuFlydslSdpaDispatch, ComputesAGenericHeadDim80)
+{
+    SKIP_IF_NO_DEVICES();
+    SdpaGraphSpec spec;
+    spec.headDim = 80;
+    spec.mask = SdpaMask::TOP_LEFT_CAUSAL;
+    spec.heads = 8;
+    spec.kvHeads = 2;
+    spec.seqLenQ = 133;
+    spec.seqLenKv = 133;
+    spec.stats = SdpaStats::LSE;
+    expectSdpaMatchesReference<hipdnn_data_sdk::types::bfloat16>(spec, BF16_TOLERANCE);
+}
+
+TEST(TestGpuFlydslSdpaDispatch, ComputesAGenericHeadDim40Bhsd)
+{
+    SKIP_IF_NO_DEVICES();
+    SdpaGraphSpec spec;
+    spec.dataType = DataType::HALF;
+    spec.layout = SdpaLayout::BHSD;
+    spec.headDim = 40;
+    spec.seqLenQ = 70;
+    spec.seqLenKv = 190;
+    expectSdpaMatchesReference<hipdnn_data_sdk::types::half>(spec, F16_TOLERANCE);
+}
+
+TEST(TestGpuFlydslSdpaDispatch, ComputesAGenericHeadDim192)
+{
+    SKIP_IF_NO_DEVICES();
+    SdpaGraphSpec spec;
+    spec.headDim = 192;
+    spec.mask = SdpaMask::BOTTOM_RIGHT_CAUSAL;
+    spec.seqLenQ = 90;
+    spec.seqLenKv = 150;
+    spec.kvHeads = 2;
+    expectSdpaMatchesReference<hipdnn_data_sdk::types::bfloat16>(spec, BF16_TOLERANCE);
+}
+
+// K and V with different head counts: each query head reads its own K head and V head.
+TEST(TestGpuFlydslSdpaDispatch, ReadsKAndVThroughTheirOwnHeadGroups)
+{
+    SKIP_IF_NO_DEVICES();
+    SdpaGraphSpec spec;
+    spec.heads = 8;
+    spec.kvHeads = 2;
+    spec.valueHeads = 4;
+    spec.mask = SdpaMask::TOP_LEFT_CAUSAL;
+    spec.seqLenQ = 100;
+    spec.seqLenKv = 100;
+    spec.stats = SdpaStats::LSE;
+    expectSdpaMatchesReference<hipdnn_data_sdk::types::bfloat16>(spec, BF16_TOLERANCE);
+}
+
+// Q, K and V as strided views into one fused-QKV buffer: no copies, just strides.
+TEST(TestGpuFlydslSdpaDispatch, ComputesPackedQkvViews)
+{
+    SKIP_IF_NO_DEVICES();
+    SdpaGraphSpec spec;
+    spec.dataType = DataType::HALF;
+    spec.packedQkv = true;
+    spec.headDim = 128;
+    spec.mask = SdpaMask::TOP_LEFT_CAUSAL;
+    spec.seqLenQ = 150;
+    spec.seqLenKv = 150;
+    expectSdpaMatchesReference<hipdnn_data_sdk::types::half>(spec, F16_TOLERANCE);
 }
 
 TEST(TestGpuFlydslSdpaDispatch, AppliesTheDefaultScaleWhenTheGraphGivesNone)

@@ -86,6 +86,12 @@
 #      loaded (both: 0 * NaN read from a neighbouring row is still NaN), the
 #      K/V slice and every Q read stop at it, and O columns past it are not
 #      stored. Objects built without it ignore the argument.
+#  16. K/V tiles of any width: the cooperative load covers a tile in as many
+#      passes of the block's threads as it takes, rounding up, and the last
+#      pass stores only the rows inside the tile. Upstream rounds down, which
+#      leaves rows unloaded when head_dim / 16 does not divide the block's
+#      threads into whole rows (160, 192, 224); every width it does divide
+#      builds as before.
 #
 # Upstream-first: prefer landing these changes in AITER/FlyDSL; this copy exists
 # so the provider is not blocked on that.
@@ -237,9 +243,14 @@ def build_flash_attn_func_module(
     if ROWS_PER_BATCH_LOAD >= BLOCK_N:
         NUM_BATCHES_KV = 1
         KV_NEEDS_GUARD = ROWS_PER_BATCH_LOAD > BLOCK_N
+        KV_TAIL_GUARD = False
     else:
-        NUM_BATCHES_KV = BLOCK_N // ROWS_PER_BATCH_LOAD
+        # Enough passes to cover the tile. When the passes overrun it (a head_dim
+        # whose rows do not tile the block's threads, e.g. 160), the last pass
+        # stores only the rows inside it.
+        NUM_BATCHES_KV = -(-BLOCK_N // ROWS_PER_BATCH_LOAD)
         KV_NEEDS_GUARD = False
+        KV_TAIL_GUARD = NUM_BATCHES_KV * ROWS_PER_BATCH_LOAD > BLOCK_N
 
     # Buffer loads cap at dwordx4, so K and V rows are fetched in 8-element pieces.
     KV_SUBVECS = VEC_WIDTH // 8
@@ -531,6 +542,17 @@ def build_flash_attn_func_module(
                     row_valid = load_row_in_batch < fx.Int64(BLOCK_N)
                     if row_valid:
                         lds_row = load_row_in_batch + row_offset
+                        for sv in range_constexpr(KV_SUBVECS):
+                            _store_row_major(
+                                base,
+                                stride,
+                                lds_row,
+                                sv * 8,
+                                vecs[batch * KV_SUBVECS + sv],
+                            )
+                elif const_expr(KV_TAIL_GUARD and batch == NUM_BATCHES_KV - 1):
+                    lds_row = load_row_in_batch + row_offset
+                    if lds_row < fx.Int64(BLOCK_N):
                         for sv in range_constexpr(KV_SUBVECS):
                             _store_row_major(
                                 base,

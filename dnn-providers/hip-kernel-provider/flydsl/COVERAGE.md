@@ -7,7 +7,7 @@ SPDX-License-Identifier:  MIT
 
 Two packs, built once for `gfx11-generic` and shipped to all eight RDNA3 /
 RDNA3.5 arches it covers (gfx1100–gfx1103, gfx1150–gfx1153): **RMSNorm forward**
-(12 kernel objects, §1–§4) and **SDPA forward** (72 kernel objects, §5). Every graph a pack accepts is
+(12 kernel objects, §1–§4) and **SDPA forward** (96 kernel objects, §5). Every graph a pack accepts is
 computed by one of its objects; everything else is **declined**, so another
 engine gets the plan.
 
@@ -234,16 +234,19 @@ splitting the head dimension across a pair of waves instead would avoid the
 recompute.
 
 **Every other head_dim** that is a multiple of 8, up to 256, is served by a
-generic tier (kernel modification 15): eight more objects, bf16 and f16 ×
-causal × largest head (128 or 256), without a bias. The actual head_dim is a
-runtime argument; Q and K columns past it are zeroed as they load and O columns
-past it are not stored, so the tensors are read exactly as wide as they are.
-They rank below the specialized objects (`priority` 20 for the 128 tier, 10 for
-256), so 64/96/128/256 always run their own object and the narrowest generic
-tier takes the rest. A generic object computes at its largest width, and the
-256 tier splits its output columns four ways to fit the register file, so it is
-for coverage rather than speed. A bias on a head no specialized object serves
-declines.
+generic tier (kernel modification 15): twenty-four more objects, bf16 and f16 ×
+causal × largest head (64, 96, 128, 160, 224 or 256), without a bias. The actual
+head_dim is a runtime argument; Q and K columns past it are zeroed as they load
+and O columns past it are not stored, so the tensors are read exactly as wide as
+they are. A generic object computes at its largest width, so the tiers are cut
+where the odd head dims models use fall: 40, 48 and 56 run at 64; 72, 80 and 88
+at 96; 136 to 160 at 160 and 168 to 224 at 224 (two output-column tiles each).
+They rank below the specialized objects, each narrower tier above the wider
+(`priority` 40, 30, 20, 15, 12, 10), so 64/96/128/256 always run their own object
+and the narrowest generic tier takes the rest. The 256 tier splits its output
+columns four ways to fit the register file (two spill), so 232 to 248 run at
+about half the speed of the 224 tier. A bias on a
+head no specialized object serves declines.
 
 The causal variant is the one that applies a right bound — top-left or
 bottom-right causal, and any band to the right of the diagonal. It is two
@@ -252,13 +255,17 @@ KV loop at the diagonal and skips fully masked tiles, and the non-causal one
 carries a V prefetch across iterations that the causal one drops for register
 pressure. Everything else about the mask is a runtime argument, served by both.
 
-**Decode** has its own thirty-two objects (`decode` 1; bf16 and f16 × `head_dim` 64,
-96, 128, 256 × causal × with and without a bias), from a kernel written for it
+**Decode** has its own forty objects (`decode` 1; bf16 and f16 × causal × `head_dim`
+64, 96, 128, 256 with and without a bias, plus two generic tiers), from a kernel
+written for it
 ([`flash_attn_decode_gfx11.py`](kernels_src/kernels/attention/flash_attn_decode_gfx11.py)).
 The prefill objects give a decode step 128 query rows of which one is used, and read
 each KV head once per query head. The decode kernel packs the query heads of one KV
-head (the GQA group) and the query positions into a single 16-row tile, so a graph
-with `(Hq / Hk) × Sq ≤ 16` reads each KV head once; splits the keys a row can see --
+head (the GQA group) and the query positions into 16-row tiles, one workgroup per tile,
+so a graph reads each KV head once per tile rather than once per query head. It serves
+`(Hq / Hk) × Sq ≤ 128`; past that, the prefill objects, which share each K/V tile
+across 128 rows, are faster. The bias objects take one tile (16 rows): at `head_dim`
+128 and up they already fill the register file, and a tiled launch's row index spills. It splits the keys a row can see --
 from the window's edge to the diagonal -- across workgroups, which the dispatcher
 sizes to the device's compute units; and merges the splits by their LSEs with a
 second kernel compiled into the same object. They rank above the prefill objects
@@ -266,9 +273,13 @@ second kernel compiled into the same object. They rank above the prefill objects
 each split's rows, one per half of the output columns (`dv_split` 2), as the prefill
 object does, to fit the register file. The bias objects read the same broadcast bias
 as the prefill ones, each lane its own (head, position) row of the GQA group's slice.
-A generic head_dim and K and V with different head counts stay on the prefill objects.
-A split
-launch takes workspace (a partial O and LSE per split); one split writes O directly.
+Every other head_dim that is a multiple of 8 runs on a generic decode object -- up to
+96, or above it up to 256 with the column split -- that reads it at runtime and never
+fetches the K and V columns past it, so a step moves only the bytes its head has (an
+up-to-128 tier does not fit the register file). They rank above every prefill object
+and below the exact ones, the narrower tier above the wider (`priority` 145, 140).
+K and V with different head counts stay on the prefill objects. A split launch takes
+workspace (a partial O and LSE per split); one split writes O directly.
 
 ### 5.2 What a graph must be
 
@@ -308,7 +319,7 @@ queries than keys — gets O = 0 and LSE = −inf, as the reference defines it.
 | 10 | padding mask via `SEQ_LEN_Q`/`SEQ_LEN_KV` | missing |
 | 11 | sliding window (`left_bound`) | **served** (and right-side bands) |
 | 12 | varlen / THD | missing (declined) |
-| 13 | decode (`Sq == 1`) | **served by a decode path** (ATT-13): GQA-packed rows and split-KV, for `(Hq / Hk) × Sq ≤ 16` at `head_dim` 64/96/128/256 |
+| 13 | decode (`Sq == 1`) | **served by a decode path** (ATT-13): GQA-packed rows and split-KV, for `(Hq / Hk) × Sq ≤ 128` (MQA, speculative steps) at `head_dim` 64/96/128/256 and every other multiple of 8 up to 256 |
 | 14 | additive bias | **served**: f32, broadcast over any of B, H, Sq, Skv; with every mask, the LSE output and every specialized head dim, on the prefill and the decode objects |
 
 ### 5.4 What is still missing, and what closing it takes
@@ -321,7 +332,6 @@ at `check_support()`, never at `execute()`.
 | **fp16 / bf16 bias** | small | A second bias dtype axis (+16 objects); today a non-f32 bias declines. |
 | **Padding mask** (Tier 1) | medium | Two per-batch length pointers read once per workgroup. The diagonal offset is already computed in-kernel from the lengths for exactly this. hipDNN's CPU reference does not implement padding yet, so its semantics must be defined there first. |
 | **Varlen / THD** (Tier 1) | medium, after padding | Ragged offsets replace the batch stride; the grid stays over the longest sequence and tiles past a sequence's end exit early. |
-| Decode for a generic head | medium | More decode objects. |
 | Bias on a generic head_dim | small | A `has_bias` variant of the eight generic objects (+8). |
 | `Dv ≠ Dqk` (MLA) | medium–large | A second head dim for V's LDS tile, the O accumulators and the store. |
 | fp32 I/O, FP8, dropout, paged KV, block masks, sinks, ALiBi, softcap | out of scope | As hipDNN's requirements state; ALiBi and softcap have no reference semantics. |
@@ -342,8 +352,8 @@ cannot span both; the kernel source can, behind four small helpers.
 
 | Claim | Checked by |
 |---|---|
-| The 72 objects are what the pinned toolchain produces | [REGEN.md](REGEN.md) §2 — 72/72 byte-identical |
-| Each decode object carries its merge kernel, with both argument layouts as declared | `gen_sdpa.py`, before the object is written; the 37-slot main layout by `TestFlydslSdpaPacks` |
+| The 96 objects are what the pinned toolchain produces | [REGEN.md](REGEN.md) §2 — 96/96 byte-identical |
+| Each decode object carries its merge kernel, with both argument layouts as declared | `gen_sdpa.py`, before the object is written; the 38-slot main layout by `TestFlydslSdpaPacks` |
 | Each object has the declared 36-argument layout and spills no registers | `gen_sdpa.py`, before the object is written |
 | The vendored kernel matches AITER but for its recorded modifications | `tools/diff_upstream.py --aiter` ([REGEN.md](REGEN.md) §5) |
 | The shard ships exactly one object per `dtype × head_dim × causal × has_bias × head_dim_max` class, each with the 36-slot signature | `TestFlydslSdpaPacks`, and the shard census that runs it |
@@ -394,7 +404,8 @@ recorded here is the decision and the gate it passed.
 | Runtime head_dim | masked loads and stores in every K step | compile-time by the rule (a generic tier beside the specialized objects); the specialized objects' instructions are unchanged | baked axis, +8 |
 | Additive bias | per-score loads and an add in the inner loop | compile-time by the rule (`has_bias`); its arguments are appended to every object's list, and the plain objects' instructions are unchanged | baked axis, +16 |
 | Additive bias on the decode objects | per-score loads and an add in the inner loop | tried as a runtime argument (a uniform branch skipped with no bias bound): `head_dim` 64 slower with no bias, beyond noise with a repeating sign; testing it once and running one of two copies of the KV loop instead spills at 128 and 256, the register allocation being the larger copy's | baked axis, +16 |
-| Idle-wave skip (rows past `seq_len_q`) | one branch per KV tile | removing it doubles decode time and slows ragged tails; it costs a few percent on small f16 non-causal prefill (`head_dim` 64, S ≈ 1K) — over the gate on that one class | kept. The decode family now serves `(Hq / Hk) × Sq ≤ 16`, so the prefill objects' skip only matters for the decode shapes it does not take; removing it from the prefill objects is a tracked performance item |
+| Row tiles on the decode objects (groups over 16 rows) | the row tile as the grid's second dimension; no work per score | 0 VGPRs; time within noise on every decode shape (computing the tile from the block index instead cost a few percent on short d64 decode, sign repeating). The bias objects are left one tile: theirs spill 2 VGPRs at `head_dim` 128 and up with it | runtime, not on the bias objects |
+| Idle-wave skip (rows past `seq_len_q`) | one branch per KV tile | removing it gains a few percent on small f16 non-causal prefill (`head_dim` 64) and nothing elsewhere, and roughly doubles every partly empty tile the decode objects do not take — K and V with different head counts, chunked prefill of fewer than 128 rows, a bias on a generic head_dim | kept, re-measured with the decode family in place |
 
 ### 6.2 Instance ledger
 
@@ -408,10 +419,13 @@ shard, so the shipped count per arch is the same as the authored count.
 | SDPA forward, `head_dim` 256 | dtype (2) × causal (2); own schedule (Q re-read, `dv_split` 2) | 4 | shipped, `gfx11-generic`; the 12 above rebuilt byte-identical with it in the source |
 | SDPA forward, additive f32 bias | one bias object beside each of the 16 above (`has_bias`) | 16 | shipped, `gfx11-generic`; the 16 plain objects compile to identical code with the bias arguments appended |
 | SDPA forward, generic head_dim | dtype (2) × causal (2) × largest head {128, 256}; head_dim a runtime argument; no bias | 8 | shipped, `gfx11-generic`; the 32 above compile to identical code with the head_dim argument appended |
+| SDPA forward, narrower generic tiers | dtype (2) × causal (2) × largest head {64, 96, 160}, for the odd head dims models use; exact 160/192 objects measured within a few percent of these tiers and not added | 12 | shipped, `gfx11-generic`; the 72 above rebuilt byte-identical with kernel modification 16 in the source |
+| SDPA forward, generic tier up to 224 | dtype (2) × causal (2); two output-column tiles, where the 256 tier needs four; a separate up-to-192 tier measured only a few percent faster and was not added | 4 | shipped, `gfx11-generic`; the 84 above unchanged |
 | SDPA decode | dtype (2) × head_dim {64, 96, 128} × causal (2); its own kernel plus merge kernel per object | 12 | shipped, `gfx11-generic`; the 40 prefill objects unchanged |
 | SDPA decode, `head_dim` 256 | dtype (2) × causal (2); output columns split across two workgroups (`dv_split` 2) | 4 | shipped, `gfx11-generic`; the 52 above rebuilt byte-identical with it in the source |
 | SDPA decode, additive f32 bias | one bias object beside each of the 16 above (`has_bias`) | 16 | shipped, `gfx11-generic`; the 16 plain decode objects compile to identical code with the bias arguments appended, the 40 prefill objects are unchanged |
-| **Total, gfx11-generic** | | **84** | |
+| SDPA decode, generic head_dim | dtype (2) × causal (2) × largest head {96, 256}; head_dim a runtime argument (appended to both kernels), K/V columns past it never fetched; no bias | 8 | shipped, `gfx11-generic`; the 32 decode objects above compile to identical code with the head_dim argument appended, the prefill objects are unchanged |
+| **Total, gfx11-generic** | | **108** | |
 
 Adding a row here, with its gate result in §6.1 where it introduces a runtime
 feature, is part of adding the feature.

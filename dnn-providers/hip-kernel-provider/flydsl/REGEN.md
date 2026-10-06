@@ -137,8 +137,8 @@ for op in rmsnorm sdpa; do
 done
 ```
 
-Expected, and the state of the tree as committed: **84/84 byte-identical** (12
-RMSNorm, 72 SDPA), all four diffs empty.
+Expected, and the state of the tree as committed: **108/108 byte-identical** (12
+RMSNorm, 96 SDPA), all four diffs empty.
 
 `manifest.json` agreeing is the stronger of the two checks — it carries the
 `toolchain` block, so an identical manifest means the *recorded* toolchain and
@@ -267,7 +267,7 @@ about which compiler built it.
 come from FlyDSL; the attention kernel comes from AITER, which carries FlyDSL
 kernels upstream FlyDSL does not. Two carry deliberate modifications recorded in
 their own headers: `kernels_src/kernels/norm/rmsnorm_kernel.py` (three) and
-`kernels_src/kernels/attention/flash_attn_func_gfx1151.py` (twelve — the gfx11
+`kernels_src/kernels/attention/flash_attn_func_gfx1151.py` (sixteen — the gfx11
 port and the runtime arguments that let a few objects cover many shapes). Each
 file's header names the upstream and path it came from, and the tool reads that
 header to decide what to diff it against. To see what has drifted:

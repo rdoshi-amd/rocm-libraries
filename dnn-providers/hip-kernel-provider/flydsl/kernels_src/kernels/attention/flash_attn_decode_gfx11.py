@@ -13,9 +13,10 @@ kernel turns that around:
 
 * **Rows.** The query heads that share a KV head (the GQA group) and the query positions
   are packed into one 16-row WMMA tile: row r is query head ``kvh * g + r // Sq`` at
-  position ``r % Sq``, valid while ``r < g * Sq <= 16``. One KV head is read once for the
-  whole group.
-* **Workgroups.** One per (batch, KV head, KV split); ``num_splits`` is a runtime
+  position ``r % Sq``, valid while ``r < g * Sq``. One KV head is read once for the
+  whole group; a group of more than 16 rows takes ``ceil(g * Sq / 16)`` row tiles.
+* **Workgroups.** One per (batch, KV head, KV split) and row tile (the grid's second
+  dimension); ``num_splits`` is a runtime
   argument the dispatcher picks from the shape and the device's compute-unit count. The
   workgroup's keys are those any row can see -- the window's edge to the diagonal -- cut
   into 32-key tiles and the tiles into splits. Above ``head_dim`` 128 each split has
@@ -32,6 +33,8 @@ Masks, scale and strides follow the prefill kernel's runtime arguments; LSE has 
 semantics (O = 0 and LSE = -inf for a row no key reaches). An additive f32 bias
 (``has_bias``, a compile-time variant) is read through its broadcast strides, one row per
 lane, and added to the scaled scores; an object without one ignores the bias arguments.
+A generic object (``generic_head_dim``) is built for the largest head_dim it serves and
+reads the actual one at runtime, skipping the K and V columns past it.
 """
 
 import math as host_math
@@ -60,6 +63,7 @@ def build_flash_attn_decode_module(
     dv_split=None,
     has_bias=False,
     bias_early=None,
+    generic_head_dim=False,
 ):
     WARP_SIZE = 32
     NW = num_waves
@@ -73,9 +77,20 @@ def build_flash_attn_decode_module(
     # An additive f32 bias, broadcast by strides, added to the scaled scores: per-score
     # loads in the inner loop, so a compile-time variant (COVERAGE.md §6).
     HAS_BIAS = bool(has_bias)
+    # Row tiles (groups of more than 16 rows) on every object but the bias ones, which
+    # already use the whole register file at 128 and up: the row index they would hold
+    # through the KV loop spills there. A bias object serves up to 16 rows.
+    ROW_TILES = not HAS_BIAS
     # Issue the bias loads before the QK product (hidden behind it) or after it. Ahead
     # pays at 128 and up, where the score epilogue has latency to hide; below, after.
     BIAS_EARLY = (D >= 128) if bias_early is None else bool(bias_early)
+    # head_dim is then the largest served; the actual one, a multiple of 8, is a
+    # runtime argument. K and V columns past it are fetched out of the buffer's
+    # range, so the hardware returns zeros without reading memory, and zeroed
+    # again in case the slice is large enough for that offset to land inside it;
+    # Q columns past it are zeroed, O columns past it are not stored, and the
+    # split workspace's rows are the actual head_dim wide.
+    GENERIC_D = bool(generic_head_dim)
     # Above 128 the output columns are split across DV_SPLIT workgroups, as in the
     # prefill kernel: each computes the whole of QK^T but only DV_TILE columns of O,
     # so it holds and stages only those.
@@ -138,6 +153,7 @@ def build_flash_attn_decode_module(
         bias_sh: fx.Int64,
         bias_sq: fx.Int64,
         bias_skv: fx.Int64,
+        head_dim_rt: fx.Int32,
     ):
         elem = elem_cls
 
@@ -230,8 +246,15 @@ def build_flash_attn_decode_module(
 
         # Packed row of this lane: query head kvh * g + r // Sq at position r % Sq.
         rows = g * sq
-        row_ok = lane16 < rows
-        r = fx.Int64(row_ok.select(lane16, fx.Int64(0)))
+        if const_expr(ROW_TILES):
+            # A group of more than 16 rows takes several row tiles, one workgroup each,
+            # along the grid's second dimension.
+            r_tile = fx.Int64(gpu.block_idx.y) * fx.Int64(16) + lane16
+            row_ok = r_tile < rows
+            r = fx.Int64(row_ok.select(r_tile, fx.Int64(0)))
+        else:
+            row_ok = lane16 < rows
+            r = fx.Int64(row_ok.select(lane16, fx.Int64(0)))
         hq = kvh * g + r // sq
         qpos = r % sq
 
@@ -279,9 +302,34 @@ def build_flash_attn_decode_module(
         q_base = b * q_sb + hq * q_sh + qpos * q_ss
         zero16 = Vec.filled(16, 0.0, elem)
 
+        if const_expr(GENERIC_D):
+            d_rt = fx.Int64(head_dim_rt)
+            zero8e = Vec.filled(8, 0.0, elem)
+            # An element offset past any slice the dispatcher accepts (< 2 GiB).
+            past_slice = fx.Int64(0x3FFFFFF0)
+
         def q_pack(ks):
+            if const_expr(GENERIC_D):
+                halves = []
+                for h in range_constexpr(2):
+                    col = fx.Int64(ks * 16 + h * 8)
+                    ok = col < d_rt
+                    raw = gload(q_ptr, q_base + ok.select(col, fx.Int64(0)), 8)
+                    halves.append((row_ok & ok).select(raw, zero8e))
+                return Vec.from_elements(
+                    [halves[0][i] for i in range(8)] + [halves[1][i] for i in range(8)],
+                    elem,
+                )
             raw = gload(q_ptr, q_base + fx.Int64(ks * 16), 16)
             return row_ok.select(raw, zero16)
+
+        def kv_load(buf, row_base, col):
+            """Eight columns of one K or V row; past head_dim, zeros without a read."""
+            if const_expr(GENERIC_D):
+                ok = col < d_rt
+                raw = gload(buf, ok.select(row_base + col, past_slice), 8)
+                return ok.select(raw, zero8e)
+            return gload(buf, row_base + col, 8)
 
         q_packs = []
         if const_expr(Q_RESIDENT):
@@ -290,14 +338,24 @@ def build_flash_attn_decode_module(
 
         k_slice = b * k_sb + kvh * k_sh
         v_slice = b * v_sb + kvh * v_sh
-        k_buf = _buf(
-            fx.add_offset(k_ptr, k_slice),
-            ((skv - fx.Int64(1)) * k_ss + fx.Int64(D)) * fx.Int64(2),
-        )
-        v_buf = _buf(
-            fx.add_offset(v_ptr, v_slice),
-            ((skv - fx.Int64(1)) * v_ss + fx.Int64(D)) * fx.Int64(2),
-        )
+        if const_expr(GENERIC_D):
+            k_buf = _buf(
+                fx.add_offset(k_ptr, k_slice),
+                ((skv - fx.Int64(1)) * k_ss + d_rt) * fx.Int64(2),
+            )
+            v_buf = _buf(
+                fx.add_offset(v_ptr, v_slice),
+                ((skv - fx.Int64(1)) * v_ss + d_rt) * fx.Int64(2),
+            )
+        else:
+            k_buf = _buf(
+                fx.add_offset(k_ptr, k_slice),
+                ((skv - fx.Int64(1)) * k_ss + fx.Int64(D)) * fx.Int64(2),
+            )
+            v_buf = _buf(
+                fx.add_offset(v_ptr, v_slice),
+                ((skv - fx.Int64(1)) * v_ss + fx.Int64(D)) * fx.Int64(2),
+            )
 
         c_ninf = fx.Float32(float("-inf"))
         c_zero = fx.Float32(0.0)
@@ -348,7 +406,10 @@ def build_flash_attn_decode_module(
             # V: this wave's 32 rows into its LDS region, one row per lane.
             v_row = kv0 + lane
             for c in range_constexpr(DV_TILE // 8):
-                vv = gload(v_buf, v_row * v_ss + dv_col_base + fx.Int64(c * 8), 8)
+                if const_expr(GENERIC_D):
+                    vv = kv_load(v_buf, v_row * v_ss, dv_col_base + fx.Int64(c * 8))
+                else:
+                    vv = gload(v_buf, v_row * v_ss + dv_col_base + fx.Int64(c * 8), 8)
                 fx.ptr_store(
                     Vec(vv), lds_v + fx.Int32(wave_lds + lane * V_STRIDE + c * 8)
                 )
@@ -373,8 +434,8 @@ def build_flash_attn_decode_module(
                     for a in range_constexpr(2):
                         k_row = kv0 + fx.Int64(a * 16) + lane16
                         # Buffer loads cap at 128 bits: two 8-element halves.
-                        k_lo = gload(k_buf, k_row * k_ss + fx.Int64(ks * 16), 8)
-                        k_hi = gload(k_buf, k_row * k_ss + fx.Int64(ks * 16 + 8), 8)
+                        k_lo = kv_load(k_buf, k_row * k_ss, fx.Int64(ks * 16))
+                        k_hi = kv_load(k_buf, k_row * k_ss, fx.Int64(ks * 16 + 8))
                         kp = Vec.from_elements(
                             [k_lo[i] for i in range(8)] + [k_hi[i] for i in range(8)],
                             elem,
@@ -537,7 +598,19 @@ def build_flash_attn_decode_module(
                     else:
                         lo_s, hi_s = prr, own
                     rows_.append(klane_is_zero.select(lo_s[j // 2], hi_s[4 + j // 2]))
-                if row_ok:
+                if const_expr(GENERIC_D):
+                    o_col = dv_col_base + fx.Int64(dc * 16) + klane * 8
+                    if row_ok & (o_col < d_rt):
+                        if single:
+                            out = Vec.from_elements(rows_, fx.Float32).to(elem)
+                            gstore(o_ptr, o_base + o_col, out)
+                        else:
+                            gstore(
+                                wso_ptr,
+                                prow * d_rt + o_col,
+                                Vec.from_elements(rows_, fx.Float32),
+                            )
+                elif row_ok:
                     if single:
                         out = Vec.from_elements(rows_, fx.Float32).to(elem)
                         gstore(
@@ -581,6 +654,7 @@ def build_flash_attn_decode_module(
         lse_sb: fx.Int64,
         lse_ss: fx.Int64,
         lse_sh: fx.Int64,
+        head_dim_rt: fx.Int32,
     ):
         def _as_ptr(ptr, ty):
             return fx.recast_iter(
@@ -610,6 +684,9 @@ def build_flash_attn_decode_module(
         m_all = m
         m_safe = (m_all == c_ninf).select(c_zero, m_all)
         DPT = (D + MERGE_THREADS - 1) // MERGE_THREADS
+        # A generic object's workspace rows, and O's, are the actual head_dim wide.
+        if const_expr(GENERIC_D):
+            ws_d = fx.Int64(head_dim_rt)
         init = [c_zero] + [c_zero for _ in range(DPT)]
         res = init
         for i, carry in range(fx.Int64(0), ns, fx.Int64(1), init=init):
@@ -619,8 +696,12 @@ def build_flash_attn_decode_module(
             acc = []
             for j in range_constexpr(DPT):
                 d = tid + fx.Int64(j * MERGE_THREADS)
-                dd = fx.Int64((d < fx.Int64(D)).select(d, fx.Int64(0)))
-                ov = fx.ptr_load(wso + fx.Int32((row * ns + i) * D + dd))
+                if const_expr(GENERIC_D):
+                    dd = fx.Int64((d < ws_d).select(d, fx.Int64(0)))
+                    ov = fx.ptr_load(wso + fx.Int32((row * ns + i) * ws_d + dd))
+                else:
+                    dd = fx.Int64((d < fx.Int64(D)).select(d, fx.Int64(0)))
+                    ov = fx.ptr_load(wso + fx.Int32((row * ns + i) * D + dd))
                 acc.append(fx.Float32(carry[1 + j]) + w * fx.Float32(ov))
             res = yield [fx.Float32(carry[0]) + w] + acc
         l_all = res[0]
@@ -628,7 +709,7 @@ def build_flash_attn_decode_module(
         inv = has.select(fx.Float32(1.0) / l_all, c_zero)
         for j in range_constexpr(DPT):
             d = tid + fx.Int64(j * MERGE_THREADS)
-            if d < fx.Int64(D):
+            if d < (ws_d if const_expr(GENERIC_D) else fx.Int64(D)):
                 val = fx.Float32(res[1 + j]) * inv
                 fx.ptr_store(
                     Vec.from_elements([val.to(elem_cls)], elem_cls),
@@ -682,6 +763,7 @@ def build_flash_attn_decode_module(
         bias_sh: fx.Int64,
         bias_sq: fx.Int64,
         bias_skv: fx.Int64,
+        head_dim_rt: fx.Int32,
         stream: fx.Stream = fx.Stream(None),  # noqa: B008
     ):
         ctx = CompilationContext.get_current()
@@ -690,6 +772,11 @@ def build_flash_attn_decode_module(
             * (fx.Uint64(num_heads) // fx.Uint64(kv_group))
             * fx.Uint64(num_splits)
             * DV_SPLIT
+        )
+        row_tiles = (
+            (fx.Uint64(kv_group) * fx.Uint64(seq_len_q) + 15) // 16
+            if const_expr(ROW_TILES)
+            else fx.Uint64(1)
         )
         grid_merge = fx.Uint64(batch_size) * fx.Uint64(num_heads) * fx.Uint64(seq_len_q)
         main = flash_attn_decode_gfx11_kernel(
@@ -730,6 +817,7 @@ def build_flash_attn_decode_module(
             bias_sh,
             bias_sq,
             bias_skv,
+            head_dim_rt,
         )
         merge = flash_attn_decode_merge_gfx11_kernel(
             O,
@@ -746,6 +834,7 @@ def build_flash_attn_decode_module(
             lse_sb,
             lse_ss,
             lse_sh,
+            head_dim_rt,
         )
         passthrough = []
         if const_expr(daz):
@@ -764,7 +853,9 @@ def build_flash_attn_decode_module(
                     op.attributes["rocdl.waves_per_eu"] = ir.IntegerAttr.get(
                         T.i32, int(waves_per_eu)
                     )
-        main.launch(grid=(grid_main, 1, 1), block=(BLOCK_SIZE, 1, 1), stream=stream)
+        main.launch(
+            grid=(grid_main, row_tiles, 1), block=(BLOCK_SIZE, 1, 1), stream=stream
+        )
         merge.launch(
             grid=(grid_merge, 1, 1), block=(MERGE_THREADS, 1, 1), stream=stream
         )
@@ -774,5 +865,7 @@ def build_flash_attn_decode_module(
     }
     launch_flash_attn_decode.block_size = BLOCK_SIZE
     launch_flash_attn_decode.dv_split = DV_SPLIT
+    launch_flash_attn_decode.generic_head_dim = GENERIC_D
+    launch_flash_attn_decode.row_tiles = ROW_TILES
     launch_flash_attn_decode.merge_threads = MERGE_THREADS
     return launch_flash_attn_decode

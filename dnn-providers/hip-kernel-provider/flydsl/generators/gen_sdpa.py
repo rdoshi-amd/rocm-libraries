@@ -103,8 +103,10 @@ _EXPECTED_SIGNATURE = (
 # main kernel: Q, K, V, O, LSE, the split workspace's O and LSE (pointers); the
 # problem's i32 scalars and the split count; the scale; the (batch, sequence, head)
 # strides of Q, K, V, O and LSE; the bias pointer and its (batch, head, query, key)
-# strides, appended, so every decode object has the same list. The merge kernel: O, LSE and the two workspace
-# pointers; seq_len_q, num_heads, lse_on, num_splits; O's and LSE's strides.
+# strides; the runtime head_dim (read only by a generic object). Each appended, so
+# every decode object has the same list. The merge kernel: O, LSE and the two
+# workspace pointers; seq_len_q, num_heads, lse_on, num_splits; O's and LSE's
+# strides; the runtime head_dim.
 _DECODE_ARG_NAMES = (
     "Q",
     "K",
@@ -129,6 +131,7 @@ _DECODE_ARG_NAMES = (
     "bias_stride_h",
     "bias_stride_q",
     "bias_stride_k",
+    "head_dim_rt",
 )
 _DECODE_SIGNATURE = (
     *(("global_buffer", 8, 8 * i) for i in range(7)),
@@ -136,8 +139,9 @@ _DECODE_SIGNATURE = (
     *(("by_value", 8, 96 + 8 * i) for i in range(15)),
     ("global_buffer", 8, 216),
     *(("by_value", 8, 224 + 8 * i) for i in range(4)),
+    ("by_value", 4, 256),
 )
-_DECODE_KERNARG_SEGMENT_SIZE = 256
+_DECODE_KERNARG_SEGMENT_SIZE = 260
 _MERGE_ARG_NAMES = (
     "O",
     "LSE",
@@ -148,17 +152,20 @@ _MERGE_ARG_NAMES = (
     "lse_on",
     "num_splits",
     *(f"{t}_stride_{a}" for t in ("o", "lse") for a in ("b", "s", "h")),
+    "head_dim_rt",
 )
 _MERGE_SIGNATURE = (
     *(("global_buffer", 8, 8 * i) for i in range(4)),
     *(("by_value", 4, 32 + 4 * i) for i in range(4)),
     *(("by_value", 8, 48 + 8 * i) for i in range(6)),
+    ("by_value", 4, 96),
 )
-_MERGE_KERNARG_SEGMENT_SIZE = 96
+_MERGE_KERNARG_SEGMENT_SIZE = 100
 # One workgroup per (batch, kv head, split, output-column tile of head_dim /
-# dv_split) of DECODE_WAVES waves; the merge, one workgroup of DECODE_MERGE_THREADS
-# per (batch, query head, query position).
-_DECODE_GRID_RULE = "batch_x_kvheads_x_splits_x_dv_split"
+# dv_split) of DECODE_WAVES waves, by 16-row tile of the GQA group's rows along the
+# grid's second dimension; the merge, one workgroup of DECODE_MERGE_THREADS per
+# (batch, query head, query position).
+_DECODE_GRID_RULE = "batch_x_kvheads_x_splits_x_dv_split_by_row_tiles"
 _DECODE_WAVES = 4
 
 # Launch geometry the native dispatch handler reproduces: one workgroup per
@@ -236,12 +243,13 @@ def _build_decode(
     knobs = instance.knobs
     env.set_dump_dir(dump_dir)
     launch = kernel_module.build_flash_attn_decode_module(
-        knobs["head_dim"],
+        knobs["head_dim_max"],
         causal=bool(knobs["causal"]),
         dtype_str=instance.dtype,
         num_waves=_DECODE_WAVES,
         dv_split=knobs["dv_split"],
         has_bias=bool(knobs["has_bias"]),
+        generic_head_dim=knobs["head_dim"] is None,
     )
     if launch.dv_split != knobs["dv_split"]:
         raise GeneratorError(
@@ -251,9 +259,10 @@ def _build_decode(
     null = flyc.from_c_void_p(fx.Uint8, 0)
     # Q, K, V, O, LSE, WS_O, WS_LSE; batch, seq_len_q, seq_len_kv, num_heads,
     # kv_group, right_bound, left_bound, align_bottom_right, lse_on, num_splits;
-    # the scale; fifteen strides; the bias pointer and its four strides.
+    # the scale; fifteen strides; the bias pointer and its four strides; the
+    # runtime head_dim.
     args = [null] * 7 + [1, 1, 1, 1, 1, 0, -1, 0, 0, 1, 1.0] + [1] * 15
-    args += [null] + [1] * 4
+    args += [null] + [1] * 4 + [1]
     args.append(fx.Stream(None))
     effective = dict(getattr(launch, "compile_hints", {}).get("llvm_options") or {})
     effective.update(llvm_options)

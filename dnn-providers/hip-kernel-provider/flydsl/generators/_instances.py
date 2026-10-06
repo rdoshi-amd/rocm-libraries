@@ -190,17 +190,26 @@ def sdpa_dv_split(head_dim: int) -> int:
 
 
 # The generic tier: any head_dim that is a multiple of 8, read at runtime, by an
-# object built for the largest it serves (kernel modification 15). Two, so a
-# small head is not run at 256's cost: up to 128, and above 128 up to 256. Each
-# maps to its output-column split; the 256 one splits four ways, because its
-# masked loads on top of the d256 schedule do not fit the register file at two.
-# Below the specialized tier in priority, and the smaller one above the larger,
-# so the narrowest object that serves a head is the one chosen.
-SDPA_GENERIC_HEAD_DIM_MAX = {128: 1, 256: 4}
-PRIORITY_SDPA_GENERIC = {128: 20, 256: PRIORITY_GENERIC}
+# object built for the largest it serves (kernel modification 15). An object
+# runs at its largest head's cost, so the tiers are cut where the odd head dims
+# models use fall: up to 64 (40, 48, 56), 96 (72, 80, 88), 128, 160 (136-160),
+# 224 (168-224) and 256. Each maps to its output-column split; the 256 one splits
+# four ways, because its masked loads on top of the d256 schedule do not fit the
+# register file at two, which is why 224 is a tier of its own. Below the
+# specialized tier in priority, and each narrower one above the wider, so the
+# narrowest object that serves a head is the one chosen.
+SDPA_GENERIC_HEAD_DIM_MAX = {64: 1, 96: 1, 128: 1, 160: 2, 224: 2, 256: 4}
+PRIORITY_SDPA_GENERIC = {
+    64: 40,
+    96: 30,
+    128: 20,
+    160: 15,
+    224: 12,
+    256: PRIORITY_GENERIC,
+}
 
 # The decode family (flash_attn_decode_gfx11.py): split-KV with the GQA group packed
-# into one 16-row tile, for graphs with g * Sq <= 16. Its own kernel and its own launch
+# into 16-row tiles, for graphs with g * Sq <= 128. Its own kernel and its own launch
 # geometry, so a separate set of objects; above the prefill ones in priority, so a
 # graph both serve runs here. Each object also carries the merge kernel that combines
 # its splits, named by `merge_symbol`. The specialized head dims, with and without a
@@ -208,6 +217,14 @@ PRIORITY_SDPA_GENERIC = {128: 20, 256: PRIORITY_GENERIC}
 # head; anything else takes the prefill objects. d256 splits its output columns across
 # two workgroups, as the prefill object does, to fit the register file.
 SDPA_DECODE_HEAD_DIMS = (64, 96, 128, 256)
+# Generic decode objects for every other head_dim that is a multiple of 8: up to 96,
+# and above it up to 256 with the d256 column split. Columns past the actual head_dim
+# are never fetched, so a decode step reads only the bytes its head has; an up-to-128
+# tier does not fit the register file. No bias, as for the generic prefill tier. Above
+# every prefill object in priority and below the specialized decode objects, the
+# narrower tier above the wider.
+SDPA_DECODE_GENERIC_HEAD_DIM_MAX = {96: 1, 256: 2}
+PRIORITY_SDPA_DECODE_GENERIC = {96: 145, 256: 140}
 SDPA_DECODE_MERGE_SYMBOL = "flash_attn_decode_merge_gfx11_kernel_1"
 PRIORITY_SDPA_DECODE = 150
 SDPA_DECODE_ROWS = 16
@@ -300,6 +317,26 @@ def sdpa_instances() -> list[Instance]:
                             },
                         )
                     )
+        for head_dim_max, dv_split in SDPA_DECODE_GENERIC_HEAD_DIM_MAX.items():
+            for causal in SDPA_CAUSAL:
+                instances.append(
+                    Instance(
+                        op="sdpa",
+                        dtype=dtype,
+                        priority=PRIORITY_SDPA_DECODE_GENERIC[head_dim_max],
+                        knobs={
+                            "head_dim": None,
+                            "causal": causal,
+                            "block_m": SDPA_DECODE_ROWS,
+                            "block_n": SDPA_BLOCK_N,
+                            "dv_split": dv_split,
+                            "has_bias": 0,
+                            "head_dim_max": head_dim_max,
+                            "decode": 1,
+                            "merge_symbol": SDPA_DECODE_MERGE_SYMBOL,
+                        },
+                    )
+                )
     _assert_unique(instances)
     return instances
 

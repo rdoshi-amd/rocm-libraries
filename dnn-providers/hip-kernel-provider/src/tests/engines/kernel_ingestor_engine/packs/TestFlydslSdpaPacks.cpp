@@ -6,9 +6,12 @@
 // reads a staged shard nothing produced.
 #if defined(HIPDNN_ENABLE_KERNEL_INGESTOR) && defined(HIPDNN_ENGINE_FLYDSL)
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
+#include <map>
 #include <set>
 #include <string>
 #include <tuple>
@@ -119,8 +122,8 @@ TEST(TestFlydslSdpaPacks, ShipsEverySpecializedAndGenericVariantOnce)
                 }
             }
         }
-        // The generic tier: head_dim read at runtime, no bias, up to 128 and up to 256.
-        for(const int64_t headDimMax : {128, 256})
+        // The generic tiers: head_dim read at runtime, no bias, each up to its largest head.
+        for(const int64_t headDimMax : {64, 96, 128, 160, 224, 256})
         {
             for(const int64_t causal : {0, 1})
             {
@@ -141,6 +144,15 @@ TEST(TestFlydslSdpaPacks, ShipsEverySpecializedAndGenericVariantOnce)
                 }
             }
         }
+        // Generic decode: head_dim read at runtime, no bias, up to 96 and up to 256.
+        for(const int64_t headDimMax : {96, 256})
+        {
+            for(const int64_t causal : {0, 1})
+            {
+                EXPECT_EQ(classes.count({dtype, 0, causal, 0, headDimMax, 1}), 1U)
+                    << dtype << " generic decode up to " << headDimMax << " causal=" << causal;
+            }
+        }
     }
 }
 
@@ -150,6 +162,98 @@ bool isDecodeKernel(const Kernel& kernel)
 {
     const auto* decode = tryGetMetadataField<int64_t>(kernel.metadata, FLYDSL_SDPA_DECODE_FIELD);
     return decode != nullptr && *decode == 1;
+}
+
+TEST(TestFlydslSdpaPacks, RanksTheNarrowestServingObjectFirst)
+{
+    const auto& set = loadedSet(FLYDSL_SDPA.engineName);
+
+    // Several objects can serve one graph and the highest priority wins, so the ordering
+    // is part of the content: a decode object above every prefill one, an object built
+    // for the exact head_dim above every generic tier, and among the generic tiers the
+    // narrower above the wider -- equal priorities would leave the choice to descriptor
+    // order. Per (dtype, causal): {decode, generic} -> [(head_dim_max, priority)].
+    struct Ranked
+    {
+        int64_t headDimMax;
+        int64_t priority;
+    };
+    std::map<std::tuple<std::string, int64_t, int64_t, bool>, std::vector<Ranked>> families;
+    size_t checked = 0;
+    for(const auto& pack : set.packs)
+    {
+        for(const auto& kernel : pack.kernels)
+        {
+            const auto* dtype
+                = tryGetMetadataField<std::string>(kernel.metadata, FLYDSL_SDPA_DTYPE_FIELD);
+            const auto* headDim
+                = tryGetMetadataField<int64_t>(kernel.metadata, FLYDSL_SDPA_HEAD_DIM_FIELD);
+            const auto* causal
+                = tryGetMetadataField<int64_t>(kernel.metadata, FLYDSL_SDPA_CAUSAL_FIELD);
+            const auto* headDimMax
+                = tryGetMetadataField<int64_t>(kernel.metadata, FLYDSL_SDPA_HEAD_DIM_MAX_FIELD);
+            const auto* decode
+                = tryGetMetadataField<int64_t>(kernel.metadata, FLYDSL_SDPA_DECODE_FIELD);
+            ASSERT_TRUE(dtype != nullptr && headDim != nullptr && causal != nullptr
+                        && headDimMax != nullptr && decode != nullptr)
+                << kernel.name;
+            families[{*dtype, *causal, *decode, *headDim == 0}].push_back(
+                {*headDimMax, static_cast<int64_t>(kernel.priority)});
+            ++checked;
+        }
+    }
+    ASSERT_GT(checked, 0U);
+
+    auto lowest = [](const std::vector<Ranked>& v) {
+        int64_t p = std::numeric_limits<int64_t>::max();
+        for(const auto& r : v)
+        {
+            p = std::min(p, r.priority);
+        }
+        return p;
+    };
+    auto highest = [](const std::vector<Ranked>& v) {
+        int64_t p = std::numeric_limits<int64_t>::lowest();
+        for(const auto& r : v)
+        {
+            p = std::max(p, r.priority);
+        }
+        return p;
+    };
+    for(const auto& [key, ranked] : families)
+    {
+        const auto& [dtype, causal, decode, generic] = key;
+        if(generic)
+        {
+            auto tiers = ranked;
+            std::sort(tiers.begin(), tiers.end(), [](const Ranked& a, const Ranked& b) {
+                return a.headDimMax < b.headDimMax;
+            });
+            for(size_t i = 1; i < tiers.size(); ++i)
+            {
+                EXPECT_GT(tiers[i - 1].priority, tiers[i].priority)
+                    << dtype << " causal=" << causal << " decode=" << decode << ": the tier up to "
+                    << tiers[i - 1].headDimMax << " must outrank the one up to "
+                    << tiers[i].headDimMax;
+            }
+            const auto exact = families.find({dtype, causal, decode, false});
+            ASSERT_NE(exact, families.end());
+            EXPECT_GT(lowest(exact->second), highest(ranked))
+                << dtype << " causal=" << causal << " decode=" << decode
+                << ": an exact head_dim object must outrank every generic tier";
+        }
+        if(decode == 1)
+        {
+            for(const bool prefillGeneric : {false, true})
+            {
+                const auto prefill = families.find({dtype, causal, 0, prefillGeneric});
+                ASSERT_NE(prefill, families.end());
+                EXPECT_GT(lowest(ranked), highest(prefill->second))
+                    << dtype << " causal=" << causal << ": a decode object must outrank every "
+                    << "prefill object";
+            }
+        }
+    }
 }
 
 TEST(TestFlydslSdpaPacks, EveryPrefillKernelDeclaresTheThirtySixSlotSignature)
@@ -219,16 +323,16 @@ TEST(TestFlydslSdpaPacks, EveryPrefillKernelDeclaresTheThirtySixSlotSignature)
     EXPECT_GT(checked, 0U);
 }
 
-TEST(TestFlydslSdpaPacks, EveryDecodeKernelDeclaresTheThirtySevenSlotSignature)
+TEST(TestFlydslSdpaPacks, EveryDecodeKernelDeclaresTheThirtyEightSlotSignature)
 {
     const auto& set = loadedSet(FLYDSL_SDPA.engineName);
 
     // Q, K, V, O, LSE and the split workspace's O and LSE pointers; nine i32 (seq_len_q,
     // seq_len_kv, num_heads, kv_group, right_bound, left_bound, align_bottom_right, lse_on,
     // num_splits) and the f32 scale from offset 56; fifteen i64 strides from 96; the bias
-    // pointer at 216 and its four i64 strides. The merge kernel in the same object is
-    // launched by name and checked by the generator.
-    constexpr size_t SLOTS = 37;
+    // pointer at 216 and its four i64 strides; the i32 head_dim at 256. The merge kernel
+    // in the same object is launched by name and checked by the generator.
+    constexpr size_t SLOTS = 38;
     size_t checked = 0;
     for(const auto& pack : set.packs)
     {
@@ -259,6 +363,7 @@ TEST(TestFlydslSdpaPacks, EveryDecodeKernelDeclaresTheThirtySevenSlotSignature)
                 else
                 {
                     kind = slot == 32 ? "global_buffer" : "by_value";
+                    size = slot == 37 ? 4 : 8;
                     offset = static_cast<uint32_t>(96 + 8 * (slot - 17));
                 }
                 EXPECT_EQ(argument.kind, kind) << kernel.name << " slot " << slot;

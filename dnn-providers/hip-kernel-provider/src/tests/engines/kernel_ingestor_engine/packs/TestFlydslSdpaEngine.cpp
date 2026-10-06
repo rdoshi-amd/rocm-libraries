@@ -502,7 +502,7 @@ TEST(TestFlydslSdpaKernelMatch, ASpecializedObjectServesOnlyItsOwnHead)
                                bindingsFor(spec)));
 }
 
-TEST(TestFlydslSdpaKernelMatch, ADecodeObjectServesAGroupThatFitsItsSixteenRows)
+TEST(TestFlydslSdpaKernelMatch, ADecodeObjectServesUpToItsRowLimit)
 {
     const auto decode = makeFlydslSdpaKernel("bf16", 128, 1, 16, 32, 1, 0, 128, 1);
     const auto matches = [&decode](int64_t heads, int64_t kvHeads, int64_t seqLenQ) {
@@ -520,8 +520,10 @@ TEST(TestFlydslSdpaKernelMatch, ADecodeObjectServesAGroupThatFitsItsSixteenRows)
     EXPECT_TRUE(matches(32, 8, 1)) << "group of 4, one position";
     EXPECT_TRUE(matches(16, 1, 1)) << "MQA, group of 16";
     EXPECT_TRUE(matches(8, 2, 4)) << "group of 4, four positions";
-    EXPECT_FALSE(matches(32, 1, 1)) << "group of 32 does not fit";
-    EXPECT_FALSE(matches(8, 2, 5)) << "20 rows do not fit";
+    EXPECT_TRUE(matches(32, 1, 1)) << "MQA, group of 32: two row tiles";
+    EXPECT_TRUE(matches(8, 2, 32)) << "group of 4, 32 positions: 128 rows";
+    EXPECT_FALSE(matches(8, 2, 33)) << "132 rows: the prefill objects are faster";
+    EXPECT_FALSE(matches(64, 1, 3)) << "MQA, group of 64, three positions: 192 rows";
 }
 
 TEST(TestFlydslSdpaKernelMatch, ADecodeObjectDeclinesWhatItsTileCannotHold)
@@ -562,6 +564,13 @@ TEST(TestFlydslSdpaKernelMatch, ADecodeBiasObjectServesABiasItsOffsetsReach)
     const GraphFixture biased(buildFlydslSdpaGraph(spec));
     EXPECT_TRUE(matchesKernel(FLYDSL_SDPA, biased.context(), bias, bindingsFor(spec)));
     EXPECT_FALSE(matchesKernel(FLYDSL_SDPA, biased.context(), plain, bindingsFor(spec)));
+
+    // A bias object is built for one 16-row tile: an MQA group of 32 goes to prefill.
+    SdpaGraphSpec mqa = spec;
+    mqa.heads = 32;
+    mqa.kvHeads = 1;
+    const GraphFixture wide(buildFlydslSdpaGraph(mqa));
+    EXPECT_FALSE(matchesKernel(FLYDSL_SDPA, wide.context(), bias, bindingsFor(mqa)));
 
     // One tile spans the four heads of a group; a head stride that puts the last of them
     // past the 32-bit offsets declines, though each (batch, head) slice alone fits.
@@ -1323,6 +1332,22 @@ TEST(TestGpuFlydslSdpaDispatch, ComputesAGenericHeadDim40Bhsd)
     expectSdpaMatchesReference<hipdnn_data_sdk::types::half>(spec, F16_TOLERANCE);
 }
 
+// The up-to-160 tier: a 160-wide K/V row does not tile the block's threads, so each KV tile
+// is loaded in passes whose last one overruns the tile and stores only the rows inside it.
+TEST(TestGpuFlydslSdpaDispatch, ComputesAGenericHeadDim152)
+{
+    SKIP_IF_NO_DEVICES();
+    SdpaGraphSpec spec;
+    spec.dataType = DataType::HALF;
+    spec.headDim = 152;
+    spec.heads = 4;
+    spec.kvHeads = 4;
+    spec.seqLenQ = 150;
+    spec.seqLenKv = 301;
+    spec.stats = SdpaStats::LSE;
+    expectSdpaMatchesReference<hipdnn_data_sdk::types::half>(spec, F16_TOLERANCE);
+}
+
 TEST(TestGpuFlydslSdpaDispatch, ComputesAGenericHeadDim192)
 {
     SKIP_IF_NO_DEVICES();
@@ -1332,6 +1357,20 @@ TEST(TestGpuFlydslSdpaDispatch, ComputesAGenericHeadDim192)
     spec.seqLenQ = 90;
     spec.seqLenKv = 150;
     spec.kvHeads = 2;
+    expectSdpaMatchesReference<hipdnn_data_sdk::types::bfloat16>(spec, BF16_TOLERANCE);
+}
+
+// Past 224 the widest tier serves, its output columns split four ways.
+TEST(TestGpuFlydslSdpaDispatch, ComputesAGenericHeadDim240)
+{
+    SKIP_IF_NO_DEVICES();
+    SdpaGraphSpec spec;
+    spec.headDim = 240;
+    spec.mask = SdpaMask::TOP_LEFT_CAUSAL;
+    spec.heads = 4;
+    spec.kvHeads = 2;
+    spec.seqLenQ = 140;
+    spec.seqLenKv = 140;
     expectSdpaMatchesReference<hipdnn_data_sdk::types::bfloat16>(spec, BF16_TOLERANCE);
 }
 
@@ -1410,6 +1449,68 @@ TEST(TestGpuFlydslSdpaDispatch, DecodesWithinASlidingWindow)
     spec.seqLenQ = 1;
     spec.seqLenKv = 3000;
     expectSdpaMatchesReference<hipdnn_data_sdk::types::bfloat16>(spec, BF16_TOLERANCE, true);
+}
+
+// More rows than one tile holds: MQA's group of 32, and a speculative step of several
+// positions, each split across row tiles along the grid's second dimension.
+TEST(TestGpuFlydslSdpaDispatch, DecodesAnMqaGroupAcrossRowTiles)
+{
+    SKIP_IF_NO_DEVICES();
+    SdpaGraphSpec spec;
+    spec.headDim = 128;
+    spec.mask = SdpaMask::BOTTOM_RIGHT_CAUSAL;
+    spec.batch = 2;
+    spec.heads = 32;
+    spec.kvHeads = 1;
+    spec.seqLenQ = 1;
+    spec.seqLenKv = 2100;
+    spec.stats = SdpaStats::LSE;
+    expectSdpaMatchesReference<hipdnn_data_sdk::types::bfloat16>(spec, BF16_TOLERANCE, true);
+}
+
+TEST(TestGpuFlydslSdpaDispatch, DecodesASpeculativeStepAcrossRowTiles)
+{
+    SKIP_IF_NO_DEVICES();
+    SdpaGraphSpec spec;
+    spec.dataType = DataType::HALF;
+    spec.headDim = 64;
+    spec.mask = SdpaMask::BOTTOM_RIGHT_CAUSAL;
+    spec.heads = 8;
+    spec.kvHeads = 2;
+    spec.seqLenQ = 7;
+    spec.seqLenKv = 900;
+    expectSdpaMatchesReference<hipdnn_data_sdk::types::half>(spec, F16_TOLERANCE, true);
+}
+
+// A head_dim off the specialized set on the decode path: columns past it are never read,
+// and the split workspace's rows are that wide.
+TEST(TestGpuFlydslSdpaDispatch, DecodesAGenericHeadDim80AcrossSplits)
+{
+    SKIP_IF_NO_DEVICES();
+    SdpaGraphSpec spec;
+    spec.headDim = 80;
+    spec.mask = SdpaMask::BOTTOM_RIGHT_CAUSAL;
+    spec.batch = 1;
+    spec.heads = 8;
+    spec.kvHeads = 2;
+    spec.seqLenQ = 1;
+    spec.seqLenKv = 2100;
+    spec.stats = SdpaStats::LSE;
+    expectSdpaMatchesReference<hipdnn_data_sdk::types::bfloat16>(spec, BF16_TOLERANCE, true);
+}
+
+TEST(TestGpuFlydslSdpaDispatch, DecodesAGenericHeadDim160)
+{
+    SKIP_IF_NO_DEVICES();
+    SdpaGraphSpec spec;
+    spec.dataType = DataType::HALF;
+    spec.headDim = 160;
+    spec.mask = SdpaMask::BOTTOM_RIGHT_CAUSAL;
+    spec.heads = 8;
+    spec.kvHeads = 4;
+    spec.seqLenQ = 2;
+    spec.seqLenKv = 700;
+    expectSdpaMatchesReference<hipdnn_data_sdk::types::half>(spec, F16_TOLERANCE, true);
 }
 
 // A bias on the decode path: each lane reads its own (head, position) row of the GQA

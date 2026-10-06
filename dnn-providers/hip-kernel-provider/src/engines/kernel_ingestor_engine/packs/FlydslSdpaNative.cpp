@@ -99,9 +99,12 @@ constexpr std::string_view DECODE_FIELD = "decode";
 /// it is loaded from the same archive entry by this symbol.
 constexpr std::string_view MERGE_SYMBOL_FIELD = "merge_symbol";
 
-/// The decode kernel packs the GQA group's query heads and the query positions into one
-/// 16-row tile, so it serves a graph only while (Hq / Hk) * Sq fits it.
+/// The decode kernel packs the GQA group's query heads and the query positions into 16-row
+/// tiles, one workgroup per tile along the grid's second dimension. Each tile re-reads the
+/// KV head, so past a few tiles the prefill objects, which share each K/V tile across 128
+/// rows, are faster: decode serves (Hq / Hk) * Sq up to DECODE_MAX_ROWS.
 constexpr int64_t DECODE_ROWS = 16;
+constexpr int64_t DECODE_MAX_ROWS = 128;
 /// Waves per decode workgroup, keys per wave per step, and threads per merge workgroup:
 /// the geometry the decode kernel and its merge were built with.
 constexpr int64_t DECODE_WAVES = 4;
@@ -856,14 +859,30 @@ std::optional<int64_t> candidateGrid(const SdpaProblem& problem, const SdpaTile&
     return grid;
 }
 
+/// Whether a decode object takes several row tiles. The bias objects are built for one:
+/// they already use the whole register file at head_dim 128 and up, and the row index a
+/// tiled launch holds through the KV loop spills there.
+bool decodeRowTiled(const KernelDefinition& kernel)
+{
+    return integerMetadata(kernel, HAS_BIAS_FIELD) == 0;
+}
+
+/// The decode launch's row tiles: (Hq / Hk) * Sq rows, 16 to a tile, or one.
+int64_t decodeRowTiles(const SdpaProblem& problem, bool rowTiled)
+{
+    return rowTiled ? ((problem.numHeads / problem.numKvHeads) * problem.seqLenQ + DECODE_ROWS - 1)
+                          / DECODE_ROWS
+                    : 1;
+}
+
 /// How many KV splits a decode launch uses: enough workgroups to roughly fill the device's
 /// compute units, but no split so short that its waves have little to stream, and at most
 /// DECODE_MAX_SPLITS. Deterministic in the problem and the device, so workspaceBytes and
 /// prepare agree.
-int64_t decodeSplits(const SdpaProblem& problem, int computeUnits)
+int64_t decodeSplits(const SdpaProblem& problem, int64_t rowTiles, int computeUnits)
 {
     const int64_t units = computeUnits > 0 ? computeUnits : DECODE_FALLBACK_COMPUTE_UNITS;
-    const int64_t groups = std::max<int64_t>(1, problem.batch * problem.numKvHeads);
+    const int64_t groups = std::max<int64_t>(1, problem.batch * problem.numKvHeads * rowTiles);
     const int64_t tiles = (problem.seqLenKv + DECODE_TILE - 1) / DECODE_TILE;
     const int64_t byWork = std::max<int64_t>(1, tiles / (DECODE_WAVES * DECODE_MIN_TILES_PER_WAVE));
     const int64_t byDevice = std::max<int64_t>(1, units / groups);
@@ -899,13 +918,14 @@ bool decodeBiasFits(const SdpaProblem& problem, const BiasStrides& strides)
            && *lastQuery <= BIAS_SLICE_ELEMENT_LIMIT - *lastKey - *lastHead;
 }
 
-/// Whether a decode object can serve the graph: the GQA group times the query positions
-/// fits its 16-row tile, and one V head goes with each K head (the rows of a tile share
-/// one KV head).
-bool decodeServes(const SdpaProblem& problem)
+/// Whether a decode object should serve the graph: the GQA group times the query
+/// positions is at most DECODE_MAX_ROWS (one tile's DECODE_ROWS for an object built for
+/// one), and one V head goes with each K head (the rows of a tile share one KV head).
+bool decodeServes(const SdpaProblem& problem, bool rowTiled)
 {
     return problem.numKvHeads == problem.numVHeads
-           && (problem.numHeads / problem.numKvHeads) * problem.seqLenQ <= DECODE_ROWS;
+           && (problem.numHeads / problem.numKvHeads) * problem.seqLenQ
+                  <= (rowTiled ? DECODE_MAX_ROWS : DECODE_ROWS);
 }
 
 /**
@@ -944,15 +964,15 @@ bool flydslSdpaKernelMatches(const MatchContext& context,
         return false;
     }
 
-    // A decode object serves only the graphs its packed tile fits, and only with its own
-    // head_dim; it carries the merge kernel it launches by name.
+    // A decode object serves only the graphs its packed tile fits, and carries the merge
+    // kernel it launches by name. Its head_dim is checked below with the prefill ones'.
     const auto decode = integerMetadata(kernel, DECODE_FIELD);
     if(!decode.has_value() || (*decode != 0 && *decode != 1))
     {
         return false;
     }
     if(*decode == 1
-       && (!decodeServes(problem) || integerMetadata(kernel, HEAD_DIM_FIELD) != problem.headDim
+       && (!decodeServes(problem, decodeRowTiled(kernel))
            || stringMetadata(kernel, MERGE_SYMBOL_FIELD).value_or("").empty()))
     {
         return false;
@@ -1068,7 +1088,7 @@ const std::vector<KernelArgument>& flydslSdpaKernelSignature()
  * num_heads, kv_group, right_bound, left_bound, align_bottom_right, lse_on, num_splits
  * (i32); scale (f32); the (batch, sequence, head) strides of Q, K, V, O and LSE (i64);
  * the bias (pointer) and its (batch, head, query, key) strides (i64), read only by a
- * has_bias object.
+ * has_bias object; the head_dim (i32), read only by a generic object.
  */
 const std::vector<KernelArgument>& flydslSdpaDecodeSignature()
 {
@@ -1082,7 +1102,7 @@ const std::vector<KernelArgument>& flydslSdpaDecodeSignature()
         s_i32,     s_i32,     s_i32,     s_i32,     s_i32,     s_i32,     s_i32,     s_i32,
         s_f32,     s_i64,     s_i64,     s_i64,     s_i64,     s_i64,     s_i64,     s_i64,
         s_i64,     s_i64,     s_i64,     s_i64,     s_i64,     s_i64,     s_i64,     s_i64,
-        s_pointer, s_i64,     s_i64,     s_i64,     s_i64};
+        s_pointer, s_i64,     s_i64,     s_i64,     s_i64,     s_i32};
     return s_signature;
 }
 
@@ -1090,7 +1110,8 @@ const std::vector<KernelArgument>& flydslSdpaDecodeSignature()
  * @brief The decode object's merge kernel's argument list.
  *
  * O, LSE and the split workspace's O and LSE (pointers); seq_len_q, num_heads, lse_on,
- * num_splits (i32); the (batch, sequence, head) strides of O and LSE (i64).
+ * num_splits (i32); the (batch, sequence, head) strides of O and LSE (i64); the
+ * head_dim (i32), the width of a generic object's workspace and O rows.
  */
 const std::vector<KernelArgument>& flydslSdpaMergeSignature()
 {
@@ -1111,7 +1132,8 @@ const std::vector<KernelArgument>& flydslSdpaMergeSignature()
                                                          s_i64,
                                                          s_i64,
                                                          s_i64,
-                                                         s_i64};
+                                                         s_i64,
+                                                         s_i32};
     return s_signature;
 }
 
@@ -1258,8 +1280,11 @@ public:
         const auto binding = flydslSdpaBinding(bound);
         auto problem
             = problemFor(requireTensor(context, binding.q), requireTensor(context, binding.k));
-        const auto bytes = decodeWorkspaceBytes(
-            problem, decodeSplits(problem, context.deviceProperties.multiProcessorCount));
+        const auto bytes
+            = decodeWorkspaceBytes(problem,
+                                   decodeSplits(problem,
+                                                decodeRowTiles(problem, decodeRowTiled(kernel)),
+                                                context.deviceProperties.multiProcessorCount));
         if(!bytes.has_value())
         {
             throw hipdnn_plugin_sdk::HipdnnPluginException(
@@ -1312,10 +1337,11 @@ public:
         int64_t splits = 1;
         if(decode)
         {
-            // `batch_x_kvheads_x_splits_x_dv_split`: one workgroup of DECODE_WAVES waves per
-            // (batch, KV head, split, output-column tile); the merge, one workgroup per
-            // (batch, query head, position).
-            splits = decodeSplits(problem, context.deviceProperties.multiProcessorCount);
+            // `batch_x_kvheads_x_splits_x_dv_split_by_row_tiles`: one workgroup of
+            // DECODE_WAVES waves per (batch, KV head, split, output-column tile), by 16-row
+            // tile along y; the merge, one workgroup per (batch, query head, position).
+            const auto rowTiles = decodeRowTiles(problem, decodeRowTiled(kernel));
+            splits = decodeSplits(problem, rowTiles, context.deviceProperties.multiProcessorCount);
             const auto mergeSymbol = stringMetadata(kernel, MERGE_SYMBOL_FIELD);
             const auto mainGrid
                 = checkedProduct({problem.batch, problem.numKvHeads, splits, tile->dvSplit});
@@ -1341,7 +1367,8 @@ public:
                                                       options,
                                                       flydslSdpaMergeSignature()));
             code.setBlockSize(static_cast<unsigned int>(DECODE_WAVES * WAVE_SIZE), 1, 1);
-            code.setGridSize(static_cast<unsigned int>(*mainGrid), 1, 1);
+            code.setGridSize(
+                static_cast<unsigned int>(*mainGrid), static_cast<unsigned int>(rowTiles), 1);
             mergeCode->setBlockSize(static_cast<unsigned int>(DECODE_MERGE_THREADS), 1, 1);
             mergeCode->setGridSize(static_cast<unsigned int>(*mergeGrid), 1, 1);
         }
@@ -1507,7 +1534,8 @@ public:
                         b[0],
                         b[1],
                         b[2],
-                        b[3]);
+                        b[3],
+                        static_cast<int32_t>(problem.headDim));
             if(splits > 1)
             {
                 preparedSdpa.mergeForStream(handle.getStream())
@@ -1525,7 +1553,8 @@ public:
                             s[3].head,
                             s[4].batch,
                             s[4].sequence,
-                            s[4].head);
+                            s[4].head,
+                            static_cast<int32_t>(problem.headDim));
             }
             return;
         }

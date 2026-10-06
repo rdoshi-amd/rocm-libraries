@@ -344,7 +344,7 @@ static void rocke__build_paged_kv_desc(rocke_gfx942_attention_tiled_3d_build_ctx
         return;
     }
     ctx->seq_base = rocke_b_mul(B, ctx->seq_idx, ctx->bt_stride_p);
-    if (CFG.T > CFG.BS)
+    if(CFG.T > CFG.BS)
     {
         return;
     }
@@ -732,14 +732,23 @@ void rocke_gfx942_attention_tiled_3d_issue_k_load(rocke_gfx942_attention_tiled_3
     {
         rocke_value_t* linear_half
             = rocke_b_add(B, rocke_b_const_i32(B, call * KV_HALVES_PER_CALL), ctx->lane_half_base);
-        rocke_value_t *voff =
-            ctx->strided_kv ? rocke_strided_kv_offset(B, &ctx->k_strides, kv_tile_idx, linear_half,
-                                                      ctx->seq_len, CFG.HD, CFG.T)
-            : (CFG.T > CFG.BS)
-                ? rocke_paged_kv_offset(B, ctx->block_tables, ctx->seq_base, ctx->kv_head_idx,
-                                        kv_tile_idx, linear_half, ctx->seq_len, CFG.HD, CFG.BS,
-                                        CFG.T, CFG.NUM_KV)
-                : rocke__paged_kv_offset(ctx, kv_tile_idx, linear_half, ctx->kv_head_idx);
+        rocke_value_t* voff
+            = ctx->strided_kv
+                  ? rocke_strided_kv_offset(
+                        B, &ctx->k_strides, kv_tile_idx, linear_half, ctx->seq_len, CFG.HD, CFG.T)
+              : (CFG.T > CFG.BS)
+                  ? rocke_paged_kv_offset(B,
+                                          ctx->block_tables,
+                                          ctx->seq_base,
+                                          ctx->kv_head_idx,
+                                          kv_tile_idx,
+                                          linear_half,
+                                          ctx->seq_len,
+                                          CFG.HD,
+                                          CFG.BS,
+                                          CFG.T,
+                                          CFG.NUM_KV)
+                  : rocke__paged_kv_offset(ctx, kv_tile_idx, linear_half, ctx->kv_head_idx);
         rocke_value_t* k_dst = rocke_b_smem_ptr_add(
             B, K_buf_base, rocke_b_const_i64(B, (int64_t)call * bytes_per_call));
         rocke_b_async_buffer_load_lds_addr(
@@ -767,14 +776,23 @@ void rocke_gfx942_attention_tiled_3d_issue_v_load(rocke_gfx942_attention_tiled_3
     {
         rocke_value_t* linear_half
             = rocke_b_add(B, rocke_b_const_i32(B, call * KV_HALVES_PER_CALL), ctx->lane_half_base);
-        rocke_value_t *voff =
-            ctx->strided_kv ? rocke_strided_kv_offset(B, &ctx->v_strides, kv_tile_idx, linear_half,
-                                                      ctx->seq_len, CFG.HD, CFG.T)
-            : (CFG.T > CFG.BS)
-                ? rocke_paged_kv_offset(B, ctx->block_tables, ctx->seq_base, ctx->kv_head_idx,
-                                        kv_tile_idx, linear_half, ctx->seq_len, CFG.HD, CFG.BS,
-                                        CFG.T, CFG.NUM_KV)
-                : rocke__paged_kv_offset(ctx, kv_tile_idx, linear_half, ctx->kv_head_idx);
+        rocke_value_t* voff
+            = ctx->strided_kv
+                  ? rocke_strided_kv_offset(
+                        B, &ctx->v_strides, kv_tile_idx, linear_half, ctx->seq_len, CFG.HD, CFG.T)
+              : (CFG.T > CFG.BS)
+                  ? rocke_paged_kv_offset(B,
+                                          ctx->block_tables,
+                                          ctx->seq_base,
+                                          ctx->kv_head_idx,
+                                          kv_tile_idx,
+                                          linear_half,
+                                          ctx->seq_len,
+                                          CFG.HD,
+                                          CFG.BS,
+                                          CFG.T,
+                                          CFG.NUM_KV)
+                  : rocke__paged_kv_offset(ctx, kv_tile_idx, linear_half, ctx->kv_head_idx);
         rocke_value_t* v_dst = rocke_b_smem_ptr_add(
             B, V_buf_base, rocke_b_const_i64(B, (int64_t)call * bytes_per_call));
         rocke_b_async_buffer_load_lds_addr(

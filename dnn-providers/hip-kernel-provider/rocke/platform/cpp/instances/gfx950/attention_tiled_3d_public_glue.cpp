@@ -326,7 +326,7 @@ int rocke_gfx950_unified_attention_3d_tiled_spec_kernel_name(
     char kv_part[32];
     char sw_part[32];
     char tile_part[32];
-    const char *parts[18];
+    const char* parts[18];
     size_t np = 0;
     size_t out_len = 0;
     rocke_status_t st;
@@ -378,9 +378,11 @@ int rocke_gfx950_unified_attention_3d_tiled_spec_kernel_name(
         parts[np++] = "qqb";
     }
 
-    if (rocke_gfx950_unified_attention_3d_tiled_spec_tile_size(s) != s->block_size)
+    if(rocke_gfx950_unified_attention_3d_tiled_spec_tile_size(s) != s->block_size)
     {
-        snprintf(tile_part, sizeof(tile_part), "t%d",
+        snprintf(tile_part,
+                 sizeof(tile_part),
+                 "t%d",
                  rocke_gfx950_unified_attention_3d_tiled_spec_tile_size(s));
         parts[np++] = tile_part;
     }
@@ -510,14 +512,16 @@ bool rocke_gfx950_attention_tiled_3d_supports(int head_size,
         ATTN3D950_REASON(reason_buf);
         return false;
     }
-    if (block_size != 1 && block_size != 16 && block_size != 32 && block_size != 64)
+    if(block_size != 1 && block_size != 16 && block_size != 32 && block_size != 64)
     {
-        snprintf(reason_buf, sizeof(reason_buf),
-                 "tiled 3D kernel only supports block_size in {1,16,32,64} (got %d)", block_size);
+        snprintf(reason_buf,
+                 sizeof(reason_buf),
+                 "tiled 3D kernel only supports block_size in {1,16,32,64} (got %d)",
+                 block_size);
         ATTN3D950_REASON(reason_buf);
         return false;
     }
-    if (block_size == 1 && (use_fp8 || kv_storage_dtype != NULL))
+    if(block_size == 1 && (use_fp8 || kv_storage_dtype != NULL))
     {
         ATTN3D950_REASON("one-token pages require fp16/bf16 KV storage");
         return false;
@@ -892,19 +896,21 @@ static rocke_kernel_def_t* build_segment_gfx950(rocke_ir_builder_t* b,
         }
 
         const int tile = rocke_gfx950_unified_attention_3d_tiled_spec_tile_size(spec);
-        if ((spec->block_size != 1 && spec->block_size != 16 && spec->block_size != 32 &&
-             spec->block_size != 64) ||
-            (tile != 16 && tile != 32 && tile != 64))
+        if((spec->block_size != 1 && spec->block_size != 16 && spec->block_size != 32
+            && spec->block_size != 64)
+           || (tile != 16 && tile != 32 && tile != 64))
         {
-            rocke_i_set_err(b, ROCKE_ERR_VALUE,
+            rocke_i_set_err(b,
+                            ROCKE_ERR_VALUE,
                             "tiled decode requires page size 1/16/32/64 and tile size 16/32/64");
             return NULL;
         }
-        if (!strided_kv && (tile != spec->block_size) &&
-            (tile != 32 || spec->kv_storage_dtype != NULL || spec->use_i64_kv_addr ||
-             spec->use_wide_kv_load))
+        if(!strided_kv && (tile != spec->block_size)
+           && (tile != 32 || spec->kv_storage_dtype != NULL || spec->use_i64_kv_addr
+               || spec->use_wide_kv_load))
         {
-            rocke_i_set_err(b, ROCKE_ERR_VALUE,
+            rocke_i_set_err(b,
+                            ROCKE_ERR_VALUE,
                             "paged gather requires tile 32 and fp16/bf16 bounded async loads");
             return NULL;
         }

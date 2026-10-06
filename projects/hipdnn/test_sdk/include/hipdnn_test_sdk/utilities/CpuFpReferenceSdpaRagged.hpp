@@ -315,6 +315,13 @@ private:
                 "CpuFpReferenceSdpaRagged: q/k/v/o must all be rank-4 [B, S, H, D]");
         }
         const auto batch = qDims[0];
+        // S_max may be 0 (every batch empty); the other dims may not.
+        if(batch <= 0 || qDims[2] <= 0 || qDims[3] <= 0 || kDims[2] <= 0 || vDims[2] <= 0
+           || vDims[3] <= 0)
+        {
+            throw std::invalid_argument(
+                "CpuFpReferenceSdpaRagged: all dimensions must be positive");
+        }
         if(kDims[0] != batch || vDims[0] != batch || oDims[0] != batch)
         {
             throw std::invalid_argument("CpuFpReferenceSdpaRagged: batch dimension mismatch");

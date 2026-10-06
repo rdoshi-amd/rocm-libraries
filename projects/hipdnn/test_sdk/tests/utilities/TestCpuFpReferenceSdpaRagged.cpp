@@ -1055,3 +1055,50 @@ TEST(TestCpuFpReferenceSdpaRaggedFp32, SlidingWindowLeftOnlyBottomRight)
 {
     checkRaggedVsDense({6, 3, 4}, {4, 7, 4}, 2, 2, 16, 16, 1, -1, /*topLeftAlignment=*/false);
 }
+
+// GpuFpReferenceSdpaRagged rejects a zero head_dim ("all dimensions must be positive"). The CPU
+// mirror must too: with D = 0 its default scale is 1/sqrt(0) = inf, every score is 0 * inf = NaN,
+// and it silently writes an all-zero output instead of failing.
+TEST(TestCpuFpReferenceSdpaRaggedFp32, ThrowsOnZeroHeadDim)
+{
+    // [1, 4, 2, 0] has a zero H x D block, so give it a 2-element token stride to be constructible.
+    const std::vector<int64_t> qkDims = {1, 4, 2, 0};
+    const std::vector<int64_t> qkStrides = {8, 2, 1, 1};
+    const auto cum = cumTokens({4});
+    std::vector<float> qB(8, 1.0f);
+    std::vector<float> kB(8, 1.0f);
+    ShallowRaggedTensor<float> q(
+        qB.data(), qkDims, qkStrides, BSHD_SEQ_AXIS, makeRaggedOffsetAux(cum, qkStrides[1]));
+    ShallowRaggedTensor<float> k(
+        kB.data(), qkDims, qkStrides, BSHD_SEQ_AXIS, makeRaggedOffsetAux(cum, qkStrides[1]));
+    std::vector<float> vB;
+    std::vector<float> oB;
+    auto v = makeValidRagged(vB, raggedDims(1, 4, 2, 16), {4});
+    auto o = makeValidRagged(oB, raggedDims(1, 4, 2, 16), {4});
+
+    EXPECT_THROW((CpuFpReferenceSdpaRagged::forward<float, float, float, float, float>(q, k, v, o)),
+                 std::invalid_argument);
+}
+
+// A zero K head count must be rejected before numHeads % numHeadsK divides by it. [1, 4, 0, 16]
+// has an empty H x D block, so it gets an explicit 16-element token stride to be constructible.
+TEST(TestCpuFpReferenceSdpaRaggedFp32, ThrowsOnZeroKvHeads)
+{
+    const std::vector<int64_t> kDims = {1, 4, 0, 16};
+    const std::vector<int64_t> kStrides = {64, 16, 16, 1};
+    std::vector<float> kB(64, 1.0f);
+    ShallowRaggedTensor<float> k(kB.data(),
+                                 kDims,
+                                 kStrides,
+                                 BSHD_SEQ_AXIS,
+                                 makeRaggedOffsetAux(cumTokens({4}), kStrides[1]));
+    std::vector<float> qB;
+    std::vector<float> vB;
+    std::vector<float> oB;
+    auto q = makeValidRagged(qB, raggedDims(1, 4, 2, 16), {4});
+    auto v = makeValidRagged(vB, raggedDims(1, 4, 2, 16), {4});
+    auto o = makeValidRagged(oB, raggedDims(1, 4, 2, 16), {4});
+
+    EXPECT_THROW((CpuFpReferenceSdpaRagged::forward<float, float, float, float, float>(q, k, v, o)),
+                 std::invalid_argument);
+}

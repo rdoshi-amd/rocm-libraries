@@ -57,6 +57,13 @@ IDs index the physical pools. Inactive table entries need not be initialized.
 The C builders share this caller contract; metadata cannot be validated during
 source generation. `allow_unsupported` does not bypass runtime safety checks.
 
+Explicit gfx942/gfx950 paged 3D specs must expose valid page/tile geometry and
+a boolean `uses_paged_gather` that agrees with it: `T > P` on gfx942, `T != P`
+on gfx950. The effective tile must agree with `tile_size_override`, including
+the default tile when no override is set. Address-width retargeting must preserve
+the architecture, path and loader geometry. The returned gather spec is validated
+again before cache lookup or launch, including segment/reducer and workspace bounds.
+
 ## Selection and validation
 
 Use dispatch algorithm `paged_decode_t32` to request T32 explicitly. The

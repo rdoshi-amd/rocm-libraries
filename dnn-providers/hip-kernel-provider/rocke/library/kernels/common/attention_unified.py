@@ -4649,23 +4649,14 @@ def run_unified_attention_torch(
     # New token-mapped loaders have stricter admission than the legacy paged
     # path. Validate before cache lookup, address-width retargeting or launch;
     # allow_unsupported is a tuning override, never an address-safety bypass.
-    uses_paged_gather = False
-    if (
-        tuning_spec is not None
-        and tuning_spec.path == "3d"
-        and tuning_spec.arch in ("gfx942", "gfx950")
-    ):
-        try:
-            uses_paged_gather = tuning_spec.kernel_spec.uses_paged_gather
-        except AttributeError as exc:
-            raise ValueError(
-                "3D kernel_spec.uses_paged_gather is required on gfx942/gfx950"
-            ) from exc
-        if not isinstance(uses_paged_gather, bool):
-            raise ValueError("3D kernel_spec.uses_paged_gather must be a bool")
-    if problem.block_size == 1 or uses_paged_gather:
-        from .attention_paged_decode import validate_paged_decode
+    from .attention_paged_decode import (
+        validate_paged_decode,
+        validate_paged_loader_geometry,
+    )
 
+    loader_geometry = validate_paged_loader_geometry(problem, tuning_spec)
+    uses_paged_gather = loader_geometry is not None and loader_geometry[2]
+    if problem.block_size == 1 or uses_paged_gather:
         arch = _resolve_attention_arch()
         if arch not in ("gfx942", "gfx950") or problem.clamp_arch not in (None, arch):
             raise ValueError(
@@ -4710,7 +4701,23 @@ def run_unified_attention_torch(
     if tuning_spec is not None:
         # Explicit specs are initially selected before framework tensors exist.
         # Refresh address-width state and tuning identity from the real cache.
+        explicit_target = tuning_spec.arch, tuning_spec.path
         tuning_spec = tuning_spec.with_num_kv_blocks(int(k.shape[0]))
+        _require_explicit_tuning_spec(tuning_spec)
+        if (tuning_spec.arch, tuning_spec.path) != explicit_target:
+            raise ValueError(
+                "KV block retargeting must preserve the spec arch and path"
+            )
+        if validate_paged_loader_geometry(problem, tuning_spec) != loader_geometry:
+            raise ValueError("KV block retargeting must preserve paged loader geometry")
+        if uses_paged_gather:
+            # Retargeting is part of the structural protocol; validate the spec
+            # actually consumed by the cache and launcher, including workspace.
+            validate_paged_decode(
+                problem,
+                (q, k, v, out, cu_seqlens_q, seqused_k, block_table),
+                tuning_spec,
+            )
 
     # Auto path selection. Historically we *always* preferred 3D when
     # supported because split-KV produces a huge grid that beats Triton

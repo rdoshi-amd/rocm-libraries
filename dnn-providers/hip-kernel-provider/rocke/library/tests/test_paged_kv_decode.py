@@ -275,6 +275,7 @@ def test_runtime_rejects_invalid_gather_before_launch(arch, page, monkeypatch):
 
     incomplete = asdict(spec.kernel_spec)
     del incomplete["kv_storage_dtype"]
+    incomplete["tile_size"] = spec.kernel_spec.tile_size
     incomplete["uses_paged_gather"] = True
     with pytest.raises(ValueError, match="kv_storage_dtype"):
         au.run_unified_attention_torch(
@@ -322,10 +323,200 @@ def test_runtime_rejects_incomplete_loader_contract(
 
 @pytest.mark.parametrize("arch", ["gfx942", "gfx950"])
 @pytest.mark.parametrize("page", [1, 16, 32, 64])
-def test_runtime_accepts_concrete_paged_loader_contract(arch, page, monkeypatch):
+@pytest.mark.parametrize("allow_unsupported", [False, True])
+def test_runtime_rejects_geometry_inconsistent_loader_flag(
+    arch, page, allow_unsupported, monkeypatch
+):
+    from types import SimpleNamespace
+
     from kernels.common import attention_unified as au
 
     kwargs = _paged_runtime_kwargs(arch, page)
+    concrete = replace(kwargs["tuning_spec"], allow_unsupported=allow_unsupported)
+    snapshot = asdict(concrete.kernel_spec)
+    snapshot.update(
+        tile_size=concrete.kernel_spec.tile_size,
+        uses_paged_gather=not concrete.kernel_spec.uses_paged_gather,
+    )
+
+    class SnapshotAdapter:
+        kernel_spec = SimpleNamespace(**snapshot)
+
+        def __getattr__(self, name):
+            return getattr(concrete, name)
+
+        def with_num_kv_blocks(self, count):
+            pytest.fail("inconsistent geometry reached retargeting")
+
+    monkeypatch.setattr(au, "_resolve_attention_arch", lambda: arch)
+    with pytest.raises(ValueError, match="uses_paged_gather.*geometry"):
+        au.run_unified_attention_torch(**dict(kwargs, tuning_spec=SnapshotAdapter()))
+
+
+@pytest.mark.parametrize("arch", ["gfx942", "gfx950"])
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("tile_size", "missing"),
+        ("block_size", "missing"),
+        ("tile_size_override", "missing"),
+        ("kv_layout", "missing"),
+        ("tile_size", 0),
+        ("tile_size", True),
+        ("tile_size", 32.0),
+        ("block_size", 0),
+        ("block_size", True),
+        ("block_size", 16.0),
+        ("block_size", 64),
+        ("tile_size_override", 16),
+        ("tile_size_override", False),
+    ],
+)
+def test_runtime_rejects_malformed_paged_geometry(arch, field, value, monkeypatch):
+    from types import SimpleNamespace
+
+    from kernels.common import attention_unified as au
+
+    kwargs = _paged_runtime_kwargs(arch, 16)
+    concrete = kwargs["tuning_spec"]
+    snapshot = asdict(concrete.kernel_spec)
+    snapshot.update(tile_size=32, uses_paged_gather=True)
+    if value == "missing":
+        del snapshot[field]
+    else:
+        snapshot[field] = value
+
+    class SnapshotAdapter:
+        kernel_spec = SimpleNamespace(**snapshot)
+
+        def __getattr__(self, name):
+            return getattr(concrete, name)
+
+        def with_num_kv_blocks(self, count):
+            pytest.fail("malformed geometry reached retargeting")
+
+    monkeypatch.setattr(au, "_resolve_attention_arch", lambda: arch)
+    with pytest.raises(ValueError, match=field):
+        au.run_unified_attention_torch(**dict(kwargs, tuning_spec=SnapshotAdapter()))
+
+
+@pytest.mark.parametrize("arch", ["gfx942", "gfx950"])
+@pytest.mark.parametrize("allow_unsupported", [False, True])
+@pytest.mark.parametrize(
+    "change",
+    [
+        "arch",
+        "path",
+        "to_legacy",
+        "to_gather",
+        "dtype",
+        "reduce",
+        "segments",
+        "workspace",
+    ],
+)
+def test_runtime_revalidates_retargeted_paged_spec(
+    arch, allow_unsupported, change, monkeypatch
+):
+    from kernels.common import attention_unified as au
+
+    kwargs = _paged_runtime_kwargs(arch, 16)
+    concrete = replace(kwargs["tuning_spec"], allow_unsupported=allow_unsupported)
+    retargeted = concrete
+    if change == "arch":
+        retargeted = replace(concrete, arch="gfx1250")
+    elif change == "path":
+        retargeted = replace(concrete, path="2d")
+    elif change in ("to_legacy", "to_gather"):
+        legacy = replace(
+            concrete, kernel_spec=replace(concrete.kernel_spec, tile_size_override=16)
+        )
+        if change == "to_legacy":
+            retargeted = legacy
+        else:
+            concrete = legacy
+    elif change == "dtype":
+        retargeted = replace(
+            concrete, kernel_spec=replace(concrete.kernel_spec, dtype="bf16")
+        )
+    elif change == "reduce":
+        retargeted = replace(
+            concrete,
+            reduce_spec=replace(
+                concrete.reduce_spec, num_segments=concrete.reduce_spec.num_segments + 1
+            ),
+        )
+    elif change == "segments":
+        retargeted = replace(
+            concrete,
+            kernel_spec=replace(concrete.kernel_spec, num_segments=256),
+            reduce_spec=replace(concrete.reduce_spec, num_segments=256),
+        )
+    elif change == "workspace":
+        batch = 32768
+        kwargs["problem"] = replace(kwargs["problem"], num_seqs=batch, total_q=batch)
+        for name in ("q", "out"):
+            kwargs[name].shape = (batch, 8, 64)
+        kwargs["cu_seqlens_q"].shape = (batch + 1,)
+        kwargs["seqused_k"].shape = (batch,)
+        kwargs["block_table"].shape = (batch, 3)
+        concrete = replace(
+            concrete,
+            kernel_spec=replace(concrete.kernel_spec, num_seqs=batch, num_segments=16),
+            reduce_spec=replace(concrete.reduce_spec, num_segments=16),
+        )
+        retargeted = replace(
+            concrete,
+            kernel_spec=replace(concrete.kernel_spec, num_segments=32),
+            reduce_spec=replace(concrete.reduce_spec, num_segments=32),
+        )
+
+    class RetargetAdapter:
+        def __getattr__(self, name):
+            return getattr(concrete, name)
+
+        def with_num_kv_blocks(self, count):
+            return retargeted
+
+    def forbidden(**kw):
+        pytest.fail("changed retargeted spec reached launch")
+
+    monkeypatch.setattr(au, "_resolve_attention_arch", lambda: arch)
+    monkeypatch.setattr(au, "_run_3d_tiled", forbidden)
+    with pytest.raises(ValueError):
+        au.run_unified_attention_torch(**dict(kwargs, tuning_spec=RetargetAdapter()))
+
+
+@pytest.mark.parametrize("arch", ["gfx942", "gfx950"])
+@pytest.mark.parametrize("page", [1, 16, 32, 64])
+@pytest.mark.parametrize("default_tile", [False, True])
+@pytest.mark.parametrize("structural", [False, True])
+def test_runtime_accepts_concrete_paged_loader_contract(
+    arch, page, default_tile, structural, monkeypatch
+):
+    from types import SimpleNamespace
+
+    from kernels.common import attention_unified as au
+
+    kwargs = _paged_runtime_kwargs(arch, page)
+    concrete = kwargs["tuning_spec"]
+    if default_tile:
+        concrete = replace(
+            concrete, kernel_spec=replace(concrete.kernel_spec, tile_size_override=None)
+        )
+    snapshot = asdict(concrete.kernel_spec)
+    snapshot.update(
+        tile_size=concrete.kernel_spec.tile_size,
+        uses_paged_gather=concrete.kernel_spec.uses_paged_gather,
+    )
+
+    class SnapshotAdapter:
+        kernel_spec = SimpleNamespace(**snapshot)
+
+        def __getattr__(self, name):
+            return getattr(concrete, name)
+
+    kwargs["tuning_spec"] = SnapshotAdapter() if structural else concrete
     monkeypatch.setattr(au, "_resolve_attention_arch", lambda: arch)
     marker = object()
     monkeypatch.setattr(au, "_run_3d_tiled", lambda **kw: marker)

@@ -6,6 +6,71 @@
 BUFFER_LIMIT = 0x7FFF0000
 
 
+def validate_paged_loader_geometry(
+    problem, tuning_spec
+) -> tuple[int, int, bool] | None:
+    """Validate the explicit CDNA paged loader's geometry before admission.
+
+    Structural specs must describe the same loader as the concrete builders.
+    The returned immutable geometry also guards address-width retargeting.
+    Other paths and architectures have independent spec contracts.
+    """
+    if (
+        tuning_spec is None
+        or tuning_spec.path != "3d"
+        or tuning_spec.arch not in ("gfx942", "gfx950")
+    ):
+        return None
+    spec = tuning_spec.kernel_spec
+    values = {}
+    for name in (
+        "uses_paged_gather",
+        "kv_layout",
+        "block_size",
+        "tile_size",
+        "tile_size_override",
+    ):
+        try:
+            values[name] = getattr(spec, name)
+        except AttributeError as exc:
+            raise ValueError(
+                f"3D kernel_spec.{name} is required on gfx942/gfx950"
+            ) from exc
+        if name == "uses_paged_gather" and not isinstance(values[name], bool):
+            raise ValueError("3D kernel_spec.uses_paged_gather must be a bool")
+    if values["kv_layout"] != "paged":
+        raise ValueError("paged loader requires kernel_spec.kv_layout='paged'")
+    for name, allowed in (
+        ("block_size", (1, 16, 32, 64)),
+        ("tile_size", (16, 32, 64)),
+        ("tile_size_override", (16, 32, 64)),
+    ):
+        value = values[name]
+        if name == "tile_size_override" and value is None:
+            continue
+        if (
+            not isinstance(value, int)
+            or isinstance(value, bool)
+            or value not in allowed
+        ):
+            raise ValueError(f"3D kernel_spec.{name} must be an integer in {allowed}")
+    page, tile = values["block_size"], values["tile_size"]
+    if page != problem.block_size:
+        raise ValueError("3D kernel_spec.block_size disagrees with problem")
+    override = values["tile_size_override"]
+    expected_tile = override if override is not None else (32 if page == 1 else page)
+    if tile != expected_tile:
+        raise ValueError("3D kernel_spec.tile_size disagrees with tile_size_override")
+    gather = tile > page if tuning_spec.arch == "gfx942" else tile != page
+    if values["uses_paged_gather"] != gather:
+        raise ValueError(
+            "3D kernel_spec.uses_paged_gather disagrees with loader geometry"
+        )
+    if gather and tile != 32:
+        raise ValueError("paged gather requires tile_size=32")
+    return page, tile, gather
+
+
 def validate_paged_decode(problem, tensors, tuning_spec=None):
     """Validate the new loader ABI without synchronization or graph allocation.
 

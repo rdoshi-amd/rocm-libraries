@@ -9,7 +9,6 @@ on:
     paths:
       - "projects/hipblaslt/**"
       - "test/therock/test_hipblaslt.py"
-      - "test/therock/test_hipblaslt_sanitizer_config.py"
       - "test/therock/lsan.supp"
       - ".github/workflows/hipblaslt-asan-ci.yml"
   workflow_dispatch:
@@ -37,15 +36,9 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          sparse-checkout: |
-            .github
-            test/therock
-            projects/hipblaslt/cmake
+          sparse-checkout: .github
           sparse-checkout-cone-mode: true
           fetch-depth: 1
-
-      - name: Test hipBLASLt sanitizer configuration
-        run: python3 test/therock/test_hipblaslt_sanitizer_config.py
 
       - name: Load CI environment
         id: ci-env

@@ -71,7 +71,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import launch_surface  # noqa: E402
 
-
 #: Why the knob cross-product dropped combinations, from the last
 #: ``build_config`` call, for the summary to print. Reporting only -- nothing
 #: reads it to make a decision, and it is reset per call so a second
@@ -310,9 +309,7 @@ def resolve_shapes(shapes: list[dict], profile: dict) -> list[Resolution]:
             spec = factory(request)
         except Exception as exc:
             if refusal is not None and isinstance(exc, refusal):
-                out.append(
-                    Resolution(shape, reason=str(exc), kind="declined")
-                )
+                out.append(Resolution(shape, reason=str(exc), kind="declined"))
                 continue
             raise ParityError(f"request/spec construction failed: {exc}") from exc
         if projection:
@@ -765,16 +762,18 @@ def main(argv=None) -> int:
                 f"\n  wrote {args.out}: {count} kernels "
                 f"= {len(served)} servable shapes x {arms} knob "
                 f"combination(s) ({', '.join(sorted(knobs))})"
-                + (f", less {crossed - count} the predicate refused" if crossed != count else "")
+                + (
+                    f", less {crossed - count} the predicate refused"
+                    if crossed != count
+                    else ""
+                )
             )
             # Not a footnote: a cross-product invents combinations the dispatcher
             # never resolved to, and the refused ones are exactly those that
             # would have failed at comgr. Printing the reasons is how a reviewer
             # tells "legal tiles this kernel does not want" from "the knob list
             # is wrong".
-            for reason, n in sorted(
-                _LAST_DROPPED.items(), key=lambda kv: -kv[1]
-            )[:5]:
+            for reason, n in sorted(_LAST_DROPPED.items(), key=lambda kv: -kv[1])[:5]:
                 print(f"    refused x{n}: {reason}")
             # The cap the runbook states, enforced where the number is known:
             # past the low thousands the pack time, the archive and the catalog

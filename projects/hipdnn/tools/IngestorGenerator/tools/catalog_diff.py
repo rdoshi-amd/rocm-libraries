@@ -32,6 +32,14 @@ passes. And a KDP carries no UUID stability of its own -- the ``--ignore-ids``
 mask is why this exits 0 at all, so preserving the SHIPPED ids through a splice
 is a separate obligation (``extend.md``: resolve by UUID, not filename), checked
 by ``--expect-ids``.
+
+KMD comparison (``--shipped-kmd`` / ``--regenerated-kmd``):
+
+The KDP carries only field NAMES via the ``specialization_contract``; the KMD
+JSON holds field types and ``default_value`` entries, which are not visible in
+the KDP. A ``default_value`` change (e.g., 512 → 256 for ``block_n``) silently
+changes how the matcher completes partial records, so it is a semantic change that
+the catalog comparison misses without the KMD. Pass both KMD files to catch it.
 """
 
 from __future__ import annotations
@@ -240,6 +248,60 @@ def compare_engine_blocks(
     return problems
 
 
+def _load_kmd(path: str, label: str) -> dict:
+    try:
+        text = Path(path).read_text()
+    except OSError as exc:
+        raise CatalogDiffError(f"cannot read the {label} KMD: {exc}") from exc
+    try:
+        kmd = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise CatalogDiffError(f"the {label} KMD is not valid JSON: {exc}") from exc
+    if "fields" not in kmd:
+        raise CatalogDiffError(f"the {label} file has no 'fields'; is it a KMD?")
+    return kmd
+
+
+def compare_kmd_fields(shipped_kmd: dict, regenerated_kmd: dict) -> list[str]:
+    """Compare KMD field names, types, and default_value entries.
+
+    The KDP comparison catches field NAME drift through the specialization_contract,
+    but the KMD holds field TYPES and default_value entries that are invisible in
+    the KDP. A changed default_value changes how the C++ matcher completes partial
+    records -- e.g., a record that omits block_n falls back to the KMD default, so
+    512 vs 256 dispatches to a different binary even though the catalog looks identical.
+    """
+    problems: list[str] = []
+
+    def _field_key(f: dict) -> str:
+        return f.get("name", "")
+
+    shipped_by_name = {
+        f["name"]: f for f in shipped_kmd.get("fields", []) if "name" in f
+    }
+    regen_by_name = {
+        f["name"]: f for f in regenerated_kmd.get("fields", []) if "name" in f
+    }
+
+    only_shipped = set(shipped_by_name) - set(regen_by_name)
+    only_regen = set(regen_by_name) - set(shipped_by_name)
+    for name in sorted(only_shipped):
+        problems.append(f"  kmd field only in shipped:     {name!r}")
+    for name in sorted(only_regen):
+        problems.append(f"  kmd field only in regenerated: {name!r}")
+
+    for name in sorted(set(shipped_by_name) & set(regen_by_name)):
+        sf, rf = shipped_by_name[name], regen_by_name[name]
+        for attr in ("type", "default_value"):
+            sv, rv = sf.get(attr), rf.get(attr)
+            if sv != rv:
+                problems.append(
+                    f"  kmd field {name!r} {attr}: shipped {sv!r}, regenerated {rv!r}"
+                )
+
+    return problems
+
+
 def compare_expected_ids(shipped: dict, regenerated: dict) -> list[str]:
     """``--expect-ids``: the regenerated tree must REUSE the shipped ids.
 
@@ -277,7 +339,25 @@ def main(argv=None) -> int:
         help="additionally require the shipped ids to be PRESERVED. For checking "
         "a splice, where reusing the shipped UUIDs is the obligation.",
     )
+    parser.add_argument(
+        "--shipped-kmd",
+        default=None,
+        help="shipped *.kmd.json; when given, KMD field types and defaults are "
+        "compared against --regenerated-kmd.",
+    )
+    parser.add_argument(
+        "--regenerated-kmd",
+        default=None,
+        help="regenerated *.kmd.json to compare against --shipped-kmd.",
+    )
     args = parser.parse_args(argv)
+
+    if bool(args.shipped_kmd) != bool(args.regenerated_kmd):
+        print(
+            "FAIL: --shipped-kmd and --regenerated-kmd must be given together",
+            file=sys.stderr,
+        )
+        return 2
 
     try:
         shipped = _load(args.shipped, "shipped")
@@ -285,6 +365,16 @@ def main(argv=None) -> int:
     except CatalogDiffError as exc:
         print(f"FAIL: {exc}", file=sys.stderr)
         return 2
+
+    shipped_kmd: dict | None = None
+    regenerated_kmd: dict | None = None
+    if args.shipped_kmd:
+        try:
+            shipped_kmd = _load_kmd(args.shipped_kmd, "shipped")
+            regenerated_kmd = _load_kmd(args.regenerated_kmd, "regenerated")
+        except CatalogDiffError as exc:
+            print(f"FAIL: {exc}", file=sys.stderr)
+            return 2
 
     sections: list[tuple[str, list[str]]] = [
         ("catalog", compare_catalog(shipped, regenerated)),
@@ -294,15 +384,23 @@ def main(argv=None) -> int:
         ),
         ("duplicate specs (regenerated)", find_duplicate_specs(regenerated)),
     ]
-    if args.expect_ids:
+    if shipped_kmd is not None:
         sections.append(
-            ("preserved ids", compare_expected_ids(shipped, regenerated))
+            (
+                "kmd field types and defaults",
+                compare_kmd_fields(shipped_kmd, regenerated_kmd),
+            )
         )
+    if args.expect_ids:
+        sections.append(("preserved ids", compare_expected_ids(shipped, regenerated)))
 
     print("catalog diff")
     print(f"  shipped      {len(shipped['kernelDescriptors'])} kernels")
     print(f"  regenerated  {len(regenerated['kernelDescriptors'])} kernels")
     print(f"  ids          {'masked' if args.ignore_ids else 'compared'}")
+    print(
+        f"  kmd          {'compared' if shipped_kmd is not None else 'not provided (types/defaults unchecked)'}"
+    )
 
     failed = False
     for label, problems in sections:

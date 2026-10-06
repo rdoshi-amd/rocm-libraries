@@ -82,8 +82,14 @@ class TestTheMaskHidesIdsAndNothingElse:
     def test_a_dropped_kernel_is_caught(self, run, capsys):
         """The failure the gate is FOR: a profile change that silently ships
         less than it did. Counting alone would catch this one."""
-        assert run(_kdp([_entry("k0"), _entry("k1", 32)]), _kdp([_entry("k0")]),
-                   "--ignore-ids") == 1
+        assert (
+            run(
+                _kdp([_entry("k0"), _entry("k1", 32)]),
+                _kdp([_entry("k0")]),
+                "--ignore-ids",
+            )
+            == 1
+        )
         out = capsys.readouterr().out
         assert "shipped 2, regenerated 1 (-1)" in out, out
         assert "only in shipped" in out and "k1" in out, out
@@ -102,11 +108,14 @@ class TestTheMaskHidesIdsAndNothingElse:
     def test_a_changed_priority_is_caught(self, run):
         """Priority orders selection, so two catalogs that differ only there
         dispatch differently for the same graph."""
-        assert run(
-            _kdp([_entry("k0", priority=0)]),
-            _kdp([_entry("k0", priority=5)]),
-            "--ignore-ids",
-        ) == 1
+        assert (
+            run(
+                _kdp([_entry("k0", priority=0)]),
+                _kdp([_entry("k0", priority=5)]),
+                "--ignore-ids",
+            )
+            == 1
+        )
 
     def test_a_changed_specialization_contract_is_caught(self, run, capsys):
         """The contract is what forces kernel_source.spec and metadata to agree.
@@ -121,16 +130,23 @@ class TestTheMaskHidesIdsAndNothingElse:
     def test_a_dropped_matcher_is_caught_even_with_ids_masked(self, run, capsys):
         """Masking a reference's VALUE must not mask its absence: a KDP that
         lost its matcher list is a different engine however equal its kernels."""
-        assert run(_kdp([_entry("k0")]), _kdp([_entry("k0")], matchers=[]),
-                   "--ignore-ids") == 1
+        assert (
+            run(_kdp([_entry("k0")]), _kdp([_entry("k0")], matchers=[]), "--ignore-ids")
+            == 1
+        )
         assert "reference" in capsys.readouterr().out
 
     def test_a_changed_arch_is_caught(self, run):
         """Arch drives pruning; equal metadata on disjoint arches is legal, so a
         silently widened arch list changes which catalog a device loads."""
-        assert run(
-            _kdp([_entry("k0")]), _kdp([_entry("k0")], arch=["gfx942"]), "--ignore-ids"
-        ) == 1
+        assert (
+            run(
+                _kdp([_entry("k0")]),
+                _kdp([_entry("k0")], arch=["gfx942"]),
+                "--ignore-ids",
+            )
+            == 1
+        )
 
 
 class TestTheDuplicateSpecCheck:
@@ -155,6 +171,103 @@ class TestExpectIds:
         renumbered["engine"] = "fresh-ued-id"
         assert run(shipped, renumbered, "--ignore-ids", "--expect-ids") == 1
         assert "was not preserved" in capsys.readouterr().out
+
+
+def _kmd(fields: list[dict]) -> dict:
+    return {"version": "1.0", "id": "kmd-id", "name": "stub fields", "fields": fields}
+
+
+def _field(name: str, type_: str = "int", default=None) -> dict:
+    f: dict = {"name": name, "type": type_}
+    if default is not None:
+        f["default_value"] = default
+    return f
+
+
+class TestKmdFieldComparison:
+    @pytest.fixture
+    def run_kmd(self, tmp_path):
+        kdp = _kdp([_entry("k0")])
+
+        def go(shipped_kmd: dict, regen_kmd: dict, *extra_flags: str) -> int:
+            a_kdp = tmp_path / "a.kdp.json"
+            b_kdp = tmp_path / "b.kdp.json"
+            a_kmd = tmp_path / "a.kmd.json"
+            b_kmd = tmp_path / "b.kmd.json"
+            a_kdp.write_text(json.dumps(kdp))
+            b_kdp.write_text(json.dumps(kdp))
+            a_kmd.write_text(json.dumps(shipped_kmd))
+            b_kmd.write_text(json.dumps(regen_kmd))
+            return catalog_diff.main(
+                [
+                    "--shipped",
+                    str(a_kdp),
+                    "--regenerated",
+                    str(b_kdp),
+                    "--shipped-kmd",
+                    str(a_kmd),
+                    "--regenerated-kmd",
+                    str(b_kmd),
+                    "--ignore-ids",
+                    *extra_flags,
+                ]
+            )
+
+        return go
+
+    def test_identical_kmd_passes(self, run_kmd):
+        kmd = _kmd([_field("dtype", "string"), _field("block_n", "int", 64)])
+        assert run_kmd(kmd, kmd) == 0
+
+    def test_changed_default_value_is_caught(self, run_kmd, capsys):
+        """A default_value change silently changes how the matcher completes partial
+        records -- e.g., block_n: 64 vs 128 dispatches to a different binary even
+        though both catalogs look identical."""
+        shipped = _kmd([_field("block_n", "int", 64)])
+        regen = _kmd([_field("block_n", "int", 128)])
+        assert run_kmd(shipped, regen) == 1
+        out = capsys.readouterr().out
+        assert "default_value" in out and "block_n" in out, out
+
+    def test_changed_type_is_caught(self, run_kmd, capsys):
+        shipped = _kmd([_field("causal", "bool")])
+        regen = _kmd([_field("causal", "int")])
+        assert run_kmd(shipped, regen) == 1
+        out = capsys.readouterr().out
+        assert "type" in out and "causal" in out, out
+
+    def test_dropped_field_is_caught(self, run_kmd, capsys):
+        shipped = _kmd([_field("dtype", "string"), _field("block_n", "int")])
+        regen = _kmd([_field("dtype", "string")])
+        assert run_kmd(shipped, regen) == 1
+        assert "block_n" in capsys.readouterr().out
+
+    def test_added_field_is_caught(self, run_kmd, capsys):
+        shipped = _kmd([_field("dtype", "string")])
+        regen = _kmd([_field("dtype", "string"), _field("block_n", "int")])
+        assert run_kmd(shipped, regen) == 1
+        assert "block_n" in capsys.readouterr().out
+
+    def test_only_shipped_kmd_exits_2(self, tmp_path, capsys):
+        """Both KMD flags must be given together; one alone is a usage error."""
+        kdp = tmp_path / "a.kdp.json"
+        kmd = tmp_path / "a.kmd.json"
+        kdp.write_text(json.dumps(_kdp([_entry("k0")])))
+        kmd.write_text(json.dumps(_kmd([_field("x", "int")])))
+        assert (
+            catalog_diff.main(
+                [
+                    "--shipped",
+                    str(kdp),
+                    "--regenerated",
+                    str(kdp),
+                    "--shipped-kmd",
+                    str(kmd),
+                ]
+            )
+            == 2
+        )
+        assert "--regenerated-kmd" in capsys.readouterr().err
 
 
 class TestUsageErrorsAreNotDifferences:

@@ -486,6 +486,23 @@ if(ROCKE_INSTALL_TESTS)
            "  ENVIRONMENT \"PYTHONPATH=${ROCKE_TEST_CTEST_REL}tests/library\"\n"
             "  TIMEOUT 180)\n")
 
+    # Library attention dispatch CPU tests (no GPU required; dispatcher selection and
+    # signature guards). Pointed at the DIRECTORY, not a file list, so a new file
+    # in tests/dispatch/attention/ runs automatically. WORKING_DIRECTORY is the
+    # library root so that tests/dispatch/attention/ does not shadow the real
+    # dispatch.attention package -- running from tests/ would make the local
+    # subdirectory win on sys.path, silently importing the wrong module.
+    string(APPEND _ROCKE_INSTALLED_CTEST_ENTRIES
+           "add_test(rocke_library_attention_pytest python -m pytest"
+           " \"${ROCKE_TEST_CTEST_REL}tests/library/tests/dispatch/attention\""
+           " -v -rs --timeout=30)\n")
+    string(APPEND _ROCKE_INSTALLED_CTEST_ENTRIES
+           "set_tests_properties(rocke_library_attention_pytest PROPERTIES\n"
+           "  LABELS \"ckc\\;python\\;attention\\;dispatch\\;host\\;quick\"\n"
+           "  ENVIRONMENT \"PYTHONPATH=${ROCKE_TEST_CTEST_REL}tests/library\"\n"
+           "  WORKING_DIRECTORY \"${ROCKE_TEST_CTEST_REL}tests/library\"\n"
+           "  TIMEOUT 180)\n")
+
     string(APPEND _ROCKE_INSTALLED_CTEST_ENTRIES
            "add_test(rocke_sdpa_reference_unit_pytest python -m pytest \"${ROCKE_TEST_CTEST_REL}tests/library/tests/test_sdpa_reference_contract.py\" \"${ROCKE_TEST_CTEST_REL}tests/library/tests/test_sdpa_reference_artifact.py\" -v -rs --timeout=30)\n")
     string(APPEND _ROCKE_INSTALLED_CTEST_ENTRIES
@@ -507,6 +524,25 @@ if(ROCKE_INSTALL_TESTS)
              "  ENVIRONMENT \"PYTHONPATH=${ROCKE_TEST_CTEST_REL}tests/library;ROCKE_TEST_REQUIRE_SDPA_GPU=1\"\n"
              "  TIMEOUT 1800)\n")
     endif()
+
+    # Library attention GPU numeric tests (gfx950-specific; require a GPU).
+    # Separate from the omnibus GPU suite so this label can be targeted on its
+    # own when only attention hardware is available.
+    set(_ROCKE_LIBRARY_ATTENTION_GPU_TEST_RELPATHS
+        "tests/library/tests/test_attention_dense_gfx950_numeric.py"
+        "tests/library/tests/test_extended_parity_attention.py")
+    set(_ROCKE_LIBRARY_ATTENTION_GPU_TESTS "")
+    foreach(_rocke_attn_gpu_test ${_ROCKE_LIBRARY_ATTENTION_GPU_TEST_RELPATHS})
+      string(APPEND _ROCKE_LIBRARY_ATTENTION_GPU_TESTS
+             " \"${ROCKE_TEST_CTEST_REL}${_rocke_attn_gpu_test}\"")
+    endforeach()
+    string(APPEND _ROCKE_INSTALLED_CTEST_ENTRIES
+           "add_test(rocke_library_attention_gpu_pytest python -m pytest${_ROCKE_LIBRARY_ATTENTION_GPU_TESTS} -v -rs)\n")
+    string(APPEND _ROCKE_INSTALLED_CTEST_ENTRIES
+           "set_tests_properties(rocke_library_attention_gpu_pytest PROPERTIES\n"
+           "  LABELS \"ckc\\;python\\;attention\\;gpu\"\n"
+           "  ENVIRONMENT \"PYTHONPATH=${ROCKE_TEST_CTEST_REL}tests/library\"\n"
+           "  TIMEOUT 1800)\n")
 
     # Library GPU numeric suites: convolution, attention, KDA, and GDN.
     # Select files rather than the "gpu" pytest marker because several runtime

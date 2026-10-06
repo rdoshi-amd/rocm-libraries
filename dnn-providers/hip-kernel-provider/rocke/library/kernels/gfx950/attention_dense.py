@@ -505,10 +505,17 @@ def gfx950_dense_static_lds_bytes(*, head_size: int, block_n: int) -> int:
     """
     buffers, element_bytes, k_pad, v_pad = 2, 2, 8, 32
     if head_size == 128:
-        return buffers * block_n * ((head_size + k_pad) + (head_size + v_pad)) * element_bytes
+        return (
+            buffers
+            * block_n
+            * ((head_size + k_pad) + (head_size + v_pad))
+            * element_bytes
+        )
     if head_size == 64:
         rows_per_group = 2
-        k_bytes = buffers * (block_n // rows_per_group) * (rows_per_group * head_size + k_pad)
+        k_bytes = (
+            buffers * (block_n // rows_per_group) * (rows_per_group * head_size + k_pad)
+        )
         v_bytes = buffers * block_n * head_size
         return (k_bytes + v_bytes) * element_bytes
     return 0
@@ -531,9 +538,10 @@ def gfx950_dense_tile_legality(*, head_size: int) -> Tuple[Tuple[int, int], ...]
         for block_n in range(32, block_m + 1, 32):
             if block_m % block_n or block_n % num_waves:
                 continue
-            if gfx950_dense_static_lds_bytes(
-                head_size=head_size, block_n=block_n
-            ) > GFX950_LDS_CAPACITY_BYTES:
+            if (
+                gfx950_dense_static_lds_bytes(head_size=head_size, block_n=block_n)
+                > GFX950_LDS_CAPACITY_BYTES
+            ):
                 continue
             legal.append((block_m, block_n))
     return tuple(legal)

@@ -584,7 +584,10 @@ class TestThePinningDialect:
         `{"kernel_spec": ...}` and pack-time hydration would fail on it."""
         argv, _ = pinned_parity
         out_path = tmp_path / "emitted.yaml"
-        assert dispatch_parity.main(argv([{"seqlen_q": 2048}], "--out", str(out_path))) == 0
+        assert (
+            dispatch_parity.main(argv([{"seqlen_q": 2048}], "--out", str(out_path)))
+            == 0
+        )
         emitted = out_path.read_text()
         assert "kernel_spec" not in emitted, emitted
         # block_n 64 is the field the stub dispatcher DERIVES at seqlen_q >= 1024,

@@ -42,9 +42,19 @@
           "bytes": 98325,
           "sha256": "74057ef8e8e7501a72edbefad83dec52de27c4f1c2b1b7d73488e09088c05510"
         },
+        "attention_dense_gfx942/dispatch_lse_d128_bf16_causal": {
+          "bytes": 177730,
+          "sha256": "668d0c2f7bc07908c02f3fe28f2be4106ccbba8c55465fa55197a8215ef27361"
+        },
         "attention_dense_gfx942/dispatch_swa_d128_bf16_w128": {
           "bytes": 175332,
           "sha256": "b732ca8aff7e8878a5da31a6c2035af5eb0d7b16dce6b4f09d363a763f92626f"
+        },
+        "attention_dense_gfx942/lse_d128_bf16_causal": {
+          "error": "AttentionDenseSpec.__init__() got an unexpected keyword argument 'emit_lse'"
+        },
+        "attention_dense_gfx942/lse_persist_empty_window_d128_bf16": {
+          "error": "AttentionDenseSpec.__init__() got an unexpected keyword argument 'emit_lse'"
         },
         "attention_dense_gfx942/persist_d128_bf16_intl": {
           "bytes": 172753,
@@ -126,9 +136,19 @@
           "bytes": 98421,
           "sha256": "c88c03c616d11ec4e244271672cb51f8b0c274ce5f68af33f980d9e6b83fe173"
         },
+        "attention_dense_gfx942/dispatch_lse_d128_bf16_causal": {
+          "bytes": 177826,
+          "sha256": "3139ee9810441f13d7e25a740824cabe719a51a781734bebe7eca5cabc5d7ff7"
+        },
         "attention_dense_gfx942/dispatch_swa_d128_bf16_w128": {
           "bytes": 175428,
           "sha256": "c7f60db60fc7d750f91ba8d7db114aa0896e512881a7d15aa249335c6b4ca5e5"
+        },
+        "attention_dense_gfx942/lse_d128_bf16_causal": {
+          "error": "AttentionDenseSpec.__init__() got an unexpected keyword argument 'emit_lse'"
+        },
+        "attention_dense_gfx942/lse_persist_empty_window_d128_bf16": {
+          "error": "AttentionDenseSpec.__init__() got an unexpected keyword argument 'emit_lse'"
         },
         "attention_dense_gfx942/persist_d128_bf16_intl": {
           "bytes": 172849,

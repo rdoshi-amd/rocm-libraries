@@ -60,7 +60,10 @@ installed header declares them, and they are not a supported API.
 For these entry points, the backend's configuration belongs to the options of
 its factory; heuristic queries use the process's backend instead, as
 [heuristic integration](#heuristic-integration) describes. The application
-owns its buffers and workspace. The
+owns its buffers and workspace. A workspace size or limit above `UINT32_MAX`
+returns `HIPBLAS_STATUS_INVALID_VALUE` from the maximum-workspace preference
+setter, `hipblasLtMatmul`, the C++ `algoGetHeuristic` and `initialize`, and
+`jit::getJitAlgo` and `jit::getLibraryAlgos`. The
 request owns descriptor values and host scalars; it does not take ownership of
 device pointers. Compilation and support checks finish before graphics
 processing unit (GPU) work is submitted; call the entry points before stream
@@ -221,7 +224,7 @@ The Prediction library type (C++ `ProblemPredictionLibrary`) is referred to as
 the **OrigamiLibrary** in the target design; it is not a new type. It ships 507
 pre-tuned solution YAML files in per-architecture `Origami` directories under
 `library/src/amd_detail/rocblaslt/src/Tensile/Logic/asm_full/`: 489 for gfx950,
-7 each for gfx1250 and gfx1250v0, and 4 for navi32. At runtime it ranks those
+7 each for gfx1250 and gfx1250-strict, and 4 for navi32. At runtime it ranks those
 existing solutions with `origami::rank_configs`. Origami does not construct
 kernels at package time. This existing-solution ranking is distinct from the JIT
 predictor, which ranks candidate recipes that may not exist in any library.

@@ -14229,6 +14229,9 @@ class KernelWriterAssembly(KernelWriter):
       # Packed follows same philosophy but may have more vector components
       indices = list(range(0, kernel["ProblemType"]["NumIndicesC"]))
       numDim = len(indices)
+      # Pointer-array batch loads are appended after the strided fall-through so the
+      # common path does not branch over them.
+      pendingGeneral = Module("coldGeneralBatch")
       #addrSrcSgpr = "Address" # use "Address" only for the first iteration
       addrSrcSgpr = "Srd" # Since SrdC/D are initialized with AddressC/D for non-General Batched GEMM case.
 
@@ -14300,12 +14303,15 @@ class KernelWriterAssembly(KernelWriter):
                   strideC = "Size%s"%(INDEX_CHARS[x])
                   module.add(SMulI32(dst=sgpr(tmpS0), src0=sgpr(tmpS0), src1=sgpr(strideC)))
                 if(i == 2 and (mat == "C" or mat == "D")):
-                  gsuComp = Component.GSU.find(self)
-                  module.add(gsuComp.routeToGeneralBatchedOrStridedBatched(self, stridedBatchedGemmLoad, argTypeChecks, generalBatchedGemmLoad, mat, kernel, tmpS1))
-                  if isPersistent(kernel):
-                    processingComponent = Component.TileProcessingStrategy.find(self)
-                    module.add(processingComponent.routeToGeneralBatchedOrStridedBatched(self, stridedBatchedGemmLoad, generalBatchedGemmLoad, kernel))
-                  module.add(stridedBatchedGemmLoad)
+                  if self._postLoopMbBranchless(kernel) and kernel["ProblemType"]["SupportUserArgs"]:
+                    self._emitStridedVsGeneralPredicate(module, kernel, mat, tmpS1, wgMT1, generalBatchedGemmLoad)
+                  elif not self._postLoopMbBranchless(kernel):
+                    gsuComp = Component.GSU.find(self)
+                    module.add(gsuComp.routeToGeneralBatchedOrStridedBatched(self, stridedBatchedGemmLoad, argTypeChecks, generalBatchedGemmLoad, mat, kernel, tmpS1))
+                    if isPersistent(kernel):
+                      processingComponent = Component.TileProcessingStrategy.find(self)
+                      module.add(processingComponent.routeToGeneralBatchedOrStridedBatched(self, stridedBatchedGemmLoad, generalBatchedGemmLoad, kernel))
+                    module.add(stridedBatchedGemmLoad)
                 module.addModuleAsFlatItems(self.s_mul_u64_u32(sgpr(tmpS0), sgpr(tmpS1), coord, sgpr(tmpS0), comment="Scale%s %s by Stride"%(mat, coord)))
               else:
                 strideC = "Size%s"%(INDEX_CHARS[i-1])
@@ -14316,52 +14322,32 @@ class KernelWriterAssembly(KernelWriter):
               else:
                 strideC = "Stride%s%s"%(mat, self.states.indexChars[i])
               if(i == 2 and (mat == "C" or mat == "D")):
-                gsuComp = Component.GSU.find(self)
-                module.add(gsuComp.routeToGeneralBatchedOrStridedBatched(self, stridedBatchedGemmLoad, argTypeChecks, generalBatchedGemmLoad, mat, kernel, tmpS1))
-                if isPersistent(kernel):
-                  processingComponent = Component.TileProcessingStrategy.find(self)
-                  module.add(processingComponent.routeToGeneralBatchedOrStridedBatched(self, stridedBatchedGemmLoad, generalBatchedGemmLoad, kernel))
-                module.add(stridedBatchedGemmLoad)
+                if self._postLoopMbBranchless(kernel) and kernel["ProblemType"]["SupportUserArgs"]:
+                  self._emitStridedVsGeneralPredicate(module, kernel, mat, tmpS1, wgMT1, generalBatchedGemmLoad)
+                elif not self._postLoopMbBranchless(kernel):
+                  gsuComp = Component.GSU.find(self)
+                  module.add(gsuComp.routeToGeneralBatchedOrStridedBatched(self, stridedBatchedGemmLoad, argTypeChecks, generalBatchedGemmLoad, mat, kernel, tmpS1))
+                  if isPersistent(kernel):
+                    processingComponent = Component.TileProcessingStrategy.find(self)
+                    module.add(processingComponent.routeToGeneralBatchedOrStridedBatched(self, stridedBatchedGemmLoad, generalBatchedGemmLoad, kernel))
+                  module.add(stridedBatchedGemmLoad)
               module.addModuleAsFlatItems(self.s_mul_u64_u32(sgpr(tmpS0), sgpr(tmpS1), coord, sgpr(strideC), comment="Scale%s %s by Stride"%(mat, coord)))
             module.add(SLShiftLeftB64(dst=sgpr(tmpS0,2), src=sgpr(tmpS0,2), shiftHex=bpe, comment="scale by bpe"))
             module.add(SAddU32(dst=sgpr("Srd%s+0"%mat), src0=sgpr("%s%s+0"%(addrSrcSgpr, mat)), src1=sgpr(tmpS0), comment="add lo to SRD"))
             module.add(SAddCU32(dst=sgpr("Srd%s+1"%mat), src0=sgpr("%s%s+1"%(addrSrcSgpr, mat)), src1=sgpr(tmpS1), comment="add hi to SRD"))
             if(i == 2 and (mat == "C" or mat == "D")):
-              module.add(SBranch(labelName=generalBatchedGemmLoad_End.getLabelName()))
-              module.add(generalBatchedGemmLoad)
-              module.add(SMulI32(dst=sgpr(tmpS0), src0=8, src1=coord, comment="Compute stride in bytes into Pointer Array"))
-              module.add(SAddU32(dst=sgpr(tmpS0), src0=sgpr(tmpS0), src1=sgpr("Address%s+0"%mat), comment="Offsetting to the location [Lower half of address]"))
-              module.add(SAddCU32(dst=sgpr(tmpS1), src0=sgpr("Address%s+1"%mat), src1=0, comment="Offsetting to the location [Higher half of address]"))
-              sgprSrdTmp = tmpS0
-              if self.states.archCaps["EnableXnackReplay"]:
-                # wgMT1 (= tmpS0+2) holds wg1*MT1, used as coord only at i == Index1.
-                # Index1 is always 0 or 1 (inner free dimension of C), so by i == 2
-                # wgMT1 is dead. Reuse [wgMT1, wgMT1+1] as the xnack-safe load dst
-                # so it is disjoint from the base [tmpS0, tmpS1].
-                # wgMT1+1 is the 4th slot from the requiredNumSgpr=4 allocation above.
-                assert sgpr(wgMT1) != coord, \
-                    f"wgMT1 is still active as coord (Index1={kernel['ProblemType']['Index1']}); " \
-                    f"cannot reuse as xnack-safe dst"
-                sgprSrdTmp = wgMT1
-              module.add(SLoadB64(dst=sgpr(sgprSrdTmp, 2), base=sgpr(tmpS0, 2), soffset=0, comment="Load the Matrix Address in the Pointer Array"))
-              module.add(SWaitCnt(kmcnt=0, comment="Wait for the Matrix Address Load from the Pointer Array"))
-              module.add(SAddU32(dst=sgpr("Srd%s+0"%mat), src0=sgpr("Srd%s+0"%mat), src1=sgpr(sgprSrdTmp), comment="Offsetting within the Batch Matrix [Lower half of address]"))
-              module.add(SAddCU32(dst=sgpr("Srd%s+1"%mat), src0=sgpr("Srd%s+1"%mat), src1=sgpr(sgprSrdTmp+1), comment="Offsetting within the Batch Matrix [Higher half of address]"))
-              # Now, we have starting matrix address of a specific batch in the corresponding Srd.
-              # Load and apply batch offset for General Batched GEMM (C or D matrix) as necessary.
-              # This block sits inside the generalBatchedGemmLoad label, which the GSU routing
-              # only reaches at runtime GSU==1 -- where SrdC/SrdD are the real user pointer arrays
-              # (not the GSU workspace), so the offset is correctly applied here. When GSU>1 the
-              # routing branches to the strided/workspace path and skips this block; the PostGSU
-              # conversion kernel applies the offset when it writes the final result to C/D.
-              if not kernel["ProblemType"]["GroupedGemm"]:
-                batchOffsetKernArgOffset = self.states.batchOffsetCKernArgOffset if mat == "C" else self.states.batchOffsetDKernArgOffset
-                module.add(SLoadB64(dst=sgpr(tmpS0, 2), base=sgpr("KernArgAddress", 2), soffset=hex(batchOffsetKernArgOffset), comment="Load batchOffset%s from kernel args"%mat))
-                module.add(SWaitCnt(kmcnt=0, comment="Wait for Matrix Address and Batch Offset Loads"))
-                # Add loaded matrix address to SRD
-                module.add(SAddU32(dst=sgpr("Srd%s+0"%mat), src0=sgpr("Srd%s+0"%mat), src1=sgpr(tmpS0), comment="Add matrix address to SRD (low)"))
-                module.add(SAddCU32(dst=sgpr("Srd%s+1"%mat), src0=sgpr("Srd%s+1"%mat), src1=sgpr(tmpS1), comment="Add matrix address to SRD (high)"))
-              module.add(generalBatchedGemmLoad_End)
+              if self._postLoopMbBranchless(kernel) and kernel["ProblemType"]["SupportUserArgs"]:
+                # Strided math above falls through. The pointer-array load sits after
+                # this function's straight-line code and branches back here.
+                module.add(generalBatchedGemmLoad_End)
+                pendingGeneral.add(generalBatchedGemmLoad)
+                self._appendGeneralBatchedMatrixLoad(pendingGeneral, kernel, mat, tmpS0, tmpS1, wgMT1, coord)
+                pendingGeneral.add(SBranch(labelName=generalBatchedGemmLoad_End.getLabelName(), comment="resume after general batch"))
+              elif not self._postLoopMbBranchless(kernel):
+                module.add(SBranch(labelName=generalBatchedGemmLoad_End.getLabelName()))
+                module.add(generalBatchedGemmLoad)
+                self._appendGeneralBatchedMatrixLoad(module, kernel, mat, tmpS0, tmpS1, wgMT1, coord)
+                module.add(generalBatchedGemmLoad_End)
           module.addSpaceLine()
 
           addrSrcSgpr = "Srd" # update src Sgpr for the second or later iterations
@@ -14372,6 +14358,7 @@ class KernelWriterAssembly(KernelWriter):
     if noMultipleBuffer:
       if srdWsAvailableCtx:
         self.removeSgprVarFromPool("SrdWS")
+      self._emitPendingGeneral(module, pendingGeneral)
       return module
 
     gsuComponent = Component.GSU.find(self)
@@ -14396,6 +14383,7 @@ class KernelWriterAssembly(KernelWriter):
     if srdWsAvailableCtx:
       self.removeSgprVarFromPool("SrdWS")
 
+    self._emitPendingGeneral(module, pendingGeneral)
     return module
 
   ##############################################################################
@@ -14749,6 +14737,59 @@ class KernelWriterAssembly(KernelWriter):
     module.add(SMovB32(dst=sgpr("Srd%s+3"%ch), src="Srd127_96", comment="Set bits 127_96 in post-loop SRD"))
     module.add(self.shiftSrd(ch))
     module.addSpaceLine()
+
+  def _emitStridedVsGeneralPredicate(self, module, kernel, mat, tmpS1, wgMT1, generalLabel):
+    """One not-taken branch for strided batch. Pointer-array batch is the taken side.
+
+    tmpS1 holds GSU masked by gsuMaskHex. wgMT1 is dead at the batch index, so it
+    is the predicate scratch. tmpS0 already holds the size product on the useSize path.
+    """
+    mbsKOnlyC = kernel["_GlobalAccumulation"] == "MultipleBufferSingleKernel" and mat == "C"
+    if mbsKOnlyC:
+      self.cmpNamedArgTypeEq(module, 3, "ArgType == 3 for General Batched GEMM")
+    else:
+      module.add(SCmpEQU32(src0=sgpr(tmpS1), src1=1, comment="GSU == 1 ?"))
+      module.add(SCSelectB32(dst=sgpr(wgMT1), src0=1, src1=0, comment="pred = (GSU == 1)"))
+      self.cmpNamedArgTypeEq(module, 3, "ArgType == 3 for General Batched GEMM")
+      module.add(SCSelectB32(dst=sgpr(wgMT1), src0=sgpr(wgMT1), src1=0, comment="pred = GSU==1 and general batch"))
+      module.add(SCmpEQU32(src0=sgpr(wgMT1), src1=1, comment="general batched pointer array"))
+    module.add(SCBranchSCC1(labelName=generalLabel.getLabelName(), comment="general batch, else strided"))
+
+  def _emitPendingGeneral(self, module, pendingGeneral):
+    """Keep pointer-array loads off the strided fall-through."""
+    if pendingGeneral.count() == 0:
+      return
+    skip = Label(label=self.labels.getNameInc("SkipGeneralBatch"), comment="strided batch continues")
+    module.add(SBranch(labelName=skip.getLabelName(), comment="skip pointer-array batch"))
+    module.add(pendingGeneral)
+    module.add(skip)
+
+  def _appendGeneralBatchedMatrixLoad(self, module, kernel, mat, tmpS0, tmpS1, wgMT1, coord):
+    # Reached only at runtime GSU==1, where SrdC/SrdD are the user pointer arrays.
+    # GSU>1 is strided workspace and does not take this branch. The PostGSU
+    # conversion kernel applies the batch offset when it writes the final C/D.
+    module.add(SMulI32(dst=sgpr(tmpS0), src0=8, src1=coord, comment="Compute stride in bytes into Pointer Array"))
+    module.add(SAddU32(dst=sgpr(tmpS0), src0=sgpr(tmpS0), src1=sgpr("Address%s+0"%mat), comment="Offsetting to the location [Lower half of address]"))
+    module.add(SAddCU32(dst=sgpr(tmpS1), src0=sgpr("Address%s+1"%mat), src1=0, comment="Offsetting to the location [Higher half of address]"))
+    sgprSrdTmp = tmpS0
+    if self.states.archCaps["EnableXnackReplay"]:
+      # wgMT1 (= tmpS0+2) holds wg1*MT1, used as coord only at i == Index1.
+      # Index1 is always 0 or 1, so by i == 2 wgMT1 is dead. Reuse it as the
+      # xnack-safe load dst so it is disjoint from the base [tmpS0, tmpS1].
+      assert sgpr(wgMT1) != coord, \
+          f"wgMT1 is still active as coord (Index1={kernel['ProblemType']['Index1']}); " \
+          f"cannot reuse as xnack-safe dst"
+      sgprSrdTmp = wgMT1
+    module.add(SLoadB64(dst=sgpr(sgprSrdTmp, 2), base=sgpr(tmpS0, 2), soffset=0, comment="Load the Matrix Address in the Pointer Array"))
+    module.add(SWaitCnt(kmcnt=0, comment="Wait for the Matrix Address Load from the Pointer Array"))
+    module.add(SAddU32(dst=sgpr("Srd%s+0"%mat), src0=sgpr("Srd%s+0"%mat), src1=sgpr(sgprSrdTmp), comment="Offsetting within the Batch Matrix [Lower half of address]"))
+    module.add(SAddCU32(dst=sgpr("Srd%s+1"%mat), src0=sgpr("Srd%s+1"%mat), src1=sgpr(sgprSrdTmp+1), comment="Offsetting within the Batch Matrix [Higher half of address]"))
+    if not kernel["ProblemType"]["GroupedGemm"]:
+      batchOffsetKernArgOffset = self.states.batchOffsetCKernArgOffset if mat == "C" else self.states.batchOffsetDKernArgOffset
+      module.add(SLoadB64(dst=sgpr(tmpS0, 2), base=sgpr("KernArgAddress", 2), soffset=hex(batchOffsetKernArgOffset), comment="Load batchOffset%s from kernel args"%mat))
+      module.add(SWaitCnt(kmcnt=0, comment="Wait for Matrix Address and Batch Offset Loads"))
+      module.add(SAddU32(dst=sgpr("Srd%s+0"%mat), src0=sgpr("Srd%s+0"%mat), src1=sgpr(tmpS0), comment="Add matrix address to SRD (low)"))
+      module.add(SAddCU32(dst=sgpr("Srd%s+1"%mat), src0=sgpr("Srd%s+1"%mat), src1=sgpr(tmpS1), comment="Add matrix address to SRD (high)"))
 
   def allocPostLoopSrd(self, ch: str, kernel):   
     module = Module("allocPostLoopSrd")

@@ -719,7 +719,7 @@ class TestMetadataSafety(unittest.TestCase):
         q = _fake_tensor((2, 4, 32, 64))
         k = _fake_tensor((2, 2, 32, 64))
         lse = _fake_tensor((2, 4, 32, 1), dtype="float32")
-        request = _dense_request(dense_layout="bhsd", return_lse=True)
+        request = _dense_request(tensor_layout="bhsd", return_lse=True)
         values = _gfx1151_validate_and_collect(
             request,
             _dense_spec(),
@@ -1811,7 +1811,7 @@ def test_dispatch_bhsd_head96_noncausal_window_with_lse():
             arch="gfx1151",
             dtype="fp16",
             layout="dense",
-            dense_layout="bhsd",
+            tensor_layout="bhsd",
             mask_type=AttentionMaskType.SLIDING_WINDOW,
             window_left=3,
             window_right=5,

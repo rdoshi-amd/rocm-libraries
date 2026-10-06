@@ -1013,45 +1013,57 @@ int runGenerator(const std::vector<std::string>& args)
         return 0;
     }
 
-    // Filters run inside the search, ahead of the engine, so the search's target is spent on
-    // points that survive them. Exclusion needs the id the graph will be written under, which
-    // is content-derived, so it is computed exactly as emission computes it.
-    int64_t heldOutDuringSearch = 0;
-    const hipdnn_corpus_gen::CorpusFilter searchFilter = [&](const std::string& operation,
-                                                             const ProblemPoint& point) {
-        if(!hipdnn_corpus_gen::keeps(keep, point))
+    // `--keep` runs inside the search, ahead of the engine, so the search's target is spent on
+    // points the corpus may contain.
+    const hipdnn_corpus_gen::CorpusFilter searchFilter
+        = [&](const std::string&, const ProblemPoint& point) {
+              return hipdnn_corpus_gen::keeps(keep, point);
+          };
+
+    // An excluded configuration is valid -- the engine serves it -- and only not returned: the
+    // search holds it, as it holds a point already pooled, and keeps walking through it. Refused
+    // instead, it fences the walk out of the region the excluded corpora cover, and a search that
+    // starts there finds nothing new however many problems are asked for. The id is the one the
+    // graph would be written under, content-derived, computed exactly as emission computes it.
+    std::set<std::string> heldOutIds;
+    std::map<std::string, bool> excludedByKey;
+    const auto excludedPoint = [&](const std::string& operation, const ProblemPoint& point) {
+        if(excluded.empty())
         {
             return false;
         }
-        if(excluded.empty())
+        const auto key = operation + "|" + hipdnn_corpus_gen::detail::describe(point);
+        const auto known = excludedByKey.find(key);
+        if(known != excludedByKey.end())
         {
-            return true;
+            return known->second;
         }
+        bool held = false;
         const auto declaration
             = std::find_if(selected.operations.begin(),
                            selected.operations.end(),
                            [&](const auto& entry) { return entry.second.operation == operation; });
-        if(declaration == selected.operations.end())
+        if(declaration != selected.operations.end())
         {
-            return true;
+            const auto graph = hipdnn_corpus_gen::buildGraphFor(declaration->second, point);
+            if(graph.ok())
+            {
+                const auto id = hipdnn_corpus_gen::stampGraphIdentity(
+                                    graph.bytes,
+                                    graphNameFor(operation,
+                                                 hipdnn_corpus_gen::regimeLabel(
+                                                     declaration->second, point),
+                                                 point))
+                                    .id;
+                held = excluded.count(id) > 0;
+                if(held)
+                {
+                    heldOutIds.insert(id);
+                }
+            }
         }
-        const auto graph = hipdnn_corpus_gen::buildGraphFor(declaration->second, point);
-        if(!graph.ok())
-        {
-            return true; // not this filter's refusal; the oracle reports build failures
-        }
-        const auto id
-            = hipdnn_corpus_gen::stampGraphIdentity(
-                  graph.bytes,
-                  graphNameFor(
-                      operation, hipdnn_corpus_gen::regimeLabel(declaration->second, point), point))
-                  .id;
-        if(excluded.count(id) > 0)
-        {
-            ++heldOutDuringSearch;
-            return false;
-        }
-        return true;
+        excludedByKey.emplace(key, held);
+        return held;
     };
 
     const auto start = std::chrono::steady_clock::now();
@@ -1070,7 +1082,6 @@ int runGenerator(const std::vector<std::string>& args)
     std::map<std::string, int64_t> allocationTotals;
     std::map<std::string, int64_t> droppedTotals;
     nlohmann::json sourceReports = nlohmann::json::object();
-    int64_t excludedRows = 0;
     std::vector<std::string> shortfall;
     bool searchCapped = false;
     /// A shortfall some combination did not demonstrate was forced on it -- saturation is the
@@ -1184,7 +1195,7 @@ int runGenerator(const std::vector<std::string>& args)
             }
             if(excluded.count(known->second.id) > 0)
             {
-                ++excludedRows;
+                heldOutIds.insert(known->second.id);
                 return false;
             }
             return true;
@@ -1264,7 +1275,8 @@ int runGenerator(const std::vector<std::string>& args)
             return searchFilter(result.operation, point) && searchOracle(point);
         };
         const hipdnn_corpus_gen::ProblemOracle alreadyPooled = [&](const ProblemPoint& point) {
-            return pooled.count(hipdnn_corpus_gen::detail::describe(point)) > 0;
+            return pooled.count(hipdnn_corpus_gen::detail::describe(point)) > 0
+                   || excludedPoint(result.operation, point);
         };
         // The pack is the whole of what a pack-coverage engine serves; a search could only
         // rediscover it. A sweep with no share has nothing to contribute either. In both cases
@@ -1385,7 +1397,8 @@ int runGenerator(const std::vector<std::string>& args)
                 }
             }
             const hipdnn_corpus_gen::ProblemOracle alreadyHave = [&](const ProblemPoint& point) {
-                return everything.count(hipdnn_corpus_gen::detail::describe(point)) > 0;
+                return everything.count(hipdnn_corpus_gen::detail::describe(point)) > 0
+                       || excludedPoint(result.operation, point);
             };
             for(const auto& [regime, asked] : quotas->second)
             {
@@ -1619,10 +1632,10 @@ int runGenerator(const std::vector<std::string>& args)
         }
     }
 
-    excludedRows += heldOutDuringSearch;
-    if(excludedRows > 0)
+    if(!heldOutIds.empty())
     {
-        std::cerr << "Held out " << excludedRows << " problem(s) already in the excluded corpora"
+        std::cerr << "Held out " << heldOutIds.size()
+                  << " problem(s) already in the excluded corpora"
                   << "\n";
     }
 
@@ -1659,7 +1672,7 @@ int runGenerator(const std::vector<std::string>& args)
             // Every problem is served by each of these as well as by `engine`.
             manifest.reports["also_engines"] = options.alsoEngineNames;
         }
-        manifest.reports["excluded"] = excludedRows;
+        manifest.reports["excluded"] = static_cast<int64_t>(heldOutIds.size());
         if(!quotaReports.empty())
         {
             manifest.reports["regime_quota"] = quotaReports;

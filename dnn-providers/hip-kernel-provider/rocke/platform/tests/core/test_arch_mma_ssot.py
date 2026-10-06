@@ -861,3 +861,165 @@ def test_shared_scale_projection_does_not_hide_independent_blocks():
     assert catalog.enumerate(**query) == [independent]
     assert catalog.enumerate(**query, scales=("e8m0", "e8m0", 16)) == []
     assert catalog.enumerate(**query, scales=("e8m0", "e8m0", 32)) == []
+
+
+@pytest.mark.parametrize(
+    "method", ["enumerate", "has_shape", "op_for_shape", "select_largest_k"]
+)
+@pytest.mark.parametrize("source", [0, 1, 2])
+@pytest.mark.parametrize("legacy", [None, "alias", "conflict"])
+def test_duplicate_matrix_query_contracts(method, source, legacy):
+    atom = ArchTarget.from_gfx("gfx942").mma.op_for_shape(
+        a_dtype="tf32", b_dtype="tf32", c_dtype="fp32", m=16, n=16, k=8
+    )
+    query = dict(src_dtypes=("tf32", "tf32", "fp32"), m=16, n=16)
+    query[("a_dtype", "b_dtype", "c_dtype")[source]] = (
+        None
+        if legacy is None
+        else (" XF32 ", " XF32 ", " F32 ")[source] if legacy == "alias" else "i32"
+    )
+    if method in ("has_shape", "op_for_shape"):
+        query["k"] = 8
+    call = getattr(MmaCatalog([atom]), method)
+    if legacy == "conflict":
+        with pytest.raises(ValueError, match="conflicting indexed and legacy matrix"):
+            call(**query)
+    else:
+        result = call(**query)
+        assert result == (
+            [atom] if method == "enumerate" else True if method == "has_shape" else atom
+        )
+
+
+def _duplicate_matrix_row():
+    return dict(
+        family="mma",
+        op_id="fixture",
+        m=16,
+        n=16,
+        k=8,
+        a="tf32",
+        b="tf32",
+        c="fp32",
+        srcs=[{"dtype": " XF32 "}, {"dtype": "tf32"}, {"dtype": " F32 "}],
+        dst={"dtype": "i32"},
+    )
+
+
+def _read_fixture_row(row, reader):
+    if reader == "builder":
+        return _build_mma_op(row)
+    _op_id_dst_dtype.cache_clear()
+    try:
+        with mock.patch(
+            "rocke.core.arch.target._load_specs",
+            return_value={"fixture": {"mma": [row]}},
+        ):
+            return _op_id_dst_dtype()[row["op_id"]]
+    finally:
+        _op_id_dst_dtype.cache_clear()
+
+
+@pytest.mark.parametrize("reader", ["builder", "raw"])
+@pytest.mark.parametrize("source", [0, 1, 2])
+def test_duplicate_matrix_rows_reject_conflicting_dtypes(reader, source):
+    row = _duplicate_matrix_row()
+    row[("a", "b", "c")[source]] = "fp16"
+    with pytest.raises(ValueError, match="conflicting indexed and legacy matrix"):
+        _read_fixture_row(row, reader)
+
+
+@pytest.mark.parametrize("reader", ["builder", "raw"])
+def test_duplicate_matrix_rows_preserve_aliases_and_independent_result(reader):
+    row = _duplicate_matrix_row()
+    result = _read_fixture_row(row, reader)
+    if reader == "builder":
+        assert result.srcs[2].dtype == "fp32"
+        assert result.dst.dtype == result.c_dtype == "i32"
+    else:
+        assert result == "i32"
+    del row["dst"]
+    result = _read_fixture_row(row, reader)
+    assert (result.dst.dtype if reader == "builder" else result) == "fp32"
+
+
+@pytest.mark.parametrize("reader", ["builder", "raw"])
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("srcs", None),
+        ("srcs", []),
+        ("srcs", [{"dtype": "tf32"}]),
+        ("srcs", [{"dtype": "tf32"}, None, {"dtype": "fp32"}]),
+        ("srcs", [{"dtype": "tf32"}, {}, {"dtype": "fp32"}]),
+        ("srcs", [{"dtype": "tf32"}, {"dtype": None}, {"dtype": "fp32"}]),
+        ("dst", None),
+        ("dst", {}),
+        ("dst", {"dtype": None}),
+    ],
+)
+def test_matrix_row_structure_rejected_before_scale_merge(reader, field, value):
+    row = _duplicate_matrix_row()
+    row[field] = value
+    row.update(a_scale_dtype="e8m0", b_scale_dtype="e8m0", scale_block_k=32)
+    with pytest.raises(ValueError, match="MMA catalog"):
+        _read_fixture_row(row, reader)
+
+
+@pytest.mark.parametrize("dtype", ["garbage", "fp16", "bf16", "tf32", ""])
+def test_raw_mma_rejects_present_unsupported_destination_dtype(dtype):
+    atom = ArchTarget.from_gfx("gfx942").mma.op_for_shape(
+        a_dtype="fp32", b_dtype="fp32", c_dtype="fp32", m=16, n=16, k=4
+    )
+    row = dict(
+        family=atom.family,
+        op_id=atom.op_id,
+        m=atom.m,
+        n=atom.n,
+        k=atom.k,
+        srcs=[{"dtype": s.dtype} for s in atom.srcs],
+        dst={"dtype": dtype},
+    )
+    # Generic catalog metadata recognizes types independently of emission support.
+    assert _build_mma_op(row).dst.dtype == dtype
+    _op_id_dst_dtype.cache_clear()
+    try:
+        with mock.patch(
+            "rocke.core.arch.target._load_specs",
+            return_value={"fixture": {"mma": [row]}},
+        ):
+            b = IRBuilder("raw_bad_destination")
+            value = b.const_i32(0)
+            before = len(b.kernel.body.ops)
+            with pytest.raises(
+                ValueError, match="MMA destination dtype must be fp32 or i32"
+            ):
+                b.mma(atom.op_id, value, value, value)
+            assert len(b.kernel.body.ops) == before
+    finally:
+        _op_id_dst_dtype.cache_clear()
+
+
+@pytest.mark.parametrize(
+    "dtype,element", [(" F32 ", "f32"), (" INT32 ", "i32"), (None, "f32")]
+)
+def test_raw_mma_preserves_aliases_and_absent_catalog_fallback(dtype, element):
+    atom = ArchTarget.from_gfx("gfx942").mma.op_for_shape(
+        a_dtype="fp32", b_dtype="fp32", c_dtype="fp32", m=16, n=16, k=4
+    )
+    lookup = {} if dtype is None else {atom.op_id: dtype}
+    with mock.patch("rocke.core.arch.target._op_id_dst_dtype", return_value=lookup):
+        b = IRBuilder("raw_destination")
+        value = b.const_i32(0)
+        result = b.mma(atom.op_id, value, value, value)
+        assert result.type.elem.name == element
+        assert result.type.count == atom.dst.frag_len
+
+
+@pytest.mark.parametrize("reader", ["builder", "raw"])
+def test_indexed_row_missing_destination_does_not_invent_a_default(reader):
+    row = _duplicate_matrix_row()
+    del row["dst"]
+    del row["c"]
+    with pytest.raises(ValueError, match="MMA catalog"):
+        _read_fixture_row(row, reader)

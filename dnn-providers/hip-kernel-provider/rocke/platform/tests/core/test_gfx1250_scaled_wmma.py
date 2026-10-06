@@ -636,3 +636,70 @@ def test_scaled_python_preserves_independent_carrier_widths(scale16, bad_width):
                         str(caught.value)
                         == "scaled WMMA requires src1 to be vec<i32x8>"
                     )
+
+
+@pytest.mark.parametrize("scale16", [False, True])
+@pytest.mark.parametrize("dtype", ["fp8", "bf8", "fp6", "bf6", "fp4"])
+@pytest.mark.parametrize("source", [0, 1])
+@pytest.mark.parametrize("width", [16.0, 16.5, 0, -1, True, False, "16", None])
+def test_scaled_descriptor_rejects_invalid_source_widths(scale16, dtype, source, width):
+    kernel, call = _scaled_call(scale16, False, dtype)
+    atom = _scaled_atom(dtype, scale16)
+    srcs = list(atom.srcs)
+    srcs[source] = replace(srcs[source], frag_len=width)
+    atom = replace(atom, srcs=tuple(srcs))
+    # A matching malformed SSA must not bypass descriptor admission either.
+    call.operands[source].type = VectorType(I32, width)
+    kernel.params[source].type = call.operands[source].type
+    catalog = ArchTarget.from_gfx("gfx1250").mma
+    with mock.patch.object(catalog, "by_op_id", return_value=atom):
+        for operation in (
+            lambda: gfx1250_scaled_wmma(atom.op_id),
+            lambda: _lower_kernel_to_llvm_python(
+                kernel, arch="gfx1250", llvm_flavor="llvm23"
+            ),
+            lambda: lower_kernel_to_hip(kernel, arch="gfx1250"),
+        ):
+            with pytest.raises(ValueError) as caught:
+                operation()
+            assert (
+                str(caught.value)
+                == f"unsupported scaled WMMA backend contract: {atom.op_id}"
+            )
+
+
+@pytest.mark.parametrize("scale16", [False, True])
+@pytest.mark.parametrize("dtype", ["fp8", "bf8", "fp6", "bf6", "fp4"])
+@pytest.mark.parametrize("field", ["m", "n", "k"])
+@pytest.mark.parametrize(
+    "kind", ["float", "fraction", "bool", "string", "null", "zero", "negative"]
+)
+def test_scaled_descriptor_rejects_invalid_shape_scalars(scale16, dtype, field, kind):
+    kernel, _ = _scaled_call(scale16, False, dtype)
+    atom = _scaled_atom(dtype, scale16)
+    value = getattr(atom, field)
+    value = {
+        "float": float(value),
+        "fraction": value + 0.5,
+        "bool": True,
+        "string": str(value),
+        "null": None,
+        "zero": 0,
+        "negative": -1,
+    }[kind]
+    atom = replace(atom, **{field: value})
+    catalog = ArchTarget.from_gfx("gfx1250").mma
+    with mock.patch.object(catalog, "by_op_id", return_value=atom):
+        for operation in (
+            lambda: gfx1250_scaled_wmma(atom.op_id),
+            lambda: _lower_kernel_to_llvm_python(
+                kernel, arch="gfx1250", llvm_flavor="llvm23"
+            ),
+            lambda: lower_kernel_to_hip(kernel, arch="gfx1250"),
+        ):
+            with pytest.raises(ValueError) as caught:
+                operation()
+            assert (
+                str(caught.value)
+                == f"unsupported scaled WMMA backend contract: {atom.op_id}"
+            )

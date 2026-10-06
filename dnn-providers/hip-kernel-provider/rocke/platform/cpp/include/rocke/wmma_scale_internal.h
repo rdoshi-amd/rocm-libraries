@@ -125,7 +125,7 @@ static inline rocke_scaled_wmma_op_t rocke_scaled_wmma_contract(const rocke_mma_
             spec.matrix_formats[i] = 4;
         else
             ckc::raise_status(ROCKE_ERR_VALUE, contract_error);
-        if(!scale_dtypes[i] || strcmp(scale_dtypes[i], "e8m0") != 0)
+        if(words[i] <= 0 || !scale_dtypes[i] || strcmp(scale_dtypes[i], "e8m0") != 0)
             ckc::raise_status(ROCKE_ERR_VALUE, contract_error);
         spec.scale_formats[i] = 0; // E8M0.
         spec.matrix_words[i] = words[i];

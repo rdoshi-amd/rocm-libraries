@@ -190,7 +190,13 @@ def _mma_dst_is_int(op_id: str) -> bool:
     (``core/arch/data/arch_specs.json`` via ``target._op_id_dst_dtype``), imported
     lazily. Op_ids absent from the catalog default to an f32 ``dst``.
     """
-    return _arch._op_id_dst_dtype().get(op_id) == "i32"
+    dtypes = _arch._op_id_dst_dtype()
+    if op_id not in dtypes:
+        return False
+    dtype = dtypes[op_id]
+    if not isinstance(dtype, str) or normalize_dtype(dtype) not in ("fp32", "i32"):
+        raise ValueError("MMA destination dtype must be fp32 or i32")
+    return normalize_dtype(dtype) == "i32"
 
 
 # Compatibility aliases for code that historically used C as the result role.

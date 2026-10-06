@@ -506,6 +506,20 @@ static int test_scaled_accumulator_contracts()
                     CHECK(strcmp(error.what(), expected) == 0);
                 }
             }
+        for(int source = 0; source < 2; ++source)
+        {
+            for(int width : {0, -1})
+            {
+                auto invalid = base;
+                invalid.srcs[source].frag_len = width;
+                CHECK(rejects_query([&] { rocke_scaled_wmma_contract(&invalid); }));
+            }
+            auto independent = base;
+            independent.srcs[source].frag_len = 8;
+            auto signature = rocke_scaled_wmma_contract(&independent);
+            CHECK(signature.matrix_words[source] == 8);
+            CHECK(signature.matrix_words[1 - source] == base.srcs[1 - source].frag_len);
+        }
         for(int role = 0; role < 3; ++role)
             for(int width : {0, 4, 7, 16})
             {

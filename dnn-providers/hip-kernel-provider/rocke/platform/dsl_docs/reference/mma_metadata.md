@@ -26,7 +26,10 @@ Unscaled sources have `scale=None`; the compatibility properties return
 `None` for their dtypes and shared block size, and zero for fragment counts.
 Construct or replace the nested source descriptors to change scale metadata.
 The JSON loader accepts indexed rows and legacy A/B/C rows with top-level scales;
-conflicting indexed and legacy scales are rejected.
+conflicting indexed and legacy matrix dtypes or scales are rejected. Equivalent
+aliases remain accepted. Legacy JSON C describes `srcs[2]`, with `dst` defaulting
+to C only when omitted; an explicit result may differ. Present-null `srcs` or
+`dst`, incomplete rows and missing dtype fields are rejected before scale merging.
 
 Scale dtypes normalize to the string-backed `MmaScaleDType` enum: `E8M0`,
 `E4M3`, or `E5M3`. Existing string inputs remain accepted, and string formatting
@@ -81,7 +84,9 @@ assert atom is not None
 
 All Python query methods accept `src_dtypes` and `dst_dtype`; native queries
 provide corresponding `_indexed` entry points with the same optional scale filter.
-Legacy three-dtype queries default `dst` to `src2`.
+Legacy three-dtype queries default `dst` to `src2`. When Python callers also
+supply indexed source dtypes, each supplied legacy dtype must agree with its
+corresponding source after alias normalization.
 
 Omitting `scales` leaves scales unconstrained. Passing `(a_type, b_type, block_k)`
 matches the scale contract exactly; `(None, None, None)` selects unscaled atoms.
@@ -145,6 +150,13 @@ For example, `wmma_gfx1250_f32_16x16x128_fp8_fp8_scale_e8m0_e8m0_k32`
 has atom K=128 and one scale per 32 K elements for both inputs. Both scale
 types are written even when equal. Lowering reads the catalog fields, never
 parses the ID, and selects LLVM intrinsic names and packed carriers separately.
+The scaled backend requires exact integer `(16, 16, 128)` shape fields and
+positive integer A/B carrier widths, checked independently before signatures are
+constructed. Accumulator and result widths must each be exactly eight.
+
+Both object and raw-ID forms of `IRBuilder.mma` require supported FP32 or I32
+result dtypes. A registered operation absent from the catalog retains its
+historical FP32 default; a present unsupported result dtype is rejected.
 Existing `wmma_scale*_f32_*` and dotted `wmma.scaled.*` IDs are retired, as are
 the dedicated scaled builder wrappers; serialized IR using those IDs must be regenerated.
 Use `tile.mma` with a resolved catalog atom. Other MMA operation IDs retain

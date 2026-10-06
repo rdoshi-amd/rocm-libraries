@@ -116,6 +116,10 @@ def gfx1250_scaled_wmma(op_id: str) -> ScaledWmmaOp | None:
         or atom.srcs[2].frag_len != 8
         or type(atom.dst.frag_len) is not int
         or atom.dst.frag_len != 8
+        or any(
+            type(src.frag_len) is not int or src.frag_len <= 0 for src in atom.srcs[:2]
+        )
+        or any(type(size) is not int for size in atom.shape)
         or atom.shape != (16, 16, 128)
     ):
         raise ValueError(f"unsupported scaled WMMA backend contract: {atom.op_id}")

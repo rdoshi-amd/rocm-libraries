@@ -60,11 +60,16 @@ static int rocke_mma_dst_frag_len(const char* op_id)
     return rocke_arch_mma_dst_frag_len(op_id);
 }
 
-/* True when op_id produces i32, from the arch catalog SSOT. */
-static bool rocke_mma_dst_is_int(const char* op_id)
+/* 1 for i32, 0 for fp32 or absent catalog metadata, -1 for an invalid
+ * present destination. The caller has already checked fragment registration. */
+static int rocke_mma_dst_is_int(const char* op_id)
 {
     const char* dst_dtype = rocke_arch_mma_op_id_dst_dtype(op_id);
-    return dst_dtype != NULL && strcmp(dst_dtype, ROCKE_DTYPE_I32) == 0;
+    if(!dst_dtype)
+        return rocke_arch_mma_op_id_family(op_id) ? -1 : 0;
+    if(strcmp(dst_dtype, ROCKE_DTYPE_I32) == 0)
+        return 1;
+    return strcmp(dst_dtype, "fp32") == 0 ? 0 : -1;
 }
 
 static const char* rocke_mma_result_hint(const char* op_id)
@@ -556,7 +561,7 @@ rocke_value_t* rocke_b_mma(rocke_ir_builder_t* b,
                            int num_extra)
 {
     int dst_frag_len;
-    bool is_int_dst;
+    int is_int_dst;
     const rocke_type_t* dst_elem;
     const rocke_type_t* vt;
     const char* hint;
@@ -583,6 +588,9 @@ rocke_value_t* rocke_b_mma(rocke_ir_builder_t* b,
             b, ROCKE_ERR_VALUE, "unknown MMA op_id '%s'; pass a known mfma_*/wmma_* op_id", op_id);
     }
     is_int_dst = rocke_mma_dst_is_int(op_id);
+    if(is_int_dst < 0)
+        return (rocke_value_t*)rocke_i_set_err(
+            b, ROCKE_ERR_VALUE, "MMA destination dtype must be fp32 or i32");
     dst_elem = is_int_dst ? rocke_i32() : rocke_f32();
     vt = rocke_vector_type(b, dst_elem, dst_frag_len);
     if(!vt)

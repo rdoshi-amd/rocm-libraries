@@ -1218,6 +1218,9 @@ class MmaCatalog:
         if len(src_dtypes) != 3:
             raise ValueError("src_dtypes must contain exactly 3 entries")
         src_keys = tuple(normalize_dtype(dtype) for dtype in src_dtypes)
+        for i, legacy in enumerate((a_dtype, b_dtype, c_dtype)):
+            if legacy is not None and normalize_dtype(legacy) != src_keys[i]:
+                raise ValueError("conflicting indexed and legacy matrix dtypes")
         # Preserve the historical three-dtype query by defaulting dst to src2.
         # Indexed callers can state a distinct result.
         dst_key = normalize_dtype(src_dtypes[2] if dst_dtype is None else dst_dtype)
@@ -1453,7 +1456,7 @@ def _op_id_dst_dtype() -> Dict[str, str]:
     for row in _load_specs().values():
         for o in row["mma"]:
             op_id = o["op_id"]
-            dst_row = o["dst"] if "dst" in o else {"dtype": o["c"]}
+            _, dst_row = _mma_operand_rows(o)
             c = normalize_dtype(dst_row["dtype"])
             prev = out.get(op_id)
             if prev is None:
@@ -1489,20 +1492,38 @@ def _op_id_family() -> Dict[str, str]:
     return out
 
 
-def _build_mma_op(o: dict) -> MmaOp:
-    """Construct an :class:`MmaOp` from one catalog JSON row, attaching the
-    physical fragment lengths and layout maps registered for its op_id."""
+def _mma_operand_rows(o: dict) -> tuple[list[dict], dict]:
+    """Validate duplicate and structural matrix metadata before either reader.
+
+    Legacy JSON C names src2; only an omitted dst defaults to that source.
+    Destination format support is checked separately when IR is built.
+    """
     op_id = o["op_id"]
-    info = _frag_info(op_id)
 
-    def _mk(role: str, frag_len: int, fn: _LaneCoordFn) -> Optional[LayoutMap]:
-        if fn is None or frag_len <= 0:
-            return None
-        return LayoutMap(role=role, frag_len=frag_len, wave_size=info.wave_size, fn=fn)
+    def matrix_row(row: object, role: str) -> dict:
+        if not isinstance(row, dict) or not isinstance(row.get("dtype"), str):
+            raise ValueError(
+                f"MMA catalog op {op_id!r} {role} must define a string dtype"
+            )
+        return dict(row)
 
-    src_rows = o.get("srcs")
-    if src_rows is None:
-        src_rows = ({"dtype": o["a"]}, {"dtype": o["b"]}, {"dtype": o["c"]})
+    if "srcs" in o:
+        rows = o["srcs"]
+        if not isinstance(rows, (list, tuple)) or len(rows) != 3:
+            raise ValueError(
+                f"MMA catalog op {op_id!r} must define exactly 3 matrix sources"
+            )
+        src_rows = [matrix_row(row, f"src{i}") for i, row in enumerate(rows)]
+        for i, legacy in enumerate(("a", "b", "c")):
+            if legacy in o:
+                legacy_row = matrix_row({"dtype": o[legacy]}, legacy)
+                if normalize_dtype(legacy_row["dtype"]) != normalize_dtype(
+                    src_rows[i]["dtype"]
+                ):
+                    raise ValueError("conflicting indexed and legacy matrix dtypes")
+    else:
+        src_rows = [matrix_row({"dtype": o.get(key)}, key) for key in ("a", "b", "c")]
+    dst_row = matrix_row(o["dst"] if "dst" in o else {"dtype": o.get("c")}, "dst")
     if "a_scale_dtype" in o or "b_scale_dtype" in o or "scale_block_k" in o:
         a, b, block_k = _normalize_mma_scales(
             o.get("a_scale_dtype"), o.get("b_scale_dtype"), o.get("scale_block_k")
@@ -1519,10 +1540,21 @@ def _build_mma_op(o: dict) -> MmaOp:
                     raise ValueError("conflicting indexed and legacy scale metadata")
             if legacy_scale is not None:
                 src_rows[i]["scale"] = {"dtype": dtype, "block_size": block_k}
-    if len(src_rows) != 3:
-        raise ValueError(
-            f"MMA catalog op {op_id!r} must define exactly 3 matrix sources"
-        )
+    return src_rows, dst_row
+
+
+def _build_mma_op(o: dict) -> MmaOp:
+    """Construct an :class:`MmaOp` from one catalog JSON row, attaching the
+    physical fragment lengths and layout maps registered for its op_id."""
+    op_id = o["op_id"]
+    info = _frag_info(op_id)
+
+    def _mk(role: str, frag_len: int, fn: _LaneCoordFn) -> Optional[LayoutMap]:
+        if fn is None or frag_len <= 0:
+            return None
+        return LayoutMap(role=role, frag_len=frag_len, wave_size=info.wave_size, fn=fn)
+
+    src_rows, dst_row = _mma_operand_rows(o)
 
     def _source(
         row: dict,
@@ -1550,7 +1582,6 @@ def _build_mma_op(o: dict) -> MmaOp:
             scale=scale,
         )
 
-    dst_row = o["dst"] if "dst" in o else {"dtype": o["c"]}
     return MmaOp(
         family=o["family"],
         srcs=(

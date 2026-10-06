@@ -73,7 +73,7 @@ private:
 // Single-process create(devices) is the special case where every
 // location has comm_rank 0. Multi-process create(mpi_comm, ...)
 // initializes only the caller's local locations; NCCL rank is the
-// index in the sorted world set (one device per MPI rank, matching
+// index in the sorted location set (one device per MPI rank, matching
 // the MPI rank when each rank's bricks use a single device).
 //
 // Thread safety: create()/reset_all() are internally synchronized. A given
@@ -102,16 +102,17 @@ public:
 
     // single-process communicator spanning the given local devices
     // (NCCL ranks = sorted device ids on comm_rank 0). Need >= 2 devices.
-    // Communicators are cached per world location set.
+    // Communicators are cached per location set.
     static rocfft_rccl_comm_t create(const std::set<int>& devices);
 
 #ifdef ROCFFT_MPI_ENABLE
-    // multi-process communicator. world must contain every participating
-    // (mpi_rank, device); this rank initializes only locations whose
-    // comm_rank == local_comm_rank. Collective on mpi_comm: unique id is
-    // broadcast from rank 0, then every rank calls ncclCommInitRank.
-    static rocfft_rccl_comm_t
-        create(MPI_Comm mpi_comm, int local_comm_rank, const std::set<rocfft_location_t>& world);
+    // multi-process communicator. comm_locations must contain every
+    // participating (mpi_comm rank, device); this rank initializes only
+    // locations whose comm_rank == local_comm_rank. Collective on mpi_comm:
+    // unique id is broadcast from rank 0, then every rank calls ncclCommInitRank.
+    static rocfft_rccl_comm_t create(MPI_Comm                           mpi_comm,
+                                     int                                local_comm_rank,
+                                     const std::set<rocfft_location_t>& comm_locations);
 #endif
 
     // release all cached communicators (called at rocfft_cleanup()).
@@ -126,16 +127,16 @@ public:
     // callers record their own event on it to sync.
     hipStream_t get_stream(int device_id) const;
 
-    // total number of NCCL ranks (world size), not the local GPU count
+    // total number of NCCL ranks (communicator size), not the local GPU count
     size_t num_ranks() const;
 
-    // NCCL rank of a world location. Throws if the location is not in the world.
+    // NCCL rank of a participating (mpi_comm rank, device) location. Throws if not participating.
     int get_rank(const rocfft_location_t& location) const;
 
     // single-process helper: NCCL rank of device_id on comm_rank 0
     int get_rank(int device_id) const;
 
-    // world locations in NCCL rank order
+    // participating (mpi_comm rank, device) locations in NCCL rank order
     std::vector<rocfft_location_t> get_locations() const;
 
     // local (this process) locations in NCCL rank order
@@ -190,15 +191,15 @@ public:
 private:
     struct Impl;
 
-    static rocfft_rccl_comm_t create_from_world(const std::set<rocfft_location_t>& world,
-                                                int                                local_comm_rank
+    static rocfft_rccl_comm_t create_from_locs(const std::set<rocfft_location_t>& locs,
+                                               int                                local_comm_rank
 #ifdef ROCFFT_MPI_ENABLE
-                                                ,
-                                                MPI_Comm mpi_comm
+                                               ,
+                                               MPI_Comm mpi_comm
 #endif
     );
 
-    // owning cache keyed by world location set
+    // owning cache keyed by location set
     static std::map<std::set<rocfft_location_t>, rocfft_rccl_comm_t> comm_cache;
     static std::mutex                                                comm_cache_mutex;
 

@@ -9,6 +9,8 @@
 #include <ostream>
 #include <set>
 #include <sstream>
+#include <stdexcept>
+#include <string>
 #include <utility>
 
 #include "harness/BundleMetadata.hpp"
@@ -360,8 +362,6 @@ IntegrationBundleVerificationHarness::OracleChain
     switch(mode)
     {
     case VerificationMode::AUTO:
-        // runReferenceMode() has already used golden data if the bundle had any.
-        chain.declined("golden (absent)");
         chain.candidates = {ReferenceExecutorType::GPU, ReferenceExecutorType::CPU};
         break;
     case VerificationMode::GPU:
@@ -372,9 +372,13 @@ IntegrationBundleVerificationHarness::OracleChain
         break;
     case VerificationMode::GOLDEN:
     default:
-        // Golden mode demands its one oracle in runGoldenMode(); an unknown mode is
-        // failed by runComparison()'s own switch. Neither has a chain to resolve.
-        break;
+        // runComparison() sends only the reference modes here: golden mode demands its
+        // one oracle in runGoldenMode(), and an unknown mode fails there. An empty
+        // chain would FAIL as a bundle no oracle can verify, blaming the bundle for a
+        // harness bug.
+        throw std::invalid_argument(
+            std::string("resolveOracles: no reference chain for verification-mode=")
+            + modeName(mode));
     }
     return chain;
 }
@@ -492,13 +496,17 @@ VerificationOutcome IntegrationBundleVerificationHarness::runReferenceMode(Graph
         return engineDidNotRun(engine);
     }
 
-    // Golden data is auto mode's first oracle; when the bundle has it, no reference
-    // is consulted.
-    if(_deps.policy.mode == VerificationMode::AUTO && _bundle->hasGoldenOutputs)
-    {
-        return compareAgainstGolden(engine.outputs);
-    }
     auto oracles = resolveOracles(_deps.policy.mode);
+    if(oracles.mode == VerificationMode::AUTO)
+    {
+        // Golden data is auto mode's first oracle; when the bundle has it, no
+        // reference is consulted.
+        if(_bundle->hasGoldenOutputs)
+        {
+            return compareAgainstGolden(engine.outputs);
+        }
+        oracles.declined("golden (absent)");
+    }
     return runOracleChain(engine.outputs, oracles);
 }
 

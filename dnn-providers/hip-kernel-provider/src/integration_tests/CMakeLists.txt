@@ -82,6 +82,17 @@ if(ENABLE_HIP_FLASH2_ENGINE)
     endif()
 endif()
 if(HIPDNN_ENABLE_KERNEL_INGESTOR)
+    # The knobs suite is compiled whenever the product root carries the bundle, on any
+    # build arch, so a binary from a non-gfx950 build still runs it against another
+    # build's gfx950 content, and it GTEST_SKIPs on other devices. The predicate is
+    # arch-agnostic and lives in HkpPackaging.cmake, which only an ingestor build
+    # includes -- hence this guard.
+    hkp_product_offers_engine(_hkp_knobs_bundle "hipkernel:Gfx950AttentionDense")
+    if(_hkp_knobs_bundle)
+        target_sources(hip_kernel_provider_integration_tests PRIVATE
+            kernel_ingestor_engine/IntegrationGpuGfx950AttentionDenseKnobs.cpp
+        )
+    endif()
     target_sources(hip_kernel_provider_integration_tests PRIVATE
         kernel_ingestor_engine/IntegrationGpuKernelIngestor.cpp
         kernel_ingestor_engine/IntegrationGpuKernelIngestorKpack.cpp
@@ -99,6 +110,20 @@ if(HIPDNN_ENABLE_KERNEL_INGESTOR)
     target_compile_definitions(hip_kernel_provider_integration_tests
         PRIVATE HIPKERNELPROVIDER_TEST_SET_INTEGRATION_RELDIR="${HIPKERNELPROVIDER_TEST_DESCRIPTOR_RELDIR}/${HIPKERNELPROVIDER_TEST_SET_INTEGRATION}"
     )
+    # The production descriptor tree, loaded beside the integration set so the shipped
+    # engines load in this binary too; the gfx950 dense attention knob suite needs its
+    # engine. A fixed binary-relative offset like the set above, so it holds in the build
+    # and the install tree alike, and main() uses it only when the directory exists at run
+    # time. The definition must not depend on this build's GPU targets: a multi-arch
+    # install pairs this binary with another build's device content, so a build that packs
+    # no production tree still names where one would be. The dependency applies only when
+    # this configuration packs one (the top-level install rule keys on the same target).
+    target_compile_definitions(hip_kernel_provider_integration_tests
+        PRIVATE HIPKERNELPROVIDER_PRODUCT_DESCRIPTOR_RELDIR="${HIPKERNELPROVIDER_PLUGIN_ENGINE_RELDIR}/${HIPKERNELPROVIDER_DESCRIPTOR_SUBDIR}"
+    )
+    if(TARGET hkp_packaging_product)
+        add_dependencies(hip_kernel_provider_integration_tests hkp_packaging_product)
+    endif()
     # The shared descriptor-root resolver lives with the unit tests
     target_include_directories(hip_kernel_provider_integration_tests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/../tests
@@ -165,6 +190,43 @@ endif()
 # import it first.
 if(NOT COMMAND add_external_integration_test_target)
     find_package(hipdnn_integration_tests CONFIG QUIET)
+endif()
+
+# Gated on the same predicate as the census and the external integration target:
+# ENGINE_NAME pins this target, so a build that does not ship the engine registers one
+# whose engine never appears. The predicate lives in HkpPackaging.cmake, which only an
+# ingestor build includes.
+set(_hkp_gfx950_attention_dense FALSE)
+if(HIPDNN_ENABLE_KERNEL_INGESTOR)
+    hkp_gfx950_attention_dense_available(_hkp_gfx950_attention_dense)
+endif()
+if(HIPDNN_ENABLE_KERNEL_INGESTOR AND HIPDNN_ENABLE_SDPA
+   AND _hkp_gfx950_attention_dense
+   AND TARGET hipdnn_integration_tests AND COMMAND add_external_integration_test_target)
+    # Routed into the gfx950 shard, not the common arch-neutral directory: the handler
+    # prunes by the first gfx directory in the path, so the entry goes when the engine
+    # does. Left in the common file it survives into a gfx942-only package, where the
+    # engine ranks nothing, every case declines and the entry reports success having run
+    # nothing.
+    #
+    # hkp_finalize_census_install() folds the accumulator into that shard's CTest file,
+    # in both YAML modes: src/ hands it whichever common entrypoint that configuration
+    # produced, and the discovery stub goes there, so a sharded entry is reachable
+    # whether or not categorization is on.
+    hkp_reserve_census_shard(_hkp_gfx950_shard_dest gfx950)
+    set(_gfx950_shard_args
+        INSTALL_DESTINATION "${_hkp_gfx950_shard_dest}"
+        INSTALL_STAGING_KEY hkp_census_gfx950)
+
+    add_external_integration_test_target(
+        TARGET_NAME hip_kernel_provider_gfx950_attention_dense_gpu_ref_integration_tests
+        PLUGIN_TARGET hip_kernel_provider
+        ENGINE_NAME   "hipkernel:Gfx950AttentionDense"
+        INSTALL_SUBDIR hip_kernel_provider
+        ${_gfx950_shard_args}
+        REFERENCE_EXECUTOR gpu
+        GTEST_FILTER "quick_SdpaFwd_bshd_*:standard_SdpaFwd_bshd_*"
+    )
 endif()
 
 if(ENABLE_ASM_SDPA_ENGINE AND HIPDNN_ENABLE_SDPA

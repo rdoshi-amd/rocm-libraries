@@ -80,6 +80,8 @@ compilation::KpackModuleCache& pointwiseKpackModuleCache();
 compilation::KpackModuleCache& convFwdKpackModuleCache();
 compilation::KpackModuleCache& flydslRmsNormKpackModuleCache();
 
+compilation::KpackModuleCache& gfx950AttentionDenseKpackModuleCache();
+
 /// What a kpack kernel needs to be loaded again for another device: the archive it was
 /// resolved to, the entry inside it, and the declared digest the loader verifies. Held
 /// because `buildIngestorKernelCode` derives them from a descriptor that a prepared

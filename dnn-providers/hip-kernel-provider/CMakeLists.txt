@@ -387,6 +387,7 @@ if(HIPKERNELPROVIDER_ENABLE_TESTS)
     set(HIPKERNELPROVIDER_CTEST_CATEGORIES_YAML "${CMAKE_CURRENT_SOURCE_DIR}/HIP_MLOPS_ENGINE_test_categories_external.yaml")
     set(HIPKERNELPROVIDER_INTEGRATION_CATEGORIES_YAML "${CMAKE_CURRENT_SOURCE_DIR}/HIP_MLOPS_ENGINE_test_categories_integration.yaml")
     set(HIPKERNELPROVIDER_ASM_SDPA_INTEGRATION_CATEGORIES_YAML "${CMAKE_CURRENT_SOURCE_DIR}/ASM_SDPA_ENGINE_test_categories_integration.yaml")
+    set(HIPKERNELPROVIDER_GFX950_ATTENTION_DENSE_INTEGRATION_CATEGORIES_YAML "${CMAKE_CURRENT_SOURCE_DIR}/hipkernel_Gfx950AttentionDense_test_categories_integration.yaml")
     set(ROCKE_ENGINE_CTEST_CATEGORIES_YAML "${CMAKE_CURRENT_SOURCE_DIR}/ROCKE_ENGINE_test_categories_external.yaml")
     set(HKP_PACK_CTEST_CATEGORIES_YAML "${CMAKE_CURRENT_SOURCE_DIR}/HKP_PACK_test_categories_external.yaml")
     set(HIPKERNELPROVIDER_CTEST_INSTALL_FILE "")
@@ -395,6 +396,7 @@ if(HIPKERNELPROVIDER_ENABLE_TESTS)
        AND EXISTS "${HIPKERNELPROVIDER_CTEST_CATEGORIES_YAML}"
        AND EXISTS "${HIPKERNELPROVIDER_INTEGRATION_CATEGORIES_YAML}"
        AND EXISTS "${HIPKERNELPROVIDER_ASM_SDPA_INTEGRATION_CATEGORIES_YAML}"
+       AND EXISTS "${HIPKERNELPROVIDER_GFX950_ATTENTION_DENSE_INTEGRATION_CATEGORIES_YAML}"
        AND EXISTS "${ROCKE_ENGINE_CTEST_CATEGORIES_YAML}"
        AND EXISTS "${ROCM_LIBRARIES_ROOT}/shared/ctest/TestCategories.cmake")
         include("${ROCM_LIBRARIES_ROOT}/shared/ctest/TestCategories.cmake")
@@ -403,6 +405,7 @@ if(HIPKERNELPROVIDER_ENABLE_TESTS)
             "${HIPKERNELPROVIDER_GTEST_CATEGORIES_YAML}"
             "${HIPKERNELPROVIDER_INTEGRATION_CATEGORIES_YAML}"
             "${HIPKERNELPROVIDER_ASM_SDPA_INTEGRATION_CATEGORIES_YAML}"
+            "${HIPKERNELPROVIDER_GFX950_ATTENTION_DENSE_INTEGRATION_CATEGORIES_YAML}"
             "${ROCKE_ENGINE_CTEST_CATEGORIES_YAML}"
             "${HIPKERNELPROVIDER_CTEST_CATEGORIES_YAML}"
         )
@@ -421,7 +424,9 @@ if(HIPKERNELPROVIDER_ENABLE_ROCKE)
     # so add_subdirectory(rocke) must precede src/ below, which emits
     # bin/hip_kernel_provider/CTestTestfile.cmake. It must also precede
     # descriptor-packaging below, whose ingestor-toolchain assertion reads the
-    # ROCKE_WHEEL_DIR and ROCKE_WHEEL_VERSION cache variables rocke/ sets.
+    # ROCKE_WHEEL_DIR and ROCKE_WHEEL_VERSION cache variables rocke/ sets. That
+    # assertion runs only when rocKE is enabled; with rocKE disabled the
+    # ingestor packs with the hip producer alone.
     set(ROCKE_INSTALL_PROVIDER_CTEST_SUBDIR "hip_kernel_provider")
     set(ROCKE_INSTALL_STANDALONE_CTEST OFF)
 
@@ -607,8 +612,9 @@ if(HIPDNN_ENABLE_KERNEL_INGESTOR)
                 PATTERN "${HKP_PACK_STAMP_NAME}" EXCLUDE)
     endif()
 
-    # The test packing roots are wired unconditionally under this gate, so the test tree
-    # always has content to ship once the build has run.
+    # The test packing roots are wired under this gate, each unless it has nothing to pack
+    # for this build, in which case it is dormant and writes no output. The install rule
+    # ships whatever the wired roots and the fixture archive staged into this tree.
     if(HIPKERNELPROVIDER_ENABLE_TESTS)
         install(DIRECTORY "${HIPKERNELPROVIDER_TEST_DESCRIPTOR_BUILD_DIR}/"
                 DESTINATION "${HIPDNN_RELATIVE_INSTALL_PLUGIN_ENGINE_DIR}/${HIPKERNELPROVIDER_TEST_DESCRIPTOR_SUBDIR}"

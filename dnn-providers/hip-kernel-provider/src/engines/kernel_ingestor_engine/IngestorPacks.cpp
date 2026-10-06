@@ -16,6 +16,9 @@ const std::vector<IngestorPack>& ingestorPacks()
         {"hipkernel:Pointwise", &registerPointwiseSymbols, &resetPointwiseModuleCache},
         {"hipkernel:ConvFwd", &registerConvFwdSymbols, &resetConvFwdModuleCache},
         {"hipkernel:FlydslRmsNorm", &registerFlydslRmsNormSymbols, &resetFlydslRmsNormModuleCache},
+        {"hipkernel:Gfx950AttentionDense",
+         &registerGfx950AttentionDenseSymbols,
+         &resetGfx950AttentionDenseModuleCache},
     };
     return s_packs;
 }

@@ -155,5 +155,5 @@ foreach(mode IN ITEMS off fallback forced)
         ${mode} "${hipblaslt_jit_bundles}")
     set_tests_properties(jit-heuristic-${mode} PROPERTIES
         FIXTURES_REQUIRED jit-bundles
-        ENVIRONMENT "HIPBLASLT_JIT=${hipblaslt_jit_mode_value}")
+        ENVIRONMENT "HIPBLASLT_JIT=${hipblaslt_jit_mode_value};HIPBLASLT_JIT_LIBRARY_PATH=${hipblaslt_jit_scratch}/heuristic-${mode}")
 endforeach()

@@ -67,9 +67,10 @@ namespace hipblaslt_ext::experimental::jit
         std::string message;
     };
 
-    // Compile synchronously on the current HIP device (which must equal device),
-    // after looking up the JIT solution library. A hit is returned without
-    // generating. A capturing stream may return a hit and does not start a
+    // Look up the JIT solution library on the current HIP device (which must
+    // equal device) and publish with backend when the request is not already
+    // there. A hit does not generate. Returns an owned Solution for the first
+    // published index. A capturing stream may return a hit and does not start a
     // build. Unsupported operation/backend pairs return NOT_SUPPORTED.
     // getGemmAlgo turns the solution into a library index.
     HIPBLASLT_EXPORT hipblasStatus_t getJitAlgo(int            device,

@@ -151,8 +151,7 @@ def _validated_value_spec(
         seen_physical.add(physical)
         for logical_index in _expanded_indices(index, packing):
             if not (
-                0 <= logical_index[0] < shape[0]
-                and 0 <= logical_index[1] < shape[1]
+                0 <= logical_index[0] < shape[0] and 0 <= logical_index[1] < shape[1]
             ):
                 raise ValueError(
                     f"layout coordinate {logical_index!r} is outside shape {shape!r}"
@@ -340,10 +339,7 @@ def reconstruct_logical_value(
 
 def logical_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     """Reconstruct every captured wave without retaining presentation strings."""
-    specs = {
-        value["logical"]["name"]: value
-        for value in snapshot["values"]
-    }
+    specs = {value["logical"]["name"]: value for value in snapshot["values"]}
     waves = []
     for wave in snapshot["waves"]:
         records = []

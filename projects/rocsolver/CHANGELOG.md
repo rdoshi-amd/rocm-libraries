@@ -3,6 +3,32 @@
 Full documentation for rocSOLVER is available at the [rocSOLVER documentation](https://rocm.docs.amd.com/projects/rocSOLVER/en/latest/index.html).
 
 
+## (Unreleased) rocSOLVER
+
+### Added
+
+* Hessenberg reduction routines
+    * GEHD2
+    * GEHRD
+
+* Support added for the gfx1250-strict architecture.
+
+### Changed
+### Removed
+### Optimized
+
+* Improved performance of expert eigensolvers SYEVDX/HEEVDX, SYGVDX/HEGVDX
+
+### Resolved issues
+
+* Fixed a loss of accuracy in STEDC, and therefore in SYEVD and HEEVD, observed when the input
+  matrix is scaled by a small number.
+
+### Known issues
+### Upcoming changes
+
+
+
 ## rocSOLVER 3.37.0 for ROCm 10.1.0
 
 ### Added

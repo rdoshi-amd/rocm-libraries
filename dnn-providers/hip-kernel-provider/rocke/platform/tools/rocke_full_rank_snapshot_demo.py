@@ -72,9 +72,7 @@ def build_kernel(arch: str):
 
 def expected_product() -> list[float]:
     return [
-        21.0 if row == column else 19.0
-        for row in range(_M)
-        for column in range(_N)
+        21.0 if row == column else 19.0 for row in range(_M) for column in range(_N)
     ]
 
 

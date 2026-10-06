@@ -75,9 +75,7 @@ def present_logical_value(
                 cell["raw_hex"] = None
             cell["value_text"] = _render_cell_value(cell)
             for source in cell["sources"]:
-                source["raw_hex"] = (
-                    f"0x{source['raw_bits']:0{bit_width // 4}x}"
-                )
+                source["raw_hex"] = f"0x{source['raw_bits']:0{bit_width // 4}x}"
                 source["value_text"] = _render_cell_value(source)
     return result
 

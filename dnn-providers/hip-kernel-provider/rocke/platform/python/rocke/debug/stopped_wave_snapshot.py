@@ -390,9 +390,7 @@ def collect_selected_wave(
             issues.append({"value": name, "status": status, "detail": message})
         else:
             captures.append(
-                CapturedValue(
-                    name=name, status="available", locations=tuple(locations)
-                )
+                CapturedValue(name=name, status="available", locations=tuple(locations))
             )
     wave_status = (
         "available"
@@ -421,9 +419,9 @@ def collect_selected_wave(
 
 
 def dumps_snapshot(snapshot: ValueSnapshot) -> str:
-    return json.dumps(
-        snapshot.to_dict(), allow_nan=False, indent=2, sort_keys=True
-    ) + "\n"
+    return (
+        json.dumps(snapshot.to_dict(), allow_nan=False, indent=2, sort_keys=True) + "\n"
+    )
 
 
 def dump_snapshot(snapshot: ValueSnapshot, path: str | Path) -> None:

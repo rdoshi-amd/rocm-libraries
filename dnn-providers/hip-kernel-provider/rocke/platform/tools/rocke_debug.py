@@ -213,9 +213,7 @@ if gdb is not None:
             manifest,
             names,
             read_words=lambda expression: _gdb_words(gdb.parse_and_eval(expression)),
-            thread_id=str(
-                getattr(thread, "global_num", getattr(thread, "num", "?"))
-            ),
+            thread_id=str(getattr(thread, "global_num", getattr(thread, "num", "?"))),
             pc=pc,
             exec_mask=exec_mask,
             architecture=architecture,

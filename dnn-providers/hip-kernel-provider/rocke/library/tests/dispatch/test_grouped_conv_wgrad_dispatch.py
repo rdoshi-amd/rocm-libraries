@@ -627,5 +627,102 @@ class TestWgradMergeDegree(unittest.TestCase):
         )
 
 
+class TestLaunchContractMatchesKernel(unittest.TestCase):
+    """The dispatcher's signature and launch values must describe the kernel
+    ``to_wgrad_spec`` builds and the grid ``_wgrad_grid`` launches.
+
+    Both go through the split-K resolver, so the raw ``spec.split_k`` (-1 on
+    the auto path) and the spec's (absent) two-stage flag must not leak into
+    the kernargs: kernargs pack positionally, and a mismatch launches.
+    """
+
+    def _check(self, req):
+        from dispatch.grouped_convolution import launch_values_for
+        from kernels.common.conv_args import ConvArgs
+
+        r = dispatch_conv_grouped(req)
+        p = _problem(r.request)
+        ws = r.spec.to_wgrad_spec(p)
+        abi = ConvArgs.from_problem(
+            p,
+            direction="wgrad",
+            tile_m=ws.tile_m,
+            tile_n=ws.tile_n,
+            tile_k=ws.tile_k,
+        ).arg_names(two_stage=ws.two_stage)
+        self.assertEqual([a["name"] for a in r.signature], [n for n, _ in abi])
+
+        ws_kw = dict(ws_ptr=0x9000, ws_bytes=64) if ws.two_stage else {}
+        values = launch_values_for(
+            r.request,
+            r.spec,
+            A_ptr=0x1000,
+            B_ptr=0x2000,
+            D_ptr=0x3000,
+            A_bytes=1,
+            B_bytes=1,
+            D_bytes=1,
+            **ws_kw,
+        )
+        self.assertEqual(values["ks_count"], ws.split_k)
+        # grid_groups, not p.groups: a merged kernel runs one workgroup per Gm
+        # conv groups, so z is (groups/Gm)*split_k. Ask the spec rather than
+        # re-deriving -- it is the same property _wgrad_grid divides by, and at
+        # Gm == 1 it is p.groups, so the unmerged cases below are unchanged.
+        self.assertEqual(r.grid[2], ws.grid_groups * ws.split_k)
+        return ws
+
+    def test_auto_split_k(self):
+        self._check(_wgrad("gfx942", G=4))
+
+    def test_odd_wg_N_two_stage(self):
+        # Odd wg_N with a 16-bit dW cannot use the packed atomic, so split-K
+        # resolves to the two-stage path and its scratch pair joins the ABI.
+        ws = self._check(_wgrad("gfx950", C=3, K=24, Y=3, X=3, dtype="bf16"))
+        if ws.split_k > 1:
+            self.assertTrue(ws.two_stage)
+
+    def test_merged_depthwise(self):
+        # Depthwise gfx950 merges, which moves the two things the AOT launch
+        # has to agree with the kernel about: z collapses to groups/Gm, and a
+        # merged split_k > 1 is forced down the two-stage path, which adds
+        # ws_ptr/ws_bytes to the kernarg ABI. _check asserts both against the
+        # spec to_wgrad_spec actually builds, so a merge-blind signature or a
+        # merge-blind grid fails here rather than on the GPU.
+        ws = self._check(_wgrad("gfx950", C=2048, K=2048, G=2048, Y=3, X=3))
+        self.assertGreater(
+            ws.group_merge, 1, "shape was chosen because it merges; it must"
+        )
+        if ws.split_k > 1:
+            self.assertTrue(ws.two_stage)
+
+    def test_merged_tile_counts_are_single_tile(self):
+        # The merged GEMM fits one tile by gate construction (grid_M <= tile_m,
+        # grid_N <= tile_n), which is why launch_values_for can keep computing
+        # p_num_pid_m/n from the unmerged problem and still match the merged
+        # grid. That equality is load-bearing, not incidental -- pin it, so a
+        # gate that ever admits a multi-tile merge fails here instead of
+        # silently decoding workgroup ids against the wrong tile counts.
+        from dispatch.grouped_convolution import launch_values_for
+
+        req = _wgrad("gfx950", C=2048, K=2048, G=2048, Y=3, X=3)
+        r = dispatch_conv_grouped(req)
+        ws = r.spec.to_wgrad_spec(_problem(r.request))
+        self.assertGreater(ws.group_merge, 1)
+        values = launch_values_for(
+            r.request,
+            r.spec,
+            A_ptr=0x1000,
+            B_ptr=0x2000,
+            D_ptr=0x3000,
+            A_bytes=1,
+            B_bytes=1,
+            D_bytes=1,
+            **(dict(ws_ptr=0x9000, ws_bytes=64) if ws.two_stage else {}),
+        )
+        self.assertEqual((values["p_num_pid_m"], values["p_num_pid_n"]), (1, 1))
+        self.assertEqual((r.grid[1], r.grid[0]), (1, 1))
+
+
 if __name__ == "__main__":
     unittest.main()

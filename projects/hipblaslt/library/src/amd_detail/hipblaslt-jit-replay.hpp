@@ -20,6 +20,13 @@ namespace hipblaslt_ext::experimental::jit::replay
         // requested count of those whose solution targets the device and
         // solves the problem, skipping excluded kernels.
         std::vector<std::string> replay;
+        enum class Fault
+        {
+            None,
+            Generate, // generation fails and leaves replay.log in its scratch directory
+            Build, // the main kernel's source does not assemble
+        };
+        Fault fault = Fault::None;
     };
 
     // The replay backend as a Jit backend; throws when a bundle cannot be read.

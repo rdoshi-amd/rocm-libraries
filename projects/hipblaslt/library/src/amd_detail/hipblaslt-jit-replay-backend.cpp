@@ -8,6 +8,7 @@
 #include "hipblaslt-jit-replay.hpp"
 #include <Tensile/Tensile.hpp>
 #include <algorithm>
+#include <fstream>
 #include <stdexcept>
 #include <string_view>
 
@@ -19,6 +20,7 @@ namespace hipblaslt_ext::experimental::jit::replay
         using hipblaslt_jit::Stage;
         using hipblaslt_jit::Status;
         using Master = TensileLite::MasterSolutionLibrary<TensileLite::ContractionProblemGemm>;
+        using Role   = hipblaslt_jit::BuildUnit::Role;
 
         struct Replayed
         {
@@ -26,11 +28,28 @@ namespace hipblaslt_ext::experimental::jit::replay
             std::shared_ptr<Master>          library;
         };
 
+        // One line per request: kind, device, problem sizes, count and excluded kernels.
+        std::string describe(const hipblaslt_jit::GenerationRequest& request,
+                             const detail::GemmRequest&              gemm)
+        {
+            std::string line(request.request.kind());
+            line += ' ' + request.target.isa + " sizes=";
+            const auto problem = hipblaslt_jit::lowerForJit(gemm);
+            const auto count   = problem.c().dimensions() + problem.boundIndices().size();
+            for(size_t i = 0; i < count; ++i)
+                line += (i ? "," : "") + std::to_string(problem.size(i));
+            line += " count=" + std::to_string(request.count) + " exclude=";
+            for(size_t i = 0; i < request.excludeKernels.size(); ++i)
+                line += (i ? "," : "") + request.excludeKernels[i];
+            return line;
+        }
+
         class ReplayBackend final : public hipblaslt_jit::Backend
         {
         public:
             explicit ReplayBackend(const Options& options)
-                : m_info{"replay", "replay", ""}
+                : m_fault(options.fault)
+                , m_info{"replay", "replay", ""}
             {
                 if(options.replay.empty())
                     throw std::invalid_argument("The replay backend has no bundle to replay");
@@ -76,6 +95,21 @@ namespace hipblaslt_ext::experimental::jit::replay
                     return {Status::Code::NotSupported,
                             Stage::Generate,
                             "The replay backend replays a GEMM solution"};
+                if(m_fault == Options::Fault::Generate)
+                {
+                    Status failure{
+                        Status::Code::Failed, Stage::Generate, "Replay generation fault"};
+                    const auto log = request.scratch / "replay.log";
+                    std::ofstream(log) << failure.message << '\n'
+                                       << describe(request, *gemm) << '\n';
+                    std::error_code error;
+                    if(fs::exists(log, error))
+                    {
+                        failure.logPath = fs::absolute(log, error).u8string();
+                        failure.message += "; see " + failure.logPath;
+                    }
+                    return failure;
+                }
                 const auto problem  = hipblaslt_jit::lowerForJit(*gemm);
                 const auto excluded = [&](const std::string& kernel) {
                     const auto& names = request.excludeKernels;
@@ -97,6 +131,13 @@ namespace hipblaslt_ext::experimental::jit::replay
                     if(excluded(replayed.solution.kernelName))
                         continue;
                     solutions.push_back(replayed.solution);
+                    if(m_fault == Options::Fault::Build)
+                    {
+                        const std::string invalid = "s_not_an_instruction\n";
+                        for(auto& unit : solutions.back().units)
+                            if(unit.role == Role::Main)
+                                unit.bytes.assign(invalid.begin(), invalid.end());
+                    }
                 }
                 if(!targeted)
                     return {Status::Code::TargetMismatch,
@@ -113,6 +154,7 @@ namespace hipblaslt_ext::experimental::jit::replay
             }
 
         private:
+            Options::Fault             m_fault;
             hipblaslt_jit::BackendInfo m_info;
             std::vector<Replayed>      m_replayed;
         };

@@ -48,6 +48,15 @@ target_link_libraries(hipblaslt-jit-builder-test PRIVATE
 hipblaslt_jit_test(jit-builder jit-cpu hipblaslt-jit-builder-test
     "${hipblaslt_jit_bundle}" "${hipblaslt_jit_scratch}/builder")
 
+# Drives the Jit stages with fakes that break the stage contracts.
+add_executable(hipblaslt-jit-component-test
+    jit_component_test.cpp
+    "${hipblaslt_jit_source}/hipblaslt-jit-component.cpp")
+target_include_directories(hipblaslt-jit-component-test PRIVATE "${hipblaslt_jit_source}")
+target_link_libraries(hipblaslt-jit-component-test PRIVATE roc::hipblaslt hip::host)
+hipblaslt_jit_test(jit-component jit-cpu hipblaslt-jit-component-test
+    "${hipblaslt_jit_scratch}/component")
+
 # Builds and inspects code objects with comgr; --gpu also launches them on the
 # current device, which can run the gfx950 bundle only in a gfx950 build.
 add_executable(hipblaslt-jit-code-object-test
@@ -121,4 +130,13 @@ if(HIPBLASLT_JIT_TESTING)
         "${hipblaslt_jit_bundle}")
     hipblaslt_jit_test(jit-end-to-end-splitk jit-gpu hipblaslt-jit-end-to-end-test
         "${hipblaslt_jit_splitk}")
+
+    # Failures of the real stages, on damaged copies of the bundles.
+    add_executable(hipblaslt-jit-failure-test
+        jit_failure_test.cpp
+        "${hipblaslt_jit_source}/hipblaslt-jit-component.cpp")
+    target_include_directories(hipblaslt-jit-failure-test PRIVATE "${hipblaslt_jit_source}")
+    target_link_libraries(hipblaslt-jit-failure-test PRIVATE roc::hipblaslt hip::device)
+    hipblaslt_jit_test(jit-failure jit-gpu hipblaslt-jit-failure-test
+        "${hipblaslt_jit_bundle}" "${hipblaslt_jit_splitk}" "${hipblaslt_jit_scratch}/failure")
 endif()

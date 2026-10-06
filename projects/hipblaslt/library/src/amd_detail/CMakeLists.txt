@@ -21,6 +21,9 @@ if(HIPBLASLT_ENABLE_JIT)
         "${CMAKE_CURRENT_SOURCE_DIR}/hipblaslt-jit-loader.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/hipblaslt-jit-component.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/hipblaslt-jit-backend.cpp")
+    if(HIPBLASLT_JIT_TESTING)
+        target_sources(hipblaslt PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/hipblaslt-jit-replay-backend.cpp")
+    endif()
 endif()
 
 if(HIPBLASLT_BUILD_TESTING)

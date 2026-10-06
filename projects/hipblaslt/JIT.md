@@ -238,10 +238,12 @@ message.
 `hipblaslt-jit-loader.{hpp,cpp}` turns a built TensileLite entry into a loaded
 library of its solutions:
 
-- `readTensileSourceBundle` reads a source bundle into a `GeneratedSolution`:
-  the library entry, the main kernel names of its solutions, each `sources/*.s`
-  as an assembly unit, and each HIP source with the bundle's headers as a HIP
-  unit.
+- `readTensileSourceBundle` reads a source bundle into a `TensileSource`: a
+  `GeneratedSolution` (the library entry, the main kernel names of its
+  solutions, each `sources/*.s` as an assembly unit, and each HIP source with
+  the bundle's headers as a HIP unit) and the TensileLite library parsed from
+  that entry. `loadGemmLibrary` is that parse. A caller that needs the library
+  keeps the one `readTensileSourceBundle` returned.
 - `parseTensileBundle` reads a built solution's entry into a TensileLite
   `MasterSolutionLibrary` for the device's hardware. It requires local
   solutions 0 to N-1, each naming one of the built kernels and every built

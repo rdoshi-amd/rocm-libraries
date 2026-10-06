@@ -16,6 +16,14 @@
 
 namespace hipblaslt_jit
 {
+    std::shared_ptr<const SolutionLoader> makeTensileLoader();
+
+    std::shared_ptr<const Jit> makeJit(std::shared_ptr<const Backend> backend)
+    {
+        return std::make_shared<const Jit>(
+            Jit::Components{std::move(backend), makeComgrBuilder(), makeTensileLoader()});
+    }
+
     namespace
     {
         namespace fs = std::filesystem;

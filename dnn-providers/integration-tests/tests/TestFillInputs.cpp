@@ -475,10 +475,11 @@ FillResult runFill(const GraphResult& gr, const std::set<int64_t>& outputUids)
     return fillInputs(*gr.graph, inputs, leafUids, recipes, nullptr);
 }
 
-// uids: x=1 (float), w=2 (half), bias=4 (float). x and w are large enough to be
-// generated on the device; bias is not.
-constexpr int64_t kLargeRows = 256;
+// uids: x=1 (float), w=2 (half), bias=4 (float). x and w are sized from the device
+// threshold, so they are generated on the device; bias is not.
 constexpr int64_t kLargeCols = 128;
+constexpr int64_t kLargeRows
+    = static_cast<int64_t>(DeviceInputFiller::minElements() / kLargeCols) * 2;
 
 GraphResult buildMixedSizeConvBiasGraph()
 {
@@ -662,12 +663,17 @@ TEST(TestFillInputs, DeviceFillerLeavesSmallTensorsOnTheHostPath)
 
     auto hostInputs = makeTensorsFromGraph(graph, leafUids);
     InputFillRecipes hostRecipes;
-    ASSERT_TRUE(fillInputs(*graph.graph, hostInputs, leafUids, hostRecipes, nullptr).filled);
+    const auto hostResult = fillInputs(*graph.graph, hostInputs, leafUids, hostRecipes, nullptr);
+    ASSERT_TRUE(hostResult.filled);
+    EXPECT_EQ(hostResult.deviceFilled, 0u);
 
     auto deviceInputs = makeTensorsFromGraph(graph, leafUids);
     InputFillRecipes deviceRecipes;
     DeviceInputFiller device;
-    ASSERT_TRUE(fillInputs(*graph.graph, deviceInputs, leafUids, deviceRecipes, &device).filled);
+    const auto deviceResult
+        = fillInputs(*graph.graph, deviceInputs, leafUids, deviceRecipes, &device);
+    ASSERT_TRUE(deviceResult.filled);
+    EXPECT_EQ(deviceResult.deviceFilled, 0u);
 
     for(const int64_t uid : leafUids)
     {
@@ -701,6 +707,7 @@ TEST(TestFillInputs, DeviceFillerFillsLargeTensorsOnTheDeviceWithinRange)
     DeviceInputFiller device;
     const auto result = fillInputs(*graph.graph, inputs, leafUids, recipes, &device);
     ASSERT_TRUE(result.filled) << result.reason;
+    EXPECT_EQ(result.deviceFilled, 2u);
 
     auto& x = typedTensor<float>(inputs, 1);
     auto& w = typedTensor<hipdnn_data_sdk::types::half>(inputs, 2);
@@ -737,6 +744,30 @@ TEST(TestFillInputs, DeviceFillerFillsLargeTensorsOnTheDeviceWithinRange)
     // about every 2700 elements, which is a different distribution of inputs.
     EXPECT_GT(distinct.size(), 4000u);
     EXPECT_EQ(zeros, 0u);
+}
+
+// The threshold is inclusive: a tensor of exactly minElements() goes to the device and one
+// element fewer stays on the host, so neither side drifts off the measured crossover.
+TEST(TestFillInputs, DeviceFillerThresholdIsInclusiveOfMinElements)
+{
+    SKIP_IF_NO_DEVICES();
+    if(!DeviceInputFiller::isSupported())
+    {
+        GTEST_SKIP() << "rocRAND not available. Skipping test.";
+    }
+
+    const auto elements = static_cast<int64_t>(DeviceInputFiller::minElements());
+    const std::vector<int64_t> belowDims = {elements - 1};
+    const std::vector<int64_t> atDims = {elements};
+    const std::vector<int64_t> strides = {1};
+    hipdnn_data_sdk::utilities::Tensor<float> below(belowDims, strides);
+    hipdnn_data_sdk::utilities::Tensor<float> at(atDims, strides);
+
+    DeviceInputFiller device;
+    const auto recipe = FillRecipe::free(-1.0f, 1.0f);
+    EXPECT_FALSE(device.tryFill(below, recipe, 1));
+    EXPECT_TRUE(device.tryFill(at, recipe, 1));
+    device.waitForFills();
 }
 
 // NOLINTEND(readability-identifier-naming)

@@ -9,11 +9,9 @@
 #include <set>
 #include <stdexcept>
 #include <string>
-#include <type_traits>
-#include <variant>
 
 #include <hip/hip_runtime.h>
-#include <hipdnn_test_sdk/utilities/FlatbufferDatatypeMapping.hpp>
+#include <hipdnn_data_sdk/types.hpp>
 #include <hipdnn_test_sdk/utilities/TestUtilities.hpp>
 #include <hipdnn_test_sdk/utilities/VariantPackUtils.hpp>
 
@@ -44,6 +42,13 @@ T sentinelValue()
 // it is a serial loop. A memset instruction covers elements of 1, 2 and 4 bytes; any
 // other type, and any tensor that is not a plain TensorBase<T>, is left to the caller.
 //
+// Dispatches on the tensor itself rather than on the attribute's data type: the tensor
+// factory builds tensors (UINT8, INT8, INT64, unpacked INT4) that the data type to
+// native type mapping has no entry for.
+//
+// Only the device-touching steps throw DeviceOutputError; anything else is a host
+// fault and keeps its own message.
+//
 // The write may still be in flight on return; allocateSentinelOutputs() waits once for
 // all of them.
 template <class T>
@@ -62,7 +67,15 @@ bool tryFillSentinelOnDevice(hipdnn_data_sdk::utilities::ITensor& tensor)
 
         // Marked first so deviceData() allocates without uploading the host buffer.
         memory.markDeviceModified();
-        void* device = memory.deviceData();
+        void* device = nullptr;
+        try
+        {
+            device = memory.deviceData();
+        }
+        catch(const std::exception& e)
+        {
+            throw DeviceOutputError(std::string("device output allocation failed: ") + e.what());
+        }
         const auto count = typed->elementSpace();
 
         hipError_t status = hipSuccess;
@@ -87,8 +100,8 @@ bool tryFillSentinelOnDevice(hipdnn_data_sdk::utilities::ITensor& tensor)
 
         if(status != hipSuccess)
         {
-            throw std::runtime_error(std::string("device sentinel fill failed: ")
-                                     + hipGetErrorString(status));
+            throw DeviceOutputError(std::string("device sentinel fill failed: ")
+                                    + hipGetErrorString(status));
         }
         return true;
     }
@@ -99,14 +112,21 @@ bool tryFillSentinelOnDevice(hipdnn_data_sdk::utilities::ITensor& tensor)
     }
 }
 
-bool fillSentinelOnDevice(hipdnn_data_sdk::utilities::ITensor& tensor,
-                          hipdnn_flatbuffers_sdk::data_objects::DataType dataType)
+// Every element type the tensor factory builds as a plain tensor of 1, 2 or 4 byte
+// elements. Wider types (double, INT64) and packed sub-byte tensors fall through to the
+// host fill.
+bool fillSentinelOnDevice(hipdnn_data_sdk::utilities::ITensor& tensor)
 {
-    return std::visit(
-        [&tensor]([[maybe_unused]] auto native) {
-            return tryFillSentinelOnDevice<std::decay_t<decltype(native)>>(tensor);
-        },
-        hipdnn_test_sdk::utilities::datatypeToNativeVariant(dataType));
+    using namespace hipdnn_data_sdk::types;
+    return tryFillSentinelOnDevice<float>(tensor) || tryFillSentinelOnDevice<half>(tensor)
+           || tryFillSentinelOnDevice<bfloat16>(tensor)
+           || tryFillSentinelOnDevice<std::int32_t>(tensor)
+           || tryFillSentinelOnDevice<std::uint8_t>(tensor)
+           || tryFillSentinelOnDevice<std::int8_t>(tensor) || tryFillSentinelOnDevice<bool>(tensor)
+           || tryFillSentinelOnDevice<fp8_e4m3>(tensor) || tryFillSentinelOnDevice<fp8_e5m2>(tensor)
+           || tryFillSentinelOnDevice<fp8_e8m0>(tensor) || tryFillSentinelOnDevice<fp4_e2m1>(tensor)
+           || tryFillSentinelOnDevice<fp6_e2m3>(tensor)
+           || tryFillSentinelOnDevice<fp6_e3m2>(tensor);
 }
 
 } // namespace
@@ -156,43 +176,31 @@ OutputTensors allocateSentinelOutputs(
     OutputTensors outputs;
     bool deviceFillPending = false;
 
-    try
+    for(const int64_t uid : outputTensorUids)
     {
-        for(const int64_t uid : outputTensorUids)
-        {
-            const auto& attributes = *tensorAttributes.at(uid);
-            outputs[uid] = hipdnn_test_sdk::detail::createTensorFromAttribute(attributes);
+        const auto& attributes = *tensorAttributes.at(uid);
+        outputs[uid] = hipdnn_test_sdk::detail::createTensorFromAttribute(attributes);
 
-            if(onDevice && fillSentinelOnDevice(*outputs[uid], attributes.data_type()))
-            {
-                deviceFillPending = true;
-            }
-            else
-            {
-                outputs[uid]->fillWithSentinelValue();
-            }
+        if(onDevice && fillSentinelOnDevice(*outputs[uid]))
+        {
+            deviceFillPending = true;
         }
-
-        // One wait for every device write, so nothing that runs on another stream starts
-        // on a half-written buffer.
-        if(deviceFillPending)
+        else
         {
-            const hipError_t status = hipDeviceSynchronize();
-            if(status != hipSuccess)
-            {
-                throw std::runtime_error(std::string("device sentinel fill failed: ")
-                                         + hipGetErrorString(status));
-            }
+            outputs[uid]->fillWithSentinelValue();
         }
     }
-    catch(const std::exception& e)
+
+    // One wait for every device write, so nothing that runs on another stream starts
+    // on a half-written buffer.
+    if(deviceFillPending)
     {
-        if(!onDevice)
+        const hipError_t status = hipDeviceSynchronize();
+        if(status != hipSuccess)
         {
-            throw;
+            throw DeviceOutputError(std::string("device sentinel fill failed: ")
+                                    + hipGetErrorString(status));
         }
-        throw DeviceOutputError(std::string("could not prepare output buffers on the device: ")
-                                + e.what());
     }
     return outputs;
 }

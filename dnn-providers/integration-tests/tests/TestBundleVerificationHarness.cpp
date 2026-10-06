@@ -257,9 +257,11 @@ TEST(TestBundleVerificationHarness, DeviceVariantPackUsesHostPointerForRuntimePa
     EXPECT_EQ(variantPack.at(2), outputs.at(2)->rawDeviceData());
 }
 
-// One output per element width the device fill handles (1, 2 and 4 bytes) and one it
-// leaves to the host (8 bytes: double), plus a type whose sentinel is its largest value
-// rather than a NaN.
+// One output per element width the device fill handles (1, 2 and 4 bytes) and ones it
+// leaves to the host (8 bytes: double and INT64), plus types whose sentinel is their
+// largest value rather than a NaN. INT8, UINT8 and INT64 are built by the tensor
+// factory but have no entry in the data type to native type mapping, which is what a
+// dispatch keyed on the attribute's data type would trip over.
 std::shared_ptr<IntegrationTestBundle> makeMixedTypeOutputBundle()
 {
     using namespace hipdnn_flatbuffers_sdk::data_objects;
@@ -273,7 +275,10 @@ std::shared_ptr<IntegrationTestBundle> makeMixedTypeOutputBundle()
                                          DataType::INT32,
                                          DataType::FP8_E4M3,
                                          DataType::DOUBLE,
-                                         DataType::BOOLEAN};
+                                         DataType::BOOLEAN,
+                                         DataType::INT8,
+                                         DataType::UINT8,
+                                         DataType::INT64};
 
     auto bundle = std::make_shared<IntegrationTestBundle>();
     std::vector<flatbuffers::Offset<TensorAttributes>> tensors;

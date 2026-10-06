@@ -506,7 +506,7 @@ std::optional<VerificationOutcome> IntegrationBundleVerificationHarness::prepare
     }
 
     // Tensors read from blobs are unpacked, but the engine reads sub-byte operands
-    // packed, and only fillBundleInputs() builds the packed set (ALMIOPEN-2724).
+    // packed, and only fillBundleInputs() builds the packed set.
     const auto wrapper = _bundle->graphWrapper();
     const std::set<int64_t> outputUids(_bundle->outputTensorUids.begin(),
                                        _bundle->outputTensorUids.end());
@@ -516,7 +516,7 @@ std::optional<VerificationOutcome> IntegrationBundleVerificationHarness::prepare
            && hipdnn_test_sdk::detail::isSubByteDataType(attrs->data_type()))
         {
             return unverifiable("sub-byte input " + std::to_string(uid)
-                                + " has no packed copy for the engine (ALMIOPEN-2724)");
+                                + " has no packed copy for the engine");
         }
     }
 
@@ -567,12 +567,27 @@ std::optional<VerificationOutcome> IntegrationBundleVerificationHarness::fillBun
     DeviceInputFiller* const device
         = _deps.policy.useDevice() && !anySubByte ? _deps.deviceFiller.get() : nullptr;
 
-    auto fillResult = hipdnn_integration_tests::fillInputs(
-        wrapper.getGraph(), inputs, leafInputUids, _inputFillRecipes, device);
+    FillResult fillResult;
+    try
+    {
+        fillResult = hipdnn_integration_tests::fillInputs(
+            wrapper.getGraph(), inputs, leafInputUids, _inputFillRecipes, device);
+    }
+    catch(const DeviceInputError& e)
+    {
+        // The device failed, not the graph, so this is a failure and not an
+        // "unverifiable" skip that would let the run go green.
+        return VerificationOutcome::failed(VerificationDepth::NOT_REACHED,
+                                           FailureOrigin::HARNESS,
+                                           std::string(e.what()) + " (" + _bundlePath.string()
+                                               + "); set HIPDNN_TEST_HOST_INPUT_FILL=1 to fill on "
+                                                 "the host");
+    }
     if(!fillResult.filled)
     {
         return unverifiable(fillResult.reason);
     }
+    _deviceFilledInputs = fillResult.deviceFilled;
 
     if(anySubByte)
     {
@@ -758,7 +773,7 @@ VerificationOutcome
                                  expectedFor,
                                  toleranceFor,
                                  resolveValidationSite(_deps.policy.validator, site),
-                                 "Bundle: " + _bundlePath.string());
+                                 "Bundle: " + _bundlePath.string() + inputFillNote());
 
     // Reported one per tensor so each diff lands next to the tensor it describes;
     // the outcome carries no message because of it.
@@ -783,6 +798,17 @@ VerificationOutcome IntegrationBundleVerificationHarness::unverifiable(const std
 void IntegrationBundleVerificationHarness::recordRefError(const std::string& reason)
 {
     _deps.reporter->recordReferenceError(_bundlePath.string(), reason);
+}
+
+std::string IntegrationBundleVerificationHarness::inputFillNote() const
+{
+    if(_deviceFilledInputs == 0)
+    {
+        return {};
+    }
+    return " [" + std::to_string(_deviceFilledInputs)
+           + " input tensor(s) filled on the device with rocRAND; set "
+             "HIPDNN_TEST_HOST_INPUT_FILL=1 to reproduce with the host fill]";
 }
 
 std::string IntegrationBundleVerificationHarness::refLabel(ReferenceExecutorType type)

@@ -499,8 +499,18 @@ int main(int argc, char** argv) noexcept
         // here so it is destroyed when this scope ends, while HIP and rocRAND are still
         // loaded, and not with the registered tests, which GTest keeps until static
         // destruction. The tests hold it weakly.
-        const auto deviceFiller = std::make_shared<hipdnn_integration_tests::DeviceInputFiller>();
-        hipdnn_integration_tests::bundle::registerBundleTests(deviceFiller);
+        //
+        // Device-filled inputs differ from the host fill's, so a failure seen with them
+        // is reproduced bit-for-bit only on the same path. HIPDNN_TEST_HOST_INPUT_FILL=1
+        // withholds the filler, which makes every input a host fill.
+        const auto hostInputFill
+            = hipdnn_data_sdk::utilities::getEnv("HIPDNN_TEST_HOST_INPUT_FILL");
+        const bool forceHostInputFill = !hostInputFill.empty() && hostInputFill != "0";
+        const auto deviceFiller
+            = forceHostInputFill ? std::shared_ptr<hipdnn_integration_tests::DeviceInputFiller>()
+                                 : std::make_shared<hipdnn_integration_tests::DeviceInputFiller>();
+        const auto registrationStats
+            = hipdnn_integration_tests::bundle::registerBundleTests(deviceFiller);
 
         const int result = RUN_ALL_TESTS();
 
@@ -605,8 +615,7 @@ int main(int argc, char** argv) noexcept
                 // filter problem. They have different fixes and these numbers are the
                 // only way to tell them apart from a CI log.
                 const int suiteCount = unitTest->total_test_suite_count();
-                const auto& registration
-                    = hipdnn_integration_tests::bundle::bundleRegistrationStats();
+                const auto& registration = registrationStats;
                 std::cerr << "Error: zero tests ran.\n"
                           << "  registered:      " << unitTest->total_test_count() << " test(s) in "
                           << suiteCount << " suite(s)\n"

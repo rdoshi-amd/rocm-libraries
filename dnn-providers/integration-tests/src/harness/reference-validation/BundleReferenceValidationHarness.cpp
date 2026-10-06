@@ -133,8 +133,21 @@ void BundleReferenceValidationHarness::TestBody()
                << "\n  bundle: " << _bundlePath;
     }
 
-    auto referenceOutputs = allocateOutputs();
-    auto variantPack = buildVariantPack(referenceOutputs);
+    // A device fault here is the harness's or the device's, not the reference's, so it
+    // says which reference lane and bundle it hit like every other failure in this body.
+    OutputTensors referenceOutputs;
+    std::unordered_map<int64_t, void*> variantPack;
+    try
+    {
+        referenceOutputs = allocateOutputs();
+        variantPack = buildVariantPack(referenceOutputs);
+    }
+    catch(const std::exception& e)
+    {
+        FAIL() << referenceLabel(_referenceType)
+               << " was not run: could not prepare its buffers: " << e.what()
+               << "\n  bundle: " << _bundlePath;
+    }
 
     IReferenceGraphExecutor& executor = referenceExecutor();
 

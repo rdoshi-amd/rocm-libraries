@@ -3,12 +3,7 @@
 
 #pragma once
 
-#include <string>
 #include <string_view>
-#include <utility>
-#include <vector>
-
-#include "harness/bundle/BundleDiscovery.hpp"
 
 namespace hipdnn_integration_tests::bundle
 {
@@ -107,27 +102,6 @@ inline bool gtestFilterSelects(std::string_view filter, std::string_view fullNam
 
     return detail::anyPatternMatches(positive, fullName)
            && !detail::anyPatternMatches(negative, fullName);
-}
-
-/// The discovered bundles `filter` would run, and the ones it would drop. Both keep
-/// discovery order, so a sweep's cases stay adjacent for SweepManifestCache.
-struct FilterSplit
-{
-    std::vector<DiscoveredBundle> selected;
-    std::vector<DiscoveredBundle> excluded;
-};
-
-inline FilterSplit splitByGTestFilter(std::vector<DiscoveredBundle> discovered,
-                                      std::string_view filter)
-{
-    FilterSplit split;
-    for(auto& bundle : discovered)
-    {
-        const std::string fullName = bundle.suiteName + "." + bundle.testName;
-        auto& into = gtestFilterSelects(filter, fullName) ? split.selected : split.excluded;
-        into.push_back(std::move(bundle));
-    }
-    return split;
 }
 
 } // namespace hipdnn_integration_tests::bundle

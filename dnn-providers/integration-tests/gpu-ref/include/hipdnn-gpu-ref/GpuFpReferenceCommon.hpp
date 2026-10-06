@@ -9,7 +9,6 @@
 #include <hipdnn_data_sdk/utilities/Tensor.hpp>
 
 #if defined(USE_ROCRAND)
-#include <hip/hip_fp16.h>
 #include <rocrand/rocrand.h>
 #endif
 
@@ -45,32 +44,6 @@ inline void throwOnRocRandError(rocrand_status status, const char* what)
     }
 }
 
-// RAII wrapper for rocrand_generator
-struct RocRandGenerator
-{
-    explicit RocRandGenerator(rocrand_rng_type type)
-    {
-        throwOnRocRandError(rocrand_create_generator(&generator, type), "rocrand_create_generator");
-    }
-
-    ~RocRandGenerator()
-    {
-        if(generator != nullptr)
-        {
-            (void)rocrand_destroy_generator(generator);
-            generator = nullptr;
-        }
-    }
-
-    RocRandGenerator(const RocRandGenerator&) = delete;
-    RocRandGenerator& operator=(const RocRandGenerator&) = delete;
-
-    RocRandGenerator(RocRandGenerator&&) = delete;
-    RocRandGenerator& operator=(RocRandGenerator&&) = delete;
-
-    rocrand_generator generator{};
-};
-
 // RAII wrapper for hipMalloc and hipFree
 template <class T>
 struct HipDeviceBuffer
@@ -101,6 +74,36 @@ struct HipDeviceBuffer
 #endif // defined(USE_ROCRAND)
 
 } // namespace detail
+
+#if defined(USE_ROCRAND)
+// RAII wrapper for rocrand_generator. Public so a harness that fills many tensors can
+// create one generator and pass it to each gpuFillWithRandomValues() call.
+struct RocRandGenerator
+{
+    explicit RocRandGenerator(rocrand_rng_type type)
+    {
+        detail::throwOnRocRandError(rocrand_create_generator(&generator, type),
+                                    "rocrand_create_generator");
+    }
+
+    ~RocRandGenerator()
+    {
+        if(generator != nullptr)
+        {
+            (void)rocrand_destroy_generator(generator);
+            generator = nullptr;
+        }
+    }
+
+    RocRandGenerator(const RocRandGenerator&) = delete;
+    RocRandGenerator& operator=(const RocRandGenerator&) = delete;
+
+    RocRandGenerator(RocRandGenerator&&) = delete;
+    RocRandGenerator& operator=(RocRandGenerator&&) = delete;
+
+    rocrand_generator generator{};
+};
+#endif // defined(USE_ROCRAND)
 
 namespace gpu_fp_reference_tensor
 {
@@ -193,7 +196,7 @@ static void gpuFillWithRandomValues(hipdnn_data_sdk::utilities::TensorBase<T>& t
                                     T minValue,
                                     T maxValue,
                                     unsigned int seed,
-                                    const detail::RocRandGenerator& generator,
+                                    const RocRandGenerator& generator,
                                     bool synchronize)
 {
     tensor.memory().markDeviceModified();
@@ -265,7 +268,7 @@ static void gpuFillWithRandomValues(hipdnn_data_sdk::utilities::TensorBase<T>& t
                                     T maxValue,
                                     unsigned int seed)
 {
-    const detail::RocRandGenerator generator(ROCRAND_RNG_PSEUDO_DEFAULT);
+    const RocRandGenerator generator(ROCRAND_RNG_PSEUDO_DEFAULT);
     gpuFillWithRandomValues(tensor, minValue, maxValue, seed, generator, /*synchronize=*/true);
 }
 #endif // USE_ROCRAND

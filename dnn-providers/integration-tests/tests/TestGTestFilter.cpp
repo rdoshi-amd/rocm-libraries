@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "harness/bundle/BundleDiscovery.hpp"
+#include "harness/bundle/BundleRegistration.hpp"
 #include "harness/bundle/GTestFilter.hpp"
 
 // NOLINTBEGIN(readability-identifier-naming)
@@ -116,7 +117,7 @@ TEST(TestGtestFilter, SplitKeepsDiscoveryOrderInBothHalves)
     discovered.push_back(bundleNamed("quick_Pointwise", "c"));
     discovered.push_back(bundleNamed("standard_Reduction", "d"));
 
-    const auto split = splitByGTestFilter(std::move(discovered), "quick_*");
+    const auto split = detail::splitByGTestFilter(std::move(discovered), "quick_*");
 
     ASSERT_EQ(split.selected.size(), 2u);
     EXPECT_EQ(split.selected[0].testName, "a");
@@ -132,7 +133,7 @@ TEST(TestGtestFilter, SplitMatchesOnTheJoinedSuiteAndCaseName)
     discovered.push_back(bundleNamed("quick_Pointwise", "case1"));
     discovered.push_back(bundleNamed("quick_Pointwise", "case2"));
 
-    const auto split = splitByGTestFilter(std::move(discovered), "quick_Pointwise.case2");
+    const auto split = detail::splitByGTestFilter(std::move(discovered), "quick_Pointwise.case2");
 
     ASSERT_EQ(split.selected.size(), 1u);
     EXPECT_EQ(split.selected[0].testName, "case2");

@@ -487,7 +487,7 @@ TEST(TestFillTensorWithRandomValues, ReseedingASharedGeneratorRestartsTheSequenc
     Tensor<float> other({1, 1, 1, TENSOR_SIZE});
     Tensor<float> again({1, 1, 1, TENSOR_SIZE});
 
-    const hipdnn_gpu_ref::common::detail::RocRandGenerator generator(ROCRAND_RNG_PSEUDO_DEFAULT);
+    const hipdnn_gpu_ref::common::RocRandGenerator generator(ROCRAND_RNG_PSEUDO_DEFAULT);
     gpu_fp_reference_tensor::gpuFillWithRandomValues(
         first, 0.0f, 100.0f, 42, generator, /*synchronize=*/true);
     gpu_fp_reference_tensor::gpuFillWithRandomValues(
@@ -510,7 +510,7 @@ TEST(TestFillTensorWithRandomValues, DeferredSynchronizationFillsEveryTensor)
     Tensor<float> low({1, 1, 1, TENSOR_SIZE});
     Tensor<HalfType> high({1, 1, 1, TENSOR_SIZE});
 
-    const hipdnn_gpu_ref::common::detail::RocRandGenerator generator(ROCRAND_RNG_PSEUDO_DEFAULT);
+    const hipdnn_gpu_ref::common::RocRandGenerator generator(ROCRAND_RNG_PSEUDO_DEFAULT);
     gpu_fp_reference_tensor::gpuFillWithRandomValues(
         low, 1.0f, 2.0f, 1, generator, /*synchronize=*/false);
     gpu_fp_reference_tensor::gpuFillWithRandomValues<HalfType>(high,

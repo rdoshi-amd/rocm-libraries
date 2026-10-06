@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -391,6 +392,30 @@ TEST_F(TestBundleReferenceValidationHarness, ReferenceThatThrowsIsReportedWithIt
     EXPECT_TRUE(testing_support::anyFailed(results));
     EXPECT_NE(testing_support::allMessages(results).find("stub: reference exploded"),
               std::string::npos);
+}
+
+// A golden blob that cannot be read fails this lane's test with the reason and the
+// bundle, instead of the bundle having been dropped quietly at registration.
+TEST_F(TestBundleReferenceValidationHarness, UnreadableGoldenBlobFailsTheRunWithTheReason)
+{
+    auto bundle = fixtures::loadBundle(_tempDir, "Bundle", /*includeGoldenOutput=*/true);
+    ASSERT_TRUE(bundle->blobs.has_value());
+    ASSERT_FALSE(bundle->blobs->inputUids.empty());
+    std::ofstream(bundle->blobs->pathForUid(bundle->blobs->inputUids.front()),
+                  std::ios::binary | std::ios::trunc)
+        << "too short";
+
+    BundleReferenceValidationHarness harness(
+        ReferenceExecutorType::GPU, /*requiresDevice=*/false, executors());
+    harness.setBundle(bundle, _tempDir / "Bundle", /*expectedGap=*/std::nullopt);
+
+    ::testing::TestPartResultArray results;
+    drive(harness, &results);
+
+    EXPECT_TRUE(testing_support::anyFailed(results));
+    const auto messages = testing_support::allMessages(results);
+    EXPECT_NE(messages.find("golden tensor data failed to load"), std::string::npos) << messages;
+    EXPECT_NE(messages.find((_tempDir / "Bundle").string()), std::string::npos) << messages;
 }
 
 // The green path, and the mismatch path beside it: a reference whose output equals

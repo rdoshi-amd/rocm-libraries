@@ -54,3 +54,13 @@ authored and proved there against the packaging suite, then relocated onto this 
 a native pack registers the symbols their UKDs name. The Linux superbuild CI lane
 overrides `HIPKERNELPROVIDER_PRODUCTION_SOURCE_ROOT` to that fixture tree, so that lane
 packs the fixtures and never this root.
+
+## DVC-sourced rocKE descriptors
+
+`descriptors_dvc/rocKE/` mirrors `descriptors/rocKE/` as DVC pointers (`*.dvc`, each
+pinned to the `ingestor` remote in `.dvc/config`); the blobs are not in git. With
+`-DHIPKERNELPROVIDER_ROCKE_DESCRIPTORS_FROM_DVC=ON` the default production root becomes
+`descriptors_dvc/`, and configure fails if any pointer's file is absent. Fetch with
+`dvc pull -r ingestor --recursive dnn-providers/hip-kernel-provider/src/engines/kernel_ingestor_engine/descriptors_dvc`.
+With the flag OFF (default) the git-tracked `descriptors/` is used unchanged. Keep the two
+copies identical until the flag default flips.

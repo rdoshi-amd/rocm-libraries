@@ -1,0 +1,6 @@
+outs:
+- md5: 6c43d90cbfdd3219b8c72a3aa34f66a8
+  size: 1151
+  hash: md5
+  path: gfx950_attention_dense.kmd.json
+  remote: ingestor

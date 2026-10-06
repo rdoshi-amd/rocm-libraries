@@ -1,0 +1,6 @@
+outs:
+- md5: 5569bc93d0c540d99acc51be59c9f51b
+  size: 382
+  hash: md5
+  path: gfx950_attention_dense.ued.json
+  remote: ingestor

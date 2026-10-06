@@ -292,6 +292,28 @@ inline bool isWaitAluInst(const StinkyInstruction& inst) {
     return inst.getUnifiedOpcode() == GFX::s_wait_alu;
 }
 
+// The dscnt an existing s_wait_dscnt / s_wait_{load,store}cnt_dscnt waits for, or nullopt.
+// The literal is the emitted value; the modifier is only a fallback for s_wait_dscnt, since
+// legalization attaches a split group's whole spec to its last member.
+std::optional<unsigned> dsWaitCount(const StinkyInstruction& inst) {
+    if (!isWaitCnt(inst)) return std::nullopt;
+    const uint16_t op = inst.getUnifiedOpcode();
+    const bool packed = op == GFX::s_wait_loadcnt_dscnt || op == GFX::s_wait_storecnt_dscnt;
+    if (op != GFX::s_wait_dscnt && !packed) return std::nullopt;
+    for (const StinkyRegister& s : inst.getSrcRegs()) {
+        if (s.dataType != StinkyRegister::Type::LiteralInt) continue;
+        const int imm = s.getLiteralInt();
+        if (imm < 0 || (packed && !isValidPackedWaitCnt(imm))) return std::nullopt;
+        return static_cast<unsigned>(packed ? unpackDsWaitCnt(imm) : imm);
+    }
+    const auto* w = inst.getModifier<SWaitCntData>();
+    if (packed || w == nullptr) return std::nullopt;
+    const int n = (w->dlcnt >= 0 && w->dscnt >= 0) ? std::min(w->dlcnt, w->dscnt)
+                                                   : std::max(w->dlcnt, w->dscnt);
+    if (n < 0) return std::nullopt;
+    return static_cast<unsigned>(n);
+}
+
 // ---------------------------------------------------------------------------
 // True16 half-selectors
 // ---------------------------------------------------------------------------
@@ -578,6 +600,7 @@ class WaitcntBrackets {
         if (enqueuesFifoLds(ev)) ordLds = ++vmFifoUB[FIFO_LDS];
         if (enqueuesFifoTex(ev)) ordTex = ++vmFifoUB[FIFO_TEX];
         noteVmAnchor(ordLds, ordTex);
+        if (ev == EV_VGPR_LDS_READ) noteDsOp(ordLds);
 
         PASS_DEBUG(std::cerr << "[InsertWaitAlu]   stamp vm event=" << eventName(ev)
                              << " [vm ub=" << vmUB << " lb=" << vmLB << "]"
@@ -865,12 +888,36 @@ class WaitcntBrackets {
                 unsigned newLB = vmFifoUB[g] >= count ? vmFifoUB[g] - count : 0u;
                 if (newLB > vmFifoLB[g]) vmFifoLB[g] = newLB;
             }
+            pruneDsOrds();
             PASS_DEBUG(std::cerr << "[InsertWaitAlu]     apply vm_vsrc(" << count << ") [vm lb→"
                                  << vmLB << " ub=" << vmUB << "]" << " [LDS lb="
                                  << vmFifoLB[FIFO_LDS] << " ub=" << vmFifoUB[FIFO_LDS] << "]"
                                  << " [TEX lb=" << vmFifoLB[FIFO_TEX]
                                  << " ub=" << vmFifoUB[FIFO_TEX] << "]\n");
         }
+    }
+
+    // An existing s_wait_dscnt(count): DS ops complete in order, and one that completed has
+    // read its VGPRs, so every LDS-FIFO op up to the (count+1)-th newest DS op is drained.
+    // Ops dscnt also counts but dsOrds does not hold only make this credit less.
+    void applyDsWait(unsigned count) {
+        if (count < dsOrds.size()) {
+            const unsigned ord = dsOrds[dsOrds.size() - 1 - count];
+            if (ord > vmFifoLB[FIFO_LDS]) vmFifoLB[FIFO_LDS] = ord;
+        }
+        // A flat_* whose LDS ticket drained has read its VGPRs, so the TEX ops ahead of it
+        // have too. Done here, because a join drops an anchor whose LDS ticket is drained.
+        for (const auto& [k, s] : scores) {
+            if (s.anchorLds != 0 && s.anchorLds <= vmFifoLB[FIFO_LDS])
+                vmFifoLB[FIFO_TEX] = std::max(vmFifoLB[FIFO_TEX], s.anchorTex);
+            if (s.pairedFlat && s.vmOrdLds != 0 && s.vmOrdLds <= vmFifoLB[FIFO_LDS])
+                vmFifoLB[FIFO_TEX] = std::max(vmFifoLB[FIFO_TEX], s.vmOrdTex);
+        }
+        pruneDsOrds();
+        PASS_DEBUG(std::cerr << "[InsertWaitAlu]     apply dscnt(" << count
+                             << ") [LDS lb=" << vmFifoLB[FIFO_LDS] << " ub=" << vmFifoUB[FIFO_LDS]
+                             << "]" << " [TEX lb=" << vmFifoLB[FIFO_TEX]
+                             << " ub=" << vmFifoUB[FIFO_TEX] << "]\n");
     }
 
     // Widen this entry state with a predecessor's exit. Returns true (strictDom)
@@ -921,6 +968,8 @@ class WaitcntBrackets {
             vm.otherShift[g] = newUB - other.vmFifoUB[g];
             vmFifoUB[g] = newUB;
         }
+
+        mergeDsOrds(other, vm, strictDom);
 
         for (const auto& [k, _] : other.scores) scores.try_emplace(k);
 
@@ -1044,6 +1093,81 @@ class WaitcntBrackets {
         return std::max(ord, oldFloor) + shift;
     }
 
+    // Record a DS op's LDS-FIFO ordinal. Only the newest kDsOrdsCap are kept, which is as
+    // deep as an s_wait_dscnt can reach.
+    void noteDsOp(unsigned ordLds) {
+        dsOrds.push_back(ordLds);
+        pruneDsOrds();
+        if (dsOrds.size() <= kDsOrdsCap) return;
+        if (dsOrds.front() > vmFifoLB[FIFO_LDS]) dsOrdsComplete = false;
+        dsOrds.erase(dsOrds.begin());
+    }
+
+    // LDS-FIFO age at which vmFollowerHides counts an op drained; 0 when the arch has no such rule.
+    unsigned ldsFollowerDrainAge() const {
+        const int req = ctx->waitHide != nullptr ? ctx->waitHide->vmVsrcLds : 0;
+        return req > 0 ? static_cast<unsigned>(req) : 0u;
+    }
+
+    // First DS op a dscnt can still credit: not retired by vm_vsrc and younger than the follower
+    // drain. Without a follower rule, kDsOrdsCap bounds the age so a loop that never retires
+    // LDS tickets cannot grow the join forever.
+    size_t firstCreditableDsOrd(const std::vector<unsigned>& ords) const {
+        const unsigned lb = vmFifoLB[FIFO_LDS], ub = vmFifoUB[FIFO_LDS];
+        const unsigned drain = ldsFollowerDrainAge();
+        const unsigned maxAge = drain != 0 ? drain : static_cast<unsigned>(kDsOrdsCap);
+        auto it = std::find_if(ords.begin(), ords.end(),
+                               [&](unsigned ord) { return ord > lb && ub - ord < maxAge; });
+        return static_cast<size_t>(it - ords.begin());
+    }
+
+    // Drop DS ops a dscnt can prove nothing new about.
+    void pruneDsOrds() {
+        const size_t n = firstCreditableDsOrd(dsOrds);
+        // Past the kDsOrdsCap fallback an op may still be live, so the run is no longer complete.
+        if (ldsFollowerDrainAge() == 0 &&
+            std::any_of(dsOrds.begin(), dsOrds.begin() + n,
+                        [&](unsigned ord) { return ord > vmFifoLB[FIFO_LDS]; }))
+            dsOrdsComplete = false;
+        dsOrds.erase(dsOrds.begin(), dsOrds.begin() + n);
+    }
+
+    // Join the DS runs newest-first, keeping the older ordinal at each depth, so a later
+    // dscnt proves no more than it does on either path. A complete run's missing depths are
+    // drained ops, credited no higher than its floor; an incomplete run ends the join there.
+    void mergeDsOrds(const WaitcntBrackets& other, const SlotFrame& vm, bool& strictDom) {
+        auto at = [](const WaitcntBrackets& b, size_t depth, unsigned shift,
+                     unsigned floor) -> std::optional<unsigned> {
+            if (depth < b.dsOrds.size())
+                return std::max(b.dsOrds[b.dsOrds.size() - 1 - depth], floor) + shift;
+            if (b.dsOrdsComplete) return floor + shift;
+            return std::nullopt;
+        };
+        const unsigned myShift = vm.myShift[FIFO_LDS], myFloor = vm.myFloor[FIFO_LDS];
+        const unsigned oShift = vm.otherShift[FIFO_LDS], oFloor = vm.otherFloor[FIFO_LDS];
+        std::vector<unsigned> joined;  // newest first
+        bool complete = dsOrdsComplete && other.dsOrdsComplete;
+        const size_t depth = std::max(dsOrds.size(), other.dsOrds.size());
+        for (size_t d = 0; d < depth; ++d) {
+            const auto m = at(*this, d, myShift, myFloor);
+            const auto o = at(other, d, oShift, oFloor);
+            if (!m || !o) {
+                complete = false;
+                break;
+            }
+            joined.push_back(std::min(*m, *o));
+        }
+        // Both sides in the widened frame, pruned alike, so a converged join compares equal.
+        std::vector<unsigned> mine = dsOrds;
+        for (unsigned& ord : mine) ord += myShift;
+        mine.erase(mine.begin(), mine.begin() + firstCreditableDsOrd(mine));
+        const bool wasComplete = dsOrdsComplete;
+        dsOrds.assign(joined.rbegin(), joined.rend());
+        dsOrdsComplete = complete;
+        pruneDsOrds();
+        if (dsOrds != mine || dsOrdsComplete != wasComplete) strictDom = true;
+    }
+
     static void takeLater(unsigned& myOrd, unsigned myS, unsigned oS, bool& strictDom,
                           const char* slot) {
         if (oS > myS) {
@@ -1076,6 +1200,11 @@ class WaitcntBrackets {
     // VM_VSRC per-FIFO UB/LB.
     std::array<unsigned, NUM_VM_FIFOS> vmFifoUB = {};
     std::array<unsigned, NUM_VM_FIFOS> vmFifoLB = {};
+    // LDS-FIFO ordinals of the newest undrained DS ops (the ops dscnt counts), oldest first,
+    // with no DS op missing between them. Complete: it also holds every undrained DS op.
+    static constexpr size_t kDsOrdsCap = kWaitCntMax + 1;
+    std::vector<unsigned> dsOrds;
+    bool dsOrdsComplete = true;
     std::unordered_map<RegKey, VgprStamp, RegKeyHash> scores;
     // Owned by the pass instance, which outlives every bracket it builds.
     const WaitAluContext* ctx;
@@ -1164,6 +1293,13 @@ Step stepInstruction(WaitcntBrackets& sb, const StinkyInstruction& inst,
             if (data->hasField(SWaitAluData::VM_VSRC))
                 sb.applyWaitcnt(CT_VM_VSRC, data->getField(SWaitAluData::VM_VSRC));
         }
+        step.kind = StepKind::AbsorbWait;
+        return step;
+    }
+
+    // Pre-existing s_wait_dscnt: the DS ops it drains have read their VGPRs.
+    if (const auto dsCount = dsWaitCount(inst)) {
+        sb.applyDsWait(*dsCount);
         step.kind = StepKind::AbsorbWait;
         return step;
     }

@@ -1,0 +1,249 @@
+# RUN: %stinkytofu-opt --arch gfx1250 %s --CFGBuilderPass --InsertWaitAluPass --print-output
+#
+# An s_wait_dscnt already in the stream drains DS ops in order, and a DS op that completed
+# has read its VGPRs. So an overwrite of a DS op's address after a dscnt that covers it
+# needs no vm_vsrc wait.
+
+#--- dscnt 0 covers the only ds_load: no wait before the overwrite of its address.
+# CHECK-LABEL: @dscnt0_drains_reader
+# CHECK: "st.s_wait_dscnt"
+# CHECK-NOT: vm_vsrc
+# CHECK: v0 = "st.v_xor_b32"
+st.func @dscnt0_drains_reader() {
+^entry:
+  v100 = "st.ds_load_b32"(v0) { issueCycles = 1, latencyCycles = 52, mod.ds = { na = 1, offset = 0, gds = false } }
+  "st.s_wait_dscnt"(0)
+  v0 = "st.v_xor_b32"(v1, v0) { issueCycles = 1, latencyCycles = 5 }
+}
+
+#--- Without the dscnt the same overwrite waits for the read.
+# CHECK-LABEL: @no_dscnt_waits
+# CHECK: "st.s_wait_alu"
+# CHECK-SAME: vm_vsrc = 0
+# CHECK-NEXT: v0 = "st.v_xor_b32"
+st.func @no_dscnt_waits() {
+^entry:
+  v100 = "st.ds_load_b32"(v0) { issueCycles = 1, latencyCycles = 52, mod.ds = { na = 1, offset = 0, gds = false } }
+  v0 = "st.v_xor_b32"(v1, v0) { issueCycles = 1, latencyCycles = 5 }
+}
+
+#--- dscnt 1 leaves only the newest ds_load outstanding, so the older reader of v1 is done.
+# CHECK-LABEL: @dscnt1_drains_older
+# CHECK: "st.s_wait_dscnt"
+# CHECK-NOT: vm_vsrc
+# CHECK: v1 = "st.v_mov_b32"
+st.func @dscnt1_drains_older() {
+^entry:
+  v100 = "st.ds_load_b32"(v0) { issueCycles = 1, latencyCycles = 52, mod.ds = { na = 1, offset = 0, gds = false } }
+  v101 = "st.ds_load_b32"(v1) { issueCycles = 1, latencyCycles = 52, mod.ds = { na = 1, offset = 0, gds = false } }
+  v102 = "st.ds_load_b32"(v2) { issueCycles = 1, latencyCycles = 52, mod.ds = { na = 1, offset = 0, gds = false } }
+  "st.s_wait_dscnt"(1)
+  v1 = "st.v_mov_b32"(v200) { issueCycles = 1, latencyCycles = 5 }
+}
+
+#--- ... but not the newest one, which it allows to stay in flight.
+# CHECK-LABEL: @dscnt1_keeps_newest
+# CHECK: "st.s_wait_dscnt"
+# CHECK: "st.s_wait_alu"
+# CHECK-SAME: vm_vsrc = 0
+# CHECK-NEXT: v2 = "st.v_mov_b32"
+st.func @dscnt1_keeps_newest() {
+^entry:
+  v100 = "st.ds_load_b32"(v0) { issueCycles = 1, latencyCycles = 52, mod.ds = { na = 1, offset = 0, gds = false } }
+  v101 = "st.ds_load_b32"(v1) { issueCycles = 1, latencyCycles = 52, mod.ds = { na = 1, offset = 0, gds = false } }
+  v102 = "st.ds_load_b32"(v2) { issueCycles = 1, latencyCycles = 52, mod.ds = { na = 1, offset = 0, gds = false } }
+  "st.s_wait_dscnt"(1)
+  v2 = "st.v_mov_b32"(v200) { issueCycles = 1, latencyCycles = 5 }
+}
+
+#--- The packed form's ds half counts too (0x0100: loadcnt 1, dscnt 0).
+# CHECK-LABEL: @packed_loadcnt_dscnt
+# CHECK: "st.s_wait_loadcnt_dscnt"
+# CHECK-NOT: vm_vsrc
+# CHECK: v0 = "st.v_mov_b32"
+st.func @packed_loadcnt_dscnt() {
+^entry:
+  v100 = "st.ds_load_b32"(v0) { issueCycles = 1, latencyCycles = 52, mod.ds = { na = 1, offset = 0, gds = false } }
+  "st.s_wait_loadcnt_dscnt"(256)
+  v0 = "st.v_mov_b32"(v200) { issueCycles = 1, latencyCycles = 5 }
+}
+
+#--- dscnt says nothing about a TEX read.
+# CHECK-LABEL: @dscnt_ignores_tex
+# CHECK: "st.s_wait_dscnt"
+# CHECK: "st.s_wait_alu"
+# CHECK-SAME: vm_vsrc = 0
+# CHECK-NEXT: v0 = "st.v_mov_b32"
+st.func @dscnt_ignores_tex() {
+^entry:
+  v100 = "st.buffer_load_b32"(v0) { issueCycles = 1, latencyCycles = 100 }
+  "st.s_wait_dscnt"(0)
+  v0 = "st.v_mov_b32"(v200) { issueCycles = 1, latencyCycles = 5 }
+}
+
+#--- One path issues a second ds_load, so after the join dscnt 1 proves the reader of v0
+#--- done on that path only. The wait stands.
+# CHECK-LABEL: @join_dscnt1_one_path_short
+# CHECK: "st.s_wait_dscnt"
+# CHECK: "st.s_wait_alu"
+# CHECK-SAME: vm_vsrc = 0
+# CHECK-NEXT: v0 = "st.v_mov_b32"
+st.func @join_dscnt1_one_path_short() {
+^entry:
+  v100 = "st.ds_load_b32"(v0) { issueCycles = 1, latencyCycles = 52, mod.ds = { na = 1, offset = 0, gds = false } }
+  "st.s_cbranch_scc1"("label_join1", SCC0)
+  Successors: ^bb_side1, ^label_join1
+^bb_side1:
+  v101 = "st.ds_load_b32"(v5) { issueCycles = 1, latencyCycles = 52, mod.ds = { na = 1, offset = 0, gds = false } }
+  Successors: ^label_join1
+^label_join1:
+  "st.s_wait_dscnt"(1)
+  v0 = "st.v_mov_b32"(v200) { issueCycles = 1, latencyCycles = 5 }
+}
+
+#--- The join issues a later ds_load, so dscnt 1 proves the reader of v0 done on both
+#--- paths, however many ds_loads the side path adds.
+# CHECK-LABEL: @join_dscnt1_both_paths
+# CHECK: "st.s_wait_dscnt"
+# CHECK-NOT: vm_vsrc
+# CHECK: v0 = "st.v_mov_b32"
+st.func @join_dscnt1_both_paths() {
+^entry:
+  v100 = "st.ds_load_b32"(v0) { issueCycles = 1, latencyCycles = 52, mod.ds = { na = 1, offset = 0, gds = false } }
+  "st.s_cbranch_scc1"("label_join2", SCC0)
+  Successors: ^bb_side2, ^label_join2
+^bb_side2:
+  v101 = "st.ds_load_b32"(v5) { issueCycles = 1, latencyCycles = 52, mod.ds = { na = 1, offset = 0, gds = false } }
+  v102 = "st.ds_load_b32"(v6) { issueCycles = 1, latencyCycles = 52, mod.ds = { na = 1, offset = 0, gds = false } }
+  Successors: ^label_join2
+^label_join2:
+  v103 = "st.ds_load_b32"(v7) { issueCycles = 1, latencyCycles = 52, mod.ds = { na = 1, offset = 0, gds = false } }
+  "st.s_wait_dscnt"(1)
+  v0 = "st.v_mov_b32"(v200) { issueCycles = 1, latencyCycles = 5 }
+}
+
+#--- Loop: the swap at the top of the body overwrites the address the previous iteration's
+#--- ds_load read, and that iteration drained it with dscnt 0 before the back edge.
+# CHECK-LABEL: @loop_swap_after_dscnt
+# CHECK: label_loop
+# CHECK-NOT: vm_vsrc
+# CHECK: v0 = "st.v_xor_b32"
+# CHECK: "st.s_wait_dscnt"
+st.func @loop_swap_after_dscnt() {
+^entry:
+  v0 = "st.v_mov_b32"(v200) { issueCycles = 1, latencyCycles = 5 }
+  Successors: ^label_loop
+^label_loop:
+  v0 = "st.v_xor_b32"(v1, v0) { issueCycles = 1, latencyCycles = 5 }
+  v100 = "st.ds_load_b32"(v0) { issueCycles = 1, latencyCycles = 52, mod.ds = { na = 1, offset = 0, gds = false } }
+  v101 = "st.ds_load_b32"(v0) { issueCycles = 1, latencyCycles = 52, mod.ds = { na = 1, offset = 0, gds = false } }
+  "st.s_wait_dscnt"(0)
+  "st.s_cbranch_scc1"("label_loop", SCC0)
+  Successors: ^label_loop, ^bb_exit
+^bb_exit:
+  v2 = "st.v_mov_b32"(v200) { issueCycles = 1, latencyCycles = 5 }
+}
+
+#--- The flat after the TEX-only prefetch anchors it. dscnt 0 drains the flat's LDS ticket
+#--- along with the ds_loads, so the flat has read its address, and the TEX order puts the
+#--- prefetch ahead of it: no wait, though only 2 reads follow the flat.
+# CHECK-LABEL: @dscnt_drains_anchor
+# CHECK: "st.s_wait_dscnt"
+# CHECK-NOT: vm_vsrc
+# CHECK: v0 = "st.v_mov_b32"
+st.func @dscnt_drains_anchor() {
+^entry:
+  "st.global_prefetch_b8"(v[0:1], off) { issueCycles = 1, latencyCycles = 1 }
+  "st.flat_prefetch_b8"(v[2:3]) { issueCycles = 1, latencyCycles = 1 }
+  v100 = "st.ds_load_b32"(v40) { issueCycles = 1, latencyCycles = 52, mod.ds = { na = 1, offset = 0, gds = false } }
+  v101 = "st.ds_load_b32"(v40) { issueCycles = 1, latencyCycles = 52, mod.ds = { na = 1, offset = 0, gds = false } }
+  "st.s_wait_dscnt"(0)
+  v0 = "st.v_mov_b32"(v41) { issueCycles = 1, latencyCycles = 1 }
+}
+
+#--- The same across a block boundary: the join drops the drained anchor, so the dscnt has
+#--- to have retired the prefetch already.
+# CHECK-LABEL: @dscnt_drains_anchor_across_block
+# CHECK: "st.s_wait_dscnt"
+# CHECK-NOT: vm_vsrc
+# CHECK: v0 = "st.v_mov_b32"
+st.func @dscnt_drains_anchor_across_block() {
+^entry:
+  "st.global_prefetch_b8"(v[0:1], off) { issueCycles = 1, latencyCycles = 1 }
+  "st.flat_prefetch_b8"(v[2:3]) { issueCycles = 1, latencyCycles = 1 }
+  v100 = "st.ds_load_b32"(v40) { issueCycles = 1, latencyCycles = 52, mod.ds = { na = 1, offset = 0, gds = false } }
+  v101 = "st.ds_load_b32"(v40) { issueCycles = 1, latencyCycles = 52, mod.ds = { na = 1, offset = 0, gds = false } }
+  "st.s_wait_dscnt"(0)
+  "st.s_cbranch_scc1"("label_exit3", SCC0)
+  Successors: ^bb_body3, ^label_exit3
+^bb_body3:
+  v0 = "st.v_mov_b32"(v41) { issueCycles = 1, latencyCycles = 1 }
+  Successors: ^label_exit3
+^label_exit3:
+  v2 = "st.v_mov_b32"(v41) { issueCycles = 1, latencyCycles = 1 }
+}
+
+#--- dscnt 2 leaves both ds_loads in flight, and the flat ahead of them with them: the
+#--- prefetch keeps its wait.
+# CHECK-LABEL: @dscnt_short_of_anchor
+# CHECK: "st.s_wait_dscnt"
+# CHECK: "st.s_wait_alu"
+# CHECK-SAME: vm_vsrc
+# CHECK-NEXT: v0 = "st.v_mov_b32"
+st.func @dscnt_short_of_anchor() {
+^entry:
+  "st.global_prefetch_b8"(v[0:1], off) { issueCycles = 1, latencyCycles = 1 }
+  "st.flat_prefetch_b8"(v[2:3]) { issueCycles = 1, latencyCycles = 1 }
+  v100 = "st.ds_load_b32"(v40) { issueCycles = 1, latencyCycles = 52, mod.ds = { na = 1, offset = 0, gds = false } }
+  v101 = "st.ds_load_b32"(v40) { issueCycles = 1, latencyCycles = 52, mod.ds = { na = 1, offset = 0, gds = false } }
+  "st.s_wait_dscnt"(2)
+  v0 = "st.v_mov_b32"(v41) { issueCycles = 1, latencyCycles = 1 }
+}
+
+#--- GSU busy-wait shape: each trip adds a flat_atomic LDS ticket that no vm_vsrc retires, so
+#--- the ds_loads ahead of the loop age past the follower drain. The join must drop them
+#--- rather than chase the growing window, or the fixed point never converges.
+#--- The wait after the loop stays: v0's stamp joins to its first-trip position, which the
+#--- older position a dscnt credits on the back-edge path does not reach.
+# CHECK-LABEL: @spin_loop_ages_out_ds_ops
+# CHECK: label_spin
+# CHECK: flat_atomic_dec_u32
+# CHECK: "st.s_wait_dscnt"
+# CHECK-NEXT: "st.s_wait_alu"
+# CHECK-SAME: vm_vsrc
+# CHECK-NEXT: v0 = "st.v_mov_b32"
+st.func @spin_loop_ages_out_ds_ops() {
+^entry:
+  v100 = "st.ds_load_b32"(v0) { issueCycles = 1, latencyCycles = 52, mod.ds = { na = 1, offset = 0, gds = false } }
+  v101 = "st.ds_load_b32"(v1) { issueCycles = 1, latencyCycles = 52, mod.ds = { na = 1, offset = 0, gds = false } }
+  Successors: ^label_spin
+^label_spin:
+  v28 = "st.flat_atomic_dec_u32"(v[26:27], v25, s[6:7])
+  "st.s_wait_loadcnt"(0)
+  s32 = "st.v_readfirstlane_b32"(v28)
+  "st.s_cbranch_scc0"("label_spin", SCC0)
+  Successors: ^label_spin, ^bb_spin_exit
+^bb_spin_exit:
+  "st.s_wait_dscnt"(0)
+  v0 = "st.v_mov_b32"(v200) { issueCycles = 1, latencyCycles = 5 }
+}
+
+#--- A loop that adds no LDS ticket keeps the credit: dscnt 1 after it still proves the older
+#--- ds_load done, with only one read behind it.
+# CHECK-LABEL: @valu_loop_keeps_ds_credit
+# CHECK: "st.s_wait_dscnt"
+# CHECK-NOT: vm_vsrc
+# CHECK: v0 = "st.v_mov_b32"
+st.func @valu_loop_keeps_ds_credit() {
+^entry:
+  v100 = "st.ds_load_b32"(v0) { issueCycles = 1, latencyCycles = 52, mod.ds = { na = 1, offset = 0, gds = false } }
+  v101 = "st.ds_load_b32"(v1) { issueCycles = 1, latencyCycles = 52, mod.ds = { na = 1, offset = 0, gds = false } }
+  Successors: ^label_valu_loop
+^label_valu_loop:
+  v50 = "st.v_add_nc_u32"(v50, v51) { issueCycles = 1, latencyCycles = 5 }
+  "st.s_cbranch_scc0"("label_valu_loop", SCC0)
+  Successors: ^label_valu_loop, ^bb_valu_exit
+^bb_valu_exit:
+  "st.s_wait_dscnt"(1)
+  v0 = "st.v_mov_b32"(v200) { issueCycles = 1, latencyCycles = 5 }
+}

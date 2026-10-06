@@ -30,6 +30,21 @@ if(NOT HIPBLASLT_ENABLE_JIT)
     add_executable(hipblaslt-jit-disabled-test disabled_api_test.cpp)
     target_link_libraries(hipblaslt-jit-disabled-test PRIVATE roc::hipblaslt hip::host)
     hipblaslt_jit_test(jit-disabled jit-cpu hipblaslt-jit-disabled-test)
+
+    # HIPBLASLT_JIT must not change heuristic queries when JIT is not built.
+    set(hipblaslt_jit_gpu OFF)
+    foreach(target IN LISTS GPU_TARGETS)
+        string(REGEX REPLACE ":.*" "" architecture "${target}")
+        if(IS_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/data/${architecture}")
+            set(hipblaslt_jit_gpu ON)
+        endif()
+    endforeach()
+    if(hipblaslt_jit_gpu AND NOT HIPBLASLT_ENABLE_YAML)
+        add_executable(hipblaslt-jit-heuristic-test jit_heuristic_test.cpp)
+        target_link_libraries(hipblaslt-jit-heuristic-test PRIVATE roc::hipblaslt hip::device)
+        hipblaslt_jit_test(jit-heuristic-ignored jit-gpu hipblaslt-jit-heuristic-test ignored)
+        set_tests_properties(jit-heuristic-ignored PROPERTIES ENVIRONMENT "HIPBLASLT_JIT=2")
+    endif()
     return()
 endif()
 
@@ -88,3 +103,22 @@ target_link_libraries(hipblaslt-jit-end-to-end-test PRIVATE roc::hipblaslt hip::
 hipblaslt_jit_test(jit-end-to-end jit-gpu hipblaslt-jit-end-to-end-test
     "${hipblaslt_jit_bundles}")
 set_tests_properties(jit-end-to-end PROPERTIES FIXTURES_REQUIRED jit-bundles)
+
+# One process per mode: HIPBLASLT_JIT is read once. The test sets
+# HIPBLASLT_JIT_TEST_REPLAY to the device's plain-pair bundle.
+add_executable(hipblaslt-jit-heuristic-test jit_heuristic_test.cpp)
+target_link_libraries(hipblaslt-jit-heuristic-test PRIVATE roc::hipblaslt hip::device)
+foreach(mode IN ITEMS off fallback forced)
+    if(mode STREQUAL "off")
+        set(hipblaslt_jit_mode_value 0)
+    elseif(mode STREQUAL "fallback")
+        set(hipblaslt_jit_mode_value 1)
+    else()
+        set(hipblaslt_jit_mode_value 2)
+    endif()
+    hipblaslt_jit_test(jit-heuristic-${mode} jit-gpu hipblaslt-jit-heuristic-test
+        ${mode} "${hipblaslt_jit_bundles}")
+    set_tests_properties(jit-heuristic-${mode} PROPERTIES
+        FIXTURES_REQUIRED jit-bundles
+        ENVIRONMENT "HIPBLASLT_JIT=${hipblaslt_jit_mode_value}")
+endforeach()

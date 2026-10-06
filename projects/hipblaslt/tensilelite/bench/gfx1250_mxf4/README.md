@@ -56,7 +56,8 @@ so setting it *and* `HIP_VISIBLE_DEVICES=3` filters the filtered list and the cl
 The `TX_PERF_SEL_VMW_*` counters read 0 until a per-XCC register is set on the card being
 profiled. umr's `-i` is the DRM instance, not the HIP device index; map them with
 `sudo cat /sys/kernel/debug/dri/<N>/name` against `rocm-smi --showbus`. On this box GPU 3
-(PCI `0004:01:00.0`) is instance 25 (GPU 0 is 1, GPU 1 is 9, GPU 2 is 17):
+(PCI `0004:01:00.0`) is instance 25 (GPU 0 is 1, GPU 1 is 9, GPU 2 is 17). The writes do not
+survive a GPU reset or reboot:
 
 ```bash
 for r in 0x3b120 0x7b120 0xbb120 0xfb120 0x13b120 0x17b120 0x1bb120 0x1fb120; do

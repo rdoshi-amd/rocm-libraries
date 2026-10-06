@@ -10,7 +10,7 @@ jobs:
     att_shader_engine_mask: "0xF"
     att_simd_select: "0xF"
     att_buffer_size: "0x40000000"
-    att_gpu_index: "0"          # visible GPU 0 == physical GPU 2 (HIP_VISIBLE_DEVICES)
+    att_gpu_index: "0"          # visible GPU 0 == physical GPU 3 (HIP_VISIBLE_DEVICES)
     output_format:
       - json
       - csv

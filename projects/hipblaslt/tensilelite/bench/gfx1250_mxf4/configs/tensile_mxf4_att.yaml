@@ -11,7 +11,7 @@ GlobalParameters:
   NumWarmups: 1
   NumElementsToValidate: 0
   PrintLevel: 2
-  Device: 0   # first visible GPU; run.sh sets HIP_VISIBLE_DEVICES=2
+  Device: 0   # first visible GPU; run.sh sets HIP_VISIBLE_DEVICES=3
   CMakeBuildType: Release
   KernelTime: True
   DataInitTypeA: 3

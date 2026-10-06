@@ -120,43 +120,106 @@ def _emitBodySetupBranch(module, loopBody, setupInsts, branch, hoist):
 
 # LDSSegmentInterleave=2 read order per LDS read port: (tensor, reversed). Segment 0 holds A and
 # SA, segment 1 holds B and SB, and the two ports walk the segments in opposite order. The B-first
-# port takes B and SB reversed so its first reads target the registers the preceding MFMAs
+# order takes B and SB reversed so its first reads target the registers the preceding MFMAs
 # finished with longest ago.
 LR_ORDER_A_FIRST = (('A', False), ('SA', False), ('B', False), ('SB', False))
 LR_ORDER_B_FIRST = (('B', True), ('SB', True), ('A', False), ('SA', False))
+# (order before the barriers, order in the group right after them). Each copy flips its order in
+# the post-barrier group, so across the barrier-free step from that group into the next
+# iteration both copies stay in the segment they were in.
+LR_ORDERS_EVEN = (LR_ORDER_A_FIRST, LR_ORDER_B_FIRST)
+LR_ORDERS_ODD = (LR_ORDER_B_FIRST, LR_ORDER_A_FIRST)
+# Both copies run in lockstep from the barriers, and per phase B+SB take more read slots than
+# A+SA, so a copy would reach its second segment while the other copy is still reading it. Each
+# copy holds its second-segment reads until (slack, post-barrier slack) MFMAs after the other
+# copy's last read of that segment; after the barriers the other port is still draining its burst.
+LR_GATE_EVEN = (6, 16)
+LR_GATE_ODD = (6, 16)
 
 
-def _reorderLocalReads(scheduled, tensorOf, order):
+def _reorderLocalReads(scheduled, tensorOf, orders, gate=None):
     """Refill the ds_read slots of a scheduled group in the given tensor order.
 
-    Slot positions are unchanged; only which read fills each slot changes, and
-    reads are never moved across a non-MFMA instruction (waits, barriers, offset
+    orders = (order, burstOrder): burstOrder is used in runs that open with a
+    read (right after the barriers), order elsewhere. Each order is a sequence of
+    (tensor, reversed) whose first two tensors share one LDS segment.
+
+    Slot positions are unchanged; only which read fills each slot changes. Reads
+    are never moved across a non-MFMA instruction (waits, barriers, offset
     swaps), so no wait count or address dependency changes.
 
-    tensorOf maps id(ds_read) -> tensor; order is a sequence of (tensor, reversed).
-    Returns a rebuilt flat Module.
+    With gate = (slack, burstSlack), reads of a run's second segment are also
+    delayed until slack (burstSlack) MFMAs after the slot where the opposite
+    order finishes that segment, and spread evenly over the run's remaining
+    MFMAs. Reads only move later, never past the end of their run, so they
+    still land before the wait that consumes them.
+
+    tensorOf maps id(ds_read) -> tensor. Returns a rebuilt flat Module.
     """
     from rocisa.code import TextBlock
     from rocisa.instruction import MFMAInstruction, MXMFMAInstruction
 
     items = scheduled.flatitems()
-    runs = [[]]
-    for idx, it in enumerate(items):
-        if id(it) in tensorOf:
-            runs[-1].append(idx)
-        elif not isinstance(it, (TextBlock, MFMAInstruction, MXMFMAInstruction)):
-            runs.append([])
-    for run in runs:
-        refill = []
-        for tensor, rev in order:
-            reads = [items[i] for i in run if tensorOf[id(items[i])] == tensor]
-            refill += reads[::-1] if rev else reads
-        assert len(refill) == len(run), "read order must cover every reordered tensor"
-        for i, it in zip(run, refill):
-            items[i] = it
+    isMfma = lambda it: isinstance(it, (MFMAInstruction, MXMFMAInstruction))
+    isBoundary = lambda it: (id(it) not in tensorOf and not isinstance(it, TextBlock)
+                             and not isMfma(it))
+    out, start = [], 0
+    while start < len(items):
+        end = start
+        while end < len(items) and not isBoundary(items[end]):
+            end += 1
+        span = items[start:end]
+        slots = [k for k, x in enumerate(span) if id(x) in tensorOf]
+        if slots:
+            burst = slots[0] == next(k for k, x in enumerate(span) if not isinstance(x, TextBlock))
+            order = orders[1] if burst else orders[0]
+            refill = []
+            for tensor, rev in order:
+                reads = [span[k] for k in slots if tensorOf[id(span[k])] == tensor]
+                refill += reads[::-1] if rev else reads
+            assert len(refill) == len(slots), "read order must cover every reordered tensor"
+            for k, x in zip(slots, refill):
+                span[k] = x
+
+            laterSeg = {t for t, _ in order[2:]}
+            nLater = sum(1 for x in refill if tensorOf[id(x)] in laterSeg)
+            if gate is not None and 0 < nLater < len(refill):
+                # The opposite order fills the same slots with this run's second segment first,
+                # so its last read of that segment sits in slot nLater-1.
+                lastSlot = slots[nLater - 1]
+                gateAt = (gate[1] if burst else gate[0]) + 1 \
+                    + sum(1 for x in span[:lastSlot] if isMfma(x))
+                nMfma = sum(1 for x in span if isMfma(x))
+                gated, mfmas, seenEarlier = [], 0, False
+                for x in span:
+                    if isMfma(x):
+                        mfmas += 1
+                    elif id(x) in tensorOf:
+                        if tensorOf[id(x)] not in laterSeg:
+                            seenEarlier = True
+                        elif seenEarlier:
+                            gated.append((x, mfmas))
+                first = min(gateAt, nMfma)
+                target = {id(x): max(origK, first + j * (nMfma - first) // len(gated))
+                          for j, (x, origK) in enumerate(gated)}
+                rebuilt, pending, mfmas = [], [], 0
+                for x in span:
+                    if id(x) in target and (pending or target[id(x)] > mfmas):
+                        pending.append(x)
+                        continue
+                    rebuilt.append(x)
+                    if isMfma(x):
+                        mfmas += 1
+                        while pending and target[id(pending[0])] <= mfmas:
+                            rebuilt.append(pending.pop(0))
+                span = rebuilt + pending
+        out += span
+        if end < len(items):
+            out.append(items[end])
+        start = end + 1
 
     rebuilt = Module(scheduled.name)
-    for it in items:
+    for it in out:
         rebuilt.add(it)
     return rebuilt
 
@@ -3451,7 +3514,8 @@ class LogicalScheduler:
         self._preloop_emitted = [[emitted]]
         return self._preloop_emitted
 
-    def _emitLoop(self, writer, kernel, label, emitted_3d, schedule=True, lrOrder=None):
+    def _emitLoop(self, writer, kernel, label, emitted_3d, schedule=True, lrOrder=None,
+                  lrGate=None):
         """Emit a loop section from a 3D emitted structure.
 
         emitted_3d: [partition][subIterK][EmittedModule]
@@ -3459,7 +3523,7 @@ class LogicalScheduler:
         When schedule=True and a group has MFMAs, calls instructionSchedule
         for interleaving. When schedule=False, emits instructions sequentially.
         lrOrder refills each scheduled group's ds_read slots in that tensor
-        order (see _reorderLocalReads).
+        order, and lrGate delays its second segment (see _reorderLocalReads).
         """
         from Tensile.Components.Subtile.InstructionScheduler import (
             instructionSchedule,
@@ -3501,14 +3565,14 @@ class LogicalScheduler:
                         minGapDsReadToWait=minGapDsReadToWait)
                     if lrOrder:
                         from rocisa.instruction import LocalReadInstruction
-                        orderTensors = {t for t, _ in lrOrder}
+                        orderTensors = {t for order in lrOrder for t, _ in order}
                         tensorOf = {id(inst): em.source.tensor
                                     for em in em_list
                                     if em.opType == 'lr' and em.source.tensor in orderTensors
                                     for item in em.instructions
                                     for inst in (item.flatitems() if isinstance(item, Module) else [item])
                                     if isinstance(inst, LocalReadInstruction)}
-                        scheduled = _reorderLocalReads(scheduled, tensorOf, lrOrder)
+                        scheduled = _reorderLocalReads(scheduled, tensorOf, lrOrder, lrGate)
                     module.add(scheduled)
                 else:
                     for em in em_list:
@@ -3668,6 +3732,63 @@ class LogicalScheduler:
 
             return emitted_3d
 
+        # LDSSegmentInterleave=2: A+SA and B+SB sit in different LDS segments and wave bit 0 picks
+        # the LDS read port. Even waves read A+SA then B+SB, odd waves run copies that read B+SB
+        # then A+SA, so the two ports read different segments.
+        portSplit = kernel.get("LDSSegmentInterleave") == 2
+
+        def branchOddWaves(target, comment, mod=None):
+            from rocisa.instruction import VReadfirstlaneB32, SBitcmp1B32
+            from rocisa.container import vgpr
+            mod = module if mod is None else mod
+            with writer.allocTmpSgpr(1) as tmpSgprRes:
+                waveSgpr = sgpr(tmpSgprRes.idx)
+                mod.add(VReadfirstlaneB32(waveSgpr, vgpr("Serial"), "first tId"))
+                mod.add(SBitcmp1B32(waveSgpr, int(math.log2(kernel["WavefrontSize"])),
+                                    "wave bit 0: LDS read port"))
+                mod.add(SCBranchSCC1(labelName=target.getLabelName(), comment=comment))
+
+        def splitPreloopReads(preloop, emitted):
+            """Give odd waves a B-first copy of the preloop's ds_read burst."""
+            from rocisa.code import TextBlock
+            from rocisa.instruction import LocalReadInstruction
+            tensorOf = {id(inst): em.source.tensor
+                        for em in emitted[0][0] if em.opType == 'lr'
+                        for item in em.instructions
+                        for inst in (item.flatitems() if isinstance(item, Module) else [item])
+                        if isinstance(inst, LocalReadInstruction)}
+            items = preloop.flatitems()
+            idx = [k for k, x in enumerate(items) if id(x) in tensorOf]
+            if not idx or any(id(x) not in tensorOf and not isinstance(x, TextBlock)
+                              for x in items[idx[0]:idx[-1] + 1]):
+                return preloop
+            reads = [items[k] for k in idx]
+
+            def ordered(order):
+                out = []
+                for tensor, rev in order:
+                    r = [x for x in reads if tensorOf[id(x)] == tensor]
+                    out += r[::-1] if rev else r
+                assert len(out) == len(reads), "read order must cover every preloop read"
+                return out
+
+            portB = Label("PreloopReadsPortB", "")
+            join = Label("PreloopReadsJoin", "")
+            split = Module(preloop.name)
+            for x in items[:idx[0]]:
+                split.add(x)
+            branchOddWaves(portB, "odd waves: B-first preloop reads", split)
+            for x in ordered(LR_ORDER_A_FIRST):
+                split.add(x)
+            split.add(SBranch(labelName=join.getLabelName(), comment="even waves: skip B-first reads"))
+            split.add(portB)
+            for x in ordered(LR_ORDER_B_FIRST):
+                split.add(copy.deepcopy(x))
+            split.add(join)
+            for x in items[idx[-1] + 1:]:
+                split.add(x)
+            return split
+
         # ── accumulator init (initC) ──
         # initC happens in preloop, between GR issue and WaitGR so the zeroing
         # MFMAs overlap the in-flight global reads. Every path must reach initC (mirrors the non-Subtile flow):
@@ -3708,8 +3829,8 @@ class LogicalScheduler:
                 em_list.insert(init_idx, EmittedModule(
                     moduleId=next_id,
                     instructions=[skipGRLabel]))
-        module.add(self._emitLoop(writer, kernel, "PRELOOP",
-                                  preloop_emitted, schedule=False))
+        preloop = self._emitLoop(writer, kernel, "PRELOOP", preloop_emitted, schedule=False)
+        module.add(splitPreloopReads(preloop, preloop_emitted) if portSplit else preloop)
 
         # ── Mainloop ──
         module.addComment0("MAINLOOP")
@@ -3718,23 +3839,10 @@ class LogicalScheduler:
         exitValue = self.config.pgr
 
         exitLabels = [Label(f"ExitC{ui}", "") for ui in range(uf - 1)]
-        # LDSSegmentInterleave=2: A+SA and B+SB sit in different LDS segments and wave bit 0 picks
-        # the LDS read port. Even waves read A+SA then B+SB, odd waves run a mainloop copy that
-        # reads B+SB then A+SA, so the two ports read different segments. Exit paths (NGLL/NLL)
-        # stay shared.
-        portSplit = kernel.get("LDSSegmentInterleave") == 2
         loopBeginB = Label("LoopBeginL_PortB", "", alignment=16) if portSplit else None
         loopEnd = Label("MainloopPortsJoin", "") if portSplit else None
         if portSplit:
-            from rocisa.instruction import VReadfirstlaneB32, SBitcmp1B32
-            from rocisa.container import vgpr
-            with writer.allocTmpSgpr(1) as tmpSgprRes:
-                waveSgpr = sgpr(tmpSgprRes.idx)
-                module.add(VReadfirstlaneB32(waveSgpr, vgpr("Serial"), "first tId"))
-                module.add(SBitcmp1B32(waveSgpr, int(math.log2(kernel["WavefrontSize"])),
-                                       "wave bit 0: LDS read port"))
-                module.add(SCBranchSCC1(labelName=loopBeginB.getLabelName(),
-                                        comment="odd waves: B-first mainloop"))
+            branchOddWaves(loopBeginB, "odd waves: B-first mainloop")
         # Debug: emit `s_mov_b32 m0, LoopCounterL; s_ttracedata` at the start of
         # every mainloop iteration so SQTT / trace decoders can identify iterations
         # (adds 2 instructions per iter). Gated by the EmitMainloopTraceMarker global.
@@ -3744,7 +3852,7 @@ class LogicalScheduler:
             from rocisa.instruction import SMovB32 as _SMovB32
             from rocisa.instruction import STtraceData as _STtraceData
 
-        def emitMainloopCopies(begin, lrOrder, suffix, ownCopy):
+        def emitMainloopCopies(begin, lrOrder, suffix, ownCopy, lrGate=None):
             module.add(begin)
             for ui in range(uf):
                 if emitTraceMarker:
@@ -3757,7 +3865,7 @@ class LogicalScheduler:
                 # The scheduler adjusts wait counts in place, so a second copy needs its own objects.
                 emitted = copy.deepcopy(self._emitted_per_unroll[ui]) if ownCopy else self._emitted_per_unroll[ui]
                 loopBody = self._emitLoop(writer, kernel, f"MAINLOOP_C{ui}" + suffix,
-                                          emitted, lrOrder=lrOrder)
+                                          emitted, lrOrder=lrOrder, lrGate=lrGate)
                 # dec + compare that produce the SCC the loop-control branch reads.
                 setupInsts = [
                     SSubU32(dst=sgpr("LoopCounterL"),
@@ -3776,10 +3884,11 @@ class LogicalScheduler:
                         comment="restart mainloop")
                 _emitBodySetupBranch(module, loopBody, setupInsts, branch, hoist=isGfx1250)
 
-        emitMainloopCopies(loopBegin, LR_ORDER_A_FIRST if portSplit else None, "", False)
+        emitMainloopCopies(loopBegin, LR_ORDERS_EVEN if portSplit else None, "", False,
+                           LR_GATE_EVEN if portSplit else None)
         if portSplit:
             module.add(SBranch(labelName=loopEnd.getLabelName(), comment="even waves: skip B-first copy"))
-            emitMainloopCopies(loopBeginB, LR_ORDER_B_FIRST, "_PortB", True)
+            emitMainloopCopies(loopBeginB, LR_ORDERS_ODD, "_PortB", True, LR_GATE_ODD)
             module.add(loopEnd)
 
         # ── NGLL + NLL exit paths ──
@@ -3798,18 +3907,36 @@ class LogicalScheduler:
 
         # Fall-through from last mainloop copy
         nll_ft = (last + pgr) % uf
-        if hasNGLL:
-            module.addComment0(f"NGLL_C{last}")
-            module.add(self._emitLoop(writer, kernel, f"NGLL_C{last}",
-                                      self._ngll_per_unroll[(last + 1) % uf]))
-        if nll_ft == 0:
-            module.add(Label("SkipToNLL", ""))
-        module.addComment0(f"NLL_C{last}")
-        module.add(self._emitLoop(writer, kernel, f"NLL_C{last}",
-                                  inject_pap_after_nll_drain(self._nll_per_unroll[nll_ft])))
-        module.add(self._emit_pgr2_tail_lw_align(kernel))
-        module.add(SBranch(labelName=endLabel.getLabelName(),
-                           comment="skip other exit paths"))
+
+        def emitExitPath(suffix, lrOrder, lrGate, ownCopy):
+            if hasNGLL:
+                module.addComment0(f"NGLL_C{last}" + suffix)
+                emitted = self._ngll_per_unroll[(last + 1) % uf]
+                module.add(self._emitLoop(writer, kernel, f"NGLL_C{last}" + suffix,
+                                          copy.deepcopy(emitted) if ownCopy else emitted,
+                                          lrOrder=lrOrder, lrGate=lrGate))
+            if nll_ft == 0 and not ownCopy:
+                module.add(Label("SkipToNLL", ""))
+            module.addComment0(f"NLL_C{last}" + suffix)
+            module.add(self._emitLoop(writer, kernel, f"NLL_C{last}" + suffix,
+                                      inject_pap_after_nll_drain(self._nll_per_unroll[nll_ft]),
+                                      lrOrder=lrOrder, lrGate=lrGate))
+            module.add(self._emit_pgr2_tail_lw_align(kernel))
+            module.add(SBranch(labelName=endLabel.getLabelName(),
+                               comment="skip other exit paths"))
+
+        # With one unroll copy the fall-through exit path is the only one, so it gets the same
+        # per-port read order as the mainloop. Waves entering at SkipToNLL (K < 2*DepthU) take
+        # the A-first copy.
+        exitSplit = portSplit and uf == 1
+        if exitSplit:
+            exitB = Label("ExitPathPortB", "")
+            branchOddWaves(exitB, "odd waves: B-first exit path")
+            emitExitPath("", LR_ORDERS_EVEN, LR_GATE_EVEN, False)
+            module.add(exitB)
+            emitExitPath("_PortB", LR_ORDERS_ODD, LR_GATE_ODD, True)
+        else:
+            emitExitPath("", None, None, False)
 
         for ui in range(uf - 1):
             nll_idx = (ui + pgr) % uf

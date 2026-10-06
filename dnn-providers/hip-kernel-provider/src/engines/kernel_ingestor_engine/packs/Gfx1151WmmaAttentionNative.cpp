@@ -221,8 +221,8 @@ std::optional<MaskParameters> maskFor(const data_objects::SdpaAttributes& attrib
     }
 
     MaskParameters result;
-    result.bottomRight
-        = attributes.diagonal_alignment() == data_objects::DiagonalAlignment::BOTTOM_RIGHT;
+    result.bottomRight = static_cast<int32_t>(attributes.diagonal_alignment()
+                                              == data_objects::DiagonalAlignment::BOTTOM_RIGHT);
     result.left = static_cast<int32_t>(left);
     result.right = static_cast<int32_t>(right);
     if(left != UNBOUNDED || right != UNBOUNDED)
@@ -688,9 +688,9 @@ public:
     {
     }
 
-    size_t workspaceBytes(const MatchContext&,
-                          const BoundTokens&,
-                          const KernelDefinition&) const override
+    size_t workspaceBytes(const MatchContext& /*context*/,
+                          const BoundTokens& /*bound*/,
+                          const KernelDefinition& /*kernel*/) const override
     {
         return 0;
     }
@@ -738,7 +738,7 @@ public:
                 const PreparedDispatch& prepared,
                 const hipdnnPluginDeviceBuffer_t* deviceBuffers,
                 uint32_t numDeviceBuffers,
-                void*) const override
+                void* /*workspace*/) const override
     {
         const auto& state = dynamic_cast<const PreparedGfx1151WmmaAttention&>(prepared);
         const auto& binding = state.binding();
@@ -791,13 +791,13 @@ private:
     const compilation::KpackKernelLoader& _kpackLoader;
 };
 
-} // namespace
-
 compilation::KpackModuleCache& gfx1151WmmaAttentionKpackModuleCache()
 {
     static compilation::KpackModuleCache s_moduleCache;
     return s_moduleCache;
 }
+
+} // namespace
 
 void resetGfx1151WmmaAttentionModuleCache()
 {

@@ -211,21 +211,21 @@ bool matchesKernel(const GraphSpec& graphSpec, const KernelSpec& kernelSpec)
     return kernelMatcher(context, *bound, makeKernel(kernelSpec));
 }
 
-TEST(Gfx1151WmmaAttentionMatchers, FixtureConstructsGfx1151DeviceByValue)
+TEST(TestGfx1151WmmaAttentionMatchers, FixtureConstructsGfx1151DeviceByValue)
 {
     const auto properties = testDeviceProperties();
     EXPECT_EQ(properties.gcnArchName, "gfx1151");
     EXPECT_EQ(properties.warpSize, 32);
 }
 
-TEST(Gfx1151WmmaAttentionMatchers, AcceptsD96BhsdWindowAndLse)
+TEST(TestGfx1151WmmaAttentionMatchers, AcceptsD96BhsdWindowAndLse)
 {
     GraphSpec spec;
     spec.bhsd = true;
     EXPECT_TRUE(matchGraph(spec).has_value());
 }
 
-TEST(Gfx1151WmmaAttentionMatchers, AcceptsBf16WithoutLse)
+TEST(TestGfx1151WmmaAttentionMatchers, AcceptsBf16WithoutLse)
 {
     GraphSpec spec;
     spec.dtype = data_objects::DataType::BFLOAT16;
@@ -233,21 +233,21 @@ TEST(Gfx1151WmmaAttentionMatchers, AcceptsBf16WithoutLse)
     EXPECT_TRUE(matchGraph(spec).has_value());
 }
 
-TEST(Gfx1151WmmaAttentionMatchers, DeclinesMismatchedOutputShape)
+TEST(TestGfx1151WmmaAttentionMatchers, DeclinesMismatchedOutputShape)
 {
     GraphSpec spec;
     spec.outputHeadSize = 64;
     EXPECT_FALSE(matchGraph(spec).has_value());
 }
 
-TEST(Gfx1151WmmaAttentionMatchers, DeclinesNonFp32Lse)
+TEST(TestGfx1151WmmaAttentionMatchers, DeclinesHalfPrecisionLse)
 {
     GraphSpec spec;
     spec.lseDtype = data_objects::DataType::HALF;
     EXPECT_FALSE(matchGraph(spec).has_value());
 }
 
-TEST(Gfx1151WmmaAttentionMatchers, KernelMatcherUsesRuntimeMaskDtypeAndHeadSize)
+TEST(TestGfx1151WmmaAttentionMatchers, KernelMatcherUsesRuntimeMaskDtypeAndHeadSize)
 {
     EXPECT_TRUE(matchesKernel(GraphSpec{}, KernelSpec{}));
 
@@ -276,7 +276,7 @@ TEST(Gfx1151WmmaAttentionMatchers, KernelMatcherUsesRuntimeMaskDtypeAndHeadSize)
     EXPECT_TRUE(matchesKernel(bf16Graph, bf16Kernel));
 }
 
-TEST(Gfx1151WmmaAttentionMatchers, ScorePrefersFastTransposedKernel)
+TEST(TestGfx1151WmmaAttentionMatchers, ScorePrefersFastTransposedKernel)
 {
     registerNativeIngestorSymbols();
     const auto scorer

@@ -13,7 +13,7 @@ namespace hipblaslt_jit
     class Backend;
 }
 
-namespace hipblaslt_ext::experimental::jit::mock
+namespace hipblaslt_ext::experimental::jit::replay
 {
     struct Options
     {
@@ -24,19 +24,20 @@ namespace hipblaslt_ext::experimental::jit::mock
         enum class Fault
         {
             None,
-            Generate, // generation fails and leaves mock.log in its scratch directory
+            Generate, // generation fails and leaves replay.log in its scratch directory
             Build, // the main kernel's source does not assemble
             Record, // generation appends its request to record and fails
             Trap, // any generation aborts the process
-        } fault = Fault::None;
+        };
+        Fault       fault = Fault::None;
         std::string record;
-        // The modeled contracts whose predictions the mock accepts, or none.
+        // The modeled contracts whose predictions the backend accepts, or none.
         // createBackend pairs them with the Origami predictor and the catalog
         // knowledge.
         std::set<std::string> contracts;
     };
 
-    // The mock as a Jit backend; throws when a bundle cannot be read.
+    // The replay backend as a Jit backend; throws when a bundle cannot be read.
     std::shared_ptr<const hipblaslt_jit::Backend> makeBackend(const Options& options);
 
     // Returns NOT_SUPPORTED from getJitAlgo for problems no replayed solution

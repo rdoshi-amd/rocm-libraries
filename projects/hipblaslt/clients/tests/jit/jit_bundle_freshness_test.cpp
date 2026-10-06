@@ -30,14 +30,6 @@ namespace
     using namespace hipblaslt_jit;
     using Master = TensileLite::MasterSolutionLibrary<TensileLite::ContractionProblemGemm>;
 
-    struct ProbeRequest final : OperationRequest
-    {
-        std::string_view kind() const noexcept override
-        {
-            return "test.bundle-freshness.v1";
-        }
-    };
-
     std::string text(const fs::path& path)
     {
         const auto bytes = source_bundle::readArtifact(path);
@@ -106,17 +98,15 @@ namespace
                                           BuildUnit::Kind::Hip,
                                           includes});
 
-            DeviceTarget target;
-            target.targetId = field(manifest, "architecture", "compiler_target");
-            target.isa      = target.targetId.substr(0, target.targetId.find(':'));
+            BuildRequest request;
+            request.targetId = field(manifest, "architecture", "compiler_target");
+            request.scratch  = scratch;
             fs::create_directories(scratch);
-            const ProbeRequest      probe;
-            const GenerationRequest request{probe, target, nullptr, 1, 0, {}, scratch};
-            BuiltSolution           built;
-            const auto status = makeComgrBuilder()->build(solution, request, built);
+            BuiltSolution built;
+            const auto    status = makeComgrBuilder()->build(solution, request, built);
             if(!status.ok())
-                problems.push_back("the build for " + target.targetId + " failed: "
-                                   + status.message);
+                problems.push_back("the build for " + request.targetId
+                                   + " failed: " + status.message);
         }
         catch(const std::exception& error)
         {
@@ -153,6 +143,7 @@ int main(int argc, char** argv)
     try
     {
         const fs::path data = fs::u8path(argv[1]), scratch = fs::u8path(argv[2]);
+        fs::remove_all(scratch);
         fs::create_directories(scratch);
         std::vector<fs::path> bundles;
         for(const auto& architecture : fs::directory_iterator(data))

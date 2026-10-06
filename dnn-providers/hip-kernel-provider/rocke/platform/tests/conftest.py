@@ -7,6 +7,7 @@
 #
 # source tree: this dir -> rocke/platform/tests, so parent -> rocke/platform
 
+import os
 import sys
 from pathlib import Path
 
@@ -17,6 +18,30 @@ _ROCKE = _HERE.parent  # tests -> rocke/platform
 _PYROOT = _ROCKE / "python"
 if str(_PYROOT) not in sys.path:
     sys.path.insert(0, str(_PYROOT))
+
+
+@pytest.fixture(scope="session")
+def native_recipe_replay_cli():
+    """Use a prebuilt native VM; installed tests must never build from source."""
+    suffix = ".exe" if sys.platform == "win32" else ""
+    name = f"rocke_portable_ir_replay_cli{suffix}"
+    explicit = os.environ.get("ROCKE_REPLAY_CLI")
+    if explicit:
+        path = Path(explicit).resolve()
+        if not path.is_file():
+            pytest.fail(f"ROCKE_REPLAY_CLI does not name a file: {path}")
+        return path
+    installed = _HERE / "portable_ir" / name
+    if installed.is_file():
+        return installed
+    if (_ROCKE / "rocke_installed_smoke.py").is_file():
+        pytest.fail(f"Installed native recipe replay CLI is missing: {installed}")
+    built = _ROCKE / "build" / "tests" / name
+    if built.is_file():
+        return built
+    pytest.skip(
+        "Build rocke_portable_ir_replay_cli and set ROCKE_REPLAY_CLI to its path"
+    )
 
 
 @pytest.hookimpl(hookwrapper=True)

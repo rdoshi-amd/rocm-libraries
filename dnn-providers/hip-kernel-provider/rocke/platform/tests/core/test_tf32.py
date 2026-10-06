@@ -1,6 +1,8 @@
 # Copyright (c) Advanced Micro Devices, Inc., or its affiliates.
 # SPDX-License-Identifier: MIT
 """Logical TF32 contracts and strict native parity, independent of GPU access."""
+import subprocess
+
 import numpy as np
 import pytest
 
@@ -360,25 +362,33 @@ def test_parsed_mma_rejects_wrong_operands():
 
 @pytest.mark.parametrize("m", [16, 32])
 @pytest.mark.parametrize("mode", PREPARATIONS)
-@pytest.mark.skip(
-    reason=(
-        "Temporarily disabled (#12612): native recipe replay attempts a source "
-        "build from installed test artifacts"
-    )
-)
-def test_recipe_replay_preserves_ir(m, mode, monkeypatch):
+def test_recipe_replay_preserves_ir(m, mode, tmp_path, native_recipe_replay_cli):
     from rocke.portable_ir.src.recording_builder import record_kernel
-    from rocke.portable_ir.src import online, recipe_bundle
+    from rocke.portable_ir.src import recipe_bundle
 
     spec = Tf32MmaProbeSpec(m, mode)
     recorded, recipe = record_kernel(lambda: build_tf32_mma_probe(spec))
     assert serialize(recorded) == serialize(build_tf32_mma_probe(spec))
+    path = tmp_path / "recipe.cbor"
+    path.write_bytes(recipe_bundle.cbor_encode(recipe))
     for flavor in ("llvm20", "llvm22", "llvm23"):
-        monkeypatch.setenv("ROCKE_LLVM_FLAVOR", flavor)
-        replayed, _ = online.recipe_cbor_to_llvm(
-            recipe_bundle.cbor_encode(recipe), arch="gfx942"
+        replayed = subprocess.run(
+            [
+                str(native_recipe_replay_cli),
+                "--recipe",
+                str(path),
+                "--cbor",
+                "--arch",
+                "gfx942",
+                "--flavor",
+                flavor,
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=30,
         )
-        assert replayed == _lower_kernel_to_llvm_python(
+        assert replayed.stdout == _lower_kernel_to_llvm_python(
             recorded, arch="gfx942", llvm_flavor=flavor
         )
 

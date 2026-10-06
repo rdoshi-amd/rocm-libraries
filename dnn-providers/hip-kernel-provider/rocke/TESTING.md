@@ -513,6 +513,22 @@ tests; an older local compiler failure is separate evidence. Review skipped
 tests explicitly: Torch-free execution, missing native fixtures, and unavailable
 GPUs each leave different coverage gaps. Host pytest is not a full GPU job replay.
 
+TF32 recipe replay uses the prebuilt `rocke_portable_ir_replay_cli` installed
+under `tests/portable_ir/`. It compares native CBOR replay with Python lowering
+for both gfx942 atom shapes, every preparation mode, and LLVM 20/22/23. Missing
+replay executables in an installed layout fail the test; installed tests never
+attempt to configure a source build. In a source checkout, build that target and
+set `ROCKE_REPLAY_CLI` to its executable path (a conventional `build/tests/`
+location is also discovered).
+
+The gfx942 TF32 numerical test runs the Python engine's 12 variants against its
+independent NumPy references when `rocke_engine` is absent. With the binding
+available, it demands all 24 variants, native builder/lowerer byte identity,
+and backend numerical parity. A discoverable but broken binding fails rather
+than falling back. The standalone TF32 numerical CLI retains its strict
+`--backend both` default. Set `ROCKE_REQUIRE_GFX942=1` to make a missing or
+different GPU fail instead of skip.
+
 ## 6. Invariants & contracts
 
 Cross-cutting properties every change must preserve:

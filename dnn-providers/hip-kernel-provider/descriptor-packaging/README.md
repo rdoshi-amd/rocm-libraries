@@ -20,6 +20,10 @@ across member folders and across separate per-arch builds.
 
 Known limitation: every installed member package carries its own copy of the generic content, so disk use scales with the number of installed members. Identical copies collapse to one catalog entry at load; copies built by different compilers differ in `provenance` and are both dropped.
 
+Known limitation: the configure-time arch probe starts one Python interpreter per KDP of the root (about 135 ms each), so a root of hundreds of KDPs adds tens of seconds to each reconfigure.
+
+Known limitation: a generic copy is merged into its member folder by staging then renaming; a filesystem failure part-way through the swap (a failed `rmtree` or rename) can lose that member's content, and the build fails.
+
 Authoring rules (packer errors, stable substrings in parentheses):
 
 - A name ending `-generic` that the table does not list is an error (`generic target name
@@ -28,9 +32,11 @@ Authoring rules (packer errors, stable substrings in parentheses):
   share a member (`lists '`). Author two KDPs instead: an explicit override plus a generic
   fallback are separate packs.
 - Under a KDP whose list holds a generic, every UKD with its own `arch` must list every
-  generic of the KDP and only entries the KDP lists, and a standalone UKD must carry such an
-  `arch` (`must list every generic of the KDP`). An inline UKD with no `arch` inherits the
-  pack.
+  generic of the KDP and only entries the KDP lists (`must list every generic of the KDP`).
+  An inline UKD with no `arch` inherits the pack.
+- A standalone UKD (referenced by id) with an empty or absent `arch` is unrestricted, and is
+  valid only under a KDP whose `arch` is empty too; under a KDP listing any arch, concrete or
+  generic, it is an error (`has an empty 'arch' (unrestricted) but the KDP lists`).
 - A UKD may not name a generic its KDP does not list, including under an empty-`arch` KDP
   (`ship in no shard`).
 - rocKE does not support generics yet (`does not support generic targets yet`).

@@ -239,6 +239,8 @@ def consumer_records(
         header = {k: v for k, v in bundle.kdp_doc.items() if k != "kernelDescriptors"}
         header["arch"] = [arch]
         for entry in bundle.entries:
+            # The literal-arch test is not subsumed by `admits_target`: a generic
+            # copy's @arch is the generic's own spelling, which names no device.
             if (
                 entry.arch
                 and arch not in entry.arch

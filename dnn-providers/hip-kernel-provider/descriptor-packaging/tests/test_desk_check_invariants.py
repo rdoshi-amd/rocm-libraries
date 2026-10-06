@@ -194,11 +194,66 @@ class TestInvariant2DuplicateMatcherTuples:
             ("FLOAT",): 2
         }
 
-    def test_an_arch_less_kernel_and_an_explicit_one_do_not_collide(self):
-        """On the explicit kernel's device the explicit kernel outranks the
-        arch-less one, and everywhere else only the arch-less one reaches: the
-        runtime never has two candidates at one tier, so neither is unreachable."""
+    def test_an_arch_less_kernel_inherits_the_kdp_arch_and_collides_with_an_explicit_one(
+        self,
+    ):
+        """The loader gives a kernel with no arch of its own the KDP's list, so
+        under a KDP listing gfx942 the arch-less kernel and the explicit gfx942 one
+        tie at the same tier on gfx942."""
         kernels = self._twins(None, ["gfx942"])
+        assert duplicate_matcher_tuples(
+            kernels, ("dtype",), GENERIC_TARGETS, ["gfx942"]
+        ) == {("FLOAT",): 2}
+
+    def test_an_arch_less_kernel_under_a_disjoint_kdp_arch_does_not_collide(self):
+        kernels = self._twins(None, ["gfx942"])
+        assert (
+            duplicate_matcher_tuples(kernels, ("dtype",), GENERIC_TARGETS, ["gfx950"])
+            == {}
+        )
+
+    def test_a_tie_at_a_worse_tier_than_the_best_is_a_duplicate(self):
+        """Two arch-less kernels tie at the unrestricted tier on gfx1100 even
+        though a third, explicit one outranks them there; the loader's pairwise
+        `archesCompete` refuses them."""
+        kernels = [
+            {"name": n, "metadata": {"dtype": "FLOAT"}, **({"arch": a} if a else {})}
+            for n, a in (("a", None), ("b", None), ("c", ["gfx942"]))
+        ]
+        assert duplicate_matcher_tuples(kernels, ("dtype",), GENERIC_TARGETS) == {
+            ("FLOAT",): 2
+        }
+
+    def test_a_tie_beaten_on_every_device_it_reaches_is_still_a_duplicate(self):
+        """Both gfx12-generic kernels are outranked by an explicit one on each member
+        (gfx1200, gfx1201), so they never tie at the BEST tier anywhere; they still
+        tie at the generic tier on both, which the loader refuses."""
+        kernels = [
+            {"name": n, "metadata": {"dtype": "FLOAT"}, "arch": a}
+            for n, a in (
+                ("g1", ["gfx12-generic"]),
+                ("g2", ["gfx12-generic"]),
+                ("e0", ["gfx1200"]),
+                ("e1", ["gfx1201"]),
+            )
+        ]
+        assert duplicate_matcher_tuples(kernels, ("dtype",), GENERIC_TARGETS) == {
+            ("FLOAT",): 2
+        }
+
+    def test_a_generic_and_an_arch_less_kernel_do_not_collide(self):
+        """The generic outranks the unrestricted kernel wherever both reach, and the
+        arch-less one is alone elsewhere: no device sees two at one tier."""
+        kernels = self._twins(["gfx11-generic"], None)
+        assert duplicate_matcher_tuples(kernels, ("dtype",), GENERIC_TARGETS) == {}
+
+    def test_a_generic_and_one_of_its_members_do_not_collide(self):
+        """The member is EXPLICIT on its own device and outranks the generic."""
+        kernels = self._twins(["gfx11-generic"], ["gfx1100"])
+        assert duplicate_matcher_tuples(kernels, ("dtype",), GENERIC_TARGETS) == {}
+
+    def test_lists_naming_only_unknown_generics_match_nothing(self):
+        kernels = self._twins(["gfx99-generic"], ["gfx99-generic"])
         assert duplicate_matcher_tuples(kernels, ("dtype",), GENERIC_TARGETS) == {}
 
     def test_two_arch_less_kernels_collide(self):

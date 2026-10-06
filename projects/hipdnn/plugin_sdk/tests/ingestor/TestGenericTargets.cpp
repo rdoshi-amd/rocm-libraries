@@ -16,7 +16,7 @@
 #include <hipdnn_plugin_sdk/ingestor/DeviceProperties.hpp>
 
 /**
- * @file TestGpuGenericTargets.cpp
+ * @file TestGenericTargets.cpp
  * @brief The generic GPU target table and the tier algebra over it, as C++ evaluates
  *        them. The table is the generated constexpr form of data/gpu_generic_targets.json
  *        and the golden vectors are shared with the Python implementation.
@@ -58,7 +58,7 @@ const char* tierName(const std::optional<ArchTier>& tier)
     return "unrestricted";
 }
 
-TEST(TestGpuGenericTargets, GeneratedTableMatchesTheJsonMemberForMember)
+TEST(TestGenericTargets, GeneratedTableMatchesTheJsonMemberForMember)
 {
     const auto json = readJson(HIPDNN_GPU_GENERIC_TARGETS_JSON_PATH);
     const auto& generics = json.at("generics");
@@ -78,7 +78,7 @@ TEST(TestGpuGenericTargets, GeneratedTableMatchesTheJsonMemberForMember)
     }
 }
 
-TEST(TestGpuGenericTargets, FindsAGenericOnlyByItsExactName)
+TEST(TestGenericTargets, FindsAGenericOnlyByItsExactName)
 {
     const auto* row = findGenericTarget("gfx11-generic");
     ASSERT_NE(row, nullptr);
@@ -95,7 +95,7 @@ TEST(TestGpuGenericTargets, FindsAGenericOnlyByItsExactName)
     EXPECT_FALSE(isGenericShapedArchName("generic"));
 }
 
-TEST(TestGpuGenericTargets, ContainsReportsMembership)
+TEST(TestGenericTargets, ContainsReportsMembership)
 {
     EXPECT_TRUE(genericTargetContains("gfx11-generic", "gfx1100"));
     EXPECT_TRUE(genericTargetContains("gfx11-generic", "gfx1153"));
@@ -106,7 +106,7 @@ TEST(TestGpuGenericTargets, ContainsReportsMembership)
     EXPECT_FALSE(genericTargetContains("gfx9-4-generic", "gfx942"));
 }
 
-TEST(TestGpuGenericTargets, EntryTierRanksExplicitAboveGeneric)
+TEST(TestGenericTargets, EntryTierRanksExplicitAboveGeneric)
 {
     EXPECT_EQ(archEntryTier("gfx1151", "gfx1151"), ArchTier::EXPLICIT);
     EXPECT_EQ(archEntryTier("gfx11-generic", "gfx1151"), ArchTier::GENERIC);
@@ -116,7 +116,7 @@ TEST(TestGpuGenericTargets, EntryTierRanksExplicitAboveGeneric)
     EXPECT_LT(static_cast<int>(ArchTier::GENERIC), static_cast<int>(ArchTier::UNRESTRICTED));
 }
 
-TEST(TestGpuGenericTargets, ListTierIsTheBestOfItsEntries)
+TEST(TestGenericTargets, ListTierIsTheBestOfItsEntries)
 {
     const Arch both{"gfx11-generic", "gfx1151"};
     EXPECT_EQ(archTier(both, "gfx1151"), ArchTier::EXPLICIT);
@@ -126,14 +126,14 @@ TEST(TestGpuGenericTargets, ListTierIsTheBestOfItsEntries)
     EXPECT_EQ(archTier({"gfx11-generic"}, "gfx1151:sramecc+"), ArchTier::GENERIC);
 }
 
-TEST(TestGpuGenericTargets, EmptyListIsUnrestricted)
+TEST(TestGenericTargets, EmptyListIsUnrestricted)
 {
     EXPECT_EQ(archTier({}, "gfx1151"), ArchTier::UNRESTRICTED);
     EXPECT_EQ(archTier({}, ""), ArchTier::UNRESTRICTED);
     EXPECT_TRUE(archSupports({}, "gfx1151"));
 }
 
-TEST(TestGpuGenericTargets, OverlapIsOverExpandedMemberSets)
+TEST(TestGenericTargets, OverlapIsOverExpandedMemberSets)
 {
     EXPECT_TRUE(archOverlaps({"gfx11-generic"}, {"gfx1151"}));
     EXPECT_TRUE(archOverlaps({"gfx1151"}, {"gfx11-generic"}));
@@ -144,7 +144,7 @@ TEST(TestGpuGenericTargets, OverlapIsOverExpandedMemberSets)
     EXPECT_FALSE(archOverlaps({"gfx1250"}, {"gfx12-generic"}));
 }
 
-TEST(TestGpuGenericTargets, CoversIsOverExpandedMemberSets)
+TEST(TestGenericTargets, CoversIsOverExpandedMemberSets)
 {
     EXPECT_TRUE(archCovers({"gfx11-generic"}, {"gfx1151"}));
     EXPECT_TRUE(archCovers({"gfx11-generic"}, {"gfx1100", "gfx1153"}));
@@ -156,7 +156,7 @@ TEST(TestGpuGenericTargets, CoversIsOverExpandedMemberSets)
     EXPECT_TRUE(archCovers({"gfx11-generic"}, {}));
 }
 
-TEST(TestGpuGenericTargets, CompeteIsSameTierOverlap)
+TEST(TestGenericTargets, CompeteIsSameTierOverlap)
 {
     EXPECT_TRUE(archesCompete({}, {}));
     EXPECT_TRUE(archesCompete({"gfx942"}, {"gfx942"}));
@@ -168,7 +168,7 @@ TEST(TestGpuGenericTargets, CompeteIsSameTierOverlap)
     EXPECT_FALSE(archesCompete({"gfx11-generic"}, {"gfx12-generic"}));
 }
 
-TEST(TestGpuGenericTargets, UnknownGenericExpandsToNothing)
+TEST(TestGenericTargets, UnknownGenericExpandsToNothing)
 {
     const Arch unknown{"gfx9-4-generic"};
     EXPECT_FALSE(archSupports(unknown, "gfx942"));
@@ -180,7 +180,7 @@ TEST(TestGpuGenericTargets, UnknownGenericExpandsToNothing)
     EXPECT_FALSE(archesCompete(unknown, unknown));
 }
 
-TEST(TestGpuGenericTargets, MatchesGoldenTierVectors)
+TEST(TestGenericTargets, MatchesGoldenTierVectors)
 {
     const auto vectors = readJson(HIPDNN_ARCH_TIER_VECTORS_JSON_PATH);
 

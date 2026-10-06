@@ -1025,8 +1025,8 @@ endfunction()
 
 # ---------------------------------------------------------------------------
 # _hkp_root_covers_any_arch(<out_var> <root> <arches>)
-#   TRUE when at least one non-hidden *.kdp.json under <root> would survive
-#   admit at least one arch in <arches> (_hkp_kdp_arch_matches: an absent or empty `arch`
+#   TRUE when at least one non-hidden *.kdp.json under <root> would survive: its arch
+#   must admit at least one arch in <arches> (_hkp_kdp_arch_matches: an absent or empty `arch`
 #   is a wildcard; an entry admits a target it names or a table generic containing it).
 #   Consulted for the default root alone (hkp_add_packaging below).
 #
@@ -1332,6 +1332,10 @@ function(hkp_add_packaging)
             "(gpu_generic_targets.json); an older installed hipdnn_plugin_sdk lacks it. "
             "Build against a hipdnn_plugin_sdk that provides the table.")
     endif()
+    # The dormancy verdicts below turn on the table's contents, so an edit to it (a
+    # reinstalled SDK) must re-run configure, as an edit to a KDP does.
+    set_property(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" APPEND PROPERTY
+        CMAKE_CONFIGURE_DEPENDS "${HIPDNN_PLUGIN_SDK_GPU_GENERIC_TARGETS_JSON}")
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
     hkp_resolve_kpack(_rocm_kpack_dir "${Python3_EXECUTABLE}")

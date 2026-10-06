@@ -14,6 +14,7 @@
     {"arch": ["gfx12-generic"], "device": "gfx1250:sramecc+", "expect": "none"},
     {"arch": ["gfx12-generic"], "device": "gfx1250-strict", "expect": "none"},
     {"arch": ["gfx1250"], "device": "gfx1250-strict", "expect": "none"},
+    {"arch": ["gfx1250-strict"], "device": "gfx1250-strict", "expect": "explicit"},
     {"arch": ["gfx1250"], "device": "gfx1250", "expect": "explicit"},
     {"arch": ["gfx9-4-generic"], "device": "gfx942", "expect": "none"},
     {"arch": ["gfx9-4-generic"], "device": "gfx9-4-generic", "expect": "none"},
@@ -70,6 +71,8 @@
     {"a": ["gfx9-4-generic"], "b": ["gfx9-4-generic"], "expect": false},
     {"a": ["gfx9-4-generic"], "b": [], "expect": false},
     {"a": ["gfx1151"], "b": ["gfx11-generic", "gfx1151"], "expect": true},
-    {"a": ["gfx11-generic"], "b": ["gfx1151", "gfx1100"], "expect": false}
+    {"a": ["gfx11-generic"], "b": ["gfx1151", "gfx1100"], "expect": false},
+    {"a": ["gfx1250"], "b": ["gfx1250-strict"], "expect": false},
+    {"a": ["gfx1250-strict"], "b": ["gfx1250-strict"], "expect": true}
   ]
 }

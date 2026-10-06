@@ -9,7 +9,7 @@ must give the packer's own answer: it applies `generic_targets.admits_target`
 generic containing it) to each selected arch.
 
 Only FALSE is authoritative. A KDP that does not parse, or whose `arch` is not
-an array of strings, prints TRUE so the packer reports what is wrong with it.
+an array of strings, or that names a generic absent from the table, prints TRUE so the packer reports what is wrong with it.
 Exits 0 whenever it answered; non-zero only when the table cannot be read.
 """
 
@@ -25,7 +25,11 @@ while _PKG_ROOT in sys.path:
 sys.path.insert(0, _PKG_ROOT)
 
 from hkp_pack.errors import HkpPackError  # noqa: E402
-from hkp_pack.generic_targets import GenericTargets, admits_target  # noqa: E402
+from hkp_pack.generic_targets import (  # noqa: E402
+    GenericTargets,
+    admits_target,
+    is_generic_shaped,
+)
 
 
 def _covers_any(kdp_path, arches, table):
@@ -41,6 +45,10 @@ def _covers_any(kdp_path, arches, table):
     if not isinstance(entries, list) or not all(isinstance(e, str) for e in entries):
         return True
     if not entries:
+        return True
+    # An unknown generic admits nothing, which would read as a clean absence; the packer
+    # names it as an error, so it must be reached.
+    if any(is_generic_shaped(e) and not table.has(e) for e in entries):
         return True
     return any(admits_target(entries, arch, table) for arch in arches)
 

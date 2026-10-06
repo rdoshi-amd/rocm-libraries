@@ -1546,8 +1546,9 @@ def run_pipeline(
     of a pass-through kind runs no producer and is emitted as authored, so a
     root that holds only pass-through UKDs writes descriptors and no archive. An
     arch with no surviving KDP is skipped cleanly (no folder, no kpack) and
-    logged with 'no kernels for <arch>, skipping'; every arch skipping is a
-    failure, not a pack. Empty arch list installs nothing (exit 0).
+    logged with 'no kernels for <arch>, skipping' (a selected member whose KDPs are
+    all generic still gets a folder, from the generic copy); every arch skipping
+    is a failure, not a pack. Empty arch list installs nothing (exit 0).
 
     `generic_targets_json` names the generic target table. After the concrete
     passes, every table generic that some KDP lists and that contains a selected

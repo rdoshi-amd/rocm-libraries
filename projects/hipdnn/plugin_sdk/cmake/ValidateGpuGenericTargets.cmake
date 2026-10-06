@@ -8,7 +8,7 @@
 # This is the only implementation of the provenance rules; the Python readers validate
 # shape only.
 #
-# cmake-lint does not model string(JSON ...) and misreads its index arguments.
+# cmake-lint does not model foreach(... RANGE ...) and reports E1120 on its arguments.
 # cmake-lint: disable=E1120
 
 # Reads the string at <key path...> of <json> into <out>; FATAL_ERROR if it is absent,
@@ -128,13 +128,19 @@ function(hipdnn_validate_gpu_generic_targets json_path)
     endif()
     file(READ "${json_path}" json)
 
+    string(JSON _root_type ERROR_VARIABLE parse_error TYPE "${json}")
+    if(parse_error)
+        message(FATAL_ERROR "gpu_generic_targets: ${json_path}: not valid JSON: ${parse_error}")
+    endif()
+
     _hipdnn_gpu_generic_targets_get_string(_ "${json}" "${json_path}" "\$comment" "\$comment")
 
     string(JSON version ERROR_VARIABLE err GET "${json}" schemaVersion)
     if(err)
         message(FATAL_ERROR "gpu_generic_targets: ${json_path}: missing required key 'schemaVersion'")
     endif()
-    if(NOT version STREQUAL "1")
+    string(JSON version_type TYPE "${json}" schemaVersion)
+    if(NOT version_type STREQUAL "NUMBER" OR NOT version STREQUAL "1")
         message(FATAL_ERROR "gpu_generic_targets: ${json_path}: 'schemaVersion' must be 1, got '${version}'")
     endif()
 

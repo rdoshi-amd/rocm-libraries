@@ -38,7 +38,7 @@ add_executable(hipdnn_plugin_sdk_tests
     $<$<BOOL:${HIPDNN_ENABLE_KERNEL_INGESTOR}>:ingestor/TestMatchContext.cpp>
     $<$<BOOL:${HIPDNN_ENABLE_KERNEL_INGESTOR}>:ingestor/TestDescriptors.cpp>
     $<$<BOOL:${HIPDNN_ENABLE_KERNEL_INGESTOR}>:ingestor/TestArchGate.cpp>
-    $<$<BOOL:${HIPDNN_ENABLE_KERNEL_INGESTOR}>:ingestor/TestGpuGenericTargets.cpp>
+    $<$<BOOL:${HIPDNN_ENABLE_KERNEL_INGESTOR}>:ingestor/TestGenericTargets.cpp>
     $<$<BOOL:${HIPDNN_ENABLE_KERNEL_INGESTOR}>:ingestor/TestKernelDefinition.cpp>
     $<$<BOOL:${HIPDNN_ENABLE_KERNEL_INGESTOR}>:ingestor/TestKernelIngestorStateManager.cpp>
     $<$<BOOL:${HIPDNN_ENABLE_KERNEL_INGESTOR}>:ingestor/TestGenericPlan.cpp>
@@ -119,7 +119,13 @@ function(_hipdnn_add_generic_targets_rejection_test case expected_text)
             -DGENERIC_TARGETS_JSON=${CMAKE_CURRENT_SOURCE_DIR}/data/generic_targets_invalid/${case}.json
             -P ${_generic_targets_check}
     )
-    set_tests_properties(${test_name} PROPERTIES PASS_REGULAR_EXPRESSION "${expected_regex}")
+    # A validator that downgrades the FATAL_ERROR to a warning still reaches the
+    # success line; FAIL_REGULAR_EXPRESSION turns that into a failure.
+    set_tests_properties(
+        ${test_name}
+        PROPERTIES PASS_REGULAR_EXPRESSION "${expected_regex}" FAIL_REGULAR_EXPRESSION
+                   "gpu_generic_targets: valid"
+    )
     _apply_hipdnn_test_category_labels(${test_name})
 endfunction()
 
@@ -132,6 +138,10 @@ _hipdnn_add_generic_targets_rejection_test(
 )
 _hipdnn_add_generic_targets_rejection_test(bad_retrieved_on "'source.retrievedOn' must be YYYY-MM-DD")
 _hipdnn_add_generic_targets_rejection_test(missing_license "missing required key 'source.license'")
+_hipdnn_add_generic_targets_rejection_test(not_json "not valid JSON")
+_hipdnn_add_generic_targets_rejection_test(string_schema_version "'schemaVersion' must be 1")
+_hipdnn_add_generic_targets_rejection_test(bad_license "'source.license' must be")
+_hipdnn_add_generic_targets_rejection_test(bad_statement "'source.statement' must state")
 _hipdnn_add_generic_targets_rejection_test(missing_statement "missing required key 'source.statement'")
 _hipdnn_add_generic_targets_rejection_test(empty_generics "'generics' must be non-empty")
 _hipdnn_add_generic_targets_rejection_test(

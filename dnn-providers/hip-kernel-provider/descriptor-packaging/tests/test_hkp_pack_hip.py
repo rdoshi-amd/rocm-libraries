@@ -772,9 +772,11 @@ def test_standalone_ukd_shared_by_two_kdps_stored_once(
     # is stored once (deduped by variant_key), not once per referencing KDP.
     src = _copy_fixture(tmp_path, main_fixture)
     # copy.kdp.json is gfx942-only; add the standalone ref to it too, so both it
-    # and pointwise.kdp.json reference the same standalone id on gfx942.
+    # and pointwise.kdp.json reference the same standalone id on gfx942. The
+    # standalone declares [gfx942, gfx950], so copy.kdp.json lists both.
     p = src / "copy.kdp.json"
     doc = _read(p)
+    doc["arch"] = ["gfx942", "gfx950"]
     doc["kernelDescriptors"].append(_STANDALONE_UKD_ID)
     p.write_text(json.dumps(doc), encoding="utf-8")
     # A second referencing KDP is a second CONSUMER: it resolves to its own engine
@@ -816,6 +818,7 @@ def test_standalone_ukd_referenced_by_a_second_engine_without_declaring_it_fails
     src = _copy_fixture(tmp_path, main_fixture)
     p = src / "copy.kdp.json"
     doc = _read(p)
+    doc["arch"] = ["gfx942", "gfx950"]
     doc["kernelDescriptors"].append(_STANDALONE_UKD_ID)
     p.write_text(json.dumps(doc), encoding="utf-8")
     with pytest.raises(HkpPackError, match="expected exactly one"):
@@ -825,15 +828,22 @@ def test_standalone_ukd_referenced_by_a_second_engine_without_declaring_it_fails
 def test_standalone_ukd_referenced_by_wildcard_kdp(
     tmp_path, main_fixture, hipcc, rocm_kpack_dir
 ):
-    # A standalone UKD referenced by a wildcard KDP (arch []) ships in every shard.
+    # An arch-less standalone UKD (unrestricted) referenced by a wildcard KDP
+    # (arch []) ships in every shard. The fixture's own standalone is authored for
+    # gfx942, so this one is a sibling without an arch.
     src = _copy_fixture(tmp_path, main_fixture)
+    wild_doc = _read(src / _STANDALONE_UKD_FILE)
+    wild_doc["id"] = "ukd-pointwise-add-f32-b128-wild"
+    del wild_doc["arch"]
+    wild_file = "pointwise_add_b128_wild.ukd.json"
+    (src / wild_file).write_text(json.dumps(wild_doc), encoding="utf-8")
     p = src / "pointwise_wild.kdp.json"
     doc = _read(p)
-    doc["kernelDescriptors"].append(_STANDALONE_UKD_ID)
+    doc["kernelDescriptors"].append(wild_doc["id"])
     p.write_text(json.dumps(doc), encoding="utf-8")
     _run(src, tmp_path, hipcc, rocm_kpack_dir, arches=["gfx942", "gfx90a"])
     for arch in ("gfx942", "gfx90a"):
-        assert (tmp_path / "out" / arch / _STANDALONE_UKD_FILE).exists(), arch
+        assert (tmp_path / "out" / arch / wild_file).exists(), arch
 
 
 @pytest.mark.quick

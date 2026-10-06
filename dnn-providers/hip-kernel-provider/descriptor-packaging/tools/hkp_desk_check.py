@@ -1,7 +1,9 @@
 """The desk-check invariants of RUNBOOK §4's host boundary, as a real, runnable CLI.
 
-    python3 tools/hkp_desk_check.py --mode structural <path/to/*.kdp.json>
-    python3 tools/hkp_desk_check.py --mode full <path/to/shipped.kdp.json>
+    python3 tools/hkp_desk_check.py --mode structural \\
+        --generic-targets-json <gpu_generic_targets.json> <path/to/*.kdp.json>
+    python3 tools/hkp_desk_check.py --mode full \\
+        --generic-targets-json <gpu_generic_targets.json> <path/to/shipped.kdp.json>
 
 `--mode structural` reads the descriptors against themselves and each other: drift
 between metadata and the authored spec, duplicate matcher tuples, toc_key
@@ -49,6 +51,7 @@ from hkp_pack.desk_check import (  # noqa: E402
     MODES,
     DeskCheckReport,
     compiled_agreement,
+    load_kdp_arch,
     load_variant_set,
     metadata_identity_fields,
 )
@@ -164,6 +167,7 @@ def main(argv=None):
         drift_fields,
         mode=args.mode,
         generic_targets=generic_targets,
+        kdp_arch=load_kdp_arch(kdp),
         agreement_failures=failures,
         agreement_unclaimed=unclaimed,
         agreement_verified=verified,

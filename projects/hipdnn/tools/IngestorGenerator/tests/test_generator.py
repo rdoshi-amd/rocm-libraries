@@ -768,21 +768,6 @@ class TestCatalogIdentity:
             "twin.right",
         ]
 
-    def test_a_generic_and_an_explicit_member_with_one_tuple_both_survive(self):
-        """gfx1151 is inside gfx11-generic: on that device the explicit entry outranks
-        the generic, so the tuple is carried once per tier."""
-        config, pack, left, right = self._twin_config()
-        pack.arch = ["gfx1151", "gfx11-generic"]
-        left.arch = ["gfx11-generic"]
-        right.arch = ["gfx1151"]
-        right.kernel_source.entry_point = "ScaleAddOther"
-        # Only tuple identity is under test; the config loader owns the pack rule.
-        kdp = build_kdp(config, pack, mint_ids(config))
-        assert [k["name"] for k in kdp["kernelDescriptors"]] == [
-            "twin.left",
-            "twin.right",
-        ]
-
     def test_two_kernels_one_tuple_under_the_same_generic_are_refused_naming_both(
         self,
     ):

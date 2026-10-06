@@ -1,6 +1,5 @@
 # Copyright © Advanced Micro Devices, Inc., or its affiliates.
 # SPDX-License-Identifier:  MIT
-# cmake-lint: disable=E1120
 
 include(CMakePackageConfigHelpers)
 
@@ -38,6 +37,8 @@ set(HIPDNN_GENERIC_TARGET_MEMBER_ARRAYS "")
 set(HIPDNN_GENERIC_TARGET_ROWS "")
 set(HIPDNN_GENERIC_TARGET_ROW_COUNT ${_generic_count})
 math(EXPR _last_generic "${_generic_count} - 1")
+# cmake-lint reports E1120 on foreach(... RANGE ...) arguments, which are valid CMake.
+# cmake-lint: disable=E1120
 foreach(_g RANGE 0 ${_last_generic})
     string(JSON _generic MEMBER "${_generic_targets_json}" generics ${_g})
     string(TOUPPER "${_generic}" _array_name)

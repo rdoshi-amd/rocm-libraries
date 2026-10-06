@@ -1,0 +1,33 @@
+{
+  "$comment": "Membership of LLVM AMDGPU generic processors, as listed in the public LLVM AMDGPU documentation. Factual processor-name membership only; no prose is copied. Edit this file (data), never a second copy: the C++ constexpr table is generated from it at CMake time and the packer reads it at pack time. Members MUST be exactly those listed at source.revision.",
+  "schemaVersion": 1,
+  "source": {
+    "description": "Generic processor -> supported processor names, from the 'AMDGPU Generic Processors' table.",
+    "document": "llvm/docs/AMDGPUUsage.rst",
+    "section": "AMDGPU Generic Processors (amdgpu-generic-processor-table)",
+    "repository": "https://github.com/ROCm/llvm-project",
+    "revision": "998a696feca902c689c53383e48d29494f9edba7",
+    "permalink": "https://github.com/ROCm/llvm-project/blob/998a696feca902c689c53383e48d29494f9edba7/llvm/docs/AMDGPUUsage.rst#L606-L711",
+    "retrievedOn": "2026-10-05",
+    "licenseNote": "LLVM is licensed under Apache-2.0 with LLVM Exceptions (llvm/LICENSE.TXT at the revision above).",
+    "statement": "Only factual processor-name membership from public documentation is recorded here; no documentation prose is copied and nothing non-public is included.",
+    "pinnedBy": "compiler/amd-llvm submodule of ROCm/TheRock main at 4bed01044 (the compiler TheRock builds hipDNN with)",
+    "license": "MIT"
+  },
+  "generics": {
+    "gfx11-generic": [
+      "gfx1100",
+      "gfx1101",
+      "gfx1102",
+      "gfx1103",
+      "gfx1150",
+      "gfx1151",
+      "gfx1152",
+      "gfx1153"
+    ],
+    "gfx12-generic": [
+      "gfx1200",
+      "gfx1201"
+    ]
+  }
+}

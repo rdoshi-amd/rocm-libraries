@@ -222,7 +222,7 @@ def _write_corpus(dest, *, hip_only=False, with_embedded=False):
     _write_json(
         dest,
         "u_standalone_wild.ukd.json",
-        _ukd("ukd-standalone-wild", _hip_ks(_K1_SOURCE, "K1", 1024)),
+        _ukd("ukd-standalone-wild", _hip_ks(_K1_SOURCE, "K1", 1024), [OTHER_ARCH]),
     )
 
     # Case 2 -- inline hip.
@@ -271,7 +271,7 @@ def _write_corpus(dest, *, hip_only=False, with_embedded=False):
     _write_json(
         dest,
         "u_standalone_hip.ukd.json",
-        _ukd("ukd-standalone-hip", _hip_ks(_K1_SOURCE, "K1", 256)),
+        _ukd("ukd-standalone-hip", _hip_ks(_K1_SOURCE, "K1", 256), [TARGET_ARCH]),
     )
 
     # Case 6 -- a standalone rocke UKD referenced by id.
@@ -284,7 +284,7 @@ def _write_corpus(dest, *, hip_only=False, with_embedded=False):
         _write_json(
             dest,
             "u_standalone_rocke.ukd.json",
-            _ukd("ukd-standalone-rocke", _rocke_ks()),
+            _ukd("ukd-standalone-rocke", _rocke_ks(), [TARGET_ARCH]),
         )
 
     # Case 7 -- a standalone UKD whose own arch excludes the target, listed
@@ -339,7 +339,7 @@ def _write_corpus(dest, *, hip_only=False, with_embedded=False):
     _write_json(
         dest,
         "u_standalone_shared.ukd.json",
-        _ukd("ukd-standalone-shared", _hip_ks(_K2_SOURCE, "K2", 512)),
+        _ukd("ukd-standalone-shared", _hip_ks(_K2_SOURCE, "K2", 512), [TARGET_ARCH]),
     )
 
     # Case 10 -- an orphan standalone UKD.
@@ -387,7 +387,7 @@ def _write_corpus(dest, *, hip_only=False, with_embedded=False):
         _write_json(
             dest,
             "u_standalone_embedded.ukd.json",
-            _ukd("ukd-standalone-embedded", _embedded_ks("E1B")),
+            _ukd("ukd-standalone-embedded", _embedded_ks("E1B"), [TARGET_ARCH]),
         )
 
     return dest
@@ -550,8 +550,8 @@ def _call_sites(callee):
 def test_arch_matches_call_sites_are_pinned():
     """The two UKD-level selection filters live in the generator and nowhere else.
 
-    `arch_matches` is the empty-inherits filter on a UKD. `compile_intermediate`
-    no longer calls it: its KDP disposition call is `kdp_arch_matches`.
+    `arch_matches` is the empty-inherits filter on a UKD. `compile_intermediate`'s
+    KDP disposition call is `kdp_arch_matches`.
     """
     assert _call_sites("arch_matches") == {"_selected_entries": 2}
 

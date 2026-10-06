@@ -64,6 +64,12 @@ class GenericTargets:
             raise HkpPackError(f"{path}: 'generics' must be an object")
         generics = {}
         for name, members in raw.items():
+            if not is_generic_shaped(name):
+                raise HkpPackError(
+                    f"{path}: generics.{name}: a generic target name must end in "
+                    f"'-generic'; a concrete processor name here would turn its own "
+                    f"pass into a generic one"
+                )
             if not isinstance(members, list) or not members:
                 raise HkpPackError(
                     f"{path}: generics.{name} must be a non-empty array of names"

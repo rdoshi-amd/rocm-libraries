@@ -1427,7 +1427,11 @@ list ranks per device in tiers: an explicit entry (the device's own base id) bea
 target containing it (e.g. `gfx11-generic`, whose members come from the shared generic target
 table), which beats an empty list. Two kernels of one engine collide on a tuple only where they
 select a device at the same tier, so a generic fallback and an explicit override of one tuple
-coexist. The dispatch descriptor is named but **not** loaded; nothing dispatches yet.
+coexist. The tiering and the shadowing of a less specific kernel by a more specific one run after
+the matcher set admits the pack, not at the arch gate, so a generic pack is dropped here only when
+no tier of its list reaches the device; shadowing costs one extra pass over the pack's kernels when
+a device's catalog is first built. The dispatch descriptor is named but **not** loaded; nothing
+dispatches yet.
 *Stored:* the parsed packs, matchers, and kernel metadata, in the same descriptor cache.
 
 **5. Run the engine's `graph_match`, lazily, on the first pack that cleared the gate.** It either

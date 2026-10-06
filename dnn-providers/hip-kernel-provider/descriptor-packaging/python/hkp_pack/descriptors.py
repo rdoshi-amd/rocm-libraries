@@ -645,8 +645,9 @@ def validate_generic_arch(flat):
     Per list: names that look generic but are not in the table are errors, and a
     list may not mix a generic with a member it contains or two generics sharing
     a member (S5). Per KDP holding a generic: a UKD with its own arch must list
-    every generic of the KDP and only entries the KDP lists (S6), and a
-    standalone UKD must carry such an arch. Per KDP of any shape: a UKD may not
+    every generic of the KDP and only entries the KDP lists (S6). Per KDP of any
+    shape: a standalone UKD with an empty `arch` (unrestricted) is valid only under
+    a KDP whose `arch` is empty too (S7; an inline UKD with none inherits the KDP's); a UKD may not
     name a generic the KDP does not list. rocKE does not support generics yet.
     The loader accepts the lenient forms; this is the stricter packer-side layer.
     """
@@ -686,6 +687,13 @@ def validate_generic_arch(flat):
                     f"(arch '{generic}')"
                 )
             ukd_label = f"UKD '{ukd.get('id', '?')}'"
+            if standalone is not None and not ukd_arch and kdp_arch:
+                raise HkpPackError(
+                    f"{file_name}: standalone UKD '{ukd.get('id')}' "
+                    f"({standalone.path.name}) has an empty 'arch' (unrestricted) "
+                    f"but the KDP lists {kdp_arch}; a standalone UKD under a KDP "
+                    "with an arch must declare an arch of its own"
+                )
             for generic in ukd_generics:
                 if generic not in kdp_arch:
                     raise HkpPackError(
@@ -703,11 +711,10 @@ def validate_generic_arch(flat):
                 continue  # an inline UKD with no arch inherits the pack
             lists_all = all(g in ukd_arch for g in kdp_generics)
             only_listed = all(a in kdp_arch for a in ukd_arch)
-            if not ukd_arch or not lists_all or not only_listed:
-                declared = f"arch {ukd_arch}" if ukd_arch else "no arch"
+            if not lists_all or not only_listed:
                 raise HkpPackError(
                     f"{file_name}: KDP lists generic target(s) {kdp_generics} "
-                    f"(arch {kdp_arch}) but {who} declares {declared}; a UKD under "
+                    f"(arch {kdp_arch}) but {who} declares arch {ukd_arch}; a UKD under "
                     "a generic KDP must list every generic of the KDP and only "
                     "entries the KDP lists"
                 )

@@ -9,6 +9,7 @@ interchangeably, and reports "neither location has a spec" as its own outcome.
 from __future__ import annotations
 
 import collections
+import json
 from pathlib import Path
 
 from . import agreement, descriptor_context
@@ -45,6 +46,10 @@ _DTYPE_ALIASES = {
 # Sentinel for "this kernel does not declare that field at all", so a tuple
 # identity can say so explicitly instead of silently shortening.
 _ABSENT = "<absent>"
+
+#: A device no table generic contains, standing in for "any device" when a list is
+#: empty (unrestricted).
+_SYNTHETIC_DEVICE = "<any-device>"
 
 
 def _canonical_dtype(value) -> str:
@@ -165,6 +170,13 @@ def metadata_identity_fields(kernels: list[dict]) -> tuple[str, ...]:
             if field not in fields:
                 fields.append(field)
     return tuple(fields)
+
+
+def load_kdp_arch(kdp_path: Path) -> list[str]:
+    """The arch list a `.kdp.json` declares; what a kernel with no list inherits."""
+    return list(
+        json.loads(Path(kdp_path).read_text(encoding="utf-8")).get("arch") or []
+    )
 
 
 def load_variant_set(kdp_path: Path) -> tuple[list[dict], tuple[str, ...] | None]:
@@ -375,16 +387,20 @@ def metadata_spec_drift(kernels: list[dict], fields=None) -> list[tuple[str, str
     return bad
 
 
-def _reachable_together(group: list[dict], generic_targets) -> int:
-    """The largest number of kernels in `group` that tie for one device.
+def _reachable_together(group: list[dict], generic_targets, kdp_arch=()) -> int:
+    """The largest number of kernels in `group` that tie at one arch tier on one
+    device -- the loader's rule (`archesCompete`): any two kernels sharing a tier on
+    some device collide, whether or not that tier is the best one there.
 
-    Per candidate device (every explicit id and every member of a table generic in
-    the group's lists; one synthetic device when every list is empty) the kernels
-    whose arch tier equals the group's best tier on that device are counted: an
-    arch-less kernel and an explicit one do not collide (the explicit one wins),
-    two arch-less ones do, and so do two kernels naming the same generic.
+    A kernel's arch is its own list, else the KDP's (`kdp_arch`), as
+    `KernelIngestorStateManager` takes it. Candidate devices are every explicit id
+    and every member of a table generic in those lists, plus one synthetic device
+    when any list is empty (an empty list is unrestricted, so it ties there at the
+    unrestricted tier). A list naming only unknown generics matches nothing.
     """
-    lists = [list(k.get("arch") or ()) for k in group]
+    lists = [list(k.get("arch") or kdp_arch) for k in group]
+    if not any(lists):
+        return len(group)
     devices: set[str] = set()
     for entries in lists:
         for entry in entries:
@@ -393,23 +409,24 @@ def _reachable_together(group: list[dict], generic_targets) -> int:
                     devices.update(generic_targets.members(entry))
             else:
                 devices.add(entry)
-    if not devices:
-        return len(group)
+    if not all(lists):
+        devices.add(_SYNTHETIC_DEVICE)
     best = 0
     for device in devices:
         tiers = [gtmod.list_tier(e, device, generic_targets) for e in lists]
         reached = [t for t in tiers if t is not None]
         if reached:
-            best = max(best, reached.count(min(reached)))
+            best = max(best, max(collections.Counter(reached).values()))
     return best
 
 
 def duplicate_matcher_tuples(
-    kernels: list[dict], fields, generic_targets
+    kernels: list[dict], fields, generic_targets, kdp_arch=()
 ) -> dict[tuple, int]:
     """Invariant 2: no two kernels may share a matcher tuple on the same arch --
     one is unreachable. Returns {tuple: count} for every tuple two kernels reach
     one device at the same arch tier with, the scope the runtime refuses in.
+    `kdp_arch` is the arch a kernel without its own list inherits.
 
     The compared set is the union of `fields` present in any kernel's metadata,
     never ``kernels[0]``'s, which would make the identity list-order dependent. A
@@ -420,7 +437,9 @@ def duplicate_matcher_tuples(
     for kernel in kernels:
         key = tuple(kernel.get("metadata", {}).get(f, _ABSENT) for f in present)
         groups[key].append(kernel)
-    counts = {t: _reachable_together(g, generic_targets) for t, g in groups.items()}
+    counts = {
+        t: _reachable_together(g, generic_targets, kdp_arch) for t, g in groups.items()
+    }
     return {t: c for t, c in counts.items() if c > 1}
 
 
@@ -480,6 +499,7 @@ class DeskCheckReport:
         *,
         mode: str,
         generic_targets,
+        kdp_arch=(),
         agreement_failures=None,
         agreement_unclaimed=None,
         agreement_verified=0,
@@ -513,7 +533,7 @@ class DeskCheckReport:
         except DeskCheckNoSpecFound as exc:
             self.spec_drift_error = str(exc)
         self.duplicate_tuples = duplicate_matcher_tuples(
-            kernels, self.fields, generic_targets
+            kernels, self.fields, generic_targets, kdp_arch
         )
 
         self.toc_applicable = _field_applicable(kernels, "toc_key")

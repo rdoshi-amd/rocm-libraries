@@ -1415,9 +1415,10 @@ def _check_generic_arch(config: IngestorConfig) -> None:
     a generic sharing a member) are errors. Per pack of any shape: a kernel may not
     name a generic the pack does not list, an empty pack list included, since it
     would ship in no shard. In a pack that lists a generic, a kernel with its own
-    non-empty ``arch`` must list every generic of the pack and only entries the pack
+    non-empty ``arch`` must list every generic of the KDP and only entries the pack
     lists; a kernel with no own ``arch`` inherits the pack and is unaffected. A hsaco
-    kernel is checked on the list it is stamped with (its own, else the pack's).
+    kernel is checked on the list it is stamped with (its own, else the pack's). A
+    rocKE kernel may not sit under a generic, whether the pack's or its own.
     """
     table = _generic_table()
     for pack in config.packs:
@@ -1427,6 +1428,17 @@ def _check_generic_arch(config: IngestorConfig) -> None:
         for kernel in pack.kernels:
             kernel_where = f"{where} kernel '{kernel.name}'"
             _check_arch_list_generics(kernel.arch, kernel_where, table)
+            if kernel.kernel_source.kind == KERNEL_SOURCE_KIND_ROCKE:
+                rocke_generics = [
+                    a
+                    for a in (pack_generics or kernel.arch)
+                    if gtmod.is_generic_shaped(a)
+                ]
+                if rocke_generics:
+                    raise ConfigError(
+                        f"{kernel_where}: rocKE does not support generic targets "
+                        f"yet (arch '{rocke_generics[0]}')"
+                    )
             stamped = (
                 list(kernel.arch or pack.arch)
                 if kernel.kernel_source.kind == KERNEL_SOURCE_KIND_HSACO
@@ -1448,7 +1460,7 @@ def _check_generic_arch(config: IngestorConfig) -> None:
                     f"{where}: pack lists generic target(s) {pack_generics} (arch "
                     f"{pack.arch}) but kernel '{kernel.name}' declares arch "
                     f"{stamped}; a kernel under a generic pack must list every "
-                    f"generic of the pack and only entries the pack lists"
+                    f"generic of the KDP and only entries the KDP lists"
                 )
 
 

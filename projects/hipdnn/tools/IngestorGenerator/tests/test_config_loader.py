@@ -5,6 +5,10 @@
 configs, the five pre-mint loader-mirroring checks, deprecated- and duplicate-key
 rejection, and the kernel_source_kind rejections."""
 
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
 import pytest
 import yaml
 
@@ -204,7 +208,7 @@ class TestGenericArchRules:
         from codegen.config_loader import _check_generic_arch
 
         config = self._config(["gfx11-generic"], ["gfx1151"])
-        with pytest.raises(ConfigError, match="must list every generic of the pack"):
+        with pytest.raises(ConfigError, match="must list every generic of the KDP"):
             _check_generic_arch(config)
 
     def test_generic_pack_accepts_a_kernel_with_no_own_arch(self):
@@ -227,7 +231,7 @@ class TestGenericArchRules:
         from codegen.config_loader import _check_generic_arch
 
         config = self._config(["gfx942", "gfx11-generic"], ["gfx942"])
-        with pytest.raises(ConfigError, match="must list every generic of the pack"):
+        with pytest.raises(ConfigError, match="must list every generic of the KDP"):
             _check_generic_arch(config)
 
     @pytest.mark.parametrize("pack_arch", [[], ["gfx942"], ["gfx942", "gfx12-generic"]])
@@ -280,6 +284,133 @@ class TestGenericArchRules:
             _check_kernel_arch_subset_of_pack(
                 self._config(["gfx11-generic"], ["gfx1250"])
             )
+
+
+_PACKER_PYTHON = (
+    Path(__file__).resolve().parents[5]
+    / "dnn-providers"
+    / "hip-kernel-provider"
+    / "descriptor-packaging"
+    / "python"
+)
+
+
+class TestGeneratorAgreesWithThePackerOnGenericRules:
+    """The generator and ``hkp_pack.descriptors.validate_generic_arch`` each carry a
+    hand-written copy of the generic-target rules. Each case runs one pack through
+    both: they must agree on accept/reject and name the same stable rule text."""
+
+    @staticmethod
+    def _packer_verdict(pack_arch, kernel_arch, kind):
+        if str(_PACKER_PYTHON) not in sys.path:
+            sys.path.insert(0, str(_PACKER_PYTHON))
+        from hkp_pack.descriptors import Descriptor, validate_generic_arch
+        from hkp_pack.errors import HkpPackError
+        from hkp_pack.generic_targets import GenericTargets
+
+        ukd = {
+            "id": "k",
+            "name": "k",
+            "kernel_source": {"kind": kind},
+            **({"arch": kernel_arch} if kernel_arch else {}),
+        }
+        kdp = Descriptor(
+            Path("p.kdp.json"),
+            {"id": "p", "arch": pack_arch, "kernelDescriptors": [ukd]},
+        )
+        flat = SimpleNamespace(
+            descriptors=[kdp],
+            generic_targets=GenericTargets.load(
+                Path(__file__).resolve().parents[3]
+                / "plugin_sdk"
+                / "data"
+                / "gpu_generic_targets.json"
+            ),
+            ukd_by_id=lambda: {},
+            kdps=lambda: [kdp],
+        )
+        try:
+            validate_generic_arch(flat)
+        except HkpPackError as exc:
+            return str(exc)
+        return None
+
+    @staticmethod
+    def _generator_verdict(pack_arch, kernel_arch, kind):
+        from codegen.config_loader import _validate_config
+        from codegen.models import KernelSource
+
+        kernel = make_kernel(
+            arch=kernel_arch,
+            **({"kernel_source": KernelSource(kind=kind)} if kind == "rocke" else {}),
+        )
+        config = make_minimal_config(
+            packs=[make_pack(arch=pack_arch, kernels=[kernel])]
+        )
+        try:
+            _validate_config(config)
+        except ConfigError as exc:
+            return str(exc)
+        return None
+
+    @pytest.mark.parametrize(
+        ("pack_arch", "kernel_arch", "kind", "rule"),
+        [
+            (["gfx11-generic"], [], "embedded_source", None),
+            (["gfx11-generic"], ["gfx11-generic"], "embedded_source", None),
+            (
+                ["gfx942", "gfx11-generic"],
+                ["gfx942", "gfx11-generic"],
+                "embedded_source",
+                None,
+            ),
+            (
+                ["gfx11-generic"],
+                ["gfx1151"],
+                "embedded_source",
+                "must list every generic of the KDP",
+            ),
+            (
+                ["gfx942", "gfx11-generic"],
+                ["gfx942"],
+                "embedded_source",
+                "must list every generic of the KDP",
+            ),
+            (
+                ["gfx11-generic", "gfx12-generic"],
+                ["gfx11-generic"],
+                "embedded_source",
+                "must list every generic of the KDP",
+            ),
+            ([], ["gfx11-generic"], "embedded_source", "does not list"),
+            (["gfx9-4-generic"], [], "embedded_source", "generic target name absent"),
+            (
+                ["gfx11-generic", "gfx1151"],
+                [],
+                "embedded_source",
+                "gfx11-generic contains gfx1151",
+            ),
+            (["gfx11-generic"], [], "rocke", "does not support generic targets yet"),
+            (
+                ["gfx942", "gfx11-generic"],
+                [],
+                "rocke",
+                "does not support generic targets yet",
+            ),
+            ([], ["gfx11-generic"], "rocke", "does not support generic targets yet"),
+        ],
+    )
+    def test_the_two_copies_of_the_rules_agree(
+        self, pack_arch, kernel_arch, kind, rule
+    ):
+        packer = self._packer_verdict(pack_arch, kernel_arch, kind)
+        generator = self._generator_verdict(pack_arch, kernel_arch, kind)
+        if rule is None:
+            assert packer is None
+            assert generator is None
+        else:
+            assert packer is not None and rule in packer
+            assert generator is not None and rule in generator
 
 
 class TestArchShapeCheck:

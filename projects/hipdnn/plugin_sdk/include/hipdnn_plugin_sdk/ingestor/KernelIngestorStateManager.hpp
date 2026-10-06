@@ -390,9 +390,9 @@ private:
         // Two kernels may share a tuple when no single device can see both at the same arch
         // tier -- the per-arch shard layout, and an explicit or generic kernel beside a
         // less specific one, which buildCatalog shadows per device. Uniqueness is therefore
-        // per competing-arch group, not per engine: the tuple is the catalog key, and a catalog is built for
-        // one device. Keyed by the tuple (an ordered map, so it already orders) rather
-        // than scanned, which would be quadratic.
+        // per competing-arch group, not per engine: the tuple is the catalog key, and a
+        // catalog is built for one device. Keyed by the tuple (an ordered map, so it already
+        // orders) rather than scanned, which would be quadratic.
         std::map<MetadataValues, std::vector<std::vector<std::string>>> archesClaimingTuple;
 
         _definitions.reserve(_packs.size());

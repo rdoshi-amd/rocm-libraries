@@ -76,6 +76,10 @@ def test_loads_the_table_members_in_document_order(table):
             {"schemaVersion": 1, "generics": {"gfx11-generic": ["gfx1100", "gfx1100"]}},
             "more than once",
         ),
+        (
+            {"schemaVersion": 1, "generics": {"gfx1100": ["gfx1100"]}},
+            "must end in '-generic'",
+        ),
         ([], "must be a JSON object"),
     ],
 )

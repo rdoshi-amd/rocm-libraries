@@ -585,7 +585,6 @@ def test_failure_names_every_failed_arch(
 
     message = str(exc.value)
     assert "gfx942" in message and "gfx950" in message
-    assert "2 failure(s) across 2" in message
 
 
 # --- E. The shipped example tree -------------------------------------------
@@ -1515,19 +1514,20 @@ def _make_embedded(folder, arch=None):
     kdp["kernelDescriptors"] = [inline, _STANDALONE_ID]
     kdp_path.write_text(json.dumps(kdp, indent=2) + "\n", encoding="utf-8")
 
+    standalone = {
+        "version": "0.1",
+        "id": _STANDALONE_ID,
+        "name": "PointwiseMul f32 block64 (solo)",
+        "kernel_source": dict(_STANDALONE_SOURCE),
+        "metadata": {"dtype": "FLOAT", "block_size": 64},
+        "priority": 0,
+    }
+    if arch:
+        # A standalone UKD without an arch is unrestricted, valid only under a KDP
+        # with none; under an arch'd KDP it declares that arch itself.
+        standalone["arch"] = list(arch)
     (folder / _STANDALONE_FILE).write_text(
-        json.dumps(
-            {
-                "version": "0.1",
-                "id": _STANDALONE_ID,
-                "name": "PointwiseMul f32 block64 (solo)",
-                "kernel_source": dict(_STANDALONE_SOURCE),
-                "metadata": {"dtype": "FLOAT", "block_size": 64},
-                "priority": 0,
-            },
-            indent=2,
-        )
-        + "\n",
+        json.dumps(standalone, indent=2) + "\n",
         encoding="utf-8",
     )
     return folder

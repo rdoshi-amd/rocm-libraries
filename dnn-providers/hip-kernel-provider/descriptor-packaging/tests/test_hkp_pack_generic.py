@@ -389,6 +389,40 @@ def test_a_failed_generic_pass_leaves_no_member_copy(
     assert not (tmp_path / "inter" / ".generic-out" / GENERIC).exists()
 
 
+@pytest.mark.quick
+def test_generic_copies_of_every_producer_are_equal_across_separate_builds(
+    tmp_path, empty_arch_fixture, hsaco_fixture_dir, rocm_kpack_dir
+):
+    """An embedded and an hsaco generic entry, packed once for gfx1100 and once for
+    gfx1151 from separate roots: the member folders hold identical files, so the
+    copies per-arch shard builds produce collapse to one. Nothing of the build's
+    target list may leak into the generic copy."""
+    hsaco = _embedded("ukd-hsaco", [GENERIC])
+    hsaco["kernel_source"] = {
+        "kind": "hsaco",
+        "file": CO_NAME,
+        "symbol": "HsacoFixtureAdd",
+    }
+    hsaco["provenance"] = copy.deepcopy(_CONTRACT)
+    folders = {}
+    for member in (MEMBER_A, MEMBER_B):
+        base = tmp_path / member
+        base.mkdir()
+        root = _root(
+            base,
+            empty_arch_fixture,
+            {
+                "e": _kdp("kdp-e", [GENERIC], [_embedded("ukd-e")]),
+                "h": _kdp("kdp-h", [GENERIC], [copy.deepcopy(hsaco)]),
+            },
+        )
+        shutil.copyfile(hsaco_fixture_dir / "gfx942" / CO_NAME, root / CO_NAME)
+        _pack(root, base, [member], rocm_kpack_dir)
+        folders[member] = _files(base / "out" / member)
+    assert any(name.endswith(".kpack") for name in folders[MEMBER_A])
+    assert folders[MEMBER_A] == folders[MEMBER_B]
+
+
 # --- authored hsaco under a generic ------------------------------------------
 
 
@@ -464,6 +498,7 @@ def test_s5_two_generics_sharing_a_member_is_an_error(tmp_path, empty_arch_fixtu
     with pytest.raises(HkpPackError) as err:
         _load(root, GenericTargets.load(table_path))
     message = str(err.value)
+    assert message.startswith("g.kdp.json:")
     assert "lists 'gfx11-generic' and 'gfx11-b-generic'" in message
     assert "share member gfx1101" in message
 
@@ -481,8 +516,8 @@ def _standalone(uid, arch=None):
 @pytest.mark.quick
 @pytest.mark.parametrize(
     "ukd_arch, accepted",
-    [([GENERIC], True), ([MEMBER_B], False), (None, False)],
-    ids=["exact_generic", "narrower", "unrestricted"],
+    [([GENERIC], True), ([MEMBER_B], False)],
+    ids=["exact_generic", "narrower"],
 )
 def test_s6_standalone_ukd_under_a_generic_kdp(
     tmp_path, empty_arch_fixture, ukd_arch, accepted
@@ -494,13 +529,62 @@ def test_s6_standalone_ukd_under_a_generic_kdp(
         {"s": _standalone("ukd-s", ukd_arch)},
     )
     if accepted:
-        assert _load(root).generic_targets is GENERIC_TARGETS
+        _load(root)
         return
     with pytest.raises(HkpPackError) as err:
         _load(root)
     message = str(err.value)
     assert _S6_RULE in message
     assert "ukd-s" in message and "s.ukd.json" in message and "g.kdp.json" in message
+
+
+_S7_RULE = "has an empty 'arch' (unrestricted) but the KDP lists"
+
+
+@pytest.mark.quick
+@pytest.mark.parametrize(
+    "kdp_arch", [["gfx942"], [GENERIC]], ids=["concrete", "generic"]
+)
+def test_s7_standalone_ukd_without_arch_under_a_kdp_with_an_arch_is_an_error(
+    tmp_path, empty_arch_fixture, kdp_arch
+):
+    root = _root(
+        tmp_path,
+        empty_arch_fixture,
+        {"g": _kdp("kdp-g", kdp_arch, ["ukd-s"])},
+        {"s": _standalone("ukd-s")},
+    )
+    with pytest.raises(HkpPackError) as err:
+        _load(root)
+    message = str(err.value)
+    assert message.startswith("g.kdp.json:")
+    assert _S7_RULE in message
+    assert "'ukd-s'" in message and "s.ukd.json" in message
+
+
+@pytest.mark.quick
+def test_s7_standalone_ukd_without_arch_under_an_arch_less_kdp_is_accepted(
+    tmp_path, empty_arch_fixture
+):
+    root = _root(
+        tmp_path,
+        empty_arch_fixture,
+        {"g": _kdp("kdp-g", [], ["ukd-s"])},
+        {"s": _standalone("ukd-s")},
+    )
+    _load(root)
+
+
+@pytest.mark.quick
+def test_s7_inline_ukd_without_arch_under_a_concrete_kdp_inherits_and_is_accepted(
+    tmp_path, empty_arch_fixture
+):
+    root = _root(
+        tmp_path,
+        empty_arch_fixture,
+        {"g": _kdp("kdp-g", ["gfx942"], [_embedded("ukd-i")])},
+    )
+    _load(root)
 
 
 @pytest.mark.quick
@@ -512,7 +596,32 @@ def test_s6_inline_ukd_with_a_narrower_arch_under_a_generic_kdp_is_an_error(
         empty_arch_fixture,
         {"g": _kdp("kdp-g", [GENERIC], [_embedded("ukd-i", [MEMBER_B])])},
     )
-    with pytest.raises(HkpPackError, match=_S6_RULE):
+    with pytest.raises(HkpPackError, match=_S6_RULE) as err:
+        _load(root)
+    assert str(err.value).startswith("g.kdp.json:")
+    assert "inline UKD 'ukd-i'" in str(err.value)
+
+
+@pytest.mark.quick
+@pytest.mark.parametrize(
+    "ukd_arch, rule",
+    [
+        (["gfx99-generic"], "generic target name absent"),
+        ([GENERIC, MEMBER_B], f"{GENERIC} contains {MEMBER_B}"),
+    ],
+    ids=["unknown_generic", "generic_beside_member"],
+)
+def test_per_list_rules_apply_to_an_inline_ukd_arch(
+    tmp_path, empty_arch_fixture, ukd_arch, rule
+):
+    """An inline UKD's own list is held to the per-list rules, which name the actual
+    defect rather than a later KDP-level rule."""
+    root = _root(
+        tmp_path,
+        empty_arch_fixture,
+        {"g": _kdp("kdp-g", [GENERIC], [_embedded("ukd-i", ukd_arch)])},
+    )
+    with pytest.raises(HkpPackError, match=rule):
         _load(root)
 
 
@@ -545,8 +654,10 @@ def test_s6_mixed_list_ukd_missing_the_generic_is_an_error(
         empty_arch_fixture,
         {"m": _kdp("kdp-m", ["gfx942", GENERIC], [_embedded("ukd-m", ["gfx942"])])},
     )
-    with pytest.raises(HkpPackError, match=_S6_RULE):
+    with pytest.raises(HkpPackError, match=_S6_RULE) as err:
         _load(root)
+    assert str(err.value).startswith("m.kdp.json:")
+    assert "inline UKD 'ukd-m'" in str(err.value)
 
 
 # --- reverse direction, unknown names, rocKE ---------------------------------
@@ -567,7 +678,8 @@ def test_a_generic_ukd_under_a_kdp_that_does_not_list_it_is_an_error(
     message = str(err.value)
     assert f"declares generic target '{GENERIC}'" in message
     assert "ship in no shard" in message
-    assert "k.kdp.json" in message
+    assert message.startswith("k.kdp.json:")
+    assert "UKD 'ukd-k'" in message
 
 
 @pytest.mark.quick
@@ -586,8 +698,13 @@ def test_unknown_generic_name_is_an_error_naming_the_file(tmp_path, empty_arch_f
 
 
 @pytest.mark.quick
-def test_rocke_with_a_generic_arch_is_an_error(tmp_path, empty_arch_fixture):
-    ukd = _embedded("ukd-r", [GENERIC])
+@pytest.mark.parametrize(
+    "ukd_arch", [None, [GENERIC]], ids=["no_own_arch", "own_generic"]
+)
+def test_rocke_under_a_generic_kdp_is_an_error(tmp_path, empty_arch_fixture, ukd_arch):
+    """A rocKE UKD is refused whether it carries the generic itself or merely
+    inherits it from the KDP."""
+    ukd = _embedded("ukd-r", ukd_arch)
     ukd["kernel_source"] = {
         "kind": "rocke",
         "source": "pkg/kernels/attention.py",
@@ -597,8 +714,10 @@ def test_rocke_with_a_generic_arch_is_an_error(tmp_path, empty_arch_fixture):
     root = _root(tmp_path, empty_arch_fixture, {"r": _kdp("kdp-r", [GENERIC], [ukd])})
     with pytest.raises(HkpPackError) as err:
         _load(root)
-    assert "does not support generic targets yet" in str(err.value)
-    assert GENERIC in str(err.value)
+    message = str(err.value)
+    assert message.startswith("r.kdp.json:")
+    assert "does not support generic targets yet" in message
+    assert f"'{GENERIC}'" in message
 
 
 # --- hipcc tier (not quick) ---------------------------------------------------
@@ -645,6 +764,24 @@ def test_generic_hip_archive_is_keyed_by_the_generic_spelling(
     assert archive.get_kernel(ks["toc_key"], GENERIC) is not None
     assert archive.get_kernel(ks["toc_key"], MEMBER_A) is None
     assert results[MEMBER_A].kpack_path is None
+
+
+def test_compiled_agreement_holds_on_a_generic_copy(
+    tmp_path, empty_arch_fixture, hipcc, rocm_kpack_dir
+):
+    """A shipped generic copy carries the generic as its literal arch, which names no
+    device: `consumer_records` must still count its own entry as a consumer, or the
+    record lookup for the copy's kernel raises."""
+    from hkp_pack.desk_check import compiled_agreement
+
+    root = _hip_generic_root(tmp_path / "src", empty_arch_fixture)
+    _hip_pack(
+        root, tmp_path / "out", tmp_path / "inter", [MEMBER_A], hipcc, rocm_kpack_dir
+    )
+    failures, _unclaimed, _verified = compiled_agreement(
+        tmp_path / "out" / MEMBER_A / "solo.kdp.json", GENERIC_TARGETS, rocm_kpack_dir
+    )
+    assert failures == []
 
 
 def test_generic_pack_is_byte_identical_across_separate_per_arch_builds(

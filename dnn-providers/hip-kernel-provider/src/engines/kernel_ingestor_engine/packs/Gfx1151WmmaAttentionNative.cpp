@@ -109,8 +109,12 @@ bool isWellFormedOperand(const data_objects::TensorAttributes& tensor)
 {
     const auto* dims = tensor.dims();
     const auto* strides = tensor.strides();
+    // Ragged (THD) operands address each batch from a device offset table; this
+    // engine binds only dense strides, so it must decline them rather than read
+    // the buffer as dense.
     if(dims == nullptr || strides == nullptr || dims->size() != SDPA_RANK
        || strides->size() != SDPA_RANK || tensor.virtual_()
+       || tensor.ragged_offset_tensor_uid().has_value()
        || hipdnn_flatbuffers_sdk::utilities::isPassByValueTensor(&tensor))
     {
         return false;
@@ -221,6 +225,15 @@ std::optional<MaskParameters> maskFor(const data_objects::SdpaAttributes& attrib
     }
 
     MaskParameters result;
+    // The deprecated causal flags override any bounds and alignment, exactly as
+    // the hipDNN reference resolves them (extractDiagonalBandParams).
+    if(topLeftDeprecated || bottomRightDeprecated)
+    {
+        result.kind = MaskKind::CAUSAL;
+        result.right = 0;
+        result.bottomRight = static_cast<int32_t>(bottomRightDeprecated);
+        return result;
+    }
     result.bottomRight = static_cast<int32_t>(attributes.diagonal_alignment()
                                               == data_objects::DiagonalAlignment::BOTTOM_RIGHT);
     result.left = static_cast<int32_t>(left);
@@ -228,13 +241,6 @@ std::optional<MaskParameters> maskFor(const data_objects::SdpaAttributes& attrib
     if(left != UNBOUNDED || right != UNBOUNDED)
     {
         result.kind = left == UNBOUNDED && right == 0 ? MaskKind::CAUSAL : MaskKind::WINDOW;
-        return result;
-    }
-    if(topLeftDeprecated || bottomRightDeprecated)
-    {
-        result.kind = MaskKind::CAUSAL;
-        result.right = 0;
-        result.bottomRight = static_cast<int32_t>(bottomRightDeprecated);
     }
     return result;
 }

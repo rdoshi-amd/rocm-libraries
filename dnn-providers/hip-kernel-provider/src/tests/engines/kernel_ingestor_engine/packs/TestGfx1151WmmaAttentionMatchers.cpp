@@ -41,6 +41,7 @@ constexpr int64_t K_UID = 2;
 constexpr int64_t V_UID = 3;
 constexpr int64_t O_UID = 4;
 constexpr int64_t LSE_UID = 5;
+constexpr int64_t RAGGED_OFFSET_UID = 6;
 
 struct GraphSpec
 {
@@ -57,6 +58,10 @@ struct GraphSpec
     int64_t leftBound = 7;
     int64_t rightBound = 3;
     std::optional<int64_t> outputHeadSize;
+    // Operand UID that carries a ragged (THD) offset table, if any.
+    std::optional<int64_t> raggedOperand;
+    bool causalMask = false;
+    bool causalMaskBottomRight = false;
 };
 
 DeviceProperties testDeviceProperties()
@@ -97,8 +102,20 @@ flatbuffers::FlatBufferBuilder buildSdpaGraph(const GraphSpec& spec)
                                data_objects::DataType dtype,
                                const std::vector<int64_t>& strides,
                                const std::vector<int64_t>& dims) {
-        return data_objects::CreateTensorAttributesDirect(
-            builder, uid, nullptr, dtype, &strides, &dims, false);
+        const ::flatbuffers::Optional<int64_t> ragged
+            = spec.raggedOperand == uid ? ::flatbuffers::Optional<int64_t>(RAGGED_OFFSET_UID)
+                                        : ::flatbuffers::nullopt;
+        return data_objects::CreateTensorAttributesDirect(builder,
+                                                          uid,
+                                                          nullptr,
+                                                          dtype,
+                                                          &strides,
+                                                          &dims,
+                                                          false,
+                                                          data_objects::TensorValue::NONE,
+                                                          0,
+                                                          false,
+                                                          ragged);
     };
 
     std::vector<flatbuffers::Offset<data_objects::TensorAttributes>> tensors{
@@ -110,6 +127,13 @@ flatbuffers::FlatBufferBuilder buildSdpaGraph(const GraphSpec& spec)
     if(spec.returnLse)
     {
         tensors.push_back(tensorFor(LSE_UID, spec.lseDtype, lseStrides, lseDims));
+    }
+    if(spec.raggedOperand.has_value())
+    {
+        const std::vector<int64_t> offsetDims{spec.batch + 1, 1, 1, 1};
+        const std::vector<int64_t> offsetStrides{1, 1, 1, 1};
+        tensors.push_back(
+            tensorFor(RAGGED_OFFSET_UID, data_objects::DataType::INT32, offsetStrides, offsetDims));
     }
 
     data_objects::SdpaAttributesBuilder attributes(builder);
@@ -123,6 +147,8 @@ flatbuffers::FlatBufferBuilder buildSdpaGraph(const GraphSpec& spec)
         attributes.add_generate_stats(true);
     }
     attributes.add_left_bound(spec.leftBound);
+    attributes.add_causal_mask(spec.causalMask);
+    attributes.add_causal_mask_bottom_right(spec.causalMaskBottomRight);
     attributes.add_right_bound(spec.rightBound);
     attributes.add_diagonal_alignment(data_objects::DiagonalAlignment::TOP_LEFT);
     attributes.add_attn_scale_value(0.125F);
@@ -245,6 +271,45 @@ TEST(TestGfx1151WmmaAttentionMatchers, DeclinesHalfPrecisionLse)
     GraphSpec spec;
     spec.lseDtype = data_objects::DataType::HALF;
     EXPECT_FALSE(matchGraph(spec).has_value());
+}
+
+// A ragged operand addresses each batch from a device offset table. The engine
+// binds dense strides only, so binding one would silently read it as dense.
+TEST(TestGfx1151WmmaAttentionMatchers, DeclinesRaggedOperands)
+{
+    ASSERT_TRUE(matchGraph(GraphSpec{}).has_value());
+    for(const int64_t uid : {Q_UID, K_UID, V_UID, O_UID, LSE_UID})
+    {
+        GraphSpec spec;
+        spec.raggedOperand = uid;
+        EXPECT_FALSE(matchGraph(spec).has_value()) << "ragged operand uid " << uid;
+    }
+}
+
+// The deprecated causal flags override the bounds and alignment, as in the
+// hipDNN reference; otherwise a left bound would drop the causal limit.
+TEST(TestGfx1151WmmaAttentionMatchers, DeprecatedCausalFlagsOverrideBounds)
+{
+    using hipdnn_plugin_sdk::ingestor::tryGetBoundInt;
+    for(const bool bottomRight : {false, true})
+    {
+        GraphSpec spec;
+        spec.causalMask = !bottomRight;
+        spec.causalMaskBottomRight = bottomRight;
+        const auto bound = matchGraph(spec);
+        ASSERT_TRUE(bound.has_value());
+        EXPECT_EQ(tryGetBoundInt(*bound, "gfx1151_wmma_attention.mask"), 1); // causal
+        EXPECT_EQ(tryGetBoundInt(*bound, "gfx1151_wmma_attention.window_left"), -1);
+        EXPECT_EQ(tryGetBoundInt(*bound, "gfx1151_wmma_attention.window_right"), 0);
+        EXPECT_EQ(tryGetBoundInt(*bound, "gfx1151_wmma_attention.bottom_right"),
+                  bottomRight ? 1 : 0);
+        auto causal = KernelSpec{};
+        causal.maskMode = "causal";
+        auto window = KernelSpec{};
+        window.maskMode = "window";
+        EXPECT_TRUE(matchesKernel(spec, causal));
+        EXPECT_FALSE(matchesKernel(spec, window));
+    }
 }
 
 TEST(TestGfx1151WmmaAttentionMatchers, KernelMatcherUsesRuntimeMaskDtypeAndHeadSize)

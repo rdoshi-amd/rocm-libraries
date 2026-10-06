@@ -32,7 +32,7 @@ inline bool
 inline int64_t elementCount(const hipdnn_flatbuffers_sdk::data_objects::TensorAttributesT& operand)
 {
     return std::accumulate(
-        operand.dims.begin(), operand.dims.end(), int64_t{1}, std::multiplies<int64_t>());
+        operand.dims.begin(), operand.dims.end(), int64_t{1}, std::multiplies<>());
 }
 
 // Resolves a scalar operand to a host float. A device-resident operand must be a single FLOAT

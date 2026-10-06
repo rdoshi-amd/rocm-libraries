@@ -327,7 +327,7 @@ inline flatbuffers::FlatBufferBuilder
                                                            TensorValue::NONE,
                                                            /*value=*/0,
                                                            /*is_runtime_pass_by_value=*/false,
-                                                           options.raggedOffsetStatsUid.value(),
+                                                           options.raggedOffsetStatsUid,
                                                            /*alignment=*/16,
                                                            multiplier(statsStrides)));
             tensors.push_back(CreateTensorAttributesDirect(builder,

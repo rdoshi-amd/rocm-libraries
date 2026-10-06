@@ -398,7 +398,7 @@ TEST(TestCpuFpReferenceSdpaRaggedFp32, AbsentAttnScaleIsOne)
 {
     const std::vector<int64_t> seqLens = {3, 5};
     const auto dims = raggedDims(2, 5, 2, 16);
-    const int64_t tokenWidth = 2 * 16;
+    const int64_t tokenWidth = int64_t{2} * 16; // H * D
     const auto cum = cumTokens(seqLens);
     const auto count = static_cast<size_t>(cum.back() * tokenWidth);
     std::vector<float> qB(count);

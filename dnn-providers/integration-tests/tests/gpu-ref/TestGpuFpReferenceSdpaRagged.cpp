@@ -247,7 +247,7 @@ TEST(TestGpuSdpaRaggedFwdFp32, AbsentAttnScaleIsOne)
 {
     SKIP_IF_NO_DEVICES();
     const auto dims = raggedDims(2, 5, 2, 16);
-    const int64_t tokenWidth = 2 * 16;
+    const int64_t tokenWidth = int64_t{2} * 16; // H * D
     const auto cum = cumTokens({3, 5});
     Tensor<float> q(dims, raggedStrides(dims));
     Tensor<float> k(dims, raggedStrides(dims));
@@ -740,8 +740,8 @@ TEST(TestGpuSdpaRaggedFwdFp8, ThrowsOnPerQueryHeadQDescaleUnderGqa)
     Tensor<fp8_e4m3> v(kvDims, raggedStrides(kvDims));
     Tensor<bfloat16> o(qDims, raggedStrides(qDims));
     const auto cum = cumTokens({4});
-    auto offQ = makeRaggedOffset(cum, 4 * 128);
-    auto offKv = makeRaggedOffset(cum, 2 * 128);
+    auto offQ = makeRaggedOffset(cum, int64_t{4} * 128);
+    auto offKv = makeRaggedOffset(cum, int64_t{2} * 128);
 
     auto perQueryHead = makePerHeadDescale(1, 4, 0.5f);
     auto descaleK = makeScalarDescale(1.0f);

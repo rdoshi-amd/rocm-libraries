@@ -61,7 +61,7 @@ using Bf16Builder = GpuSdpaRaggedFwdPlanBuilder<DataType::BFLOAT16,
 flatbuffers::FlatBufferBuilder makeRaggedGraph(SdpaAttributesT attrs = {})
 {
     RaggedSdpaFwdGraphOptions options;
-    options.attrs = std::move(attrs);
+    options.attrs = attrs;
     return createRaggedSdpaFwdGraph(Q_UID,
                                     K_UID,
                                     V_UID,
@@ -102,11 +102,11 @@ ShallowRaggedTensor<float> wrapRagged(float* buf,
                                       int64_t seqStride,
                                       const std::vector<int64_t>& lengths)
 {
-    return ShallowRaggedTensor<float>(buf,
-                                      dims,
-                                      raggedStrides(dims),
-                                      BSHD_SEQ_AXIS,
-                                      makeRaggedOffsetAux(cumTokens(lengths), seqStride));
+    return {buf,
+            dims,
+            raggedStrides(dims),
+            BSHD_SEQ_AXIS,
+            makeRaggedOffsetAux(cumTokens(lengths), seqStride)};
 }
 
 // Runs the fp32 plan with unequal Q/KV lengths and an LSE in statsLayout, and compares it with
@@ -1079,10 +1079,15 @@ TEST_P(TestGpuSdpaRaggedFwdPlanScale, ExecuteHonorsNonDefaultScale)
     {
         FloatOperandSpec scale;
         scale.uid = SCALE_UID;
-        scale.storage = source == ScaleSource::DEVICE_TENSOR ? OperandStorage::DEVICE
-                        : source == ScaleSource::BAKED_TENSOR
-                            ? OperandStorage::BAKED
-                            : OperandStorage::RUNTIME_PASS_BY_VALUE;
+        scale.storage = OperandStorage::RUNTIME_PASS_BY_VALUE;
+        if(source == ScaleSource::DEVICE_TENSOR)
+        {
+            scale.storage = OperandStorage::DEVICE;
+        }
+        else if(source == ScaleSource::BAKED_TENSOR)
+        {
+            scale.storage = OperandStorage::BAKED;
+        }
         scale.bakedValue = SCALE;
         options.scale = scale;
     }

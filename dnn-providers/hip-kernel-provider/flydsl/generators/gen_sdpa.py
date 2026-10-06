@@ -428,9 +428,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--arch",
         required=True,
-        help="GPU target, e.g. gfx11-generic (every RDNA3/RDNA3.5 part) or a "
-        "concrete gfx11 arch. The kernel is gfx11-only (RDNA3 / RDNA3.5 WMMA ABI); "
-        "one arch per invocation.",
+        help="GPU target, e.g. gfx11-generic (every RDNA3/RDNA3.5 part), "
+        "gfx12-generic (every RDNA4 part) or a concrete gfx11/gfx120x arch. The "
+        "kernels carry the gfx11 and gfx12 WMMA ABIs; one arch per invocation.",
     )
     parser.add_argument(
         "--out-dir",
@@ -447,10 +447,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    if not args.arch.startswith("gfx11"):
+    # Refused before compiling: built for another ABI, the kernel aborts the
+    # process inside LLVM rather than raising.
+    if not (
+        args.arch.startswith("gfx11")
+        or args.arch.startswith("gfx120")
+        or args.arch == "gfx12-generic"
+    ):
         print(
-            f"error: the SDPA kernel targets the gfx11 WMMA ABI; {args.arch!r} is not "
-            "gfx11",
+            f"error: the SDPA kernels target the gfx11 and gfx12 WMMA ABIs; "
+            f"{args.arch!r} is neither",
             file=sys.stderr,
         )
         return 1

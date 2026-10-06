@@ -138,7 +138,8 @@ done
 ```
 
 Expected, and the state of the tree as committed: **108/108 byte-identical** (12
-RMSNorm, 96 SDPA), all four diffs empty.
+RMSNorm, 96 SDPA), all four diffs empty. Repeat with `gfx12-generic` in place of
+`gfx11-generic` throughout: **108/108** there too.
 
 `manifest.json` agreeing is the stronger of the two checks — it carries the
 `toolchain` block, so an identical manifest means the *recorded* toolchain and
@@ -163,17 +164,19 @@ a new arch, a deliberate toolchain bump.
 cd dnn-providers/hip-kernel-provider/flydsl
 
 # (1) Compile. Writes $CONTENT/<op>/<arch>/*.hsaco + manifest.json + SOURCE.md
-#     for each op. The SDPA kernel is gfx11-only (RDNA3 / RDNA3.5 WMMA ABI);
-#     gen_sdpa refuses any other arch.
-$PY -m generators.gen_rmsnorm --arch gfx11-generic
-$PY -m generators.gen_sdpa --arch gfx11-generic
+#     for each op. The SDPA kernels carry the gfx11 (RDNA3 / RDNA3.5) and gfx12
+#     (RDNA4) WMMA ABIs; gen_sdpa refuses any other arch before compiling.
+for ARCH in gfx11-generic gfx12-generic; do
+  $PY -m generators.gen_rmsnorm --arch $ARCH
+  $PY -m generators.gen_sdpa --arch $ARCH
 
-# (2) Descriptors. Every field is derived from the manifest and the objects it
-#     names, so a descriptor cannot disagree with the object it describes.
-$PY gen_descriptors.py --arch gfx11-generic
+  # (2) Descriptors. Every field is derived from the manifest and the objects it
+  #     names, so a descriptor cannot disagree with the object it describes.
+  $PY gen_descriptors.py --arch $ARCH
 
-# (3) Verify the set. This is the same invocation the build runs before packing.
-$PY gen_descriptors.py --arch gfx11-generic --check
+  # (3) Verify the set. This is the same invocation the build runs before packing.
+  $PY gen_descriptors.py --arch $ARCH --check
+done
 ```
 
 **Why `gfx11-generic`.** It is an LLVM *generic* target: one object set that the
@@ -195,8 +198,19 @@ effective set is recorded per instance as `llvm_options`):
 without it the d128 causal objects spill a few VGPRs, because the generic ISA
 has no gfx115x scalar-float instructions.
 
-A concrete gfx11 arch still works (`--arch gfx1151`) if a part ever needs its own
-objects; its directory then ships only to that arch.
+**`gfx12-generic`** (gfx1200, gfx1201) works the same way, with one more step.
+FlyDSL 0.3.4's own arch checks classify RDNA by name prefix (`gfx120`), which
+the generic name fails: told `gfx12-generic` it picks no WMMA atom and CDNA
+buffer-descriptor flags -- silently, for RMSNorm. The family's row in
+`arch_families.json` therefore names a `flydsl_gpu_arch` (gfx1200) that
+`prepare()` gives those checks, while the object is still built for and stamped
+as `gfx12-generic`; `prepare()` refuses a build whose checks would not see RDNA.
+The kernels pick their WMMA operand layout from that same arch (attention-kernel
+modification 17). gfx12 needs no `amdgpu-use-amdgpu-trackers`: every instance
+fits without a spill under the default scheduler.
+
+A concrete gfx11 or gfx120x arch still works (`--arch gfx1151`) if a part ever
+needs its own objects; its directory then ships only to that arch.
 
 Steps 1 and 2 are per-arch and **one arch per invocation** — FlyDSL reads `ARCH`
 from the environment at each compile, so a multi-arch run could file an object

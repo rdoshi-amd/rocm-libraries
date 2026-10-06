@@ -48,10 +48,32 @@ def write_op_manifest(
     }
     path = op_dir / MANIFEST_NAME
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(manifest, indent=2, sort_keys=False) + "\n", encoding="utf-8"
-    )
+    path.write_text(_dumps(manifest) + "\n", encoding="utf-8")
     return path
+
+
+def _dumps(manifest: dict) -> str:
+    """Indented JSON, but each kernel-argument record on one line.
+
+    The argument lists are most of a manifest, and one record per line keeps a
+    hundred-instance manifest reviewable and under the repository's size check.
+    """
+    tokens: dict[str, str] = {}
+    shaped = json.loads(json.dumps(manifest))
+    for record in shaped.get("instances", []):
+        for key in ("args", "merge_args"):
+            if not isinstance(record.get(key), list):
+                continue
+            compact = []
+            for argument in record[key]:
+                token = f"@@arg{len(tokens)}@@"
+                tokens[token] = json.dumps(argument, separators=(", ", ": "))
+                compact.append(token)
+            record[key] = compact
+    text = json.dumps(shaped, indent=2, sort_keys=False)
+    for token, value in tokens.items():
+        text = text.replace(f'"{token}"', value, 1)
+    return text
 
 
 def refresh_source_md(op_dir: Path) -> Path:

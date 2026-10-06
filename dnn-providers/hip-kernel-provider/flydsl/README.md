@@ -32,11 +32,18 @@ way to check it, or it is just bytes someone once vouched for.
 
 ## What ships
 
-Two ops, 108 kernel objects, built once for the LLVM generic target
-**`gfx11-generic`** and shipped to every RDNA3 / RDNA3.5 part it covers:
-gfx1100, gfx1101, gfx1102, gfx1103, gfx1150, gfx1151, gfx1152 and gfx1153. Each
-of those arches' shards carries the same bytes (see
-[REGEN.md §3](REGEN.md) for why one object set is enough, and what it needs).
+Two ops, 108 kernel objects per family, built once for each of two LLVM generic
+targets and shipped to every part each covers:
+
+- **`gfx11-generic`** -- RDNA3 / RDNA3.5: gfx1100, gfx1101, gfx1102, gfx1103,
+  gfx1150, gfx1151, gfx1152 and gfx1153. Verified on gfx1151.
+- **`gfx12-generic`** -- RDNA4: gfx1200 and gfx1201. Built from the same kernel
+  sources, which carry both WMMA operand layouts, and checked by everything that
+  can run without the hardware (signatures, register use, ELF target, shard
+  contents); **not yet run on a gfx12 device**.
+
+Each member's shard carries its family's bytes (see [REGEN.md §3](REGEN.md) for
+why one object set per family is enough, and what it needs).
 
 **RMSNorm forward** (`hipkernel:flydsl_rmsnorm`), 12 objects, bf16 and f16:
 
@@ -72,8 +79,8 @@ src/engines/kernel_ingestor_engine/descriptors/
   rocKE/…                         authored rocKE bundles (compiled at pack time)
   FlyDSL/<op>/*.json              descriptors shared by every arch of the op
   FlyDSL/<op>/gfx11-generic/      the pack (KDP), one `hsaco` UKD per object,
-                                  the objects, manifest.json, SOURCE.md;
-                                  `arch` lists all eight members
+  FlyDSL/<op>/gfx12-generic/      the objects, manifest.json, SOURCE.md;
+                                  `arch` lists the family's members
         │
         │  shared packer (descriptor-packaging), product root
         ▼
@@ -178,7 +185,7 @@ Each link is checkable by a command, and [REGEN.md](REGEN.md) gives each command
 upstream FlyDSL @ 89ad52fbbb9e, AITER @ 8253efc40595
    │  tools/diff_upstream.py          — vendored copy == upstream, but for recorded modifications
 kernels_src/
-   │  gen_<op>.py (flydsl 0.3.4)      — byte-reproducible: currently 108/108 identical
+   │  gen_<op>.py (flydsl 0.3.4)      — byte-reproducible: currently 108/108 identical per family
 <content>/<op>/<arch>/*.hsaco + manifest.json
    │  gen_descriptors.py --check      — objects match manifest SHA256 and target; descriptors agree
 <content>/<op>/**/*.json (hsaco UKDs)

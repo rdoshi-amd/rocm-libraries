@@ -35,6 +35,11 @@ semantics (O = 0 and LSE = -inf for a row no key reaches). An additive f32 bias
 lane, and added to the scaled scores; an object without one ignores the bias arguments.
 A generic object (``generic_head_dim``) is built for the largest head_dim it serves and
 reads the actual one at runtime, skipping the K and V columns past it.
+
+Both WMMA operand layouts are built from this file, chosen by the arch FlyDSL compiles for:
+gfx11 (RDNA3/3.5: 16 K-values per lane, accumulator rows 2r + l/16, a trade with the
+xor-16 peer for P and O) and gfx12 (RDNA4: 8 K-values per lane at 8*(l/16), accumulator
+rows r + 8*(l/16), no trade). The name says gfx11 because the gfx11 objects came first.
 """
 
 import math as host_math
@@ -47,6 +52,7 @@ from flydsl.expr import const_expr, gpu, range_constexpr
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 
+from flydsl.runtime.device import get_rocm_arch
 from kernels.common.kernels_common import LOG2E as _LOG2E
 
 _NO_WINDOW = -(1 << 30)
@@ -70,6 +76,12 @@ def build_flash_attn_decode_module(
     BLOCK_SIZE = NW * WARP_SIZE
     TILE = 32  # keys per wave per iteration
     D = head_dim
+    # The WMMA operand layout: gfx11 passes all 16 K-values per lane for A and B
+    # (lanes 16-31 duplicate 0-15) and lays accumulator element r at row
+    # 2r + l/16; gfx12 passes 8, at K offset 8*(l/16), and lays element r at row
+    # r + 8*(l/16). Chosen by the arch FlyDSL compiles for.
+    WMMA_V8 = get_rocm_arch().lower().startswith("gfx12")
+    WMMA_AB = 8 if WMMA_V8 else 16
     assert D % 32 == 0 and 64 <= D <= 256
     K_STEPS = D // 16
     D_CHUNKS = D // 16
@@ -194,8 +206,8 @@ def build_flash_attn_decode_module(
         atom = fx.make_mma_atom(fx.rocdl.WMMA(16, 16, 16, elem, fx.Float32))
 
         def wmma(a, b, c):
-            af = fx.make_rmem_tensor(16, elem)
-            bf = fx.make_rmem_tensor(16, elem)
+            af = fx.make_rmem_tensor(WMMA_AB, elem)
+            bf = fx.make_rmem_tensor(WMMA_AB, elem)
             cf = fx.make_rmem_tensor(8, fx.Float32)
             af.store(Vec(a))
             bf.store(Vec(b))
@@ -298,7 +310,8 @@ def build_flash_attn_decode_module(
         t_end = fx.Int64((_t_end < hi_tile).select(_t_end, hi_tile))
         iters = (chunk + NW - 1) // NW
 
-        # Q, resident (B operand of S^T = K Q^T).
+        # Q (B operand of S^T = K Q^T): 16 head-dim values per lane on gfx11, 8 on
+        # gfx12.
         q_base = b * q_sb + hq * q_sh + qpos * q_ss
         zero16 = Vec.filled(16, 0.0, elem)
 
@@ -309,6 +322,15 @@ def build_flash_attn_decode_module(
             past_slice = fx.Int64(0x3FFFFFF0)
 
         def q_pack(ks):
+            if const_expr(WMMA_V8):
+                col = fx.Int64(ks * 16) + klane * 8
+                zero8q = Vec.filled(8, 0.0, elem)
+                if const_expr(GENERIC_D):
+                    ok = col < d_rt
+                    raw = gload(q_ptr, q_base + ok.select(col, fx.Int64(0)), 8)
+                    return (row_ok & ok).select(raw, zero8q)
+                raw = gload(q_ptr, q_base + col, 8)
+                return row_ok.select(raw, zero8q)
             if const_expr(GENERIC_D):
                 halves = []
                 for h in range_constexpr(2):
@@ -416,7 +438,19 @@ def build_flash_attn_decode_module(
                 if const_expr(c % V_FENCE == V_FENCE - 1):
                     fx.rocdl.sched_barrier(0)
 
-            if const_expr(HAS_BIAS):
+            if const_expr(HAS_BIAS and WMMA_V8):
+                # Element i = 8 a + e is key kv0 + 16 a + e + 8 klane.
+                b_tile = (
+                    bias_row_i32
+                    + (fx.Int32(kv0) + fx.Int32(klane) * fx.Int32(8)) * bias_skv_i32
+                )
+                bias_offs = [
+                    b_tile + fx.Int32((i // 8) * 16 + i % 8) * bias_skv_i32
+                    for i in range(16)
+                ]
+                if const_expr(BIAS_EARLY):
+                    bias_vals = [fx.ptr_load(bias_buf + off) for off in bias_offs]
+            elif const_expr(HAS_BIAS):
                 # Element i = 8 a + e is key kv0 + 16 a + 2 e + klane.
                 b_tile = bias_row_i32 + (fx.Int32(kv0) + fx.Int32(klane)) * bias_skv_i32
                 bias_offs = [
@@ -433,13 +467,19 @@ def build_flash_attn_decode_module(
                         q_cur = q_pack(ks)
                     for a in range_constexpr(2):
                         k_row = kv0 + fx.Int64(a * 16) + lane16
-                        # Buffer loads cap at 128 bits: two 8-element halves.
-                        k_lo = kv_load(k_buf, k_row * k_ss, fx.Int64(ks * 16))
-                        k_hi = kv_load(k_buf, k_row * k_ss, fx.Int64(ks * 16 + 8))
-                        kp = Vec.from_elements(
-                            [k_lo[i] for i in range(8)] + [k_hi[i] for i in range(8)],
-                            elem,
-                        )
+                        if const_expr(WMMA_V8):
+                            kp = kv_load(
+                                k_buf, k_row * k_ss, fx.Int64(ks * 16) + klane * 8
+                            )
+                        else:
+                            # Buffer loads cap at 128 bits: two 8-element halves.
+                            k_lo = kv_load(k_buf, k_row * k_ss, fx.Int64(ks * 16))
+                            k_hi = kv_load(k_buf, k_row * k_ss, fx.Int64(ks * 16 + 8))
+                            kp = Vec.from_elements(
+                                [k_lo[i] for i in range(8)]
+                                + [k_hi[i] for i in range(8)],
+                                elem,
+                            )
                         s_acc[a] = wmma(
                             kp,
                             q_packs[ks] if const_expr(Q_RESIDENT) else q_cur,
@@ -455,12 +495,16 @@ def build_flash_attn_decode_module(
                 for i in range_constexpr(16):
                     s_vals[i] = fx.math.fma(s_vals[i], c_scale, bias_vals[i])
 
-            rel_base = fx.Int32(kv0) + fx.Int32(klane) - first_i32
+            if const_expr(WMMA_V8):
+                rel_base = fx.Int32(kv0) + fx.Int32(klane) * fx.Int32(8) - first_i32
+            else:
+                rel_base = fx.Int32(kv0) + fx.Int32(klane) - first_i32
             s_raw = []
             for a in range_constexpr(2):
                 for e in range_constexpr(8):
                     sv = s_vals[a * 8 + e]
-                    rel = fx.Uint32(rel_base + fx.Int32(a * 16 + 2 * e))
+                    _kv = a * 16 + (e if const_expr(WMMA_V8) else 2 * e)
+                    rel = fx.Uint32(rel_base + fx.Int32(_kv))
                     ok = (rel < span_u32) & active
                     s_raw.append(ok.select(sv, c_ninf))
 
@@ -497,11 +541,14 @@ def build_flash_attn_decode_module(
             p_packs = []
             for pks in range_constexpr(2):
                 own = [p_vals[pks * 8 + j] for j in range(8)]
-                prr = [peer(own[j]) for j in range(8)]
-                full = []
-                for j in range_constexpr(8):
-                    full.append(klane_is_zero.select(own[j], prr[j]))
-                    full.append(klane_is_zero.select(prr[j], own[j]))
+                if const_expr(WMMA_V8):
+                    full = own
+                else:
+                    prr = [peer(own[j]) for j in range(8)]
+                    full = []
+                    for j in range_constexpr(8):
+                        full.append(klane_is_zero.select(own[j], prr[j]))
+                        full.append(klane_is_zero.select(prr[j], own[j]))
                 p_packs.append(
                     Vec.from_elements([fx.Float32(x).to(elem) for x in full], elem)
                 )
@@ -509,6 +556,12 @@ def build_flash_attn_decode_module(
             def v_pack(pks, dc):
                 dpos = fx.Int64(dc * 16) + lane16
                 vals = []
+                if const_expr(WMMA_V8):
+                    for ksub in range_constexpr(8):
+                        krow = fx.Int64(pks * 16 + ksub) + klane * 8
+                        idx = wave_lds + krow * V_STRIDE + dpos
+                        vals.append(fx.ptr_load(lds_v + fx.Int32(idx)))
+                    return Vec.from_elements(vals, elem)
                 for ksub in range_constexpr(16):
                     idx = wave_lds + fx.Int64(pks * 16 + ksub) * V_STRIDE + dpos
                     vals.append(fx.ptr_load(lds_v + fx.Int32(idx)))
@@ -590,14 +643,20 @@ def build_flash_attn_decode_module(
                     ).broadcast_to(8)
                 on = Vec(acc * Vec.from_elements([inv_l], fx.Float32).broadcast_to(8))
                 own = [on[e] for e in range(8)]
-                prr = [peer(own[e]) for e in range(8)]
-                rows_ = []
-                for j in range_constexpr(8):
-                    if const_expr(j % 2 == 0):
-                        lo_s, hi_s = own, prr
-                    else:
-                        lo_s, hi_s = prr, own
-                    rows_.append(klane_is_zero.select(lo_s[j // 2], hi_s[4 + j // 2]))
+                if const_expr(WMMA_V8):
+                    # gfx12: element e is head-dim row e + 8*klane already.
+                    rows_ = own
+                else:
+                    prr = [peer(own[e]) for e in range(8)]
+                    rows_ = []
+                    for j in range_constexpr(8):
+                        if const_expr(j % 2 == 0):
+                            lo_s, hi_s = own, prr
+                        else:
+                            lo_s, hi_s = prr, own
+                        rows_.append(
+                            klane_is_zero.select(lo_s[j // 2], hi_s[4 + j // 2])
+                        )
                 if const_expr(GENERIC_D):
                     o_col = dv_col_base + fx.Int64(dc * 16) + klane * 8
                     if row_ok & (o_col < d_rt):

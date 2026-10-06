@@ -34,54 +34,14 @@
       "grid_rule": "one_block_per_row",
       "named_args": 0,
       "args": [
-        {
-          "name": "Input.ptr",
-          "kind": "global_buffer",
-          "size": 8,
-          "offset": 0
-        },
-        {
-          "name": "Input.desc",
-          "kind": "by_value",
-          "size": 16,
-          "offset": 8
-        },
-        {
-          "name": "Gamma.ptr",
-          "kind": "global_buffer",
-          "size": 8,
-          "offset": 24
-        },
-        {
-          "name": "Gamma.desc",
-          "kind": "by_value",
-          "size": 4,
-          "offset": 32
-        },
-        {
-          "name": "Rstd.ptr",
-          "kind": "global_buffer",
-          "size": 8,
-          "offset": 40
-        },
-        {
-          "name": "Rstd.desc",
-          "kind": "by_value",
-          "size": 4,
-          "offset": 48
-        },
-        {
-          "name": "Output.ptr",
-          "kind": "global_buffer",
-          "size": 8,
-          "offset": 56
-        },
-        {
-          "name": "Output.desc",
-          "kind": "by_value",
-          "size": 16,
-          "offset": 64
-        }
+        {"name": "Input.ptr", "kind": "global_buffer", "size": 8, "offset": 0},
+        {"name": "Input.desc", "kind": "by_value", "size": 16, "offset": 8},
+        {"name": "Gamma.ptr", "kind": "global_buffer", "size": 8, "offset": 24},
+        {"name": "Gamma.desc", "kind": "by_value", "size": 4, "offset": 32},
+        {"name": "Rstd.ptr", "kind": "global_buffer", "size": 8, "offset": 40},
+        {"name": "Rstd.desc", "kind": "by_value", "size": 4, "offset": 48},
+        {"name": "Output.ptr", "kind": "global_buffer", "size": 8, "offset": 56},
+        {"name": "Output.desc", "kind": "by_value", "size": 16, "offset": 64}
       ]
     },
     {
@@ -107,54 +67,14 @@
       "grid_rule": "one_block_per_row",
       "named_args": 0,
       "args": [
-        {
-          "name": "Input.ptr",
-          "kind": "global_buffer",
-          "size": 8,
-          "offset": 0
-        },
-        {
-          "name": "Input.desc",
-          "kind": "by_value",
-          "size": 16,
-          "offset": 8
-        },
-        {
-          "name": "Gamma.ptr",
-          "kind": "global_buffer",
-          "size": 8,
-          "offset": 24
-        },
-        {
-          "name": "Gamma.desc",
-          "kind": "by_value",
-          "size": 4,
-          "offset": 32
-        },
-        {
-          "name": "Rstd.ptr",
-          "kind": "global_buffer",
-          "size": 8,
-          "offset": 40
-        },
-        {
-          "name": "Rstd.desc",
-          "kind": "by_value",
-          "size": 4,
-          "offset": 48
-        },
-        {
-          "name": "Output.ptr",
-          "kind": "global_buffer",
-          "size": 8,
-          "offset": 56
-        },
-        {
-          "name": "Output.desc",
-          "kind": "by_value",
-          "size": 16,
-          "offset": 64
-        }
+        {"name": "Input.ptr", "kind": "global_buffer", "size": 8, "offset": 0},
+        {"name": "Input.desc", "kind": "by_value", "size": 16, "offset": 8},
+        {"name": "Gamma.ptr", "kind": "global_buffer", "size": 8, "offset": 24},
+        {"name": "Gamma.desc", "kind": "by_value", "size": 4, "offset": 32},
+        {"name": "Rstd.ptr", "kind": "global_buffer", "size": 8, "offset": 40},
+        {"name": "Rstd.desc", "kind": "by_value", "size": 4, "offset": 48},
+        {"name": "Output.ptr", "kind": "global_buffer", "size": 8, "offset": 56},
+        {"name": "Output.desc", "kind": "by_value", "size": 16, "offset": 64}
       ]
     },
     {
@@ -180,54 +100,14 @@
       "grid_rule": "one_block_per_row",
       "named_args": 0,
       "args": [
-        {
-          "name": "Input.ptr",
-          "kind": "global_buffer",
-          "size": 8,
-          "offset": 0
-        },
-        {
-          "name": "Input.desc",
-          "kind": "by_value",
-          "size": 16,
-          "offset": 8
-        },
-        {
-          "name": "Gamma.ptr",
-          "kind": "global_buffer",
-          "size": 8,
-          "offset": 24
-        },
-        {
-          "name": "Gamma.desc",
-          "kind": "by_value",
-          "size": 4,
-          "offset": 32
-        },
-        {
-          "name": "Rstd.ptr",
-          "kind": "global_buffer",
-          "size": 8,
-          "offset": 40
-        },
-        {
-          "name": "Rstd.desc",
-          "kind": "by_value",
-          "size": 4,
-          "offset": 48
-        },
-        {
-          "name": "Output.ptr",
-          "kind": "global_buffer",
-          "size": 8,
-          "offset": 56
-        },
-        {
-          "name": "Output.desc",
-          "kind": "by_value",
-          "size": 16,
-          "offset": 64
-        }
+        {"name": "Input.ptr", "kind": "global_buffer", "size": 8, "offset": 0},
+        {"name": "Input.desc", "kind": "by_value", "size": 16, "offset": 8},
+        {"name": "Gamma.ptr", "kind": "global_buffer", "size": 8, "offset": 24},
+        {"name": "Gamma.desc", "kind": "by_value", "size": 4, "offset": 32},
+        {"name": "Rstd.ptr", "kind": "global_buffer", "size": 8, "offset": 40},
+        {"name": "Rstd.desc", "kind": "by_value", "size": 4, "offset": 48},
+        {"name": "Output.ptr", "kind": "global_buffer", "size": 8, "offset": 56},
+        {"name": "Output.desc", "kind": "by_value", "size": 16, "offset": 64}
       ]
     },
     {
@@ -253,54 +133,14 @@
       "grid_rule": "one_block_per_row",
       "named_args": 0,
       "args": [
-        {
-          "name": "Input.ptr",
-          "kind": "global_buffer",
-          "size": 8,
-          "offset": 0
-        },
-        {
-          "name": "Input.desc",
-          "kind": "by_value",
-          "size": 16,
-          "offset": 8
-        },
-        {
-          "name": "Gamma.ptr",
-          "kind": "global_buffer",
-          "size": 8,
-          "offset": 24
-        },
-        {
-          "name": "Gamma.desc",
-          "kind": "by_value",
-          "size": 4,
-          "offset": 32
-        },
-        {
-          "name": "Rstd.ptr",
-          "kind": "global_buffer",
-          "size": 8,
-          "offset": 40
-        },
-        {
-          "name": "Rstd.desc",
-          "kind": "by_value",
-          "size": 4,
-          "offset": 48
-        },
-        {
-          "name": "Output.ptr",
-          "kind": "global_buffer",
-          "size": 8,
-          "offset": 56
-        },
-        {
-          "name": "Output.desc",
-          "kind": "by_value",
-          "size": 16,
-          "offset": 64
-        }
+        {"name": "Input.ptr", "kind": "global_buffer", "size": 8, "offset": 0},
+        {"name": "Input.desc", "kind": "by_value", "size": 16, "offset": 8},
+        {"name": "Gamma.ptr", "kind": "global_buffer", "size": 8, "offset": 24},
+        {"name": "Gamma.desc", "kind": "by_value", "size": 4, "offset": 32},
+        {"name": "Rstd.ptr", "kind": "global_buffer", "size": 8, "offset": 40},
+        {"name": "Rstd.desc", "kind": "by_value", "size": 4, "offset": 48},
+        {"name": "Output.ptr", "kind": "global_buffer", "size": 8, "offset": 56},
+        {"name": "Output.desc", "kind": "by_value", "size": 16, "offset": 64}
       ]
     },
     {
@@ -326,54 +166,14 @@
       "grid_rule": "one_block_per_row",
       "named_args": 0,
       "args": [
-        {
-          "name": "Input.ptr",
-          "kind": "global_buffer",
-          "size": 8,
-          "offset": 0
-        },
-        {
-          "name": "Input.desc",
-          "kind": "by_value",
-          "size": 16,
-          "offset": 8
-        },
-        {
-          "name": "Gamma.ptr",
-          "kind": "global_buffer",
-          "size": 8,
-          "offset": 24
-        },
-        {
-          "name": "Gamma.desc",
-          "kind": "by_value",
-          "size": 4,
-          "offset": 32
-        },
-        {
-          "name": "Rstd.ptr",
-          "kind": "global_buffer",
-          "size": 8,
-          "offset": 40
-        },
-        {
-          "name": "Rstd.desc",
-          "kind": "by_value",
-          "size": 4,
-          "offset": 48
-        },
-        {
-          "name": "Output.ptr",
-          "kind": "global_buffer",
-          "size": 8,
-          "offset": 56
-        },
-        {
-          "name": "Output.desc",
-          "kind": "by_value",
-          "size": 16,
-          "offset": 64
-        }
+        {"name": "Input.ptr", "kind": "global_buffer", "size": 8, "offset": 0},
+        {"name": "Input.desc", "kind": "by_value", "size": 16, "offset": 8},
+        {"name": "Gamma.ptr", "kind": "global_buffer", "size": 8, "offset": 24},
+        {"name": "Gamma.desc", "kind": "by_value", "size": 4, "offset": 32},
+        {"name": "Rstd.ptr", "kind": "global_buffer", "size": 8, "offset": 40},
+        {"name": "Rstd.desc", "kind": "by_value", "size": 4, "offset": 48},
+        {"name": "Output.ptr", "kind": "global_buffer", "size": 8, "offset": 56},
+        {"name": "Output.desc", "kind": "by_value", "size": 16, "offset": 64}
       ]
     },
     {
@@ -399,54 +199,14 @@
       "grid_rule": "one_block_per_row",
       "named_args": 0,
       "args": [
-        {
-          "name": "Input.ptr",
-          "kind": "global_buffer",
-          "size": 8,
-          "offset": 0
-        },
-        {
-          "name": "Input.desc",
-          "kind": "by_value",
-          "size": 16,
-          "offset": 8
-        },
-        {
-          "name": "Gamma.ptr",
-          "kind": "global_buffer",
-          "size": 8,
-          "offset": 24
-        },
-        {
-          "name": "Gamma.desc",
-          "kind": "by_value",
-          "size": 4,
-          "offset": 32
-        },
-        {
-          "name": "Rstd.ptr",
-          "kind": "global_buffer",
-          "size": 8,
-          "offset": 40
-        },
-        {
-          "name": "Rstd.desc",
-          "kind": "by_value",
-          "size": 4,
-          "offset": 48
-        },
-        {
-          "name": "Output.ptr",
-          "kind": "global_buffer",
-          "size": 8,
-          "offset": 56
-        },
-        {
-          "name": "Output.desc",
-          "kind": "by_value",
-          "size": 16,
-          "offset": 64
-        }
+        {"name": "Input.ptr", "kind": "global_buffer", "size": 8, "offset": 0},
+        {"name": "Input.desc", "kind": "by_value", "size": 16, "offset": 8},
+        {"name": "Gamma.ptr", "kind": "global_buffer", "size": 8, "offset": 24},
+        {"name": "Gamma.desc", "kind": "by_value", "size": 4, "offset": 32},
+        {"name": "Rstd.ptr", "kind": "global_buffer", "size": 8, "offset": 40},
+        {"name": "Rstd.desc", "kind": "by_value", "size": 4, "offset": 48},
+        {"name": "Output.ptr", "kind": "global_buffer", "size": 8, "offset": 56},
+        {"name": "Output.desc", "kind": "by_value", "size": 16, "offset": 64}
       ]
     },
     {
@@ -472,54 +232,14 @@
       "grid_rule": "one_block_per_row",
       "named_args": 0,
       "args": [
-        {
-          "name": "Input.ptr",
-          "kind": "global_buffer",
-          "size": 8,
-          "offset": 0
-        },
-        {
-          "name": "Input.desc",
-          "kind": "by_value",
-          "size": 16,
-          "offset": 8
-        },
-        {
-          "name": "Gamma.ptr",
-          "kind": "global_buffer",
-          "size": 8,
-          "offset": 24
-        },
-        {
-          "name": "Gamma.desc",
-          "kind": "by_value",
-          "size": 4,
-          "offset": 32
-        },
-        {
-          "name": "Rstd.ptr",
-          "kind": "global_buffer",
-          "size": 8,
-          "offset": 40
-        },
-        {
-          "name": "Rstd.desc",
-          "kind": "by_value",
-          "size": 4,
-          "offset": 48
-        },
-        {
-          "name": "Output.ptr",
-          "kind": "global_buffer",
-          "size": 8,
-          "offset": 56
-        },
-        {
-          "name": "Output.desc",
-          "kind": "by_value",
-          "size": 16,
-          "offset": 64
-        }
+        {"name": "Input.ptr", "kind": "global_buffer", "size": 8, "offset": 0},
+        {"name": "Input.desc", "kind": "by_value", "size": 16, "offset": 8},
+        {"name": "Gamma.ptr", "kind": "global_buffer", "size": 8, "offset": 24},
+        {"name": "Gamma.desc", "kind": "by_value", "size": 4, "offset": 32},
+        {"name": "Rstd.ptr", "kind": "global_buffer", "size": 8, "offset": 40},
+        {"name": "Rstd.desc", "kind": "by_value", "size": 4, "offset": 48},
+        {"name": "Output.ptr", "kind": "global_buffer", "size": 8, "offset": 56},
+        {"name": "Output.desc", "kind": "by_value", "size": 16, "offset": 64}
       ]
     },
     {
@@ -545,54 +265,14 @@
       "grid_rule": "one_block_per_row",
       "named_args": 0,
       "args": [
-        {
-          "name": "Input.ptr",
-          "kind": "global_buffer",
-          "size": 8,
-          "offset": 0
-        },
-        {
-          "name": "Input.desc",
-          "kind": "by_value",
-          "size": 16,
-          "offset": 8
-        },
-        {
-          "name": "Gamma.ptr",
-          "kind": "global_buffer",
-          "size": 8,
-          "offset": 24
-        },
-        {
-          "name": "Gamma.desc",
-          "kind": "by_value",
-          "size": 4,
-          "offset": 32
-        },
-        {
-          "name": "Rstd.ptr",
-          "kind": "global_buffer",
-          "size": 8,
-          "offset": 40
-        },
-        {
-          "name": "Rstd.desc",
-          "kind": "by_value",
-          "size": 4,
-          "offset": 48
-        },
-        {
-          "name": "Output.ptr",
-          "kind": "global_buffer",
-          "size": 8,
-          "offset": 56
-        },
-        {
-          "name": "Output.desc",
-          "kind": "by_value",
-          "size": 16,
-          "offset": 64
-        }
+        {"name": "Input.ptr", "kind": "global_buffer", "size": 8, "offset": 0},
+        {"name": "Input.desc", "kind": "by_value", "size": 16, "offset": 8},
+        {"name": "Gamma.ptr", "kind": "global_buffer", "size": 8, "offset": 24},
+        {"name": "Gamma.desc", "kind": "by_value", "size": 4, "offset": 32},
+        {"name": "Rstd.ptr", "kind": "global_buffer", "size": 8, "offset": 40},
+        {"name": "Rstd.desc", "kind": "by_value", "size": 4, "offset": 48},
+        {"name": "Output.ptr", "kind": "global_buffer", "size": 8, "offset": 56},
+        {"name": "Output.desc", "kind": "by_value", "size": 16, "offset": 64}
       ]
     },
     {
@@ -618,54 +298,14 @@
       "grid_rule": "one_block_per_row",
       "named_args": 0,
       "args": [
-        {
-          "name": "Input.ptr",
-          "kind": "global_buffer",
-          "size": 8,
-          "offset": 0
-        },
-        {
-          "name": "Input.desc",
-          "kind": "by_value",
-          "size": 16,
-          "offset": 8
-        },
-        {
-          "name": "Gamma.ptr",
-          "kind": "global_buffer",
-          "size": 8,
-          "offset": 24
-        },
-        {
-          "name": "Gamma.desc",
-          "kind": "by_value",
-          "size": 4,
-          "offset": 32
-        },
-        {
-          "name": "Rstd.ptr",
-          "kind": "global_buffer",
-          "size": 8,
-          "offset": 40
-        },
-        {
-          "name": "Rstd.desc",
-          "kind": "by_value",
-          "size": 4,
-          "offset": 48
-        },
-        {
-          "name": "Output.ptr",
-          "kind": "global_buffer",
-          "size": 8,
-          "offset": 56
-        },
-        {
-          "name": "Output.desc",
-          "kind": "by_value",
-          "size": 16,
-          "offset": 64
-        }
+        {"name": "Input.ptr", "kind": "global_buffer", "size": 8, "offset": 0},
+        {"name": "Input.desc", "kind": "by_value", "size": 16, "offset": 8},
+        {"name": "Gamma.ptr", "kind": "global_buffer", "size": 8, "offset": 24},
+        {"name": "Gamma.desc", "kind": "by_value", "size": 4, "offset": 32},
+        {"name": "Rstd.ptr", "kind": "global_buffer", "size": 8, "offset": 40},
+        {"name": "Rstd.desc", "kind": "by_value", "size": 4, "offset": 48},
+        {"name": "Output.ptr", "kind": "global_buffer", "size": 8, "offset": 56},
+        {"name": "Output.desc", "kind": "by_value", "size": 16, "offset": 64}
       ]
     },
     {
@@ -691,54 +331,14 @@
       "grid_rule": "one_block_per_row",
       "named_args": 0,
       "args": [
-        {
-          "name": "Input.ptr",
-          "kind": "global_buffer",
-          "size": 8,
-          "offset": 0
-        },
-        {
-          "name": "Input.desc",
-          "kind": "by_value",
-          "size": 16,
-          "offset": 8
-        },
-        {
-          "name": "Gamma.ptr",
-          "kind": "global_buffer",
-          "size": 8,
-          "offset": 24
-        },
-        {
-          "name": "Gamma.desc",
-          "kind": "by_value",
-          "size": 4,
-          "offset": 32
-        },
-        {
-          "name": "Rstd.ptr",
-          "kind": "global_buffer",
-          "size": 8,
-          "offset": 40
-        },
-        {
-          "name": "Rstd.desc",
-          "kind": "by_value",
-          "size": 4,
-          "offset": 48
-        },
-        {
-          "name": "Output.ptr",
-          "kind": "global_buffer",
-          "size": 8,
-          "offset": 56
-        },
-        {
-          "name": "Output.desc",
-          "kind": "by_value",
-          "size": 16,
-          "offset": 64
-        }
+        {"name": "Input.ptr", "kind": "global_buffer", "size": 8, "offset": 0},
+        {"name": "Input.desc", "kind": "by_value", "size": 16, "offset": 8},
+        {"name": "Gamma.ptr", "kind": "global_buffer", "size": 8, "offset": 24},
+        {"name": "Gamma.desc", "kind": "by_value", "size": 4, "offset": 32},
+        {"name": "Rstd.ptr", "kind": "global_buffer", "size": 8, "offset": 40},
+        {"name": "Rstd.desc", "kind": "by_value", "size": 4, "offset": 48},
+        {"name": "Output.ptr", "kind": "global_buffer", "size": 8, "offset": 56},
+        {"name": "Output.desc", "kind": "by_value", "size": 16, "offset": 64}
       ]
     },
     {
@@ -764,54 +364,14 @@
       "grid_rule": "one_block_per_row",
       "named_args": 0,
       "args": [
-        {
-          "name": "Input.ptr",
-          "kind": "global_buffer",
-          "size": 8,
-          "offset": 0
-        },
-        {
-          "name": "Input.desc",
-          "kind": "by_value",
-          "size": 16,
-          "offset": 8
-        },
-        {
-          "name": "Gamma.ptr",
-          "kind": "global_buffer",
-          "size": 8,
-          "offset": 24
-        },
-        {
-          "name": "Gamma.desc",
-          "kind": "by_value",
-          "size": 4,
-          "offset": 32
-        },
-        {
-          "name": "Rstd.ptr",
-          "kind": "global_buffer",
-          "size": 8,
-          "offset": 40
-        },
-        {
-          "name": "Rstd.desc",
-          "kind": "by_value",
-          "size": 4,
-          "offset": 48
-        },
-        {
-          "name": "Output.ptr",
-          "kind": "global_buffer",
-          "size": 8,
-          "offset": 56
-        },
-        {
-          "name": "Output.desc",
-          "kind": "by_value",
-          "size": 16,
-          "offset": 64
-        }
+        {"name": "Input.ptr", "kind": "global_buffer", "size": 8, "offset": 0},
+        {"name": "Input.desc", "kind": "by_value", "size": 16, "offset": 8},
+        {"name": "Gamma.ptr", "kind": "global_buffer", "size": 8, "offset": 24},
+        {"name": "Gamma.desc", "kind": "by_value", "size": 4, "offset": 32},
+        {"name": "Rstd.ptr", "kind": "global_buffer", "size": 8, "offset": 40},
+        {"name": "Rstd.desc", "kind": "by_value", "size": 4, "offset": 48},
+        {"name": "Output.ptr", "kind": "global_buffer", "size": 8, "offset": 56},
+        {"name": "Output.desc", "kind": "by_value", "size": 16, "offset": 64}
       ]
     },
     {
@@ -837,54 +397,14 @@
       "grid_rule": "one_block_per_row",
       "named_args": 0,
       "args": [
-        {
-          "name": "Input.ptr",
-          "kind": "global_buffer",
-          "size": 8,
-          "offset": 0
-        },
-        {
-          "name": "Input.desc",
-          "kind": "by_value",
-          "size": 16,
-          "offset": 8
-        },
-        {
-          "name": "Gamma.ptr",
-          "kind": "global_buffer",
-          "size": 8,
-          "offset": 24
-        },
-        {
-          "name": "Gamma.desc",
-          "kind": "by_value",
-          "size": 4,
-          "offset": 32
-        },
-        {
-          "name": "Rstd.ptr",
-          "kind": "global_buffer",
-          "size": 8,
-          "offset": 40
-        },
-        {
-          "name": "Rstd.desc",
-          "kind": "by_value",
-          "size": 4,
-          "offset": 48
-        },
-        {
-          "name": "Output.ptr",
-          "kind": "global_buffer",
-          "size": 8,
-          "offset": 56
-        },
-        {
-          "name": "Output.desc",
-          "kind": "by_value",
-          "size": 16,
-          "offset": 64
-        }
+        {"name": "Input.ptr", "kind": "global_buffer", "size": 8, "offset": 0},
+        {"name": "Input.desc", "kind": "by_value", "size": 16, "offset": 8},
+        {"name": "Gamma.ptr", "kind": "global_buffer", "size": 8, "offset": 24},
+        {"name": "Gamma.desc", "kind": "by_value", "size": 4, "offset": 32},
+        {"name": "Rstd.ptr", "kind": "global_buffer", "size": 8, "offset": 40},
+        {"name": "Rstd.desc", "kind": "by_value", "size": 4, "offset": 48},
+        {"name": "Output.ptr", "kind": "global_buffer", "size": 8, "offset": 56},
+        {"name": "Output.desc", "kind": "by_value", "size": 16, "offset": 64}
       ]
     }
   ]

@@ -19,9 +19,11 @@ for the generic target rejects anything that slipped through.
 Pinned to the FlyDSL release it was validated against and to the families
 validated under it. FlyDSL 0.3.4's Python-side arch checks are prefix compares
 on the arch string, which ``gfx11-generic`` passes (``startswith("gfx11")``) and
-``gfx12-generic`` does not (``startswith("gfx120")``), so gfx12-generic would
-mis-select its WMMA atom; it is refused here rather than built wrong. Delete
-this file once the pinned FlyDSL parses generic targets itself.
+``gfx12-generic`` does not (``startswith("gfx120")``): told ``gfx12-generic``,
+FlyDSL picks no WMMA atom and CDNA buffer-descriptor flags. That family carries a
+``flydsl_gpu_arch`` (its lowest member) that ``_flydsl_env.prepare`` gives those
+checks instead, while the target the object is built for stays the generic one.
+Delete this file once the pinned FlyDSL parses generic targets itself.
 """
 
 from __future__ import annotations
@@ -29,7 +31,7 @@ from __future__ import annotations
 from . import _arch_families as families
 
 VALIDATED_FLYDSL = "0.3.4"
-VALIDATED_FAMILIES = ("gfx11-generic",)
+VALIDATED_FAMILIES = ("gfx11-generic", "gfx12-generic")
 
 _installed: str | None = None
 
@@ -88,6 +90,8 @@ def record(arch: str) -> dict | None:
     """Provenance for an object built through the shim, or None if it was not."""
     if not families.is_generic(arch):
         return None
-    return {
-        "generic_target_shim": f"chipset={families.family(arch)['mlir_chipset']}",
-    }
+    row = families.family(arch)
+    shim = f"chipset={row['mlir_chipset']}"
+    if "flydsl_gpu_arch" in row:
+        shim += f" flydsl_gpu_arch={row['flydsl_gpu_arch']}"
+    return {"generic_target_shim": shim}

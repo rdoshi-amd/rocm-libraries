@@ -681,12 +681,20 @@ std::optional<KernelDefinition> findStagedKernel(
     const std::string& dtype, int64_t headDim, int64_t causal, int64_t hasBias, int64_t decode = 0)
 {
     const auto& set = loadedSet(FLYDSL_SDPA.engineName);
+    // A build for several arches loads every arch's shard: pass over another device's.
+    const auto device = packedArchDeviceProperties().gcnArchName;
     std::optional<KernelDefinition> best;
     int64_t bestMax = 0;
     for(const auto& pack : set.packs)
     {
         for(const auto& kernel : pack.kernels)
         {
+            const auto& arches = kernel.arch.empty() ? pack.arch : kernel.arch;
+            if(!device.empty() && !arches.empty()
+               && std::find(arches.begin(), arches.end(), device) == arches.end())
+            {
+                continue;
+            }
             const auto* name
                 = tryGetMetadataField<std::string>(kernel.metadata, FLYDSL_SDPA_DTYPE_FIELD);
             const auto* dim

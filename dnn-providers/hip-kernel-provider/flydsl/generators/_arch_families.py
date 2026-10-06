@@ -28,6 +28,9 @@ Per family:
   member accepts.
 * ``mlir_chipset`` -- the concrete chipset FlyDSL's MLIR lowering is told
   (``_generic_targets.py``); the lowest member, whose feature gates assume least.
+* ``flydsl_gpu_arch`` (optional) -- the arch FlyDSL's Python-side checks are told
+  (``FLYDSL_GPU_ARCH``) when they cannot classify the generic name itself; see
+  ``_flydsl_env.prepare``. Absent, they are told the generic name.
 """
 
 from __future__ import annotations

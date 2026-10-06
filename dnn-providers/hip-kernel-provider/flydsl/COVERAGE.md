@@ -5,9 +5,11 @@ SPDX-License-Identifier:  MIT
 
 # What the FlyDSL packs cover
 
-Two packs, built once for `gfx11-generic` and shipped to all eight RDNA3 /
-RDNA3.5 arches it covers (gfx1100–gfx1103, gfx1150–gfx1153): **RMSNorm forward**
-(12 kernel objects, §1–§4) and **SDPA forward** (96 kernel objects, §5). Every graph a pack accepts is
+Two packs, built once for each of two LLVM generic targets -- `gfx11-generic`
+(RDNA3 / RDNA3.5: gfx1100–gfx1103, gfx1150–gfx1153) and `gfx12-generic` (RDNA4:
+gfx1200, gfx1201) -- and shipped to every member: **RMSNorm forward** (12 kernel
+objects per family, §1–§4) and **SDPA forward** (96 per family, §5). The gfx12
+set is built and checked but not yet run on a gfx12 device (§5.4). Every graph a pack accepts is
 computed by one of its objects; everything else is **declined**, so another
 engine gets the plan.
 
@@ -173,7 +175,7 @@ do not compute, declined rather than approximated.
 | **Rank < 2 on x or y** | No row to reduce over. |
 | **Broadcast gamma that is not the normalised axis** | Not a broadcast the kernel performs. |
 | **Multi-node graphs, fused add+RMSNorm** | One node per kernel. Fusion would be its own pack. |
-| **Architectures outside gfx11-generic** | Objects are checked in for the gfx11 generic family (gfx1100–gfx1103, gfx1150–gfx1153). gfx1170/gfx1171 belong to `gfx11-7-generic`, and CDNA / gfx12 are other families. With `GPU_TARGETS` naming no arch we ship kernels for, the integration reports dormant at configure time and stages nothing — it does not fail, and it does not silently produce an empty shard. Adding a family is a regeneration ([REGEN.md](REGEN.md) §3), not a code change. |
+| **Architectures outside gfx11-generic and gfx12-generic** | Objects are checked in for the gfx11 generic family (gfx1100–gfx1103, gfx1150–gfx1153) and the gfx12 one (gfx1200, gfx1201). gfx1170/gfx1171 belong to `gfx11-7-generic`, and CDNA is another family. With `GPU_TARGETS` naming no arch we ship kernels for, the integration reports dormant at configure time and stages nothing — it does not fail, and it does not silently produce an empty shard. Adding a family is a regeneration ([REGEN.md](REGEN.md) §3), not a code change. |
 | **Ops other than RMSNorm** | `OPS` in `_instances.py` has one entry. |
 
 ---
@@ -336,7 +338,7 @@ at `check_support()`, never at `execute()`.
 | `Dv ≠ Dqk` (MLA) | medium–large | A second head dim for V's LDS tile, the O accumulators and the store. |
 | fp32 I/O, FP8, dropout, paged KV, block masks, sinks, ALiBi, softcap | out of scope | As hipDNN's requirements state; ALiBi and softcap have no reference semantics. |
 | **Backward** | out of scope here | Inference-only, as for hipDNN's Tier 0/1. LSE is emitted so a backward can be added without an ABI break. |
-| **Other architectures** | see below | The objects are `gfx11-generic` builds, so every RDNA3 / RDNA3.5 part is served. |
+| **Other architectures** | see below | The objects are `gfx11-generic` and `gfx12-generic` builds, so every RDNA3 / RDNA3.5 / RDNA4 part is served. |
 
 **Every gfx11 generic member** (gfx1100–gfx1103, gfx1150–gfx1153) is served by
 the one object set; execution is verified on gfx1151, and the other seven rest on
@@ -345,8 +347,13 @@ FlyDSL 0.3.4 needs the `_generic_targets.py` shim to lower for a generic target
 (REGEN.md §3), and the SDPA objects are built with `amdgpu-use-amdgpu-trackers`,
 without which d128 causal spills a few VGPRs: the generic ISA lacks gfx115x's
 scalar-float instructions. **gfx1170/gfx1171** need `gfx11-7-generic` objects.
-**gfx12** needs per-family WMMA codegen: its operand ABI differs, so one object
-cannot span both; the kernel source can, behind four small helpers.
+**gfx12** (gfx1200, gfx1201) has its own `gfx12-generic` object set from the same
+sources: its WMMA operand layout differs, so one object cannot span both families,
+but each kernel branches on the layout at the few sites that depend on it
+(modification 17). The gfx12 set compiles with no spill, its argument layouts and
+ELF target are checked, and its shards are checked in a gfx1200/gfx1201 build;
+**its numerics have not been run on a gfx12 device yet** -- the GPU suites
+(`TestGpuFlydsl*`) on gfx1200/gfx1201 are what verifies them.
 
 ### 5.5 Where each claim is checked
 
@@ -426,6 +433,8 @@ shard, so the shipped count per arch is the same as the authored count.
 | SDPA decode, additive f32 bias | one bias object beside each of the 16 above (`has_bias`) | 16 | shipped, `gfx11-generic`; the 16 plain decode objects compile to identical code with the bias arguments appended, the 40 prefill objects are unchanged |
 | SDPA decode, generic head_dim | dtype (2) × causal (2) × largest head {96, 256}; head_dim a runtime argument (appended to both kernels), K/V columns past it never fetched; no bias | 8 | shipped, `gfx11-generic`; the 32 decode objects above compile to identical code with the head_dim argument appended, the prefill objects are unchanged |
 | **Total, gfx11-generic** | | **108** | |
+| **gfx12-generic** | the same table, built from the same sources for RDNA4 | **108** | built and checked; not yet run on gfx12 hardware |
+| **Total, both families** | | **216** | |
 
 Adding a row here, with its gate result in §6.1 where it introduces a runtime
 feature, is part of adding the feature.

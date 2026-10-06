@@ -92,6 +92,11 @@
 #      leaves rows unloaded when head_dim / 16 does not divide the block's
 #      threads into whole rows (160, 192, 224); every width it does divide
 #      builds as before.
+#  17. Both WMMA ABIs, chosen by the arch FlyDSL compiles for: gfx11 as in
+#      modification 1, and gfx12 (RDNA4) as upstream has it -- Q, K and V^T
+#      loaded 8 wide at K offset 8*(l/16), P^T fed straight from the S
+#      accumulator, kv indexed as r + 8*(l/16) in the mask and the bias, and O
+#      stored with no trade. Every other modification applies to both.
 #
 # Upstream-first: prefer landing these changes in AITER/FlyDSL; this copy exists
 # so the provider is not blocked on that.
@@ -118,6 +123,7 @@ from flydsl.expr import const_expr, gpu, range_constexpr
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 
+from flydsl.runtime.device import get_rocm_arch
 from kernels.common.kernels_common import LOG2E as _LOG2E
 
 KERNEL_NAME = "flash_attn_func_gfx1151_kernel"
@@ -226,6 +232,10 @@ def build_flash_attn_func_module(
     assert dtype_str in ("f16", "bf16")
 
     HEAD_DIM = head_dim
+    # The WMMA operand layout (modification 17): gfx12 passes 8 K-values per lane
+    # for A and B, gfx11 all 16.
+    WMMA_V8 = get_rocm_arch().lower().startswith("gfx12")
+    WMMA_AB = 8 if WMMA_V8 else 16
     CAUSAL = causal
     # P (the softmax numerators, f32) is narrowed to bf16 for the second product.
     # Upstream truncates; rounding to nearest halves the bf16 output error, for a
@@ -361,9 +371,10 @@ def build_flash_attn_func_module(
         )
 
         def wmma_acc(a_v16, b_v16, c_v8):
-            # gfx11 ABI: 16 K-values per lane for A and B, 8 f32 accumulators.
-            a_frag = fx.make_rmem_tensor(16, elem_dtype)
-            b_frag = fx.make_rmem_tensor(16, elem_dtype)
+            # gfx11 ABI: 16 K-values per lane for A and B, 8 f32 accumulators;
+            # gfx12: 8 K-values per lane.
+            a_frag = fx.make_rmem_tensor(WMMA_AB, elem_dtype)
+            b_frag = fx.make_rmem_tensor(WMMA_AB, elem_dtype)
             c_frag = fx.make_rmem_tensor(8, fx.Float32)
             a_frag.store(Vec(a_v16))
             b_frag.store(Vec(b_v16))
@@ -631,11 +642,24 @@ def build_flash_attn_func_module(
         # the matrix work.
         wave_has_rows = (q_start + wave_q_offset) < seq_q_v
 
-        # B operand of S^T = K @ Q^T: lane l carries query row l%16, all 16
-        # head-dim values of the K-step (lanes 16-31 duplicate lanes 0-15).
+        # B operand of S^T = K @ Q^T: lane l carries query row l%16 and, on gfx11,
+        # all 16 head-dim values of the K-step (lanes 16-31 duplicate lanes 0-15);
+        # on gfx12, the 8 at 8*(l/16).
         c_zero_v16 = Vec.filled(16, 0.0, elem_dtype)
 
         def load_q_pack(ks):
+            if const_expr(WMMA_V8):
+                # gfx12: this lane's 8 head-dim values of the K-step, at 8*(l/16).
+                col = fx.Int64(ks * K_STEP_QK) + klane * 8
+                if const_expr(GENERIC_D):
+                    col_ok = q_in_bounds & (col < fx.Int64(head_dim_rt))
+                    safe = col_ok.select(col, fx.Int64(0))
+                    raw = Vec(
+                        _load_global_half_vec(q_elem_ptr, q_idx(q_row_safe, safe), 8)
+                    )
+                    return col_ok.select(raw, Vec.filled(8, 0.0, elem_dtype))
+                raw = _load_global_half_vec(q_elem_ptr, q_idx(q_row_safe, col), 8)
+                return q_in_bounds.select(raw, Vec.filled(8, 0.0, elem_dtype))
             if const_expr(GENERIC_D):
                 # Two 8-column halves, each wholly in or out (head_dim % 8 == 0);
                 # an out half reads column 0 instead, so nothing reads past a row.
@@ -766,10 +790,18 @@ def build_flash_attn_func_module(
                     bias_row_i32
                     + (fx.Int32(kv_block_start) + fx.Int32(klane)) * bias_skv_i32
                 )
+                if const_expr(WMMA_V8):
+                    # gfx12: element (st, r) is kv = kv_start + 16 st + r + 8 klane.
+                    _bias_tile_i32 = (
+                        bias_row_i32
+                        + (fx.Int32(kv_block_start) + fx.Int32(klane) * fx.Int32(8))
+                        * bias_skv_i32
+                    )
                 bias_vals = []
                 for st in range_constexpr(NUM_S_ACCS):
                     for r in range_constexpr(8):
-                        _off = _bias_tile_i32 + fx.Int32(st * 16 + 2 * r) * bias_skv_i32
+                        _kv = st * 16 + (r if const_expr(WMMA_V8) else 2 * r)
+                        _off = _bias_tile_i32 + fx.Int32(_kv) * bias_skv_i32
                         bias_vals.append(fx.ptr_load(bias_buf_ptr + _off))
 
             if wave_needs_kv_tile:
@@ -791,12 +823,21 @@ def build_flash_attn_func_module(
                         st_base_row = st_idx * K_SUB_N
 
                         k_row_a = lane16 + fx.Int64(st_base_row)
-                        k_lds_a = k_base + k_row_a * K_STRIDE + k_col
-                        k_pack_a = Vec(lds_load(k_lds_a, 16))
-
                         k_row_b = lane16 + fx.Int64(st_base_row + 16)
-                        k_lds_b = k_base + k_row_b * K_STRIDE + k_col
-                        k_pack_b = Vec(lds_load(k_lds_b, 16))
+                        if const_expr(WMMA_V8):
+                            k_col_l = k_col + klane * 8
+                            k_pack_a = Vec(
+                                lds_load(k_base + k_row_a * K_STRIDE + k_col_l, 8)
+                            )
+                            k_pack_b = Vec(
+                                lds_load(k_base + k_row_b * K_STRIDE + k_col_l, 8)
+                            )
+                        else:
+                            k_lds_a = k_base + k_row_a * K_STRIDE + k_col
+                            k_pack_a = Vec(lds_load(k_lds_a, 16))
+
+                            k_lds_b = k_base + k_row_b * K_STRIDE + k_col
+                            k_pack_b = Vec(lds_load(k_lds_b, 16))
 
                         acc_idx_a = st_idx * 2
                         acc_idx_b = st_idx * 2 + 1
@@ -810,22 +851,31 @@ def build_flash_attn_func_module(
                         fx.rocdl.sched_barrier(0)
 
             # Element r of accumulator a holds kv = kv_start + 16a + 2r + klane
-            # for this lane's query row. Mask the kv tail and, when causal, the
+            # (gfx12: + r + 8*klane) for this lane's query row. Mask the kv tail and, when causal, the
             # columns past this row's limit. Unconditional: a select per score
             # is cheap beside the WMMA work, and it keeps the scores out of a
             # data-dependent region.
             # Offset of this lane's first score from the row's first attendable
             # column; each score adds only a constant to it.
-            kv_rel_base_i32 = (
-                fx.Int32(kv_block_start) + fx.Int32(klane) - q_kv_first_i32
-            )
+            if const_expr(WMMA_V8):
+                # gfx12: element r holds kv = kv_start + 16a + r + 8*klane.
+                kv_rel_base_i32 = (
+                    fx.Int32(kv_block_start)
+                    + fx.Int32(klane) * fx.Int32(8)
+                    - q_kv_first_i32
+                )
+            else:
+                kv_rel_base_i32 = (
+                    fx.Int32(kv_block_start) + fx.Int32(klane) - q_kv_first_i32
+                )
             s_raw = []
             for st in range_constexpr(NUM_S_ACCS):
                 for r in range_constexpr(8):
                     s_val = Vec(s_accs[st])[r]
                     if const_expr(HAS_BIAS):
                         s_val = fx.math.fma(s_val, c_scale_f, bias_vals[st * 8 + r])
-                    kv_rel_u32 = fx.Uint32(kv_rel_base_i32 + fx.Int32(st * 16 + 2 * r))
+                    _kv = st * 16 + (r if const_expr(WMMA_V8) else 2 * r)
+                    kv_rel_u32 = fx.Uint32(kv_rel_base_i32 + fx.Int32(_kv))
                     s_val = (kv_rel_u32 < q_kv_span_u32).select(s_val, c_neg_inf)
                     s_raw.append(s_val)
 
@@ -875,9 +925,10 @@ def build_flash_attn_func_module(
             coop_store_v_lds(_v_vecs_tile, 0)
             gpu.barrier()
 
-            # B operand of O^T += V^T @ P^T: lane l needs query row l%16 and
-            # all 16 kv values of the step. It holds the even (klane 0) or odd
-            # (klane 1) half; its xor-16 peer holds the other.
+            # B operand of O^T += V^T @ P^T: lane l needs query row l%16 and, on
+            # gfx11, all 16 kv values of the step. It holds the even (klane 0) or
+            # odd (klane 1) half; its xor-16 peer holds the other. On gfx12 it needs
+            # the 8 it holds.
             p_packs_all = []
             for st_idx in range_constexpr(N_SUB_TILES):
                 p_packs_st = []
@@ -885,12 +936,16 @@ def build_flash_attn_func_module(
                     acc_idx = st_idx * 2 + pks
                     p_base = acc_idx * 8
                     own = [p_vals[p_base + j] for j in range(8)]
-                    peer = [reduction_peer(own[j]) for j in range(8)]
-                    full = []
-                    for j in range_constexpr(8):
-                        full.append(klane_is_zero.select(own[j], peer[j]))
-                        full.append(klane_is_zero.select(peer[j], own[j]))
-                    p_packs_st.append(to_elem_vec(full))
+                    if const_expr(WMMA_V8):
+                        # gfx12: the lane's 8 kv values are its operand as they are.
+                        p_packs_st.append(to_elem_vec(own))
+                    else:
+                        peer = [reduction_peer(own[j]) for j in range(8)]
+                        full = []
+                        for j in range_constexpr(8):
+                            full.append(klane_is_zero.select(own[j], peer[j]))
+                            full.append(klane_is_zero.select(peer[j], own[j]))
+                        p_packs_st.append(to_elem_vec(full))
                 p_packs_all.append(p_packs_st)
 
             v_base = v_buf_base(0)
@@ -900,6 +955,16 @@ def build_flash_attn_func_module(
             def _load_v_rowmajor(st_kv_base_val, pks_val, dc_val, v_base=v_base):
                 d_pos = dv_col_base + fx.Int64(dc_val * D_CHUNK) + lane16
                 v_elems = []
+                if const_expr(WMMA_V8):
+                    # gfx12: this lane's 8 kv values of the step, at 8*(l/16).
+                    for k_sub in range_constexpr(8):
+                        kv_row = (
+                            fx.Int64(st_kv_base_val + pks_val * PV_K_STEP + k_sub)
+                            + klane * 8
+                        )
+                        v_lds_idx = v_base + kv_row * V_STRIDE + d_pos
+                        v_elems.append(fx.ptr_load(lds_kv + fx.Int32(v_lds_idx)))
+                    return Vec.from_elements(v_elems, elem_dtype)
                 for k_sub in range_constexpr(16):
                     kv_row = fx.Int64(st_kv_base_val + pks_val * PV_K_STEP + k_sub)
                     v_lds_idx = v_base + kv_row * V_STRIDE + d_pos
@@ -967,22 +1032,29 @@ def build_flash_attn_func_module(
         inv_l = row_has_keys.select(c_one_f / l_final, c_zero_f)
         inv_l_vec = Vec.from_elements([inv_l], fx.Float32).broadcast_to(8)
 
-        # Element r of an O accumulator is head-dim row 2r + klane. Trade with
-        # the xor-16 peer so lane klane writes rows [8*klane, 8*klane + 8).
+        # Element r of an O accumulator is head-dim row 2r + klane on gfx11. Trade
+        # with the xor-16 peer so lane klane writes rows [8*klane, 8*klane + 8),
+        # which is where gfx12 has them already.
         o_rows = []
         for dc in range_constexpr(O_CHUNKS):
             o_norm = Vec(_fmul(o_finals[dc], inv_l_vec))
             own = [o_norm[r] for r in range(8)]
-            peer = [reduction_peer(own[r]) for r in range(8)]
-            rows = []
-            for j in range_constexpr(8):
-                if const_expr(j % 2 == 0):
-                    lo_src, hi_src = own, peer
-                else:
-                    lo_src, hi_src = peer, own
-                # klane 0 -> row j = 2*(j//2) + j%2; klane 1 -> row 8 + j.
-                rows.append(klane_is_zero.select(lo_src[j // 2], hi_src[4 + j // 2]))
-            o_rows.append(rows)
+            if const_expr(WMMA_V8):
+                # gfx12: element r is head-dim row r + 8*klane already.
+                o_rows.append(own)
+            else:
+                peer = [reduction_peer(own[r]) for r in range(8)]
+                rows = []
+                for j in range_constexpr(8):
+                    if const_expr(j % 2 == 0):
+                        lo_src, hi_src = own, peer
+                    else:
+                        lo_src, hi_src = peer, own
+                    # klane 0 -> row j = 2*(j//2) + j%2; klane 1 -> row 8 + j.
+                    rows.append(
+                        klane_is_zero.select(lo_src[j // 2], hi_src[4 + j // 2])
+                    )
+                o_rows.append(rows)
 
         # Natural-log log-sum-exp of the scaled scores, [B, H, Sq, 1] f32: the
         # running max is unscaled, and l is a sum of exp((s - m) * scale).

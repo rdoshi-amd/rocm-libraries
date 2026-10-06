@@ -152,15 +152,23 @@ KernelDefinition makeFlydslKernel(const std::string& dtype,
 /// as the boundary it may not resolve outside of. Guessing any of them fails at load with
 /// a diagnostic about the guess rather than about the kernel.
 ///
-/// Returns false when the loaded set holds no kernel with that (dtype, N), which is the
-/// normal answer on an arch this build packed nothing for.
+/// Returns false when the loaded set holds no kernel with that (dtype, N) for this device,
+/// which is the normal answer on an arch this build packed nothing for. A build for several
+/// arches loads every arch's shard, so a kernel staged for another device is passed over.
 bool findStagedKernel(const std::string& dtype, int64_t bakedN, KernelDefinition& out)
 {
     const auto& set = loadedSet(FLYDSL_RMSNORM.engineName);
+    const auto device = packedArchDeviceProperties().gcnArchName;
     for(const auto& pack : set.packs)
     {
         for(const auto& kernel : pack.kernels)
         {
+            const auto& arches = kernel.arch.empty() ? pack.arch : kernel.arch;
+            if(!device.empty() && !arches.empty()
+               && std::find(arches.begin(), arches.end(), device) == arches.end())
+            {
+                continue;
+            }
             const auto* name
                 = tryGetMetadataField<std::string>(kernel.metadata, FLYDSL_DTYPE_FIELD);
             const auto* n = tryGetMetadataField<int64_t>(kernel.metadata, FLYDSL_N_FIELD);

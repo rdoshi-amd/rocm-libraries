@@ -138,7 +138,14 @@ def prepare(arch: str) -> None:
     # read `get_rocm_arch()`, which is FLYDSL_GPU_ARCH or else the *host GPU*,
     # never ARCH. Unpinned, a gfx950 object built on an RDNA laptop carries RDNA
     # buffer descriptors. Pin it to the compile target.
-    os.environ["FLYDSL_GPU_ARCH"] = arch
+    # A generic family whose name those checks cannot classify (gfx12-generic)
+    # names a member to tell them instead; the object's target stays the family.
+    gpu_arch = arch
+    if arch.endswith("-generic"):
+        from . import _arch_families  # noqa: PLC0415
+
+        gpu_arch = _arch_families.family(arch).get("flydsl_gpu_arch", arch)
+    os.environ["FLYDSL_GPU_ARCH"] = gpu_arch
     os.environ["COMPILE_ONLY"] = "1"
     os.environ["FLYDSL_DUMP_IR"] = "1"
 
@@ -146,6 +153,15 @@ def prepare(arch: str) -> None:
         from . import _generic_targets  # noqa: PLC0415
 
         _generic_targets.install(arch)
+        # Every generic family is RDNA, and a check that did not see it as RDNA
+        # would build CDNA buffer descriptors without an error.
+        from flydsl.runtime.device import is_rdna_arch  # noqa: PLC0415
+
+        if not is_rdna_arch(gpu_arch):
+            raise FlydslEnvError(
+                f"FlyDSL does not classify {gpu_arch!r} as RDNA; building {arch} "
+                "through it would emit CDNA buffer descriptors"
+            )
 
 
 def set_dump_dir(dump_dir: Path) -> None:

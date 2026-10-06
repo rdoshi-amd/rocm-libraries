@@ -13,5 +13,15 @@
     "elf_mach": 84,
     "min_generic_version": 1,
     "mlir_chipset": "gfx1100"
+  },
+  "gfx12-generic": {
+    "members": [
+      "gfx1200",
+      "gfx1201"
+    ],
+    "elf_mach": 89,
+    "min_generic_version": 1,
+    "mlir_chipset": "gfx1200",
+    "flydsl_gpu_arch": "gfx1200"
   }
 }

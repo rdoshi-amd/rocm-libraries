@@ -6,8 +6,9 @@
     python -m generators.gen_sdpa --arch gfx1151
 
 Writes ``<content>/sdpa/<arch>/<instance>.hsaco`` for every row of
-``_instances.sdpa_instances()``, plus the ``manifest.json`` and ``SOURCE.md``
-beside them. ``<content>`` is FlyDSL's bundle folder under the provider's
+``_instances.sdpa_instances()``, plus the ``manifest.json`` beside them and
+``<content>/sdpa/<arch>.SOURCE.md`` next to the folder (``<arch>/`` is kept in
+DVC, the summary in git). ``<content>`` is FlyDSL's bundle folder under the provider's
 production descriptor root (``_flydsl_env.CONTENT_DIR``).
 
 The kernel is the vendored gfx11 flash-attention forward

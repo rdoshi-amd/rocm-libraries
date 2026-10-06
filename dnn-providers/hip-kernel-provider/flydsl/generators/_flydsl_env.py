@@ -115,7 +115,7 @@ def prepare(arch: str) -> None:
     """Put the vendored kernel sources on the path and pin the compile env.
 
     Must run before any ``kernels.*`` import. ``COMPILE_ONLY=1`` is what lets a
-    gfx942/gfx950 object be produced on an RDNA laptop: the launcher traces and
+    gfx942/gfx950 object be produced on an RDNA machine: the launcher traces and
     compiles but never dispatches, so no matching device has to be present.
     """
     if not KERNELS_SRC_DIR.is_dir():
@@ -136,7 +136,7 @@ def prepare(arch: str) -> None:
     # FlyDSL's codegen-time arch queries -- the WMMA atom, s_waitcnt encoding,
     # buffer-descriptor flags, and the vendored kernels' own feature checks --
     # read `get_rocm_arch()`, which is FLYDSL_GPU_ARCH or else the *host GPU*,
-    # never ARCH. Unpinned, a gfx950 object built on an RDNA laptop carries RDNA
+    # never ARCH. Unpinned, a gfx950 object built on an RDNA machine carries RDNA
     # buffer descriptors. Pin it to the compile target.
     # A generic family whose name those checks cannot classify (gfx12-generic)
     # names a member to tell them instead; the object's target stays the family.

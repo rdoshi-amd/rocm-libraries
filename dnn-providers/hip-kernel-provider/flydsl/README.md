@@ -77,10 +77,11 @@ descriptor root**, beside rocKE's, and ship through the same packer:
 ```
 src/engines/kernel_ingestor_engine/descriptors/
   rocKE/…                         authored rocKE bundles (compiled at pack time)
-  FlyDSL/<op>/*.json              descriptors shared by every arch of the op
-  FlyDSL/<op>/gfx11-generic/      the pack (KDP), one `hsaco` UKD per object,
-  FlyDSL/<op>/gfx12-generic/      the objects, manifest.json, SOURCE.md;
-                                  `arch` lists the family's members
+  FlyDSL/<op>/*.json              descriptors shared by every target of the op
+  FlyDSL/<op>/<target>.SOURCE.md  readable summary of one target's object set
+  FlyDSL/<op>/<target>/           the target's pack (KDP), one `hsaco` UKD per
+                                  object, the objects, manifest.json; `arch`
+                                  lists the members (gfx11-generic, gfx12-generic)
         │
         │  shared packer (descriptor-packaging), product root
         ▼
@@ -157,18 +158,18 @@ provider tree; everything else is relative to this directory.
 
 | Path | |
 |---|---|
-| `<content>/<op>/*.json` | descriptors shared by every arch of an op: schema, engine, heuristic, dispatch, matcher |
-| `<content>/<op>/<arch>/*.hsaco` | the committed code objects |
-| `<content>/<op>/<arch>/*.{kdp,ukd}.json` | the arch's pack and one `hsaco` UKD per object |
-| `<content>/<op>/<arch>/manifest.json` | per-object SHA256 + knobs + semantic argument names + the toolchain that built them |
-| `<content>/<op>/<arch>/SOURCE.md` | generated provenance record |
+| `<content>/<op>/*.json` | descriptors shared by every target of an op: KMD (metadata schema), UED (engine), UHD (heuristic), UDD (dispatch), UMD (matcher) |
+| `<content>/<op>/<target>.SOURCE.md` | the target's readable summary: toolchain, input digest, one row per object |
+| `<content>/<op>/<target>/*.hsaco` | the committed code objects |
+| `<content>/<op>/<target>/*.{kdp,ukd}.json` | the target's pack and one `hsaco` UKD per object |
+| `<content>/<op>/<target>/manifest.json` | per-object SHA256 + knobs + argument layout + the toolchain and input digest that built them |
 | `kernels_src/kernels/**` | vendored kernel sources; each file's header names its upstream (FlyDSL or AITER), commit and path |
 | `generators/_instances.py` | **the instance table** — one row per shipped object, every op |
 | `generators/_flydsl_env.py` | the pins: wheel version, upstream commits, ROCm recording |
 | `generators/_codeobject.py` | reads and verifies a compiled object (target, ELF generic machine), shared by every generator |
 | `generators/arch_families.json`, `_arch_families.py` | the generic targets and their member arches; read by the generators and `CMakeLists.txt` |
 | `generators/_generic_targets.py` | the FlyDSL 0.3.4 shim that lets MLIR lower for a generic target |
-| `generators/gen_rmsnorm.py`, `gen_sdpa.py` | compile one op's rows into objects + manifest + `SOURCE.md` |
+| `generators/gen_rmsnorm.py`, `gen_sdpa.py` | compile one op's rows into objects + manifest + `<target>.SOURCE.md` |
 | `gen_descriptors.py` | derives descriptors from the objects; `--check` re-verifies |
 | `tools/diff_upstream.py` | vendored sources vs. their upstream checkouts, black-normalized |
 | `tools/check_shards.py` | after the pack: every member's shard ships exactly the checked-in objects |
@@ -176,6 +177,49 @@ provider tree; everything else is relative to this directory.
 Adding an instance is a **row in `_instances.py`** plus a regeneration — the
 compiler, the packer and the descriptor emitter all read that table, so there is
 no second place that can disagree with it.
+
+## What is readable, and what is generated output
+
+The content tree is split by one rule: **what a reviewer reads, and what does
+not grow with the object count, sits at the op level; everything that grows with
+it is generated output inside the per-target folders.**
+
+```
+<content>/<op>/
+  flydsl_<op>.{kmd,ued,uhd,udd}.json, flydsl_<op>_kernel_match.umd.json
+                              a fixed handful per op -- however many objects,
+                              knobs, targets or arches it gains
+  <target>.SOURCE.md          one per target: the toolchain, the input digest,
+                              and one short row per object (name, priority,
+                              VGPRs, LDS, SHA256 prefix) -- the diff a review
+                              of a regeneration reads
+  <target>/                   generated output: the pack (KDP), one UKD per
+                              object, the objects, manifest.json -- binaries and
+                              long lists nobody reviews line by line
+```
+
+`<target>` is a generic family (`gfx11-generic`, `gfx12-generic`) or a concrete
+arch (`gfx1151`); both can sit side by side under one op, each its own folder
+and summary, as the provider grows arch-specific objects beside a family set.
+
+The per-target folders are laid out to move to DVC as they are -- one DVC
+pointer per `<op>/<target>/`, with `<target>.SOURCE.md` beside it in git -- once
+the object sets outgrow the repository. Until then they are committed.
+
+**Who changes what.** A contribution changes the *inputs*: the kernel sources
+under `kernels_src/`, the generators and their instance table, the docs. The
+per-target folders and summaries are *outputs*, written only by the generators
+(REGEN.md §3). Every manifest records a digest of the inputs its op was generated
+from (`inputs_sha256`): the op's own kernel directories
+(`generators/_manifest.py` `OP_KERNEL_DIRS`, where a new op adds its row), the
+shared kernel helpers and generator machinery, its `gen_<op>.py`, its own rows
+of the instance table, and its target's row of `arch_families.json`. The build's `gen_descriptors.py --check` fails when
+the tree's inputs no longer match -- so a source change without a regeneration
+cannot ship objects built from other sources, and a change to one op leaves the
+others current. Regeneration is
+byte-reproducible against the pinned toolchain: a contributor who regenerates
+gets exactly the bytes a maintainer would, and a maintainer can regenerate a
+contribution to confirm it.
 
 ## The provenance chain
 
@@ -204,7 +248,7 @@ stating plainly:
 
 - Objects that regenerate to **different bytes** are a *change to what this
   provider ships*, not a refresh — commit them as such, with objects, manifest,
-  `SOURCE.md` and descriptors moving together. A regenerated object committed as
+  `<target>.SOURCE.md` and descriptors moving together. A regenerated object committed as
   a refresh reviews as a no-op diff while changing what every user runs.
 - The repo's `black` hook reformats `kernels_src/`. That is accepted, and the
   reformat was verified codegen-neutral by regenerating — so re-run the

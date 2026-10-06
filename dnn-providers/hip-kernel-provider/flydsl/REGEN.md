@@ -5,7 +5,7 @@ SPDX-License-Identifier:  MIT
 
 # Regenerating the checked-in FlyDSL kernels
 
-The `.hsaco` code objects, their `manifest.json` and `SOURCE.md`, and the
+The `.hsaco` code objects, their `manifest.json` and `<arch>.SOURCE.md`, and the
 descriptor JSON beside them are **generated and committed**, as FlyDSL's bundle
 of the provider's production descriptor root:
 `src/engines/kernel_ingestor_engine/descriptors/FlyDSL/<op>/<arch>/` (and
@@ -47,12 +47,9 @@ python3 -m venv /path/to/flydsl-regen-venv
 /path/to/flydsl-regen-venv/bin/pip install 'flydsl==0.3.4' torch msgpack
 ```
 
-On a box behind a TLS-intercepting proxy without the corporate CA installed, add
-`--trusted-host pypi.org --trusted-host files.pythonhosted.org`.
-
 `flydsl` compiles but does not *dispatch* here, so **no matching GPU is
 required** — `prepare()` sets `COMPILE_ONLY=1`, which is what lets a gfx942
-object be produced on an RDNA laptop.
+object be produced on a machine with an RDNA GPU, or none.
 
 ### The three settings every command below reads
 
@@ -75,7 +72,7 @@ The tree as committed was produced with Python 3.12.3, `flydsl` 0.3.4,
 contract; where they live on disk is not.
 
 `ROCM_PATH` matters beyond finding the compiler: `rocm_version()` reads
-`$ROCM_PATH/.info/version` and writes it into `manifest.json` and `SOURCE.md`.
+`$ROCM_PATH/.info/version` and writes it into `manifest.json` and `<arch>.SOURCE.md`.
 With neither `ROCM_PATH` nor `ROCM_VERSION` set it records the literal
 `"unknown"` rather than guessing — an unrecorded toolchain is better than a
 wrong one, because a wrong one reads as verified.
@@ -133,7 +130,7 @@ The manifests and the provenance record must also come out identical:
 ```bash
 for op in rmsnorm sdpa; do
   diff "$CONTENT/$op/gfx11-generic/manifest.json" "$REGEN_OUT/$op/gfx11-generic/manifest.json"
-  diff "$CONTENT/$op/gfx11-generic/SOURCE.md"     "$REGEN_OUT/$op/gfx11-generic/SOURCE.md"
+  diff "$CONTENT/$op/gfx11-generic.SOURCE.md"     "$REGEN_OUT/$op/gfx11-generic.SOURCE.md"
 done
 ```
 
@@ -163,7 +160,8 @@ a new arch, a deliberate toolchain bump.
 ```bash
 cd dnn-providers/hip-kernel-provider/flydsl
 
-# (1) Compile. Writes $CONTENT/<op>/<arch>/*.hsaco + manifest.json + SOURCE.md
+# (1) Compile. Writes $CONTENT/<op>/<arch>/*.hsaco + manifest.json, and
+#     $CONTENT/<op>/<arch>.SOURCE.md
 #     for each op. The SDPA kernels carry the gfx11 (RDNA3 / RDNA3.5) and gfx12
 #     (RDNA4) WMMA ABIs; gen_sdpa refuses any other arch before compiling.
 for ARCH in gfx11-generic gfx12-generic; do
@@ -218,7 +216,7 @@ under a name it was not built for. The generator additionally re-reads each
 object's own `amdhsa.target` and refuses a mismatch, and for a generic target
 checks the ELF header carries the generic machine too.
 
-Commit the objects, the manifest, `SOURCE.md` and the descriptors **together**.
+Commit the objects, the manifest, `<arch>.SOURCE.md` and the descriptors **together**.
 They are one unit: the build's `--check` fails on a descriptor that disagrees
 with its manifest, on an object whose bytes no longer match the SHA256 its
 manifest records, and on one built for a processor other than its directory's.
@@ -264,13 +262,13 @@ change.
    did not update the pins. `tools/diff_upstream.py` answers this against an
    upstream checkout.
 4. **A genuine kernel change.** Then the new bytes are the point: regenerate per
-   §3, commit objects + manifest + `SOURCE.md` + descriptors in one change, and
+   §3, commit objects + manifest + `<arch>.SOURCE.md` + descriptors in one change, and
    say in the message what moved. A regenerated object committed as a refresh
    reviews as a no-op diff while changing what every user runs.
 
 Bumping a pin is a deliberate act with a cost attached: `FLYDSL_VERSION` is
 per-provider, not per-arch, so changing it obliges regenerating **every** arch in
-`kernels/`. Leaving one behind ships a tree whose `SOURCE.md` files disagree
+`kernels/`. Leaving one behind ships a tree whose `<arch>.SOURCE.md` files disagree
 about which compiler built it.
 
 ---

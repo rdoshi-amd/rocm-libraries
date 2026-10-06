@@ -8,7 +8,8 @@
     "flydsl_kernels_describe": "v0.3.4.1-19-g89ad52f",
     "aiter_kernels_commit": "8253efc4059516f492df597b80ce5311e9fda8bd",
     "rocm_version": "7.13.0",
-    "generic_target_shim": "chipset=gfx1100"
+    "generic_target_shim": "chipset=gfx1100",
+    "inputs_sha256": "a589d332c987ceda03ee3c4fad9468e4f369eb624b731a5f41452ead3ca2cece"
   },
   "instances": [
     {

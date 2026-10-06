@@ -6,14 +6,15 @@
     python -m generators.gen_rmsnorm --arch gfx1151
 
 Writes ``<content>/rmsnorm/<arch>/<instance>.hsaco`` for every row of
-``_instances.rmsnorm_instances()``, plus the ``manifest.json`` and
-``SOURCE.md`` beside them. ``<content>`` is FlyDSL's bundle folder under the
+``_instances.rmsnorm_instances()``, plus the ``manifest.json`` beside them and
+``<content>/rmsnorm/<arch>.SOURCE.md`` next to the folder (``<arch>/`` is kept in
+DVC, the summary in git). ``<content>`` is FlyDSL's bundle folder under the
 provider's production descriptor root (``_flydsl_env.CONTENT_DIR``).
 
 Compilation needs no matching GPU. Under ``COMPILE_ONLY=1`` the launcher traces
-and lowers but never dispatches, so a gfx942 object builds on an RDNA laptop --
-which is what makes the CDNA work in ``PORTING.md`` a *validation* handoff
-rather than a generation one.
+and lowers but never dispatches, so a gfx942 object builds on an RDNA machine --
+porting an op to another architecture is then a validation step on that
+hardware, not a generation one.
 
 **Every object is verified against its own AMDGPU metadata before it is
 written.** The increment-1 gate established that FlyDSL emits no argument
@@ -206,6 +207,8 @@ def generate(arch: str, out_root: Path, keep_ir: Path | None = None) -> Path:
                 "bytes": len(blob),
                 "sha256": sha256(blob),
                 "kernarg_segment_size": described["kernarg_segment_size"],
+                "lds_bytes": described["group_segment_fixed_size"],
+                "vgprs": described["vgpr_count"],
                 "block": [instance.knobs["block_threads"], 1, 1],
                 "grid_rule": _GRID_RULE,
                 # The gate's finding, recorded per object rather than asserted once:

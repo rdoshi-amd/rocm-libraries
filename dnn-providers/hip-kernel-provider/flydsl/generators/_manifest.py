@@ -3,20 +3,22 @@
 
 """Provenance records for the checked-in code objects of one op and one arch.
 
-Two artifacts, written by every generator run into the directory that holds the
-objects (``<content>/<op>/<arch>/``):
+Two artifacts, written by every generator run:
 
-* ``manifest.json`` -- the machine-readable record: the toolchain the objects
-  were built with, and one row per instance (knobs, priority, symbol, kernarg
+* ``<content>/<op>/<arch>/manifest.json`` -- the machine-readable record, beside
+  the objects: the toolchain the objects were built with, a digest of the
+  generator inputs, and one row per instance (knobs, priority, symbol, kernarg
   layout, SHA256). The descriptor generator reads it; nothing else is a source
-  of truth for what an object is.
-* ``SOURCE.md`` -- the human-readable view of the same record, following the
+  of truth for what an object is. It lives in DVC with the objects.
+* ``<content>/<op>/<arch>.SOURCE.md`` -- the human-readable view of the same
+  record, beside the DVC pointer for ``<arch>/`` and kept in git, following the
   convention ``src/engines/asm_sdpa_engine/asm/asm_kernels/`` established for
   checked-in ``.co``: upstream source, toolchain, and a full SHA256 manifest.
+  It is how a change to objects that live in DVC shows up in a review.
 
-A binary in the tree is only reviewable through these files, so a *stale* one is
-worse than a missing one. ``refresh_source_md`` therefore rebuilds the document
-from the manifest on every run rather than patching it.
+A binary is only reviewable through these files, so a *stale* one is worse than
+a missing one. ``refresh_source_md`` therefore rebuilds the document from the
+manifest on every run rather than patching it.
 """
 
 from __future__ import annotations
@@ -29,6 +31,85 @@ from . import _arch_families as families
 
 MANIFEST_NAME = "manifest.json"
 MANIFEST_VERSION = 1
+
+FLYDSL_DIR = Path(__file__).resolve().parent.parent
+
+# What one op's objects are generated from, so a change to one op's inputs leaves
+# every other op's objects current. Each op names its kernel directories under
+# kernels_src/kernels/; a new op must add itself, and an op missing here is an
+# error rather than an empty digest.
+OP_KERNEL_DIRS = {
+    "rmsnorm": ("norm",),
+    "sdpa": ("attention",),
+}
+# Shared by every op: the package root, the kernel helpers every op imports, and
+# the generator machinery -- every module under generators/ but the per-op
+# generators (gen_<op>.py, counted for their own op only), the instance table,
+# which holds every op's rows and is counted as the op's own rows instead, and
+# the family table, counted as the target's own row, so adding a family leaves
+# every other target's objects current.
+# gen_descriptors.py is not an input to the objects, and its own --check
+# re-derives every descriptor.
+_SHARED_KERNEL_PATHS = ("kernels_src/kernels/__init__.py", "kernels_src/kernels/common")
+_INSTANCE_TABLE = "generators/_instances.py"
+_FAMILY_TABLE = "generators/arch_families.json"
+_INPUT_SUFFIXES = (".py", ".json")
+
+
+def _input_files(flydsl_dir: Path, op: str) -> list[Path]:
+    roots = [flydsl_dir / path for path in _SHARED_KERNEL_PATHS]
+    roots += [flydsl_dir / "kernels_src" / "kernels" / d for d in OP_KERNEL_DIRS[op]]
+    generators = flydsl_dir / "generators"
+    files = [
+        path
+        for path in generators.iterdir()
+        if path.is_file()
+        and path.suffix in _INPUT_SUFFIXES
+        and not path.name.startswith("gen_")
+        and path.relative_to(flydsl_dir).as_posix()
+        not in (_INSTANCE_TABLE, _FAMILY_TABLE)
+    ]
+    files.append(generators / f"gen_{op}.py")
+    for root in roots:
+        if root.is_file():
+            files.append(root)
+            continue
+        files += [
+            path
+            for path in root.rglob("*")
+            if path.is_file()
+            and path.suffix in _INPUT_SUFFIXES
+            and "__pycache__" not in path.parts
+        ]
+    return sorted(set(files))
+
+
+def inputs_digest(op: str, arch: str, flydsl_dir: Path = FLYDSL_DIR) -> str:
+    """SHA256 over one op's generator inputs for one target.
+
+    The op's files, then its instance rows, then the target's family row (a
+    concrete arch has none). Recorded in the target's manifest; ``gen_descriptors.py`` compares it with the
+    tree, so a source edit without a regeneration fails the build instead of
+    shipping objects built from other sources. Line endings are normalized, so a
+    checkout with CRLF text does not read as a change.
+    """
+    if op not in OP_KERNEL_DIRS:
+        raise KeyError(
+            f"op {op!r} names no kernel directories in _manifest.OP_KERNEL_DIRS; "
+            "add its row so its objects are tied to their sources"
+        )
+    from ._instances import instances_for  # noqa: PLC0415
+
+    digest = hashlib.sha256()
+    for path in _input_files(flydsl_dir, op):
+        relative = path.relative_to(flydsl_dir).as_posix()
+        digest.update(relative.encode("utf-8") + b"\0")
+        digest.update(path.read_bytes().replace(b"\r\n", b"\n") + b"\0")
+    rows = [instance.to_record() for instance in instances_for(op)]
+    digest.update(json.dumps(rows, sort_keys=True).encode("utf-8") + b"\0")
+    family = families.table().get(arch) if families.is_generic(arch) else None
+    digest.update(json.dumps(family, sort_keys=True).encode("utf-8"))
+    return digest.hexdigest()
 
 
 def sha256(data: bytes) -> str:
@@ -43,7 +124,7 @@ def write_op_manifest(
         "manifest_version": MANIFEST_VERSION,
         "arch": arch,
         "op": op,
-        "toolchain": dict(provenance),
+        "toolchain": {**provenance, "inputs_sha256": inputs_digest(op, arch)},
         "instances": records,
     }
     path = op_dir / MANIFEST_NAME
@@ -76,8 +157,13 @@ def _dumps(manifest: dict) -> str:
     return text
 
 
+def source_md_path(op_dir: Path) -> Path:
+    """``<content>/<op>/<arch>.SOURCE.md``: beside ``<arch>/``, not in it."""
+    return op_dir.parent / f"{op_dir.name}.SOURCE.md"
+
+
 def refresh_source_md(op_dir: Path) -> Path:
-    """Rebuild ``<op_dir>/SOURCE.md`` from the manifest beside it."""
+    """Rebuild ``<op_dir>.SOURCE.md`` from the manifest in ``op_dir``."""
     manifest_path = op_dir / MANIFEST_NAME
     if not manifest_path.is_file():
         raise FileNotFoundError(f"no {MANIFEST_NAME} in {op_dir}; nothing to describe")
@@ -89,10 +175,10 @@ def refresh_source_md(op_dir: Path) -> Path:
         f"# FlyDSL AOT kernel objects — `{op}`, `{arch}`",
         "",
         "<!-- Generated by flydsl/generators/. Do not edit by hand: every generator",
-        "     run rebuilds this file from manifest.json beside it. -->",
+        f"     run rebuilds this file from {arch}/manifest.json. -->",
         "",
-        f"{len(manifest['instances'])} checked-in code object(s), compiled from the "
-        "vendored sources under",
+        f"{len(manifest['instances'])} code object(s), kept in DVC under `{arch}/` "
+        "(`dvc pull` it), compiled from the vendored sources under",
         "`flydsl/kernels_src/` in the hip-kernel-provider tree. Regenerate with:",
         "",
         "```",
@@ -126,24 +212,19 @@ def refresh_source_md(op_dir: Path) -> Path:
         "",
         "## Instances",
         "",
-        "| Instance | Tier | Priority | Knobs | Symbol | Bytes |",
-        "| --- | --- | ---: | --- | --- | ---: |",
+        "One row per object: the name spells out its knobs, and the SHA256 prefix",
+        f"changes when the object does. The full record is `{arch}/manifest.json`.",
+        "",
+        "| Instance | Priority | VGPRs | LDS | SHA256 |",
+        "| --- | ---: | ---: | ---: | --- |",
     ]
     for record in manifest["instances"]:
-        knobs = ", ".join(
-            f"{key}={'runtime' if value is None else value}"
-            for key, value in record["knobs"].items()
-        )
         lines.append(
-            f"| `{record['name']}` | {record['tier']} | {record['priority']} | "
-            f"{knobs} | `{record['symbol']}` | {record['bytes']} |"
+            f"| `{record['name']}` | {record['priority']} | {record.get('vgprs', '')} "
+            f"| {record.get('lds_bytes', '')} | `{record['sha256'][:16]}` |"
         )
+    lines.append("")
 
-    lines += ["", "## SHA256 manifest", "", "```"]
-    for record in manifest["instances"]:
-        lines.append(f"{record['sha256']}  {record['file']}")
-    lines += ["```", ""]
-
-    path = op_dir / "SOURCE.md"
+    path = source_md_path(op_dir)
     path.write_text("\n".join(lines), encoding="utf-8")
     return path

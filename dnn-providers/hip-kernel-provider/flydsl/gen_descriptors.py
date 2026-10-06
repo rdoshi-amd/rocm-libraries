@@ -44,7 +44,9 @@ Layout, per op:
   engine, heuristic, dispatch and the kernel-scoped matcher. One copy, so the
   authored root holds each id once.
 * ``<content>/<op>/<arch>/`` -- that arch's pack (KDP), one UKD per object, and
-  the objects themselves with ``manifest.json`` and ``SOURCE.md``.
+  the objects themselves with ``manifest.json``: generated content, kept in DVC
+  (``<content>/<op>/<arch>.dvc``). Its readable summary, ``<arch>.SOURCE.md``,
+  sits beside the pointer in git.
 
 ``--check`` re-derives the documents and compares them to what is checked in,
 then runs the packer's own authoring validator over the whole FlyDSL folder.
@@ -78,6 +80,7 @@ from generators._codeobject import (  # noqa: E402
     verify_generic,
 )
 from generators._flydsl_env import CONTENT_DIR  # noqa: E402
+from generators._manifest import inputs_digest  # noqa: E402
 
 # Descriptor schema version, as the loader spells it: UKD_VERSION_MAJOR = 1,
 # UKD_VERSION_MINOR = 0 (DescriptorLoader.hpp:288-289).
@@ -160,6 +163,18 @@ def collect(content_dir: Path, arch: str) -> list[KernelEntry]:
             raise ValueError(
                 f"{manifest_path}: manifest records op '{op}' but sits in "
                 f"'{manifest_path.parent.parent.name}/'"
+            )
+        # The objects must be built from the sources in this tree. A kernel or
+        # generator edit without a regeneration would otherwise ship objects that
+        # no longer match what a reviewer reads.
+        recorded = manifest.get("toolchain", {}).get("inputs_sha256")
+        current = inputs_digest(op, arch)
+        if recorded != current:
+            raise ValueError(
+                f"{manifest_path}: the objects were generated from kernel and "
+                f"generator sources with digest {recorded}, but the tree's are "
+                f"{current}. Regenerate ({op}, {arch}) as flydsl/REGEN.md describes; "
+                "the regenerated objects are published to DVC by a maintainer."
             )
         for record in manifest["instances"]:
             path = manifest_path.parent / record["file"]

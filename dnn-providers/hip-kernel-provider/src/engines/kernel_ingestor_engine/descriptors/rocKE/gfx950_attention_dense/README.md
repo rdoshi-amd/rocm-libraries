@@ -19,7 +19,7 @@ builder `build_attention_dense`). Engine: `hipkernel:Gfx950AttentionDense`.
 
 | File | In | Notes |
 |---|---|---|
-| `gfx950_attention_dense.kdp.json` | DVC | 1.2 MB, the 840 variants. Pointer: `.kdp.json.dvc` |
+| `artifacts/gfx950_attention_dense.kdp.json` | DVC | 1.2 MB, the 840 variants. Pointer: `artifacts.dvc` (one artifact for the folder) |
 | `gfx950_attention_dense.kmd.json` | git | variant fields |
 | `gfx950_attention_dense.udd.json` | git | dispatch symbol |
 | `gfx950_attention_dense.ued.json` | git | engine, knobs `block_m`, `block_n` |
@@ -28,7 +28,7 @@ builder `build_attention_dense`). Engine: `hipkernel:Gfx950AttentionDense`.
 
 ## Notes
 
-- Fetch the KDP with `dvc pull -r ingestor gfx950_attention_dense.kdp.json.dvc`. See
+- Fetch `artifacts/` with `dvc pull -r ingestor artifacts.dvc`. See
   `../../README.md`.
 - The native symbols (`hipkernel.gfx950_attention_dense.*`) are registered in
   `packs/Gfx950AttentionDenseNative.cpp`.

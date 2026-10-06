@@ -74,10 +74,13 @@ rocKE/<bundle>/
 ```
 
 One pointer per bundle keeps the pointer count and the pull small, and the whole bundle
-updates atomically. Files are stored uncompressed, one blob each. A single large file with
-its own `<name>.kdp.json.dvc` pointer, as `gfx950_attention_dense` does today, is also
-accepted. The packer reads only `*.json`, so check that a bundle with its KDP in a
-subfolder stages as expected before relying on this layout.
+updates atomically. Files are stored uncompressed, one blob each. `gfx950_attention_dense`
+uses this layout. A single large file with its own `<name>.kdp.json.dvc` pointer is also
+accepted.
+
+A KDP in `artifacts/` packs correctly: the packer walks the root recursively and computes
+each packed kernel's archive path from the descriptor's depth (`../../../kpack/...` here).
+The small descriptors name each other by id, not by path, so moving a KDP needs no edit to them.
 
 ### Using the bundles
 

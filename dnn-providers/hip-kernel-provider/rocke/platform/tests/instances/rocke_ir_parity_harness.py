@@ -1597,10 +1597,10 @@ def cases():
     #   - dw_unmerged is the group_merge=1 control. Without it a drift in the
     #     merged hashes could not be attributed to the merge path rather than
     #     to the depthwise path, which carried no coverage here at all.
-    #   - gm4/gm8/gm32 vary the shift and mask width (log2 Gm) on the B-load
-    #     diagonal.
-    #   - gm64 collapses merged groups to 1, which elides k_out_group_base
-    #     entirely; gm8/gm32 keep it emitted.
+    #   - gm4/gm8/gm32 vary the shift and mask width (log2 Gm) of the merged
+    #     k decode that feeds both the A channel and the B-load diagonal.
+    #   - gm64 is Gm == groups: one merged group, but the grouped decode stays
+    #     engaged because an AOT binary serves every group count Gm divides.
     #   - dw_gm4_direct pins vector_size_c=1 to reach _emit_direct_epilogue.
     #     Merged kpg otherwise auto-derives vec_c > 1, which the validator
     #     turns into a cshuffle requirement, so without the pin every merged

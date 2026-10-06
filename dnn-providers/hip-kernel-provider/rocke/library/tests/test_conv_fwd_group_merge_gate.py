@@ -165,6 +165,21 @@ class TestConvFwdGroupMergeGate(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("pointwise", why)
 
+    def test_3d_is_gated_off(self):
+        # The merged addressing exists only in the 2-D split address form; the
+        # gate, not the builder, has to say so, or dispatch would admit a spec
+        # the builder then rejects.
+        from kernels.common._conv_implicit_gemm_common import ConvProblem
+        from kernels.common.conv_implicit_gemm import is_valid_spec
+
+        p = ConvProblem(
+            N=1, Hi=8, Wi=8, C=64, K=64, Y=3, X=3, pH=1, pW=1, groups=64,
+            Di=8, Z=3, sD=1, pD=1, dD=1,
+        )  # fmt: skip
+        ok, why = is_valid_spec(self._spec(problem=p, group_merge=8), arch="gfx950")
+        self.assertFalse(ok)
+        self.assertIn("3-D", why)
+
     def test_kernel_names_are_tagged_per_degree(self):
         # The compile cache keys on kernel.name. Untagged, a Gm sweep would
         # measure one binary N times.

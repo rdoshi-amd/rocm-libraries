@@ -65,9 +65,15 @@ mapping, forward puts `Gm` on **GemmN and GemmK**:
 | `N_gemm` | `kpg` (= 1) | `Gm` — the GEMM-N index *is* the merged group `g_n` |
 | `K_gemm` | `Y*X*cpg` (= `Y*X`) | `Y*X*Gm`, decoding to `(y, x, g_k)` with `g_k` innermost |
 
-Everything load-side binds to `spec.merged_problem`
+The kernel is AOT-compiled, so its problem shape arrives as kernel arguments,
+and those describe the **true** problem -- the tensors do not merge. The merged
+extents are folded in from the build-time degree: merging is depthwise-only, so
+the merged per-group channel run is exactly `Gm` (a constant), and only the
+merged reduction `K_gemm*Gm` is a runtime product. Host-side choices -- the
+default vector widths, the launch grid -- bind to `spec.merged_problem`
 (`dc_replace(problem, groups=groups // group_merge)`), which is the identity at
-`group_merge == 1`. That is what keeps the default path byte-identical.
+`group_merge == 1`. Nothing merge-related is emitted at `group_merge == 1`,
+which is what keeps the default path byte-identical.
 
 Total MFMA issue is **unchanged** against `Gm == 1`: `grid.z` shrinks by exactly
 the factor `K_gemm` grows by. The redundant FLOPs are absorbed by the previously
@@ -277,11 +283,13 @@ and would not be on a dense convolution.
 
 Two emitter details that are easy to get wrong:
 
-- The whole merged `b_descriptor` wrapper is built **inside** `if
-  spec.group_merge > 1:`. `IRBuilder` performs no constant folding and no CSE,
-  so an unconditionally materialised `const_i32` renumbers every downstream SSA
-  value and silently breaks byte-identity even though the kernel is unchanged.
-  For the same reason the `gm_group*Gm` term is elided when it is provably zero.
+- The merged `b_descriptor` wrapper and the `Gm` constants are built **inside**
+  `if merged:`. `IRBuilder` performs no constant folding and no CSE, so an
+  unconditionally materialised `const_i32` renumbers every downstream SSA value
+  and silently breaks byte-identity even though the kernel is unchanged.
+- The grouped decode (`block_id_z`, the `group*Gm` base) stays engaged even at
+  `Gm == groups`, where it is provably zero: an AOT binary serves every group
+  count `Gm` divides, so the build-time count cannot decide to elide it.
 - The validator's effective store-vector computation and the cshuffle epilogue's
   `max_store_vec` both read `spec.merged_problem`. They are deliberately
   identical expressions: wgrad's history records that two copies of one gate is

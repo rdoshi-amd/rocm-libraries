@@ -25,9 +25,12 @@ run. Its interfaces, a comgr code-object builder and a TensileLite solution
 loader are implemented. Internal entry points let the JIT test binaries
 generate a GEMM solution through a backend and run it with `hipblasLtMatmul`
 or `hipblaslt_ext::Gemm`. The only backend is a test backend that replays
-pre-generated source bundles. No generator backend is implemented yet,
-generated solutions live only in the process that built them, and no public
-API reaches JIT.
+pre-generated source bundles. No generator backend is implemented yet, and
+generated solutions live only in the process that built them.
+`hipblasLtMatmulAlgoGetHeuristic` and `Gemm::algoGetHeuristic` consult JIT
+when the library is built with JIT support and `HIPBLASLT_JIT` is `1` or `2`.
+`getIndexFromAlgo` returns -1 for those algorithms: they are not TensileLite
+library indices.
 
 ## Current behavior
 
@@ -67,6 +70,36 @@ scalar values. The generic `Solution` and private `CompiledSolution` retain
 the `Jit`, device target, request, workspace and bundle lifetime around the
 existing GEMM support and execution machinery. A matmul algorithm is an
 adaptation token, not a general owning executable object.
+
+### Heuristic queries
+
+`HIPBLASLT_JIT` chooses whether the C and C++ heuristic queries consult the
+JIT library. The value is read once per process. A build without JIT support
+does not read it. Anything other than unset, empty, `0`, `1` or `2` warns
+once and leaves the mode off.
+
+| Value | Lookup |
+| --- | --- |
+| unset, empty or `0` | Heuristic queries do not consult JIT. `getBestSolutions` runs as it does without JIT. |
+| `1` | The override file, then the Equality provider rows, then the JIT library, then the other provider rows, then the `getAllSolutions` fill. Each source fills only the remaining request, and a kernel already returned is skipped. |
+| `2` | The JIT library only. The override file is not read. A problem the library does not solve returns success with no algorithms. |
+
+In a testing build the JIT library is the replay backend. `HIPBLASLT_JIT_TEST_REPLAY`
+is a whitespace-separated list of source-bundle directories, read once per
+process. A JIT build with no such source warns once: mode `1` leaves the query
+unchanged, and mode `2` returns no algorithms.
+
+The algorithms are the same process-local algorithms the internal entry points
+return. `getIndexFromAlgo` returns -1 until a persistent library assigns them
+indices. Copies work only on their original device in the process that built
+them.
+
+A process-local cache holds the bundles already built. Its key is the device,
+the workspace limit and the GEMM problem, not the buffer addresses, so a later
+query of the same problem does not build again.
+
+Grouped GEMM is not filled from the JIT library. Mode `1` leaves that query on
+its existing path. Mode `2` returns success with no algorithms.
 
 ### Components
 

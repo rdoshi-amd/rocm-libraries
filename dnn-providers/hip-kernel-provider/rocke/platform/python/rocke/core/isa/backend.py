@@ -32,6 +32,8 @@ from typing import Callable, Dict, Tuple, Union
 
 from ..arch import ArchTarget
 from ..arch.wmma_scale import gfx1250_scaled_wmma
+from ..ir import F32, I32
+from ..wmma import validate_unscaled_wmma
 from .wmma_scale import ScaledWmmaLLVM
 
 
@@ -383,6 +385,7 @@ class Gfx11RdnaBackend(ISABackend):
                 f"known: {sorted(_RDNA_WMMA) + sorted(_RDNA_WMMA_INT)}"
             )
         decl_key, intrinsic, ssa_elt, call_elt = spec
+        validate_unscaled_wmma(op, F32)
         a, b, c = op.operands
         lowerer._need(decl_key)
         a_arg = lowerer._operand(a)
@@ -421,6 +424,7 @@ class Gfx11RdnaBackend(ISABackend):
         needed; values stay within i32 range -> ``clamp = 0`` (exact wrap).
         """
         decl_key, intrinsic, op_vec, acc_vec = spec
+        validate_unscaled_wmma(op, I32, acc_vec)
         a, b, c = op.operands
         lowerer._need(decl_key)
         a_arg = lowerer._operand(a)
@@ -463,6 +467,7 @@ class Gfx12RdnaBackend(Gfx11RdnaBackend):
                 f"known: {sorted(_RDNA_GFX12_WMMA)}"
             )
         decl_key, intrinsic, ssa_elt, call_elt = spec
+        validate_unscaled_wmma(op, F32)
         a, b, c = op.operands
         lowerer._need(decl_key)
         a_arg = lowerer._operand(a)
@@ -580,6 +585,7 @@ class Gfx1250Backend(Gfx12RdnaBackend):
                 f"known: {sorted(_GFX1250_WMMA) + sorted(_GFX1250_WMMA_FP8) + sorted(scaled_ops)}"
             )
         decl_key, intrinsic, elt = spec
+        validate_unscaled_wmma(op, F32)
         a, b, c = op.operands
         lowerer._need(decl_key)
         a_arg = lowerer._operand(a)
@@ -602,6 +608,7 @@ class Gfx1250Backend(Gfx12RdnaBackend):
         format / reuse immediates pinned to 0 (plain unscaled MMA).
         """
         decl_key, intrinsic = spec
+        validate_unscaled_wmma(op, F32)
         a, b, c = op.operands
         lowerer._need(decl_key)
         lowerer._current().emit(

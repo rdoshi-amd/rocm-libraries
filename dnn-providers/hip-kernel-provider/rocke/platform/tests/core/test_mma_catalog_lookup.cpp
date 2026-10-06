@@ -8,11 +8,13 @@
 #include "rocke/helper_rocke.core.arch.h"
 #include "rocke/instance_gemm_internal.h"
 #include "rocke/lower_hip.h"
+#include "rocke/lower_llvm.h"
 #include "rocke/wmma_scale_internal.h"
 
 #include <atomic>
 #include <initializer_list>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <thread>
 
@@ -543,13 +545,110 @@ static int test_scaled_hip_accumulator_values()
     return 0;
 }
 
+// Exercise the C ABI independently of the Python serializer and binding.
+static int test_unscaled_wmma_values()
+{
+    struct Case
+    {
+        const char* arch;
+        const char* id;
+        const rocke_type_t* matrix_elem;
+        int matrix_width;
+        const rocke_type_t* accum_elem;
+    };
+    const Case cases[] = {
+        {"gfx1151", "wmma_i32_16x16x16_iu8", rocke_i32(), 4, rocke_i32()},
+        {"gfx1151", "wmma_i32_16x16x16_iu4", rocke_i32(), 2, rocke_i32()},
+        {"gfx1151", "wmma_f32_16x16x16_f16", rocke_f16(), 16, rocke_f32()},
+        {"gfx1151", "wmma_f32_16x16x16_bf16", rocke_bf16(), 16, rocke_f32()},
+        {"gfx1201", "wmma_gfx12_f32_16x16x16_f16", rocke_f16(), 8, rocke_f32()},
+        {"gfx1201", "wmma_gfx12_f32_16x16x16_bf16", rocke_bf16(), 8, rocke_f32()},
+        {"gfx1250", "wmma_gfx1250_f32_16x16x32_f16", rocke_f16(), 16, rocke_f32()},
+        {"gfx1250", "wmma_gfx1250_f32_16x16x32_bf16", rocke_bf16(), 16, rocke_f32()},
+        {"gfx1250", "wmma_gfx1250_f32_16x16x64_fp8_fp8", rocke_i32(), 8, rocke_f32()},
+        {"gfx1250", "wmma_gfx1250_f32_16x16x64_fp8_bf8", rocke_i32(), 8, rocke_f32()},
+        {"gfx1250", "wmma_gfx1250_f32_16x16x64_bf8_fp8", rocke_i32(), 8, rocke_f32()},
+        {"gfx1250", "wmma_gfx1250_f32_16x16x64_bf8_bf8", rocke_i32(), 8, rocke_f32()},
+    };
+    for(const auto& spec : cases)
+        for(int variant = 0; variant < 15; ++variant)
+        {
+            rocke_ir_builder_t b = {};
+            CHECK(rocke_ir_builder_init(&b, "unscaled_values") == ROCKE_OK);
+            auto* a = rocke_b_param(
+                &b, "a", rocke_vector_type(&b, spec.matrix_elem, spec.matrix_width), NULL);
+            auto* c = rocke_b_param(&b, "c", rocke_vector_type(&b, spec.accum_elem, 8), NULL);
+            auto* result = rocke_b_mma(&b, spec.id, a, a, c, NULL, 0);
+            CHECK(result);
+            auto* op = result->op;
+            char expected[ROCKE_ERR_MSG_CAP];
+            snprintf(expected,
+                     sizeof(expected),
+                     "unscaled WMMA requires src2 and dst to be vec<%sx8>",
+                     spec.accum_elem->name);
+            if(variant < 10)
+            {
+                const int widths[] = {4, 7, 16, 8, 8};
+                int kind = variant % 5;
+                const auto* wrong_elem = spec.accum_elem == rocke_i32() ? rocke_f32() : rocke_i32();
+                const auto* type
+                    = kind == 3 ? spec.accum_elem
+                                : rocke_vector_type(
+                                      &b, kind == 4 ? wrong_elem : spec.accum_elem, widths[kind]);
+                (variant < 5 ? c : result)->type = type;
+            }
+            rocke_value_t* operands[] = {a, a, c, c};
+            rocke_value_t extra = {"%extra", result->type, op};
+            rocke_value_t* results[] = {result, &extra};
+            op->operands = operands;
+            op->results = results;
+            if(variant == 10 || variant == 11)
+                op->num_operands = variant == 10 ? 2 : 4;
+            if(variant == 12 || variant == 13)
+                op->num_results = variant == 12 ? 0 : 2;
+            if(variant >= 10)
+                snprintf(
+                    expected, sizeof(expected), "unscaled WMMA expects 3 operands and 1 result");
+            rocke_b_ret(&b);
+            for(auto flavor :
+                {ROCKE_LLVM_FLAVOR_LLVM20, ROCKE_LLVM_FLAVOR_LLVM22, ROCKE_LLVM_FLAVOR_LLVM23})
+            {
+                char* text = NULL;
+                char error[ROCKE_ERR_MSG_CAP] = {};
+                auto status = rocke_lower_kernel_to_llvm_ex(
+                    b.kernel, flavor, spec.arch, &text, error, sizeof(error));
+                CHECK(status == (variant == 14 ? ROCKE_OK : ROCKE_ERR_VALUE));
+                if(variant != 14)
+                {
+                    CHECK(text == NULL);
+                    CHECK(strcmp(error, expected) == 0);
+                }
+                else
+                    CHECK(text != NULL);
+                free(text);
+            }
+            if(variant == 14)
+            {
+                // These operations have no native HIP handler yet.
+                rocke_strbuf_t hip;
+                CHECK(rocke_strbuf_init(&hip, 0) == 0);
+                rocke_lower_hip_opts_t opts = {};
+                opts.arch = spec.arch;
+                CHECK(rocke_lower_kernel_to_hip(&b, b.kernel, &opts, &hip) == ROCKE_ERR_NOTIMPL);
+                rocke_strbuf_free(&hip);
+            }
+            rocke_ir_builder_free(&b);
+        }
+    return 0;
+}
+
 int main()
 {
     // Keep this first: no previous query may prime the shared family index.
     if(test_family_index_first_use() || test_family_index_duplicates() || test_mma_result_names()
        || test_scale_contracts() || test_scale_layouts_and_families()
        || test_independent_accumulator_width() || test_scaled_accumulator_contracts()
-       || test_scaled_hip_accumulator_values())
+       || test_scaled_hip_accumulator_values() || test_unscaled_wmma_values())
         return 1;
     int checked = 0;
     for(const char* gfx : {"gfx950", "gfx1250"})

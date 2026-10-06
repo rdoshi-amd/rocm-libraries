@@ -443,6 +443,26 @@ static const _wmma_int_spec_t WMMA_INT_SPECS[] = {
 };
 static const int WMMA_INT_SPECS_N = (int)(sizeof(WMMA_INT_SPECS) / sizeof(WMMA_INT_SPECS[0]));
 
+/* Mirrors core/wmma.py::validate_unscaled_wmma. Validate actual SSA types;
+ * re-resolving the catalog cannot check a caller's independent src2/dst values. */
+static void _validate_unscaled_wmma(rocke_lower_t* L,
+                                    const rocke_op_t* op,
+                                    const rocke_type_t* elem,
+                                    int count)
+{
+    if(op->num_operands != 3 || op->num_results != 1)
+        rocke_ll_fail(L, ROCKE_ERR_VALUE, "unscaled WMMA expects 3 operands and 1 result");
+    const rocke_type_t* types[] = {op->operands[2]->type, op->results[0]->type};
+    for(const auto* type : types)
+        if(!type || type->kind != ROCKE_TYPE_VECTOR || type->count != count
+           || !rocke_type_eq(type->elem, elem))
+            rocke_ll_fail(L,
+                          ROCKE_ERR_VALUE,
+                          "unscaled WMMA requires src2 and dst to be vec<%sx%d>",
+                          elem->name,
+                          count);
+}
+
 /* Emit an integer WMMA (iu8/iu4) call (Python _emit_wmma_int). The signature is
  * (i1 signedA, <N x i32> A, i1 signedB, <N x i32> B, <8 x i32> C, i1 clamp) with
  * an <8 x i32> result. Both signedness flags are 1 (signed quant data); clamp
@@ -450,27 +470,25 @@ static const int WMMA_INT_SPECS_N = (int)(sizeof(WMMA_INT_SPECS) / sizeof(WMMA_I
 static void _emit_wmma_int(rocke_lower_t* L, const rocke_op_t* op, const _wmma_int_spec_t* spec)
 {
     const rocke_value_t *a, *b, *c;
-    const char *src2_ty, *dst_ty;
+    _validate_unscaled_wmma(L, op, rocke_i32(), spec->acc_vec);
     a = op->operands[0];
     b = op->operands[1];
     c = op->operands[2];
-    src2_ty = rocke_ll_llvm_type(L, c->type);
     const char* result = mma_result_name(L, op);
-    dst_ty = rocke_ll_llvm_type(L, op->results[0]->type);
     rocke_ll_need(L, spec->decl_key);
     rocke_ll_emitf(L,
-                   "  %s = call %s @%s("
+                   "  %s = call <%d x i32> @%s("
                    "i1 1, <%d x i32> %s, "
                    "i1 1, <%d x i32> %s, "
-                   "%s %s, i1 0)",
+                   "<%d x i32> %s, i1 0)",
                    result,
-                   dst_ty,
+                   spec->acc_vec,
                    spec->intrinsic,
                    spec->op_vec,
                    rocke_ll_operand(L, a),
                    spec->op_vec,
                    rocke_ll_operand(L, b),
-                   src2_ty,
+                   spec->acc_vec,
                    rocke_ll_operand(L, c));
 }
 
@@ -478,17 +496,12 @@ static void _emit_wmma(rocke_lower_t* L, const rocke_op_t* op, const char* op_id
 {
     const _wmma_spec_t* spec = NULL;
     const rocke_value_t *a, *b, *c;
-    const char *a_arg, *b_arg, *src2_ty, *dst_ty;
+    const char *a_arg, *b_arg;
     int w, i;
 
     if(!rocke_ll_live(L))
     {
         return;
-    }
-    if(op->num_operands != 3)
-    {
-        rocke_ll_fail(
-            L, ROCKE_ERR_VALUE, "%s expects 3 operands", op->name ? op->name : "tile.mma");
     }
 
     /* Integer WMMA (iu8/iu4) is checked first, mirroring
@@ -523,12 +536,11 @@ static void _emit_wmma(rocke_lower_t* L, const rocke_op_t* op, const char* op_id
                       L->backend ? L->backend->gfx : "(rdna)");
     }
 
+    _validate_unscaled_wmma(L, op, rocke_f32(), 8);
     a = op->operands[0];
     b = op->operands[1];
     c = op->operands[2];
-    src2_ty = rocke_ll_llvm_type(L, c->type);
     const char* result = mma_result_name(L, op);
-    dst_ty = rocke_ll_llvm_type(L, op->results[0]->type);
     w = spec->frag_width;
 
     rocke_ll_need(L, spec->decl_key);
@@ -567,13 +579,12 @@ static void _emit_wmma(rocke_lower_t* L, const rocke_op_t* op, const char* op_id
          * i1 reuseA, i1 reuseB). The negate / format / reuse immediates are
          * pinned to the plain unscaled MMA. */
         rocke_ll_emitf(L,
-                       "  %s = call %s @%s("
+                       "  %s = call <8 x float> @%s("
                        "i1 false, <%d x %s> %s, "
                        "i1 false, <%d x %s> %s, "
-                       "i16 0, %s %s, "
+                       "i16 0, <8 x float> %s, "
                        "i1 false, i1 false)",
                        result,
-                       dst_ty,
                        spec->intrinsic,
                        w,
                        spec->call_elt,
@@ -581,7 +592,6 @@ static void _emit_wmma(rocke_lower_t* L, const rocke_op_t* op, const char* op_id
                        w,
                        spec->call_elt,
                        b_arg,
-                       src2_ty,
                        rocke_ll_operand(L, c));
         return;
     }
@@ -590,12 +600,11 @@ static void _emit_wmma(rocke_lower_t* L, const rocke_op_t* op, const char* op_id
         /* gfx1250 K=64 6-operand form: (A, B, i16 fmt, C, i1, i1), format and
          * reuse immediates pinned to 0 (plain unscaled MMA). */
         rocke_ll_emitf(L,
-                       "  %s = call %s @%s("
+                       "  %s = call <8 x float> @%s("
                        "<%d x %s> %s, <%d x %s> %s, "
-                       "i16 0, %s %s, "
+                       "i16 0, <8 x float> %s, "
                        "i1 false, i1 false)",
                        result,
-                       dst_ty,
                        spec->intrinsic,
                        w,
                        spec->call_elt,
@@ -603,15 +612,13 @@ static void _emit_wmma(rocke_lower_t* L, const rocke_op_t* op, const char* op_id
                        w,
                        spec->call_elt,
                        b_arg,
-                       src2_ty,
                        rocke_ll_operand(L, c));
         return;
     }
     rocke_ll_emitf(L,
-                   "  %s = call %s @%s("
-                   "<%d x %s> %s, <%d x %s> %s, %s %s)",
+                   "  %s = call <8 x float> @%s("
+                   "<%d x %s> %s, <%d x %s> %s, <8 x float> %s)",
                    result,
-                   dst_ty,
                    spec->intrinsic,
                    w,
                    spec->call_elt,
@@ -619,7 +626,6 @@ static void _emit_wmma(rocke_lower_t* L, const rocke_op_t* op, const char* op_id
                    w,
                    spec->call_elt,
                    b_arg,
-                   src2_ty,
                    rocke_ll_operand(L, c));
 }
 

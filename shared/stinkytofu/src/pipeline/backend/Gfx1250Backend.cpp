@@ -223,6 +223,8 @@ bool buildGfx1250Pipeline(ModulePassManager& mpm, StinkyAsmModule& module, const
                 WaitCntInsertionOptions waitCntOptions;
                 waitCntOptions.enableLoopCarriedTokenDeps =
                     moduleOptions.EnableLoopCarriedTokenDeps;
+                // A WMMA batch must stay back-to-back: one wait before it, none inside.
+                waitCntOptions.mergeWaitsInWmmaRuns = moduleOptions.WmmaBatchSize > 1;
                 innerPM.addPass(createStinkyWaitCntInsertionPass(waitCntOptions));
                 if (runScheduler) innerPM.addPass(createRemoveDscntPass());
             }

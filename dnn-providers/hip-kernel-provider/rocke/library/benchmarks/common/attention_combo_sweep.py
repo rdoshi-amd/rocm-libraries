@@ -66,6 +66,18 @@ def _spec_key(spec) -> str:
     return str(getattr(spec, "tuning_id", "") or _kernel_name(spec))
 
 
+def _mask_type(args) -> int:
+    """Request mask ordinal: 0 none, 1 top-left causal, 2 bottom-right causal.
+
+    Bottom-right is the default because the unified candidates always mask
+    bottom-right whatever the request says, so it is the one corner every
+    candidate in the sweep agrees on. The two corners differ only when
+    seqlen_q != seqlen_k."""
+    if not args.causal:
+        return 0
+    return 2 if getattr(args, "diagonal", "bottom_right") == "bottom_right" else 1
+
+
 def _requests(args):
     for d in args.head_dim:
         for sq in args.seqlen_q:
@@ -80,7 +92,7 @@ def _requests(args):
                     hdim_v=d,
                     arch=args.arch,
                     dtype=args.dtype,
-                    mask_type=1 if args.causal else 0,
+                    mask_type=_mask_type(args),
                     kv_block_size=args.kv_block_size,
                     sliding_window=args.sliding_window,
                     num_cus=args.num_cus,
@@ -100,11 +112,12 @@ def _shape_fields(req) -> dict:
         "head_size": int(req.hdim_q),
         "kv_block_size": int(req.kv_block_size),
         "causal": bool(req.mask_type),
+        "bottom_right": int(req.mask_type) == 2,
         "sliding_window": int(req.sliding_window),
     }
 
 
-def _flops(req) -> float:
+def _flops(req, *, bottom_right: bool = True) -> float:
     return attention_flops(
         req.batch,
         req.nhead_q,
@@ -113,10 +126,13 @@ def _flops(req) -> float:
         req.seqlen_k,
         causal=bool(req.mask_type),
         sliding_window=int(req.sliding_window),
+        bottom_right=bottom_right,
     )
 
 
-def _reference(q, k, v, *, causal: bool, sliding_window: int):
+def _reference(q, k, v, *, causal: bool, sliding_window: int, bottom_right: bool):
+    """fp32 SDPA oracle. The causal diagonal and the window both anchor at the
+    requested corner: offset seqlen_k - seqlen_q for bottom-right, 0 for top-left."""
     import torch
 
     hq, hkv = q.shape[2], k.shape[2]
@@ -128,10 +144,11 @@ def _reference(q, k, v, *, causal: bool, sliding_window: int):
     qi = torch.arange(sq, device=q.device)[:, None]
     ki = torch.arange(sk, device=q.device)[None, :]
     allowed = torch.ones(sq, sk, dtype=torch.bool, device=q.device)
+    offset = sk - sq if bottom_right else 0
     if causal:
-        allowed &= ki <= qi + (sk - sq)
+        allowed &= ki <= qi + offset
     if sliding_window > 0:
-        allowed &= ki > qi + (sk - sq) - sliding_window
+        allowed &= ki > qi + offset - sliding_window
     scores = scores.masked_fill(~allowed[None, None], float("-inf"))
     probs = torch.softmax(scores, dim=-1)
     return torch.matmul(probs, vh).transpose(1, 2)
@@ -392,6 +409,10 @@ def _run_result(req, result, args, index: int) -> dict:
 
     row = _row_skeleton(req, result.candidate, result.spec, index)
     kind = row["kind"]
+    # From args, not req.mask_type: the gfx950 table sweeps reuse this runner
+    # with their own args and top-left requests (square prefill, or q=1 decode on
+    # the always-bottom-right unified path) and rely on the bottom-right default.
+    bottom_right = getattr(args, "diagonal", "bottom_right") == "bottom_right"
     try:
         if kind == "dense":
             tensors = _dense_tensors(req, args.seed)
@@ -425,6 +446,7 @@ def _run_result(req, result, args, index: int) -> dict:
                 tensors["_dense_v"],
                 causal=bool(req.mask_type),
                 sliding_window=int(req.sliding_window),
+                bottom_right=bottom_right,
             )
             out = tensors["out"]
             max_abs = float((out.reshape_as(ref).float() - ref).abs().max().item())
@@ -450,7 +472,7 @@ def _run_result(req, result, args, index: int) -> dict:
     used = values[1:] if len(values) > 1 else values
     ordered = sorted(used)
     ms = ordered[len(ordered) // 2]
-    flops = _flops(req)
+    flops = _flops(req, bottom_right=bottom_right)
     ok = args.no_check or (max_abs == max_abs and max_abs <= args.tolerance)
     row.update(
         status="ok" if ok else "mismatch",
@@ -520,6 +542,7 @@ def _child_argv(args, req, result) -> list:
         str(req.seqlen_k),
     ]
     argv += ["--causal"] if args.causal else ["--no-causal"]
+    argv += ["--diagonal", getattr(args, "diagonal", "bottom_right")]
     if args.no_check:
         argv += ["--no-check"]
     return argv
@@ -806,6 +829,14 @@ def main() -> int:
         help="dense-kernel WPE pin: 0 keeps policy/sweep expansion; 1..8 pins it",
     )
     ap.add_argument("--causal", action=argparse.BooleanOptionalAction, default=True)
+    ap.add_argument(
+        "--diagonal",
+        choices=("bottom_right", "top_left"),
+        default="bottom_right",
+        help="causal corner, requested and checked; differs only when seqlen_q != "
+        "seqlen_k. Unified candidates always mask bottom-right, so top_left with "
+        "unequal lengths fails them",
+    )
     ap.add_argument("--candidate-prefix", default="")
     ap.add_argument("--tuning-id-prefix", default="")
     ap.add_argument(

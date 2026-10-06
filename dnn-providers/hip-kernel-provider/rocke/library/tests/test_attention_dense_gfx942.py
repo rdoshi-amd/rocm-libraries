@@ -540,8 +540,8 @@ def test_supports_rejects_modes_deferred_to_later_phases(kw, marker):
     assert marker in why
 
 
-def test_shared_bottom_right_field_is_rejected_by_support_and_build():
-    """The reflected common field is outside gfx942's concrete contract."""
+def test_shared_bottom_right_field_is_admitted_by_support_and_build():
+    """The reflected common field promotes onto the gfx942 spec and builds."""
     spec = AttentionDenseSpec(
         batch=1,
         seqlen_q=2048,
@@ -555,10 +555,9 @@ def test_shared_bottom_right_field_is_rejected_by_support_and_build():
         causal_bottom_right=True,
     )
     ok, why = supports_attention_dense(spec, arch="gfx942")
-    assert not ok
-    assert "causal_bottom_right" in why
-    with pytest.raises(ValueError, match="causal_bottom_right"):
-        build_attention_dense(spec, arch="gfx942")
+    assert ok, why
+    kernel = build_attention_dense(spec, arch="gfx942")
+    assert "br" in kernel.name.split("_")
 
 
 @pytest.mark.parametrize("block_n", [96, 160, 224])

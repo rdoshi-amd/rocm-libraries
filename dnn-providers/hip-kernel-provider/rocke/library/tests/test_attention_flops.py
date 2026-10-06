@@ -22,6 +22,16 @@ class TestAttendedPairs(unittest.TestCase):
     def test_sliding_window_caps_the_lookback(self):
         self.assertEqual(attended_pairs(4, 4, causal=True, sliding_window=1), 4)
 
+    def test_top_left_causal_anchors_the_diagonal_at_key_zero(self):
+        # sq=2, sk=4: top-left keeps {0} and {0, 1}; bottom-right {0..2} and {0..3}.
+        self.assertEqual(attended_pairs(2, 4, causal=True, bottom_right=False), 3)
+        self.assertEqual(attended_pairs(2, 4, causal=True, bottom_right=True), 7)
+        # The corners agree when the lengths are equal.
+        self.assertEqual(
+            attended_pairs(4, 4, causal=True, bottom_right=False),
+            attended_pairs(4, 4, causal=True),
+        )
+
     def test_flops_are_four_times_pairs(self):
         pairs = attended_pairs(1024, 1024, causal=True)
         self.assertEqual(

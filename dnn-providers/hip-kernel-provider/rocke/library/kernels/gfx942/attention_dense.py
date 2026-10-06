@@ -409,9 +409,10 @@ class Gfx942AttentionDenseSpec(AttentionDenseSpec):
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        if self.causal_bottom_right:
+        if self.causal_bottom_right and self.sliding_window > 0:
             raise ValueError(
-                "gfx942 attention_dense: causal_bottom_right not yet supported"
+                "gfx942 attention_dense: causal_bottom_right is not supported "
+                "with sliding_window>0"
             )
 
     def resolved_use_cfvst(self) -> bool:
@@ -470,6 +471,10 @@ class Gfx942AttentionDenseSpec(AttentionDenseSpec):
         shape params at all. ``ragged``/``varlen``/``paged`` never reach the builder
         (:func:`supports_attention_dense` rejects them) but stay in the predicate,
         identical to the gfx950 twin, so a later admit lands already excluded.
+
+        Bottom-right causal stays IN the cohort, unlike on gfx950: the body derives
+        the diagonal offset ``seqlen_kv - seqlen_q`` from the same params, so one
+        bottom-right binary serves every shape. Only the persistent body bakes it.
 
         Every other knob that forks the body -- :func:`_use_exp2_fast` included --
         is a function of compile-time config only, never of the problem shape, so
@@ -920,8 +925,10 @@ def supports_attention_dense(
     In scope for this port: gfx942, bf16/fp16, D64/D128, MHA/GQA including
     non-power-of-2 groups, causal or full, the default grid AND the P4 persistent
     grid-stride variant, ``block_n`` dividing the ``block_m`` query tile, within the
-    LDS budget and 32-bit addressing, and sliding-window (KV-loop prune + window mask).
-    varlen / ragged / sinks are later follow-ups (rejected below).
+    LDS budget and 32-bit addressing, sliding-window (KV-loop prune + window mask), and
+    bottom-right causal (diagonal shifted by ``seqlen_kv - seqlen_q``) on both grids.
+    varlen / ragged / sinks, and bottom-right combined with a sliding window, are later
+    follow-ups (rejected below).
     """
     if arch != "gfx942":
         return False, f"kernels.gfx942.attention_dense is gfx942-only (got {arch})"
@@ -930,8 +937,12 @@ def supports_attention_dense(
     # returning the structured rejection the contract promises.
     if not isinstance(spec, AttentionDenseSpec):
         return False, f"spec must be an AttentionDenseSpec, got {type(spec).__name__}"
-    if spec.causal_bottom_right:
-        return False, "gfx942 attention_dense: causal_bottom_right not yet supported"
+    # Checked before the promotion below, whose constructor would raise on it.
+    if spec.causal_bottom_right and spec.sliding_window > 0:
+        return False, (
+            "gfx942 attention_dense: causal_bottom_right is not supported with "
+            "sliding_window>0"
+        )
     try:
         spec = _as_gfx942_spec(spec)
     except TypeError as exc:
@@ -1299,6 +1310,20 @@ def _build_attention_dense_single_buffer(
     # here would make the window logic read that work count on the persistent path.
     SW = spec.sliding_window
     SWt = SW // BN  # window length in KV tiles (0 when disabled)
+    # Bottom-right causal diagonal offset (seqlen_kv - seqlen_q): query q keeps keys
+    # k <= q + offset, so the last query row sees every key. None emits nothing, which
+    # keeps the top-left IR byte-identical. The runtime-shape body derives it from its
+    # shape params so one binary serves every shape; the persistent body bakes it and
+    # skips a zero offset, so equal-length bottom-right lowers to the top-left body.
+    # The shared spec guarantees seqlen_q <= seqlen_kv, so the offset is never negative.
+    if not spec.causal_bottom_right:
+        diag_off = None
+    elif spec.runtime_shape:
+        diag_off = b.sub(seqlen_kv_p, seqlen_q_p)
+    elif Skv != Sq:
+        diag_off = b.const_i32(Skv - Sq)
+    else:
+        diag_off = None
 
     # ---- async DMA loaders (arch-neutral; width=1 = CDNA3 legal) ----
     K_LDROW_BYTES = LDROW * 2
@@ -1644,6 +1669,8 @@ def _build_attention_dense_single_buffer(
                 return
             tile_key0 = b.mul(tile_idx, b.const_i32(BN))
             query_tok = b.add(q_tok0, _mfma_32x32_c_col(b, lane, 0))
+            if diag_off is not None:
+                query_tok = b.add(query_tok, diag_off)
             win_lo = b.sub(query_tok, b.const_i32(SW)) if lower else None
             for nsub in range(N_SUB):
                 sub_base = b.add(tile_key0, b.const_i32(nsub * 32))
@@ -1660,7 +1687,10 @@ def _build_attention_dense_single_buffer(
 
         # n_up: causal clamps the KV loop to the diagonal tile of this query block.
         # The window does not move the upper diagonal, only the lower edge, so n_up
-        # is unchanged by W.
+        # is unchanged by W. Bottom-right moves it right by the diagonal offset: the
+        # block's last row (block_m - 1) reaches key block_m - 1 + offset, so the
+        # block spans ceil((block_m + offset) / BN) tiles from its first diagonal
+        # tile. That is the gfx950 formula; the tile-multiple lengths make it exact.
         # BN is a power of two, so the runtime divide lowers to a shift. The causal
         # clamp below needs no further edit -- it consumes n_ktiles_c, so converting
         # the trip count carries it.
@@ -1669,8 +1699,18 @@ def _build_attention_dense_single_buffer(
             if spec.runtime_shape
             else b.const_i32(n_ktiles)
         )
-        if causal:
+        if causal and diag_off is None:
             n_up = b.add(b.mul(qb, b.const_i32(n_per)), b.const_i32(n_per))
+            n_up = b.select(b.cmp_lt(n_up, n_ktiles_c), n_up, n_ktiles_c)
+        elif causal:
+            if spec.runtime_shape:
+                diag_reach = b.add(
+                    b.div(b.add(diag_off, b.const_i32(BLOCK_M - 1)), b.const_i32(BN)),
+                    b.const_i32(1),
+                )
+            else:
+                diag_reach = b.const_i32((BLOCK_M - 1 + Skv - Sq) // BN + 1)
+            n_up = b.add(b.mul(qb, b.const_i32(n_per)), diag_reach)
             n_up = b.select(b.cmp_lt(n_up, n_ktiles_c), n_up, n_ktiles_c)
         else:
             n_up = n_ktiles_c

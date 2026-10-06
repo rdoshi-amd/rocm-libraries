@@ -167,6 +167,9 @@ def _run_unified_graph(req, result, args) -> dict:
             tensors["_dense_v"],
             causal=bool(req.mask_type),
             sliding_window=int(req.sliding_window),
+            # q=1 decode attends the whole KV cache: the bottom-right corner the
+            # unified decode path masks, whatever corner the request names.
+            bottom_right=True,
         )
         out = tensors["out"]
         max_abs = float((out.reshape_as(ref).float() - ref).abs().max().item())

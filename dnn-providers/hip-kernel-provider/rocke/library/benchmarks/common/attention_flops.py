@@ -11,8 +11,10 @@ def attended_pairs(
     *,
     causal: bool,
     sliding_window: int = 0,
+    bottom_right: bool = True,
 ) -> int:
-    """Return logical query/key pairs under right-aligned mask semantics."""
+    """Return logical query/key pairs under right-aligned mask semantics, or
+    left-aligned (top-left causal) ones when ``bottom_right`` is False."""
     sq = int(seqlen_q)
     sk = int(seqlen_k)
     window = int(sliding_window)
@@ -21,7 +23,7 @@ def attended_pairs(
     if not causal and window <= 0:
         return sq * sk
 
-    offset = sk - sq
+    offset = sk - sq if bottom_right else 0
     total = 0
     for qi in range(sq):
         last = qi + offset if causal else sk - 1
@@ -44,6 +46,7 @@ def attention_flops(
     *,
     causal: bool,
     sliding_window: int = 0,
+    bottom_right: bool = True,
 ) -> float:
     """Count QK^T and PV as ``4 * B * Hq * D * attended_pairs``."""
     pairs = attended_pairs(
@@ -51,5 +54,6 @@ def attention_flops(
         seqlen_k,
         causal=causal,
         sliding_window=sliding_window,
+        bottom_right=bottom_right,
     )
     return 4.0 * int(batch) * int(nhead_q) * int(head_size) * float(pairs)

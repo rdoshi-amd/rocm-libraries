@@ -241,7 +241,8 @@ def dense_spec_for_request(req: AttentionRequest):
 
 
 def _make_gfx942_attention_dense_candidate() -> KernelCandidate:
-    """Dense flash-attn prefill on gfx942 (bf16/fp16, causal/full).
+    """Dense flash-attn prefill on gfx942 (bf16/fp16, causal/full, top-left or
+    bottom-right diagonal).
 
     OPT-IN ONLY (mirrors the gfx950 sibling): matches solely when the request names
     ``algorithm="attention_dense"`` / ``spec_id="gfx942_attention_dense"``, so it
@@ -349,12 +350,15 @@ def _make_gfx942_attention_dense_candidate() -> KernelCandidate:
         capability=Capability(
             arches=("gfx942",),
             dtypes=("bf16", "fp16"),
-            # Dense: causal + sliding-window; no sinks or moving bottom-right
-            # diagonal. The latter is a distinct request feature, absent here.
+            # Dense: causal, moving bottom-right diagonal, and sliding-window; no
+            # sinks. Bottom-right combined with a window is a spec-level rejection
+            # in ``supports_attention_dense``, which a feature set cannot express.
             # Head size stays out -- D64/D128 coverage is
             # ``supports_attention_dense``'s call, and it reads the built spec
             # (LDS budget, block_n divisibility), which a ShapeRange cannot.
-            supports_features=frozenset({"causal", "sliding_window"}),
+            supports_features=frozenset(
+                {"causal", "causal_bottom_right", "sliding_window"}
+            ),
         ),
         _supports=support,
         select_spec=select,

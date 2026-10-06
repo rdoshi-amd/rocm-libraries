@@ -164,36 +164,91 @@ class TestGfx942DenseSupportGates(unittest.TestCase):
             self.assertIn("ragged", why)
 
 
-class TestGfx942BottomRightSafety(unittest.TestCase):
-    def test_moving_bottom_right_declines_at_capability(self):
-        for mask_type in (AttentionMaskType.BOTTOM_RIGHT_CAUSAL, 2):
-            with self.subTest(mask_type=mask_type), _Gfx942Arch():
-                ok, why = _candidate().admits(
-                    _req(
-                        seqlen_q=2048,
-                        seqlen_k=4096,
-                        mask_type=mask_type,
-                        dense_persistent="off",
-                    )
-                )
-                self.assertFalse(ok)
-                self.assertIn("capability", why)
-                self.assertIn("causal_bottom_right", why)
+class TestGfx942BottomRight(unittest.TestCase):
+    """Moving bottom-right diagonal (seqlen_q != seqlen_kv), mirroring gfx950's
+    ``TestDenseBottomRightWiring``. Unlike gfx950, gfx942 serves it on BOTH grids:
+    the persistent and default grids share one work-item body, so the persistent
+    policy is not overridden, and the default grid keeps runtime shape params."""
 
-    def test_direct_factory_rejects_moving_bottom_right(self):
-        for mask_type in (AttentionMaskType.BOTTOM_RIGHT_CAUSAL, 2):
-            with self.subTest(mask_type=mask_type):
-                with self.assertRaisesRegex(ValueError, "causal_bottom_right"):
-                    _dense_spec(
-                        _req(
+    _MOVING = (AttentionMaskType.BOTTOM_RIGHT_CAUSAL, 2)
+
+    def test_capability_declares_bottom_right(self):
+        self.assertIn("causal_bottom_right", _candidate().capability.supports_features)
+
+    def test_moving_bottom_right_is_admitted_on_both_grids(self):
+        with _Gfx942Arch():
+            for mask_type in self._MOVING:
+                for persistent in ("off", "on"):
+                    with self.subTest(mask_type=mask_type, persistent=persistent):
+                        req = _req(
                             seqlen_q=2048,
                             seqlen_k=4096,
                             mask_type=mask_type,
-                            dense_persistent="off",
+                            dense_persistent=persistent,
                         )
-                    )
+                        ok, why = _candidate().admits(req)
+                        self.assertTrue(ok, why)
+                        spec = _dense_spec(req)
+                        self.assertTrue(spec.causal)
+                        self.assertTrue(spec.causal_bottom_right)
+                        self.assertEqual(spec.persistent, persistent == "on")
+                        self.assertIn("br", spec.kernel_name().split("_"))
+                        self.assertEqual(dispatch_attention(req).candidate.name, _NAME)
 
-    def test_concrete_support_rejects_shared_bottom_right_spec(self):
+    def test_auto_persistent_policy_is_unchanged_for_moving_bottom_right(self):
+        with _Gfx942Arch():
+            spec = _dense_spec(
+                _req(
+                    seqlen_q=8192,
+                    seqlen_k=12288,
+                    mask_type=AttentionMaskType.BOTTOM_RIGHT_CAUSAL,
+                    dense_persistent="auto",
+                )
+            )
+            self.assertTrue(spec.causal_bottom_right)
+            self.assertTrue(spec.persistent)
+
+    def test_default_grid_serves_every_bottom_right_shape_with_one_symbol(self):
+        """The default-grid body reads the diagonal offset from its shape params,
+        so bottom-right stays in the runtime-shape cohort: one symbol per config,
+        distinct from the top-left symbol."""
+        shapes = ((2048, 4096), (1024, 4096), (256, 320))
+        with _Gfx942Arch():
+            specs = [
+                _dense_spec(
+                    _req(
+                        seqlen_q=sq,
+                        seqlen_k=sk,
+                        mask_type=AttentionMaskType.BOTTOM_RIGHT_CAUSAL,
+                        dense_persistent="off",
+                    )
+                )
+                for sq, sk in shapes
+            ]
+            top_left = _dense_spec(
+                _req(seqlen_q=2048, seqlen_k=4096, dense_persistent="off")
+            )
+        self.assertTrue(all(s.runtime_shape for s in specs))
+        self.assertEqual(len({s.kernel_name() for s in specs}), 1)
+        self.assertNotRegex(specs[0].kernel_name(), r"_sq\d+|_sk\d+")
+        self.assertNotEqual(specs[0].kernel_name(), top_left.kernel_name())
+
+    def test_persistent_grid_bakes_the_offset_into_the_symbol(self):
+        with _Gfx942Arch():
+            names = {
+                _dense_spec(
+                    _req(
+                        seqlen_q=2048,
+                        seqlen_k=sk,
+                        mask_type=AttentionMaskType.BOTTOM_RIGHT_CAUSAL,
+                        dense_persistent="on",
+                    )
+                ).kernel_name()
+                for sk in (2304, 4096)
+            }
+        self.assertEqual(len(names), 2)
+
+    def test_concrete_support_admits_shared_bottom_right_spec(self):
         common = dict(
             batch=1,
             seqlen_q=2048,
@@ -205,12 +260,53 @@ class TestGfx942BottomRightSafety(unittest.TestCase):
             causal_bottom_right=True,
             dtype="bf16",
         )
-        spec = AttentionDenseSpec(**common)
-        ok, why = supports_attention_dense(spec, arch="gfx942")
+        ok, why = supports_attention_dense(AttentionDenseSpec(**common), arch="gfx942")
+        self.assertTrue(ok, why)
+        self.assertTrue(Gfx942AttentionDenseSpec(**common).causal_bottom_right)
+
+    def test_bottom_right_with_sliding_window_is_rejected(self):
+        """A spec-level rejection the feature set cannot express, so it is turned
+        down by the predicate, not by capability."""
+        with _Gfx942Arch():
+            ok, why = _candidate().admits(
+                _req(
+                    seqlen_q=2048,
+                    seqlen_k=4096,
+                    mask_type=AttentionMaskType.BOTTOM_RIGHT_CAUSAL,
+                    sliding_window=128,
+                )
+            )
         self.assertFalse(ok)
-        self.assertIn("causal_bottom_right", why)
-        with self.assertRaisesRegex(ValueError, "causal_bottom_right"):
-            Gfx942AttentionDenseSpec(**common)
+        self.assertNotIn("capability", why)
+        self.assertIn("sliding_window", why)
+        common = dict(
+            batch=1,
+            seqlen_q=2048,
+            seqlen_kv=4096,
+            num_query_heads=128,
+            num_kv_heads=8,
+            head_size=128,
+            causal=True,
+            causal_bottom_right=True,
+            sliding_window=128,
+        )
+        ok, why = supports_attention_dense(AttentionDenseSpec(**common), arch="gfx942")
+        self.assertFalse(ok)
+        self.assertIn("sliding_window", why)
+
+    def test_query_longer_than_kv_is_rejected(self):
+        """Bottom-right with seqlen_q > seqlen_kv would leave fully masked rows."""
+        with _Gfx942Arch():
+            ok, why = _candidate().admits(
+                _req(
+                    seqlen_q=4096,
+                    seqlen_k=2048,
+                    mask_type=AttentionMaskType.BOTTOM_RIGHT_CAUSAL,
+                )
+            )
+        self.assertFalse(ok)
+        self.assertNotIn("capability", why)
+        self.assertIn("seqlen_q <= seqlen_kv", why)
 
     def test_equal_length_bottom_right_preserves_persistent_policy(self):
         common = dict(

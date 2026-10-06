@@ -90,7 +90,18 @@ _SWA_COHORT = [
 
 
 def _spec(
-    dtype, d, hq, hkv, persistent, *, causal=True, batch=1, sq=512, sliding_window=0
+    dtype,
+    d,
+    hq,
+    hkv,
+    persistent,
+    *,
+    causal=True,
+    batch=1,
+    sq=512,
+    sk=None,
+    mask_type=None,
+    sliding_window=0,
 ):
     """The SHIPPED gfx942 dense spec for a cohort row, built through the dispatch
     factory (``dispatch.attention.gfx942._dense_spec``) rather than hand-rolled.
@@ -115,6 +126,9 @@ def _spec(
     BOTH grid variants at one fixed Sq, where "auto" would pick a single one. Every
     other lever -- block_n, the D64 K row-group pad, persist_decode, ragged -- is
     whatever the shipped path folds in.
+
+    ``sk`` defaults to ``sq`` (self-attention). ``mask_type`` defaults to top-left
+    causal (1) or no mask (0) from ``causal``; pass 2 for bottom-right.
     """
     # Imported lazily, mirroring the golden sibling: keeps module import (and hence
     # CPU collection of this gpu-marked file) independent of the dispatch package.
@@ -127,11 +141,11 @@ def _spec(
             nhead_q=hq,
             nhead_k=hkv,
             seqlen_q=sq,
-            seqlen_k=sq,
+            seqlen_k=sq if sk is None else sk,
             hdim_q=d,
             hdim_v=d,
             arch="gfx942",
-            mask_type=1 if causal else 0,
+            mask_type=(1 if causal else 0) if mask_type is None else mask_type,
             dtype=dtype,
             sliding_window=sliding_window,
             algorithm="attention_dense",
@@ -354,6 +368,138 @@ def test_dense_swa_numeric_vs_fp32_sdpa(dtype, d, hq, hkv, persistent, sliding_w
         f"{dtype} D{d} GQA{hq}/{hkv} swa{sliding_window} "
         f"{'persist' if persistent else 'default'}: max_abs={max_abs:.3e} >= {tol}"
     )
+
+
+# (dtype, head_size, num_query_heads, num_kv_heads, persistent) -- bottom-right
+# causal, crossed with _BR_SHAPES. Both dtypes, D64/D128, GQA + MHA, both grids: the
+# default grid derives the diagonal offset from its runtime shape params, the
+# persistent grid bakes it, so each grid is a distinct code path.
+_BR_COHORT = [
+    ("fp16", 128, 16, 4, False),  # flagship default (cfvst arm)
+    ("fp16", 128, 16, 4, True),
+    ("bf16", 128, 16, 4, False),  # plain-exp2 arm
+    ("bf16", 128, 16, 4, True),
+    ("fp16", 64, 16, 16, False),  # D64 MHA
+    ("bf16", 64, 16, 4, True),  # D64 bf16 persistent (wpe=4)
+]
+
+# (seqlen_q, seqlen_kv): offsets of one tile, several tiles, and several query blocks
+# (seqlen_q is a block_m=256 multiple, seqlen_kv a block_n=64 multiple).
+_BR_SHAPES = [(256, 320), (512, 1536), (256, 2048)]
+
+
+def _bottom_right_reference(q, k, v, *, hq, hkv, scale):
+    """fp32 SDPA with an explicit bottom-right mask: keep key k for query q iff
+    ``k <= q + (Skv - Sq)``. ``is_causal=True`` cannot be used here: torch anchors
+    it top-left, which differs from bottom-right whenever the lengths differ."""
+    import torch
+    import torch.nn.functional as F
+
+    sq, sk = q.shape[1], k.shape[1]
+    qi = torch.arange(sq, device=q.device).view(-1, 1)
+    ki = torch.arange(sk, device=q.device).view(1, -1)
+    keep = ki <= qi + (sk - sq)
+    rep = hq // hkv
+    return F.scaled_dot_product_attention(
+        q.transpose(1, 2).float(),
+        k.transpose(1, 2).float().repeat_interleave(rep, dim=1),
+        v.transpose(1, 2).float().repeat_interleave(rep, dim=1),
+        attn_mask=keep,
+        scale=scale,
+    ).transpose(1, 2)
+
+
+def _run_bottom_right(spec, *, dtype, d, hq, hkv, batch, sq, sk):
+    """Launch ``spec`` on seeded inputs; return max_abs against the reference."""
+    import torch
+
+    tdt = getattr(torch, _TORCH_DT[dtype])
+    scale = 1.0 / math.sqrt(d)
+    torch.manual_seed(0)
+    q = torch.randn(batch, sq, hq, d, device="cuda", dtype=tdt)
+    k = torch.randn(batch, sk, hkv, d, device="cuda", dtype=tdt)
+    v = torch.randn(batch, sk, hkv, d, device="cuda", dtype=tdt)
+    out = torch.empty(batch, sq, hq, d, device="cuda", dtype=tdt)
+    run_attention_dense_torch(spec=spec, q=q, k=k, v=v, out=out, scale=scale)
+    torch.cuda.synchronize()
+    ref = _bottom_right_reference(q, k, v, hq=hq, hkv=hkv, scale=scale)
+    return (ref - out.float()).abs().max().item()
+
+
+@requires_gfx942_gpu
+@pytest.mark.gpu
+@pytest.mark.parametrize("sq,sk", _BR_SHAPES)
+@pytest.mark.parametrize("dtype,d,hq,hkv,persistent", _BR_COHORT)
+def test_dense_bottom_right_numeric_vs_fp32_sdpa(dtype, d, hq, hkv, persistent, sq, sk):
+    """Bottom-right causal numeric parity on both grids, seqlen_q < seqlen_kv. Every
+    row keeps at least key 0, so no row is fully masked."""
+    tol = 2e-2 if dtype == "fp16" else 4e-2
+    spec = _spec(dtype, d, hq, hkv, persistent, sq=sq, sk=sk, mask_type=2)
+    assert spec.causal_bottom_right and spec.persistent == persistent
+    max_abs = _run_bottom_right(
+        spec, dtype=dtype, d=d, hq=hq, hkv=hkv, batch=1, sq=sq, sk=sk
+    )
+    assert max_abs < tol, (
+        f"{dtype} D{d} GQA{hq}/{hkv} br sq{sq} sk{sk} "
+        f"{'persist' if persistent else 'default'}: max_abs={max_abs:.3e} >= {tol}"
+    )
+
+
+@requires_gfx942_gpu
+@pytest.mark.gpu
+def test_equal_length_bottom_right_runtime_offset_is_zero():
+    """Dispatch normalizes equal-length bottom-right to top-left, so the default
+    grid's runtime offset of zero is only reachable by setting the flag directly.
+    It must still match the (identical) top-left answer."""
+    dtype, d, hq, hkv, s = "fp16", 128, 16, 4, 512
+    spec = dataclasses.replace(
+        _as_gfx942_spec(_spec(dtype, d, hq, hkv, False, sq=s)),
+        causal_bottom_right=True,
+    )
+    assert spec.runtime_shape
+    max_abs = _run_bottom_right(
+        spec, dtype=dtype, d=d, hq=hq, hkv=hkv, batch=1, sq=s, sk=s
+    )
+    assert max_abs < 2e-2, f"equal-length br: max_abs={max_abs:.3e}"
+
+
+@requires_gfx942_gpu
+@pytest.mark.gpu
+def test_one_binary_serves_every_bottom_right_shape():
+    """The bottom-right twin of :func:`test_one_binary_serves_every_shape`: the
+    default grid reads the diagonal offset from its shape params, so shapes with
+    different offsets (and batch) share one launcher and stay correct at each."""
+    from kernels.common.attention_dense_spec import attention_dense_cache_key
+    from kernels.gfx942.attention_dense import _DENSE_LAUNCHER_CACHE
+
+    dtype, d, hq, hkv = "fp16", 128, 16, 4
+    shapes = ((1, 256, 320), (2, 512, 1536))
+    specs = [
+        _as_gfx942_spec(
+            _spec(dtype, d, hq, hkv, False, batch=b, sq=sq, sk=sk, mask_type=2)
+        )
+        for b, sq, sk in shapes
+    ]
+    assert all(s.runtime_shape and s.causal_bottom_right for s in specs)
+    keys = [attention_dense_cache_key(s, arch="gfx942") for s in specs]
+    assert keys[0] == keys[1], f"shapes {shapes} did not share a cache key"
+
+    _DENSE_LAUNCHER_CACHE.pop(keys[0], None)
+    before = set(_DENSE_LAUNCHER_CACHE)
+    launchers = []
+    for (b, sq, sk), spec in zip(shapes, specs):
+        max_abs = _run_bottom_right(
+            spec, dtype=dtype, d=d, hq=hq, hkv=hkv, batch=b, sq=sq, sk=sk
+        )
+        assert max_abs < 2e-2, f"B={b} sq={sq} sk={sk}: max_abs={max_abs:.3e}"
+        launchers.append(_launcher_for(spec))
+
+    assert launchers[0] is not None
+    assert launchers[0] is launchers[1], (
+        f"bottom-right shapes {shapes} share a cache key but were served by "
+        "different launcher objects"
+    )
+    assert set(_DENSE_LAUNCHER_CACHE) - before == {keys[0]}
 
 
 @requires_gfx942_gpu

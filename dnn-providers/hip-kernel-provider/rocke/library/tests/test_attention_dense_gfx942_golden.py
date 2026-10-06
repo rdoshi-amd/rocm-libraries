@@ -9,8 +9,9 @@ unintended codegen drift across the P1-P4 lever set. Pure text lowering -- no GP
 comgr required.
 
 Covers the acceptance matrix: D64/D128 x bf16/fp16 x default/persistent x GQA, causal
-and full. Every case is in the gfx942 supported set (varlen / ragged / sliding-window
-are rejected on gfx942, so -- unlike the gfx950 sibling -- they are absent here).
+(top-left and bottom-right) and full, plus sliding-window. Every case is in the gfx942
+supported set (varlen / ragged are rejected on gfx942, so -- unlike the gfx950
+sibling -- they are absent here).
 
 Both D64 K-LDS layouts are pinned so drift on either is caught:
   * ``default_d64_*``  -- specs built DIRECTLY with ``lds_k_group_pad=0``: the UNPADDED
@@ -108,11 +109,13 @@ def _cases():
             nhead_q=base["num_query_heads"],
             nhead_k=base["num_kv_heads"],
             seqlen_q=base["seqlen_q"],
-            seqlen_k=base["seqlen_kv"],
+            seqlen_k=over.get("seqlen_kv", base["seqlen_kv"]),
             hdim_q=over.get("head_size", base["head_size"]),
             hdim_v=over.get("head_size", base["head_size"]),
             arch=_ARCH,
-            mask_type=1 if over.get("causal", base["causal"]) else 0,
+            mask_type=over.get(
+                "mask_type", 1 if over.get("causal", base["causal"]) else 0
+            ),
             dtype=over.get("dtype", base["dtype"]),
             sliding_window=over.get("sliding_window", 0),
             algorithm="attention_dense",
@@ -198,6 +201,27 @@ def _cases():
         # pad + wpe=4 tune). Numeric coverage is in _SWA_COHORT
         "attention_dense_gfx942/swa_d64_bf16_w128": mk(
             head_size=64, sliding_window=128
+        ),
+        # --- bottom-right causal (seqlen_kv > seqlen_q): diagonal shifted by
+        #     seqlen_kv - seqlen_q. The default grid derives the offset from its
+        #     shape params; the persistent grid bakes it. fp16 D128 covers the
+        #     cfvst arm; the dispatch case guards the mask_type threading (a
+        #     dispatch D128 bf16 case would hash identical to br_d128_bf16). ---
+        "attention_dense_gfx942/br_d128_bf16": mk(
+            seqlen_kv=1024, causal_bottom_right=True
+        ),
+        "attention_dense_gfx942/br_d128_fp16": mk(
+            dtype="fp16", seqlen_kv=1024, causal_bottom_right=True
+        ),
+        "attention_dense_gfx942/persist_br_d128_bf16_qbmaj": mk(
+            seqlen_kv=1024,
+            causal_bottom_right=True,
+            persistent=True,
+            num_persistent=304,
+            persist_decode="qb_major",
+        ),
+        "attention_dense_gfx942/dispatch_br_d64_fp16": mk_dispatch(
+            head_size=64, dtype="fp16", seqlen_kv=1024, mask_type=2
         ),
     }
 

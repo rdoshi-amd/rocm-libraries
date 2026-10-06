@@ -23,7 +23,7 @@ from dispatch.attention.common import ATTENTION_FEATURES
 _GFX950_DENSE_FEATURES = {"causal", "sinks", "sliding_window"}
 _GFX950_DENSE_GRID_FEATURES = _GFX950_DENSE_FEATURES | {"causal_bottom_right"}
 EXPECTED_FEATURES = {
-    "attention_gfx942_dense": {"causal", "sliding_window"},
+    "attention_gfx942_dense": {"causal", "causal_bottom_right", "sliding_window"},
     "attention_gfx950_dense": set(_GFX950_DENSE_FEATURES),
     "attention_gfx950_dense_grid_default": set(_GFX950_DENSE_GRID_FEATURES),
     "attention_gfx950_dense_persist_default": set(_GFX950_DENSE_FEATURES),
@@ -190,10 +190,7 @@ class TestAttentionBottomRightRouting(unittest.TestCase):
                 self.assertEqual(result.spec.path, path)
 
     def test_bottom_right_still_rejects_top_left_only_standalone_kernels(self):
-        for arch, algorithm in (
-            ("gfx942", "attention_dense"),
-            ("gfx1250", "wmma_attention_fwd"),
-        ):
+        for arch, algorithm in (("gfx1250", "wmma_attention_fwd"),):
             with self.subTest(arch=arch):
                 req = _attn(
                     arch=arch,
@@ -203,6 +200,17 @@ class TestAttentionBottomRightRouting(unittest.TestCase):
                 )
                 with self.assertRaises(ValueError):
                     dispatch_attention(req)
+
+    def test_bottom_right_routes_to_gfx942_dense_when_pinned(self):
+        req = _attn(
+            arch="gfx942",
+            seqlen_k=1024,
+            mask_type=AttentionMaskType.BOTTOM_RIGHT_CAUSAL,
+            algorithm="attention_dense",
+        )
+        result = dispatch_attention(req)
+        self.assertEqual(result.candidate.name, "attention_gfx942_dense")
+        self.assertTrue(result.spec.causal_bottom_right)
 
 
 class TestAttentionDispatch(unittest.TestCase):

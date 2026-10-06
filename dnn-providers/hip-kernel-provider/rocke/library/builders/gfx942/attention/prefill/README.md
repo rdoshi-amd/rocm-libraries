@@ -33,7 +33,7 @@ The gfx950 golden is untouched either way: this is a separate kernel module emit
 its own symbol against its own fixture, not an arch branch in the gfx950 file.
 
 Still rejected with a structured reason by `supports_attention_dense`: varlen, ragged,
-sliding-window. The deferred-findings backlog lives in the optimization plan for this
+sinks, and bottom-right causal combined with a sliding window. The deferred-findings backlog lives in the optimization plan for this
 port, which is kept outside the repo.
 
 ### Gain over the unified-attention baseline
@@ -81,7 +81,8 @@ named follow-up, now as upside rather than as a fix for a deficit.
 
 ## Scope
 
-gfx942 only · forward-inference prefill · dense causal (no paging / bias / SWA / sinks)
+gfx942 only · forward-inference prefill · dense causal, top-left or bottom-right
+diagonal, or sliding-window (no paging / bias / sinks; no bottom-right with a window)
 · bf16 + fp16 · head dims **D64 & D128** · MHA + GQA incl. non-power-of-2 (40/8, 28/4)
 · default **and** persistent grids. D256 is out of scope — it is served by its own
 wide-atom candidates.

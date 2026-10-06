@@ -195,6 +195,43 @@ class TestComboSweepLifecycle(unittest.TestCase):
         )
         self.assertEqual(argv[argv.index("--benchmark-iterations") + 1], "7")
 
+    def test_diagonal_reaches_request_and_isolated_child(self):
+        """Bottom-right by default (the corner unified always masks); top-left on
+        request. The isolated child must be told the same corner, or it checks
+        against a different reference than the parent validated."""
+        result = SimpleNamespace(candidate=SimpleNamespace(name="candidate"))
+        cases = (
+            (_args(), 2, "bottom_right"),
+            (_args(diagonal="top_left"), 1, "top_left"),
+            (_args(diagonal="bottom_right"), 2, "bottom_right"),
+            (_args(causal=False), 0, "bottom_right"),
+        )
+        for args, mask_type, diagonal in cases:
+            with self.subTest(mask_type=mask_type):
+                req = next(sweep._requests(args))
+                self.assertEqual(req.mask_type, mask_type)
+                argv = sweep._child_argv(args, req, result)
+                self.assertEqual(argv[argv.index("--diagonal") + 1], diagonal)
+
+    def test_reference_anchors_the_diagonal_at_the_requested_corner(self):
+        torch = __import__("pytest").importorskip("torch")
+        sq, sk, h, d = 2, 4, 1, 8
+        q = torch.zeros(1, sq, h, d)
+        k = torch.zeros(1, sk, h, d)
+        # V row j holds the value j, so with uniform scores each output is the mean
+        # of the attended key indices.
+        v = torch.arange(sk, dtype=torch.float32).view(1, sk, 1, 1).expand(1, sk, h, d)
+        top_left = sweep._reference(
+            q, k, v, causal=True, sliding_window=0, bottom_right=False
+        )
+        bottom_right = sweep._reference(
+            q, k, v, causal=True, sliding_window=0, bottom_right=True
+        )
+        # Top-left: row 0 sees {0}, row 1 sees {0, 1}.
+        self.assertEqual(top_left[0, :, 0, 0].tolist(), [0.0, 0.5])
+        # Bottom-right (offset 2): row 0 sees {0, 1, 2}, row 1 sees all 4 keys.
+        self.assertEqual(bottom_right[0, :, 0, 0].tolist(), [1.0, 1.5])
+
     def test_dense_wpe_reaches_request_and_isolated_child(self):
         args = _args(dense_waves_per_eu=3)
         req = next(sweep._requests(args))

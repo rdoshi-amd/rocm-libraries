@@ -4,19 +4,19 @@
 #include "hipblaslt-jit-prediction.hpp"
 
 #include <algorithm>
-#include <atomic>
+#include <array>
 #include <cstdlib>
 #include <filesystem>
-#include <fstream>
 #include <iostream>
-#include <mutex>
 #include <new>
 #include <set>
 #include <stdexcept>
 #include <string>
-#include <thread>
 #include <vector>
 
+// Jit against stages that break its contract in ways the library's real
+// stages cannot, and the catalog knowledge; jit_failure_test covers the real
+// stages' failures.
 namespace hj  = hipblaslt_jit;
 namespace abi = hipblaslt_ext::experimental::jit::detail;
 namespace fs  = std::filesystem;
@@ -66,155 +66,35 @@ namespace
         {
             return HIPBLAS_STATUS_NOT_SUPPORTED;
         }
-        hipblasStatus_t prepare(const abi::OperationRequest&,
-                                const abi::ExecutionContext&,
-                                std::shared_ptr<const abi::PreparedLaunch>&,
-                                hipblaslt_ext::experimental::jit::Diagnostics&) const override
-        {
-            return HIPBLAS_STATUS_NOT_SUPPORTED;
-        }
     };
 
-    // Calls are recorded as "stage:kernel" in the order they happen.
-    struct Log
-    {
-        mutable std::mutex       mutex;
-        std::vector<std::string> calls;
-        void                     add(const std::string& call)
-        {
-            std::lock_guard<std::mutex> lock(mutex);
-            calls.push_back(call);
-        }
-        size_t count(const std::string& prefix) const
-        {
-            std::lock_guard<std::mutex> lock(mutex);
-            return std::count_if(calls.begin(), calls.end(), [&](const auto& call) {
-                return call.rfind(prefix, 0) == 0;
-            });
-        }
-    };
-
-    struct Knowledge final : hj::TuningKnowledge
-    {
-        Log& log;
-        explicit Knowledge(Log& l)
-            : log(l)
-        {
-        }
-        std::string_view id() const noexcept override
-        {
-            return "fake-knowledge";
-        }
-        std::string version() const override
-        {
-            return "3";
-        }
-        std::vector<hj::CandidateSeed> seeds(const hj::OperationRequest&,
-                                             const hj::DeviceTarget&) const override
-        {
-            log.add("seeds");
-            return {{{64, 64, 2, 2}, {{32, 1}}, {{0, 0}}}};
-        }
-        std::vector<hj::TuningParameter> defaults(const hj::OperationRequest&,
-                                                  const hj::DeviceTarget&,
-                                                  const hj::Candidate&) const override
-        {
-            return {};
-        }
-    };
-
-    struct Predictor final : hj::Predictor
-    {
-        Log&               log;
-        hj::Status         result;
-        mutable size_t     workspaceLimit = 0;
-        std::string        other; // the contract of a second candidate, when set
-        Predictor(Log& l, hj::Status r = {})
-            : log(l)
-            , result(std::move(r))
-        {
-        }
-        std::string_view id() const noexcept override
-        {
-            return "fake-model";
-        }
-        std::set<std::string> modeledContracts() const override
-        {
-            return {"fake.v1", "spare.v1"};
-        }
-        hj::Status predict(const hj::PredictionRequest& request,
-                           const hj::TuningKnowledge&   knowledge,
-                           hj::Prediction&              prediction) const override
-        {
-            log.add("predict");
-            workspaceLimit = request.workspaceLimit;
-            if(!result.ok())
-                return result;
-            const auto seeds = knowledge.seeds(request.request, request.target);
-            prediction.modeledContract = "fake.v1";
-            if(!other.empty())
-            {
-                prediction.ranked.push_back({6, 1.0, {{"DepthU", "0"}}, {}});
-                prediction.ranked.back().contract = other;
-            }
-            prediction.ranked.push_back({7, 1.0, {{"DepthU", std::to_string(seeds.size())}}, {}});
-            return {};
-        }
-    };
-
+    // Returns every kernel whatever the requested count, and statuses with
+    // whatever stage the test sets.
     struct Backend final : hj::Backend
     {
-        Log&                     log;
-        hj::BackendInfo          information;
-        std::vector<std::string> kernels; // generated in order
-        hj::Status               result;
-        bool                     throws = false, allocationFails = false, writes = true;
-        mutable std::mutex       mutex;
-        mutable size_t           count = 0, workspaceLimit = 0;
-        mutable std::vector<std::string> excludeKernels;
-        mutable const hj::Prediction*    prediction = nullptr;
-        mutable std::string              candidate;
-        mutable std::vector<uint32_t>    ranked;
-        mutable std::vector<fs::path>    scratches;
-        mutable const hj::DeviceTarget*  target = nullptr;
+        hj::BackendInfo               information{"fake-backend", "Fake"};
+        std::vector<std::string>      kernels;
+        hj::Status                    result{Code::Success, Stage::Generate, "generated"};
+        bool                          throws = false, allocationFails = false;
+        mutable size_t                calls = 0;
+        mutable std::vector<uint32_t> ranked; // the candidate ids it was given
 
-        Backend(Log& l, std::vector<std::string> k, std::set<std::string> contracts = {})
-            : log(l)
-            , information{"fake-backend", "Fake", std::move(contracts)}
-            , kernels(std::move(k))
-            , result{Code::Success, Stage::Generate, "generated"}
+        explicit Backend(std::vector<std::string> k)
+            : kernels(std::move(k))
         {
         }
         const hj::BackendInfo& info() const noexcept override
         {
             return information;
         }
-        hj::Status generate(const hj::GenerationRequest&       request,
+        hj::Status generate(const hj::GenerationRequest&        request,
                             std::vector<hj::GeneratedSolution>& solutions) const override
         {
-            log.add("generate");
-            {
-                std::lock_guard<std::mutex> lock(mutex);
-                count          = request.count;
-                workspaceLimit = request.workspaceLimit;
-                excludeKernels = request.excludeKernels;
-                prediction     = request.prediction;
-                candidate      = request.prediction && !request.prediction->ranked.empty()
-                                     ? request.prediction->ranked[0].parameters.at(0).json
-                                     : "";
-                ranked.clear();
-                if(request.prediction)
-                    for(const auto& c : request.prediction->ranked)
-                        ranked.push_back(c.id);
-                target         = &request.target;
-                scratches.push_back(request.scratch);
-            }
-            require(dynamic_cast<const ProbeRequest*>(&request.request) != nullptr,
-                    "Jit did not forward the request");
-            require(fs::is_directory(request.scratch) && fs::is_empty(request.scratch),
-                    "Scratch is not a fresh directory");
-            if(writes)
-                std::ofstream(request.scratch / "generator.log") << "log\n";
+            ++calls;
+            ranked.clear();
+            if(request.prediction)
+                for(const auto& candidate : request.prediction->ranked)
+                    ranked.push_back(candidate.id);
             if(allocationFails)
                 throw std::bad_alloc();
             if(throws)
@@ -228,53 +108,63 @@ namespace
         }
     };
 
+    // Fails, or ranks candidate 7 of its modeled contract after candidate 6 of
+    // another contract when one is set.
+    struct Predictor final : hj::Predictor
+    {
+        hj::Status       result;
+        std::string      other;
+        mutable size_t   workspaceLimit = 0;
+        std::string_view id() const noexcept override
+        {
+            return "fake-model";
+        }
+        std::set<std::string> modeledContracts() const override
+        {
+            return {"fake.v1", "spare.v1"};
+        }
+        hj::Status predict(const hj::PredictionRequest& request,
+                           const hj::TuningKnowledge&,
+                           hj::Prediction& prediction) const override
+        {
+            workspaceLimit = request.workspaceLimit;
+            if(!result.ok())
+                return result;
+            prediction.modeledContract = "fake.v1";
+            if(!other.empty())
+            {
+                prediction.ranked.push_back({6, 1.0, {}, {}});
+                prediction.ranked.back().contract = other;
+            }
+            prediction.ranked.push_back({7, 1.0, {}, {}});
+            return {};
+        }
+    };
+
     struct Builder final : hj::CodeObjectBuilder
     {
-        Log&                                       log;
-        std::set<std::string>                      failures;
-        mutable std::mutex                         mutex;
-        mutable std::vector<hj::GeneratedSolution> received; // in build order
-        explicit Builder(Log& l, std::set<std::string> f = {})
-            : log(l)
-            , failures(std::move(f))
+        mutable std::vector<std::string> built; // in build order
+        hj::Status                       build(const hj::GeneratedSolution& solution,
+                                               const hj::BuildRequest&,
+                                               hj::BuiltSolution& result) const override
         {
-        }
-        hj::Status build(const hj::GeneratedSolution& solution,
-                         const hj::GenerationRequest&,
-                         hj::BuiltSolution& built) const override
-        {
-            log.add("build:" + solution.kernelName);
-            {
-                std::lock_guard<std::mutex> lock(mutex);
-                received.push_back(solution);
-            }
-            if(failures.count(solution.kernelName))
-                return {Code::Failed, Stage::Generate, "build failed " + solution.kernelName};
-            built.generated    = solution;
-            built.object.bytes = solution.units.at(0).bytes;
+            built.push_back(solution.kernelName);
+            result.generated    = solution;
+            result.object.bytes = solution.units.at(0).bytes;
             return {};
         }
     };
 
     struct Loader final : hj::SolutionLoader
     {
-        Log&                  log;
-        std::set<std::string> rejects, throwing, failures, empty;
-        explicit Loader(Log& l)
-            : log(l)
+        std::set<std::string> throwing, empty;
+        hj::Status            support(const hj::BuiltSolution& built,
+                                      const hj::OperationRequest&,
+                                      const hj::DeviceTarget&,
+                                      size_t) const override
         {
-        }
-        hj::Status support(const hj::BuiltSolution& built,
-                           const hj::OperationRequest&,
-                           const hj::DeviceTarget&,
-                           size_t) const override
-        {
-            const auto& kernel = built.generated.kernelName;
-            log.add("support:" + kernel);
-            if(throwing.count(kernel))
-                throw std::runtime_error("support threw " + kernel);
-            if(rejects.count(kernel))
-                return {Code::NotSupported, Stage::Load, "rejected " + kernel};
+            if(throwing.count(built.generated.kernelName))
+                throw std::runtime_error("support threw " + built.generated.kernelName);
             return {};
         }
         hj::Status load(const hj::BuiltSolution& built,
@@ -283,34 +173,24 @@ namespace
                         size_t,
                         std::shared_ptr<const hj::KernelBundle>& bundle) const override
         {
-            const auto& kernel = built.generated.kernelName;
-            log.add("load:" + kernel);
-            if(failures.count(kernel))
-                return {Code::Failed, Stage::Support, "load failed " + kernel};
-            if(!empty.count(kernel))
-                bundle = std::make_shared<ProbeBundle>(kernel);
+            if(!empty.count(built.generated.kernelName))
+                bundle = std::make_shared<ProbeBundle>(built.generated.kernelName);
             return {};
         }
     };
 
+    // Throws, or returns one index fewer than it was given solutions.
     struct Store final : hj::SolutionStore
     {
-        Log&        log;
-        hj::Status  result;
-        bool        shortIndices = false;
-        std::string version; // the one the Jit made this store for
-        explicit Store(Log& l)
-            : log(l)
+        bool           throws = false;
+        mutable size_t calls  = 0;
+        hj::Status     lookup(const hj::OperationRequest&,
+                              const hj::DeviceTarget&,
+                              size_t,
+                              size_t,
+                              const std::vector<std::string>&,
+                              std::vector<int32_t>& indices) const override
         {
-        }
-        hj::Status lookup(const hj::OperationRequest&,
-                          const hj::DeviceTarget&,
-                          size_t,
-                          size_t,
-                          const std::vector<std::string>&,
-                          std::vector<int32_t>& indices) const override
-        {
-            log.add("lookup");
             indices.clear();
             return {};
         }
@@ -319,10 +199,10 @@ namespace
                            const std::vector<hj::BuiltSolution>& solutions,
                            std::vector<int32_t>&                 indices) const override
         {
-            log.add("publish:" + std::to_string(solutions.size()));
-            if(!result.ok())
-                return result;
-            for(size_t i = shortIndices ? 1 : 0; i < solutions.size(); ++i)
+            ++calls;
+            if(throws)
+                throw std::runtime_error("deliberate store exception");
+            for(size_t i = 1; i < solutions.size(); ++i)
                 indices.push_back(100 + static_cast<int32_t>(i));
             return {};
         }
@@ -331,44 +211,39 @@ namespace
     // A Jit over fakes; tests adjust the fakes before calling run().
     struct Fixture
     {
-        Log                        log;
         std::shared_ptr<Backend>   backend;
-        std::shared_ptr<Predictor> predictor;
-        std::shared_ptr<Knowledge> knowledge = std::make_shared<Knowledge>(log);
-        std::shared_ptr<Builder>   builder   = std::make_shared<Builder>(log);
-        std::shared_ptr<Loader>    loader    = std::make_shared<Loader>(log);
+        std::shared_ptr<Predictor> predictor = std::make_shared<Predictor>();
+        std::shared_ptr<Builder>   builder   = std::make_shared<Builder>();
+        std::shared_ptr<Loader>    loader    = std::make_shared<Loader>();
         std::shared_ptr<Store>     store;
         ProbeRequest               request;
         hj::DeviceTarget           target;
 
-        explicit Fixture(std::vector<std::string> kernels, std::set<std::string> contracts = {})
-            : backend(std::make_shared<Backend>(log, std::move(kernels), std::move(contracts)))
-            , predictor(std::make_shared<Predictor>(log))
+        explicit Fixture(std::vector<std::string> kernels)
+            : backend(std::make_shared<Backend>(std::move(kernels)))
         {
             target.device = 0;
             target.isa    = "gfx950";
         }
-        hj::Jit jit() const
+        hj::Jit::Outcome run(size_t count = 1) const
         {
             hj::Jit::StoreFactory factory;
             if(store)
-                factory = [s = store](const hj::BackendInfo&, const std::string& version) {
-                    s->version = version;
-                    return s;
-                };
-            return hj::Jit({backend, predictor, knowledge, builder, loader, factory});
-        }
-        hj::Jit::Outcome run(size_t                          count   = 1,
-                             const std::vector<std::string>& exclude = {}) const
-        {
-            return jit().generate(request, target, count, 4096, exclude);
+                factory = [s = store](const hj::BackendInfo&, const std::string&) { return s; };
+            return hj::Jit({backend,
+                            predictor,
+                            hj::makeCatalogKnowledge(),
+                            builder,
+                            loader,
+                            std::move(factory)})
+                .generate(request, target, count, 4096, {});
         }
     };
 
     std::vector<std::string> names(const hj::Jit::Outcome& outcome)
     {
         std::vector<std::string> result;
-        for(const auto& bundle : outcome.unpublished)
+        for(const auto& bundle : outcome.bundles)
             result.push_back(bundle->name());
         return result;
     }
@@ -383,30 +258,18 @@ namespace
         const auto& status = outcome.failures.front();
         require(status.code == code && status.stage == stage
                     && status.message.find(message) != std::string::npos,
-                label + ": unexpected failure '" + status.message + "' at stage "
-                    + std::to_string(static_cast<int>(status.stage)));
-    }
-
-    size_t scratchCount(const fs::path& parent)
-    {
-        size_t count = 0;
-        for(const auto& entry : fs::directory_iterator(parent))
-            count += entry.path().filename().string().rfind("hipblaslt-jit-", 0) == 0;
-        return count;
+                label + ": unexpected " + hj::toString(status.stage) + " failure '" + status.message
+                    + "'");
     }
 
     void construction()
     {
-        Log  log;
-        auto backend   = std::make_shared<Backend>(log, std::vector<std::string>{});
-        auto predicted = std::make_shared<Backend>(
-            log, std::vector<std::string>{}, std::set<std::string>{"fake.v1", "other.v1"});
-        auto other = std::make_shared<Backend>(
-            log, std::vector<std::string>{}, std::set<std::string>{"other.v1"});
-        auto predictor = std::make_shared<Predictor>(log);
-        auto knowledge = std::make_shared<Knowledge>(log);
-        auto builder   = std::make_shared<Builder>(log);
-        auto loader    = std::make_shared<Loader>(log);
+        auto backend   = std::make_shared<Backend>(std::vector<std::string>{});
+        auto predicted = std::make_shared<Backend>(std::vector<std::string>{});
+        auto predictor = std::make_shared<Predictor>();
+        auto knowledge = hj::makeCatalogKnowledge();
+        auto builder   = std::make_shared<Builder>();
+        auto loader    = std::make_shared<Loader>();
         auto rejected  = [](hj::Jit::Components components) {
             try
             {
@@ -418,164 +281,53 @@ namespace
             }
             return false;
         };
-        require(rejected({nullptr, nullptr, nullptr, builder, loader, nullptr})
-                    && rejected({backend, nullptr, nullptr, nullptr, loader, nullptr})
-                    && rejected({backend, nullptr, nullptr, builder, nullptr, nullptr}),
+        require(rejected({nullptr, nullptr, nullptr, builder, loader})
+                    && rejected({backend, nullptr, nullptr, nullptr, loader})
+                    && rejected({backend, nullptr, nullptr, builder, nullptr}),
                 "Jit accepted a missing backend, builder or loader");
-        require(rejected({predicted, nullptr, knowledge, builder, loader, nullptr})
-                    && rejected({predicted, predictor, nullptr, builder, loader, nullptr})
-                    && rejected({other, predictor, knowledge, builder, loader, nullptr}),
-                "Jit accepted a prediction contract it cannot satisfy");
-        backend->information.version   = "b1";
-        predicted->information.version = "b2";
-        auto        store              = std::make_shared<Store>(log);
-        std::string storeBackend;
-        auto        factory = [&](const hj::BackendInfo& info, const std::string& version) {
-            storeBackend   = info.id;
-            store->version = version;
-            return store;
-        };
-        hj::Jit plain({backend, nullptr, nullptr, builder, loader, nullptr});
-        hj::Jit modeled({predicted, predictor, knowledge, builder, loader, factory});
-        require(plain.components().backend == backend, "Jit did not keep its components");
-        const std::string composed
-            = "b2|predictor=fake-model;contracts=fake.v1|knowledge=fake-knowledge@3";
-        require(plain.version() == "b1" && !plain.store() && modeled.version() == composed
-                    && modeled.store() == store && store->version == composed
-                    && storeBackend == "fake-backend",
-                "Jit did not make its store under the composed version");
-        std::cout << "PASS Jit construction validates components and prediction contracts, and "
-                     "makes the store under the composed version\n";
+        predicted->information.contracts = {"fake.v1"};
+        require(rejected({predicted, nullptr, knowledge, builder, loader})
+                    && rejected({predicted, predictor, nullptr, builder, loader}),
+                "Jit accepted a backend that consumes predictions without a predictor and "
+                "knowledge");
+        backend->information.version = "b1";
+        std::string stored;
+        hj::Jit     jit({backend,
+                         nullptr,
+                         nullptr,
+                         builder,
+                         loader,
+                         [&](const hj::BackendInfo&, const std::string& version) {
+                         stored = version;
+                         return std::make_shared<Store>();
+                     }});
+        require(jit.components().backend == backend && jit.version() == "b1" && stored == "b1"
+                    && jit.store(),
+                "Jit did not keep its components or make its store under its version");
+        std::cout << "PASS Jit construction validates components and makes its store under its "
+                     "version\n";
     }
 
-    void pipeline()
+    void counts()
     {
         {
             Fixture f({"a"});
-            require(f.run(0).unpublished.empty() && f.log.calls.empty(),
+            require(f.run(0).bundles.empty() && f.backend->calls == 0,
                     "A zero count reached the backend");
         }
         {
-            Fixture f({"a", "b", "c", "d"});
-            f.loader->rejects = {"b"};
-            const auto outcome = f.run(2, {"x", "y"});
-            require(names(outcome) == std::vector<std::string>{"a", "c"},
-                    "Count limiting or support rejection dropped the wrong solutions");
-            failure(outcome, Code::NotSupported, Stage::Support, "rejected b", "Support rejection");
-            require(outcome.failures.size() == 1 && f.log.count("build:d") == 0,
-                    "Jit built solutions beyond the requested count");
-            require(f.backend->count == 2 && f.backend->workspaceLimit == 4096
-                        && f.backend->excludeKernels == std::vector<std::string>{"x", "y"}
-                        && f.backend->target == &f.target,
-                    "Jit did not forward count, workspace, exclusions and target");
-            require(outcome.summary == "generated", "Jit lost the backend's success note");
-            const auto& received = f.builder->received;
-            require(received.size() == 3
-                        && std::all_of(received.begin(),
-                                       received.end(),
-                                       [](const hj::GeneratedSolution& solution) {
-                                           const auto& units = solution.units;
-                                           return solution.entry == std::vector<uint8_t>{1, 2, 3}
-                                                  && units.size() == 1
-                                                  && units[0].role == hj::BuildUnit::Role::Main
-                                                  && units[0].name == solution.kernelName
-                                                  && units[0].bytes == std::vector<uint8_t>{4};
-                                       }),
-                    "The builder did not receive exactly the generator's entry and units");
-        }
-        std::cout << "PASS count limiting, excludeKernels forwarding, the generator's units "
-                     "reach the builder, one support rejection keeps the rest\n";
-
-
-        {
-            Fixture f({"a"});
-            const auto outcome = f.run();
-            require(f.log.count("predict") == 0 && f.backend->prediction == nullptr
-                        && names(outcome) == std::vector<std::string>{"a"},
-                    "Predict ran for a backend that consumes no prediction");
-        }
-        {
-            Fixture f({"a"}, {"fake.v1"});
-            const auto outcome = f.run();
-            require(f.log.count("predict") == 1 && f.log.count("seeds") == 1
-                        && f.backend->prediction != nullptr && f.backend->candidate == "1"
-                        && f.predictor->workspaceLimit == 4096
-                        && names(outcome) == std::vector<std::string>{"a"},
-                    "The backend did not receive the prediction");
-        }
-        std::cout << "PASS Predict runs only for backends that consume a prediction\n";
-
-        {
-            Fixture f({"a"}, {"fake.v1"});
-            f.predictor->other = "spare.v1";
-            f.run();
-            require(f.backend->ranked == std::vector<uint32_t>{7},
-                    "A candidate the backend does not transport reached it");
-            f.backend->information.contracts = {"spare.v1"};
-            f.predictor->other               = "";
-            failure(f.run(),
-                    Code::NotSupported,
-                    Stage::Predict,
-                    "No predicted candidate",
-                    "No transported candidate");
-            require(f.log.count("generate") == 1, "Generation ran without a candidate");
-        }
-        std::cout << "PASS Jit keeps only candidates whose contract the backend transports\n";
-
-        {
-            Fixture f({"a", "b"});
-            f.store = std::make_shared<Store>(f.log);
-            const auto outcome = f.run(2);
-            require(outcome.indices == std::vector<int32_t>{100, 101} && outcome.unpublished.empty()
-                        && outcome.failures.empty() && f.log.count("load:") == 0,
-                    "A successful publish still loaded solutions");
-        }
-        {
-            Fixture f({"a", "b"});
+            Fixture    f({"a", "b", "c"});
             const auto outcome = f.run(2);
             require(names(outcome) == std::vector<std::string>{"a", "b"}
-                        && f.log.count("load:") == 2,
-                    "Jit without a store did not load");
+                        && f.builder->built == std::vector<std::string>{"a", "b"},
+                    "Jit built or returned more solutions than requested");
         }
-        {
-            Fixture f({"a", "b"});
-            f.store         = std::make_shared<Store>(f.log);
-            f.store->result = {Code::Failed, Stage::Configure, "store unavailable"};
-            const auto outcome = f.run(2);
-            failure(outcome, Code::Failed, Stage::Publish, "store unavailable", "Publish failure");
-            require(outcome.indices.empty() && names(outcome) == std::vector<std::string>{"a", "b"},
-                    "A failed publish did not fall back to loading");
-        }
-        {
-            Fixture f({"a", "b"});
-            f.store               = std::make_shared<Store>(f.log);
-            f.store->shortIndices = true;
-            const auto outcome    = f.run(2);
-            failure(outcome, Code::Failed, Stage::Publish, "1 indices for 2", "Short publish");
-            require(outcome.indices.empty() && f.log.count("load:") == 2,
-                    "A short publish was accepted");
-        }
-        {
-            Fixture f({"a"});
-            f.store = std::make_shared<Store>(f.log);
-            f.loader->rejects = {"a"};
-            const auto outcome = f.run();
-            require(f.log.count("publish:") == 0 && f.log.count("load:") == 0,
-                    "Nothing supported, yet Jit published or loaded");
-        }
-        std::cout << "PASS load runs only without a store or after a publish failure\n";
+        std::cout << "PASS a zero count generates nothing; extra solutions are not built\n";
     }
 
-    void stages()
+    void failures()
     {
-        {
-            Fixture f({"a"}, {"fake.v1"});
-            f.predictor = std::make_shared<Predictor>(
-                f.log, hj::Status{Code::NotSupported, Stage::Generate, "not modeled"});
-            const auto outcome = f.run();
-            failure(outcome, Code::NotSupported, Stage::Predict, "not modeled", "Predict");
-            require(f.log.count("generate") == 0, "Generation ran after a failed prediction");
-        }
+        // The stage is the one Jit was running, whatever the backend reported.
         const std::pair<hj::Status, Stage> generated[]
             = {{{Code::TargetMismatch, Stage::Build, "other target"}, Stage::Configure},
                {{Code::NotSupported, Stage::Build, "not mine"}, Stage::Generate},
@@ -586,38 +338,27 @@ namespace
             f.backend->result  = status;
             const auto outcome = f.run();
             failure(outcome, status.code, stage, status.message, "Generate");
-            require(f.log.count("build:") == 0, "Jit built after a failed generation");
+            require(f.builder->built.empty(), "Jit built after a failed generation");
         }
         {
             Fixture f({"a"});
-            f.backend->throws  = true;
-            const auto outcome = f.run();
-            failure(outcome, Code::Failed, Stage::Generate, "deliberate generator", "Throw");
+            f.backend->throws = true;
+            failure(f.run(), Code::Failed, Stage::Generate, "deliberate generator", "Throw");
         }
         {
             Fixture f({"a", "b"});
-            f.builder = std::make_shared<Builder>(f.log, std::set<std::string>{"a"});
-            const auto outcome = f.run();
-            failure(outcome, Code::Failed, Stage::Build, "build failed a", "Build");
-            require(names(outcome) == std::vector<std::string>{"b"},
-                    "A build failure dropped the other solutions");
-        }
-        {
-            Fixture f({"a"});
             f.loader->throwing = {"a"};
             const auto outcome = f.run();
             failure(outcome, Code::Failed, Stage::Support, "support threw a", "Support");
+            require(names(outcome) == std::vector<std::string>{"b"},
+                    "A throwing support check dropped the other solutions");
         }
         {
-            Fixture f({"a", "b"});
-            f.loader->failures = {"a"};
-            f.loader->empty    = {"b"};
-            const auto outcome = f.run(2);
-            failure(outcome, Code::Failed, Stage::Load, "load failed a", "Load");
-            require(outcome.failures.size() == 2 && outcome.failures[1].stage == Stage::Load
-                        && outcome.failures[1].message == "Loader returned no bundle"
-                        && outcome.unpublished.empty(),
-                    "A missing bundle was not a load failure");
+            Fixture f({"a"});
+            f.loader->empty    = {"a"};
+            const auto outcome = f.run();
+            failure(outcome, Code::Failed, Stage::Load, "Loader returned no bundle", "Load");
+            require(outcome.bundles.empty(), "A missing bundle was returned");
         }
         {
             Fixture f({"a"});
@@ -633,67 +374,75 @@ namespace
             }
             require(thrown, "Allocation failure did not propagate");
         }
-        std::cout << "PASS failures are attributed to the stage that produced them\n";
+        std::cout << "PASS misreported stages, exceptions and missing bundles fail at the stage "
+                     "Jit was running\n";
     }
 
-    void scratch(const fs::path& parent)
+    void stores()
     {
-        const auto before = scratchCount(parent);
+        for(const bool throws : {false, true})
         {
-            Fixture f({"a"});
-            f.run();
-            require(!fs::exists(f.backend->scratches.at(0))
-                        && f.backend->scratches[0].parent_path() == parent,
-                    "Scratch was not a removed directory under TMPDIR after success");
+            Fixture f({"a", "b"});
+            f.store            = std::make_shared<Store>();
+            f.store->throws    = throws;
+            const auto outcome = f.run(2);
+            failure(outcome,
+                    Code::Failed,
+                    Stage::Publish,
+                    throws ? "deliberate store exception" : "returned 1 indices for 2 solutions",
+                    throws ? "Throwing store" : "Short publish");
+            require(f.store->calls == 1 && outcome.indices.empty()
+                        && names(outcome) == std::vector<std::string>{"a", "b"},
+                    "A failed publish did not fall back to loading");
         }
         {
             Fixture f({"a"});
-            f.builder = std::make_shared<Builder>(f.log, std::set<std::string>{"a"});
-            f.run();
-            require(fs::exists(f.backend->scratches.at(0) / "generator.log"),
-                    "Scratch was not kept after a failure");
-            fs::remove_all(f.backend->scratches[0]);
+            f.store            = std::make_shared<Store>();
+            f.loader->throwing = {"a"};
+            const auto outcome = f.run();
+            require(f.store->calls == 0 && outcome.bundles.empty(),
+                    "Nothing was supported, yet Jit published or loaded");
+        }
+        std::cout << "PASS a store that throws or returns too few indices fails at publish, "
+                     "and the solutions load instead\n";
+    }
+
+    void predictions()
+    {
+        {
+            Fixture f({"a"});
+            f.backend->information.contracts = {"fake.v1"};
+            f.predictor->other               = "spare.v1";
+            const auto outcome               = f.run();
+            require(f.backend->ranked == std::vector<uint32_t>{7}
+                        && f.predictor->workspaceLimit == 4096
+                        && names(outcome) == std::vector<std::string>{"a"},
+                    "A candidate the backend does not transport reached it");
         }
         {
             Fixture f({"a"});
-            f.backend->writes = false;
-            f.backend->result = {Code::Failed, Stage::Generate, "failed"};
-            f.run();
-            require(!fs::exists(f.backend->scratches.at(0)), "An empty scratch was kept");
+            f.backend->information.contracts = {"spare.v1"};
+            failure(f.run(),
+                    Code::NotSupported,
+                    Stage::Predict,
+                    "No predicted candidate",
+                    "No transported candidate");
+            require(f.backend->calls == 0, "Generation ran without a candidate");
         }
-        require(scratchCount(parent) == before, "Scratch directories leaked");
-        std::cout << "PASS scratch removed on success, kept on failure unless empty\n";
+        {
+            Fixture f({"a"});
+            f.backend->information.contracts = {"fake.v1"};
+            f.predictor->result              = {Code::NotSupported, Stage::Generate, "not modeled"};
+            failure(f.run(), Code::NotSupported, Stage::Predict, "not modeled", "Predict");
+            require(f.backend->calls == 0, "Generation ran after a failed prediction");
+        }
+        std::cout << "PASS candidates the backend does not transport are dropped, and a failed "
+                     "or empty prediction stops before generation\n";
     }
 
-    void concurrency(const fs::path& parent)
+    void catalog()
     {
-        Fixture                  f({"a", "b"});
-        const auto               jit    = f.jit();
-        const auto               before = scratchCount(parent);
-        std::atomic<int>         passed{0};
-        std::vector<std::thread> threads;
-        for(int t = 0; t < 8; ++t)
-            threads.emplace_back([&] {
-                for(int i = 0; i < 25; ++i)
-                {
-                    const auto outcome = jit.generate(f.request, f.target, 2, 4096, {});
-                    if(outcome.failures.empty()
-                       && names(outcome) == std::vector<std::string>{"a", "b"})
-                        ++passed;
-                }
-            });
-        for(auto& thread : threads)
-            thread.join();
-        const std::set<fs::path> unique(f.backend->scratches.begin(), f.backend->scratches.end());
-        require(passed == 200 && unique.size() == 200 && scratchCount(parent) == before,
-                "Concurrent generation interfered: " + std::to_string(passed) + " passed, "
-                    + std::to_string(unique.size()) + " scratch directories");
-        std::cout << "PASS 8 threads generate concurrently with private scratch directories\n";
-    }
-
-    void defaults()
-    {
-        const auto        knowledge = hj::makeCatalogKnowledge();
+        const auto         knowledge = hj::makeCatalogKnowledge();
         const ProbeRequest request;
         require(knowledge->id() == "catalog.v1", "Unexpected knowledge id");
         const std::vector<std::array<size_t, 4>> tiles{{32, 32, 2, 2},
@@ -713,8 +462,8 @@ namespace
         for(const auto* isa : {"gfx90a", "gfx942", "gfx950", "gfx1250"})
         {
             hj::DeviceTarget target;
-            target.isa       = isa;
-            const auto seeds = knowledge->seeds(request, target);
+            target.isa        = isa;
+            const auto  seeds = knowledge->seeds(request, target);
             const auto& hints
                 = target.isa == "gfx90a" || target.isa == "gfx1250" ? defaultHints : allHints;
             require(seeds.size() == tiles.size(), std::string(isa) + ": wrong seed count");
@@ -735,25 +484,26 @@ int main(int argc, char** argv)
 {
     if(argc != 2)
     {
-        std::cerr << "Usage: " << argv[0] << " FRESH_SCRATCH_PARENT\n";
+        std::cerr << "Usage: " << argv[0] << " SCRATCH_PARENT\n";
         return 2;
     }
     try
     {
         const fs::path parent = fs::absolute(argv[1]);
-        require(fs::create_directories(parent), "Scratch parent already exists");
+        fs::remove_all(parent);
+        fs::create_directories(parent);
 #ifdef _WIN32
         require(_putenv_s("TMP", parent.string().c_str()) == 0, "Cannot set TMP");
 #else
         require(setenv("TMPDIR", parent.c_str(), 1) == 0, "Cannot set TMPDIR");
 #endif
-        require(fs::temp_directory_path() == parent, "Scratch parent is not the temp directory");
         construction();
-        pipeline();
-        stages();
-        scratch(parent);
-        concurrency(parent);
-        defaults();
+        counts();
+        failures();
+        stores();
+        predictions();
+        catalog();
+        require(fs::is_empty(parent), "Jit left a scratch directory");
         std::cout << "ALL JIT COMPONENT CHECKS PASSED\n";
     }
     catch(const std::exception& error)

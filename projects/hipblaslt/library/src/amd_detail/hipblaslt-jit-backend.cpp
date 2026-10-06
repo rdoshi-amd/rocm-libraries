@@ -297,60 +297,6 @@ namespace hipblaslt_ext::experimental
                 return status;
             });
         }
-
-        rocblaslt_status prepareJit(rocblaslt_handle                       handle,
-                                    const rocblaslt_matmul_algo&           algo,
-                                    const GemmRequest&                     request,
-                                    void*                                  workspace,
-                                    size_t                                 workspaceBytes,
-                                    hipStream_t                            stream,
-                                    std::shared_ptr<const PreparedLaunch>& launch)
-        {
-            launch.reset();
-            return invoke([&] {
-                auto        entry = resolveJitAlgo(algo, handle->device);
-                Diagnostics diagnostics;
-                size_t      required = 0;
-                auto        status
-                    = entry->bundle->support(request,
-                                             std::min(workspaceBytes, algo.max_workspace_bytes),
-                                             required,
-                                             diagnostics);
-                if(status != HIPBLAS_STATUS_SUCCESS)
-                    return status;
-                if(required > workspaceBytes || required > algo.max_workspace_bytes
-                   || (required && !workspace))
-                    return HIPBLAS_STATUS_INVALID_VALUE;
-                std::shared_ptr<const PreparedLaunch> candidate;
-                status = entry->bundle->prepare(request,
-                                                {reinterpret_cast<hipblasLtHandle_t>(handle),
-                                                 workspace,
-                                                 workspaceBytes,
-                                                 stream},
-                                                candidate,
-                                                diagnostics);
-                if(status == HIPBLAS_STATUS_SUCCESS)
-                {
-                    if(!candidate)
-                        return HIPBLAS_STATUS_INTERNAL_ERROR;
-                    launch = std::move(candidate);
-                }
-                return status;
-            });
-        }
-
-        rocblaslt_status runJit(rocblaslt_handle             handle,
-                                const rocblaslt_matmul_algo& algo,
-                                const PreparedLaunch&        launch,
-                                hipStream_t                  stream,
-                                hipEvent_t                   start,
-                                hipEvent_t                   stop)
-        {
-            return invoke([&] {
-                auto entry = resolveJitAlgo(algo, handle->device);
-                return launch.run(stream, start, stop);
-            });
-        }
     }
 
     namespace jit
@@ -445,7 +391,7 @@ namespace hipblaslt_ext::experimental
                 auto status = hipblaslt_jit::DeviceTarget::make(device, target);
                 if(status.ok())
                     outcome = jit->generate(*operation, target, 1, workspaceLimit, {});
-                if(status.ok() && outcome.unpublished.empty())
+                if(status.ok() && outcome.bundles.empty())
                 {
                     if(outcome.failures.empty())
                         return HIPBLAS_STATUS_INTERNAL_ERROR;
@@ -456,7 +402,7 @@ namespace hipblaslt_ext::experimental
                     diagnostics.message = std::move(status.message);
                     return detail::toHipStatus(status.code);
                 }
-                auto bundle         = std::move(outcome.unpublished.front());
+                auto bundle         = std::move(outcome.bundles.front());
                 diagnostics.message = std::move(outcome.summary);
                 if(bundle->operationKind() != operation->kind())
                 {

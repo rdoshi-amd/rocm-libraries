@@ -27,9 +27,9 @@ generate a GEMM solution through a backend and run it with `hipblasLtMatmul`
 or `hipblaslt_ext::Gemm`, or publish generated solutions into a persistent
 JIT solution library on disk, whose solution indices any later process runs
 without generating again. For a backend that consumes a prediction, an Origami
-predictor first ranks candidate configurations. The only backend is a test mock
-that replays pre-generated source bundles. No generator backend is implemented yet, and no
-public API reaches JIT.
+predictor first ranks candidate configurations. The only backend is a test
+backend that replays pre-generated source bundles. No generator backend is
+implemented yet, and no public API reaches JIT.
 
 ## Current behavior
 
@@ -40,7 +40,7 @@ generate through `Jit`, keep generated algorithms in one process-local
 registry, and return an algorithm for the existing C and C++ GEMM execution
 APIs:
 
-- A backend factory, such as `jit::mock::createBackend`, returns a `Backend`
+- A backend factory, such as `jit::replay::createBackend`, returns a `Backend`
   handle that owns a `Jit` configured with that backend.
 - `jit::makeGemmRequest` captures existing GEMM descriptors and host scalars.
 - `jit::getJitAlgo` compiles on the selected device and returns an owned
@@ -52,14 +52,15 @@ APIs:
   publishing the solutions it lacks; `hipblaslt_ext::getAlgosFromIndex` turns
   them into algorithms.
 
-The header is internal, as are `hipblaslt-jit-mock.hpp` and
+The header is internal, as are `hipblaslt-jit-replay.hpp` and
 `hipblaslt-jit-gemm-internal.hpp`: they are not installed and
 `hipblaslt-ext.hpp` does not include them. `libhipblaslt.so` exports four
 functions and one type from them with `HIPBLASLT_EXPORT` for the JIT test
 binaries, which link against the shared library: `jit::makeGemmRequest`,
 `jit::getJitAlgo`, `jit::getGemmAlgo`, `jit::getLibraryAlgos` and the
-`jit::detail::GemmRequest` request type. A build with `HIPBLASLT_JIT_TESTING=ON` also exports
-`jit::mock::createBackend`. No installed header declares them, and they are
+`jit::detail::GemmRequest` request type. A build with
+`HIPBLASLT_JIT_TESTING=ON` also exports `jit::replay::createBackend`. No
+installed header declares them, and they are
 not a supported API.
 
 The backend's configuration belongs to the options of its factory. The
@@ -85,7 +86,7 @@ interface, so that each implementation can be replaced and tested on its own.
 | --- | --- | --- |
 | Predict | `Predictor::predict(PredictionRequest, TuningKnowledge, Prediction&)` | Only for a backend that consumes a prediction. Ranks candidates built from the tuning knowledge's seeds, best first, each naming its modeled contract. |
 | Generate | `Backend::generate(GenerationRequest, std::vector<GeneratedSolution>&)` | Returns up to `GenerationRequest::count` solutions, best first, and builds and loads nothing. Each `GeneratedSolution` holds a one-solution TensileLite library entry, its main kernel name, and the source units to build. `NotSupported` means the request is outside the backend's domain. |
-| Build | `CodeObjectBuilder::build(GeneratedSolution, GenerationRequest, BuiltSolution&)` | Builds a solution's units into code objects. `GeneratedSolution` has no code-object field; only `BuiltSolution` adds the main code object and its helpers. |
+| Build | `CodeObjectBuilder::build(GeneratedSolution, BuildRequest, BuiltSolution&)` | Builds a solution's units into code objects. `GeneratedSolution` has no code-object field; only `BuiltSolution` adds the main code object and its helpers. |
 | Support | `SolutionLoader::support` | Evaluates the entry's predicates and workspace for the request, and loads no code. |
 | Publish | `SolutionStore::publish` | Stores built solutions and returns one library index per solution, in order. `SolutionStore::lookup` returns the indices of stored solutions for exactly a request. |
 | Load | `SolutionLoader::load` | Loads the code objects into a process-local executable `KernelBundle`. |
@@ -98,7 +99,7 @@ directory, forwarding the workspace limit and the kernels the caller already
 has. It then builds each solution and checks its support until the count is
 reached. With a store it publishes the supported solutions, and loads them only
 when publishing fails; without a store it loads them. A failure in one
-solution's build or support skips that solution and keeps the rest.
+solution's build, support or load skips that solution and keeps the rest.
 
 Each failure is recorded with its stage (configure, predict, generate, build,
 support, load or publish) in `Jit::Outcome::failures`, in the order it happened.
@@ -144,24 +145,28 @@ The implementations are:
   which keep the backend's defaults.
 - Code-object builder: `makeComgrBuilder()`; see
   [building generated sources](#building-generated-sources).
-- Loader: `makeTensileLoader()`, in `hipblaslt-jit-loader.cpp`, parses the
-  entry, checks support and workspace with TensileLite's predicates, and loads
-  the code object into a process-local `TensileBundle`.
+- Loader: `makeTensileLoader()` reads the entry with the Tensile loader (see
+  [loading a built solution](#loading-a-built-solution)), checks support and
+  workspace with TensileLite's predicates, and returns a process-local
+  `TensileGemmBundle`. It is in `rocblaslt/src/tensile_host.cpp`, next to the
+  GEMM problem translation that the support check reuses.
 - Solution store: the JIT solution library, in `hipblaslt-jit-library.cpp`,
   with `hipblaslt-jit-msgpack.cpp` writing the library files and
   `hipblaslt-jit-fs.cpp` providing the directory checks, file lock and atomic
   replacement. `getLibraryAlgos` sets it as the store of its `Jit`; see
   [persistent solution library](#persistent-solution-library).
-- Mock backend: `hipblaslt-jit-mock-backend.cpp` replays a list of source
+- Replay backend: `hipblaslt-jit-replay-backend.cpp` replays a list of source
   bundles without a generator. A generation returns, in list order, up to the
   requested count of bundles whose predicates accept the device and problem,
-  skipping excluded kernels; the comgr builder still builds them. Its faults
-  fail generation and leave a log in the scratch directory, replace the main
-  kernel assembly with an invalid instruction so the build fails, append the
-  request to a file and fail, or abort the process. Given modeled contracts it
-  consumes the predictions of the Origami predictor and the catalog knowledge.
-  Tests reach it through `jit::mock::createBackend` in `hipblaslt-jit-mock.hpp`. Only builds with
-  `HIPBLASLT_JIT_TESTING=ON` compile it; it is not a production backend.
+  skipping excluded kernels; the comgr builder still builds them. Tests reach
+  it through `jit::replay::createBackend` in `hipblaslt-jit-replay.hpp`, whose
+  `Options::fault` makes generation fail and leave `replay.log` in the scratch
+  directory, makes the main kernel's source fail to assemble, makes generation
+  append its request to the `Options::record` file and fail, or makes any
+  generation abort the process. Given modeled contracts in
+  `Options::contracts`, it consumes the predictions of the Origami predictor
+  and the catalog knowledge. Only builds with `HIPBLASLT_JIT_TESTING=ON`
+  compile it; it is not a production backend.
 
 ### Origami modeled inputs
 
@@ -225,8 +230,7 @@ cmake -S "$project_root/projects/hipblaslt" -B "$project_build" \
 cmake --build "$project_build" --parallel
 ```
 
-The `jit` CMake preset enables this feature for a new configuration.
-`HIPBLASLT_JIT_TESTING`, off by default, also compiles the mock backend into
+`HIPBLASLT_JIT_TESTING`, off by default, also compiles the replay backend into
 the library and adds the tests that use it. The
 [JIT test guide](clients/tests/jit/README.md) lists the test targets and the
 validation commands.
@@ -235,10 +239,15 @@ validation commands.
 
 The returned heuristic result contains the required workspace size. Supply that
 workspace and follow the same handle, stream and workspace sharing rules as
-`hipblasLtMatmul` and `Gemm` calls using prebuilt algorithms. All helper
-entrypoints are resolved before submission. Stream-K uses the handle's
-stream-specific synchronization region; MultipleBufferSingleKernel and
-output-amax use its shared synchronization storage. Registry synchronization
+`hipblasLtMatmul` and `Gemm` calls using prebuilt algorithms. The algorithm
+resolves to its bundle's one-solution library and adapter, and then runs
+through the same launch path as a prebuilt algorithm, including its
+synchronization storage. The loader resolves only the main kernel, and a
+solution can also launch helper kernels, such as the split-K reduction. For a
+JIT algorithm, `hipblasLtMatmul` and `Gemm::initialize` resolve every kernel of
+the launch before any is submitted or kept. When the code object lacks one,
+the call returns `HIPBLAS_STATUS_EXECUTION_FAILED` without writing D or the
+workspace, and a `Gemm` keeps the launch it had prepared. Registry synchronization
 protects algorithm lookup; it does not protect application buffers or make
 simultaneous calls on one `Gemm` object safe.
 
@@ -317,7 +326,7 @@ still run on every match.
 | Field | Contents |
 | --- | --- |
 | `target` | Full target ID with features (for example `gfx950:sramecc+:xnack-`), ISA, TensileLite library architecture and wavefront size |
-| `backend` | Backend identifier and version. Each backend defines its version to change whenever its output can; the mock backend's is a hash of its replayed bundles. For a backend that consumes predictions, the version is followed by `\|predictor=<id>;contracts=<contracts>\|knowledge=<id>@<version>`: the predictor, the modeled contracts that both it and the backend support, sorted, and the tuning knowledge with its version. |
+| `backend` | Backend identifier and version. Each backend defines its version to change whenever its output can; the replay backend's is a hash of its replayed bundles. For a backend that consumes predictions, the version is followed by `\|predictor=<id>;contracts=<contracts>\|knowledge=<id>@<version>`: the predictor, the modeled contracts that both it and the backend support, sorted, and the tuning knowledge with its version. |
 | `comgr` | comgr version, and on Linux the path, size and modification time of the loaded comgr library |
 | `code_object_version` | The code-object version that the generator and the builder use (4) |
 | `rocm_path` | The ROCm path that the builder passes to comgr |
@@ -377,7 +386,8 @@ code objects in process through AMD comgr (`hipblaslt-jit-builder.cpp` and
   `-Xlinker --build-id=sha1`.
 
 The generator and the builder use the same code-object version, which
-`GenerationRequest::codeObjectVersion` carries (4 by default). The output is a
+`GenerationRequest::codeObjectVersion` and `BuildRequest::codeObjectVersion`
+carry (4 by default). The output is a
 raw, uncompressed executable code object. comgr cannot bundle or compress it,
 and `hipModuleLoadData` accepts raw executable and linkable format (ELF)
 objects. A generator needs no offload bundler.
@@ -386,13 +396,31 @@ After linking, the builder reads the code object's metadata and checks that its
 instruction set architecture (ISA) is the device's and that it defines the
 solution's main kernel. A build failure has the build stage. Its message
 carries the first error line of the comgr log, and the builder appends the full
-log to `comgr.log` in the request's scratch directory and names that file in
-the message.
+log to `comgr.log` in `BuildRequest::scratch` and names that file in the
+message.
 
 comgr's own on-disk cache (`~/.cache/comgr`) keeps its default: hipBLASLt never
 sets `AMD_COMGR_CACHE`. That cache holds the results of comgr actions for every
 comgr user in the process, such as hipRTC, and comgr reads its setting once per
 process.
+
+### Loading a built solution
+
+`hipblaslt-jit-loader.{hpp,cpp}` turns a built TensileLite solution into a
+loaded one-solution library:
+
+- `readTensileSourceBundle` reads a source bundle into a `GeneratedSolution`:
+  the library entry, its main kernel name, each `sources/*.s` as a main
+  assembly unit, and `sources/Kernels.cpp` with its headers as a helper unit.
+- `parseTensileBundle` reads a built solution's entry into a TensileLite
+  `MasterSolutionLibrary` for the device's hardware. It requires exactly one
+  local solution, index 0, named after the built kernel, and loads no code.
+- `loadTensileBundle` loads the main and helper code objects into a new
+  `SolutionAdapter` and resolves the main kernel.
+
+The entry's own hardware and problem predicates decide which problems the
+solution serves, so `findBestSolution` on the loaded library selects it only
+for the problems it was generated for.
 
 ### Source bundle format
 
@@ -402,7 +430,7 @@ one by directory convention:
 
 | Path | Contents |
 | --- | --- |
-| `library/TensileLibrary.dat.zlib`, `.dat` or `.yaml` | The one-solution library entry; exactly one of them, decoded when compressed |
+| `library/TensileLibrary.dat` | The one-solution library entry, stored as uncompressed MsgPack |
 | `sources/*.s` | The main kernel assembly; at least one |
 | `sources/Kernels.cpp` | The helper kernels, when the solution needs helpers |
 | Other files in `sources/` | Headers that the helper source includes |
@@ -410,14 +438,14 @@ one by directory convention:
 
 Artifact paths must be relative and stay inside the bundle, including through
 symbolic links, and `sources/` may hold only regular files. The reader bounds
-the file count (1024), each file (64 MiB), the decoded library (64 MiB) and the
-sources in total (256 MiB).
+the file count (1024), each file (64 MiB) and the sources in total (256 MiB).
 
-The JIT tests use gfx950 source bundles committed in `clients/tests/jit/data`.
-Their manifests record the kernel-argument and persistent-loop argument layout
-versions of the generator that wrote them, and the `jit-bundle-freshness` test
-fails when those differ from the ones in
-`tensilelite/Tensile/Common/GlobalParameters.py`, when the code-object version
-differs from the builder's, or when a bundle no longer reads or builds.
-[Their README](clients/tests/jit/data/README.md) gives the commands that
-regenerate them.
+The JIT tests use gfx950 source bundles committed in `clients/tests/jit/data`:
+`plain`, with no helper kernels; `splitk`, whose split-K solution launches
+helper kernels from `Kernels.cpp`; and `streamk` and `amax`, a Stream-K
+solution and an output-amax solution. Each manifest records the
+kernel-argument and persistent-loop argument layout versions of the generator
+that wrote it, and [their README](clients/tests/jit/data/README.md) gives the
+commands that generated them. The `jit-bundle-freshness` test fails when those
+versions or the code-object version no longer match this tree, or when the
+host library or comgr can no longer read or build a bundle.

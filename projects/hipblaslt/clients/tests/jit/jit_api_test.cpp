@@ -1,13 +1,11 @@
 // Copyright Advanced Micro Devices, Inc., or its affiliates.
 // SPDX-License-Identifier: MIT
 
+#include "hipblaslt-jit-replay.hpp"
 #include "hipblaslt-jit.hpp"
-#include "hipblaslt-jit-mock.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstring>
-#include <filesystem>
-#include <fstream>
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 #include <hipblaslt/hipblaslt-ext.hpp>
@@ -16,8 +14,11 @@
 #include <stdexcept>
 #include <vector>
 
-// Solutions come from bundles that the mock backend replays.
-using Generation = hipblaslt_ext::experimental::jit::mock::Options;
+// Runs a solution that the replay backend replays from a bundle through
+// hipblasLtMatmul and hipblaslt_ext::Gemm: copied algorithms, forged tokens,
+// workspace rules, repeated runs with changed inputs, a second solution and a
+// rejected reinitialization, with D checked against a host reference.
+using Generation = hipblaslt_ext::experimental::jit::replay::Options;
 
 namespace
 {
@@ -47,7 +48,6 @@ namespace
     bool        zeroAlphaInputs        = false;
     bool        allowWorkspaceFallback = false;
     std::string secondReplay;
-    bool        expectHelperFailure = false;
     struct Problem
     {
         hipblasLtHandle_t       handle  = nullptr;
@@ -305,7 +305,7 @@ namespace
             if(status != HIPBLAS_STATUS_SUCCESS)
                 return status;
             jit::Backend backend;
-            status = jit::mock::createBackend(generation, backend, info);
+            status = jit::replay::createBackend(generation, backend, info);
             if(status != HIPBLAS_STATUS_SUCCESS)
                 return status;
             int device = -1;
@@ -419,54 +419,6 @@ namespace
                 "Second test recipe needs more workspace than the first");
         require(std::memcmp(algo.data, selected.algo.data, sizeof(algo.data)) != 0,
                 "Separate generations reused an opaque token");
-        if(expectHelperFailure)
-        {
-            require(workspaceBytes != 0, "Helper-failure test requires split-K workspace");
-            std::vector<unsigned char> workspace(workspaceBytes);
-            auto                       unchanged = [&] {
-                check(hipMemcpyAsync(p.hostD.data(),
-                                     p.d,
-                                     p.hostD.size() * sizeof(__half),
-                                     hipMemcpyDeviceToHost,
-                                     p.stream),
-                      "Read D sentinel");
-                check(hipMemcpyAsync(workspace.data(),
-                                     p.workspace,
-                                     workspaceBytes,
-                                     hipMemcpyDeviceToHost,
-                                     p.stream),
-                      "Read workspace sentinel");
-                check(hipStreamSynchronize(p.stream), "Check preflight submission boundary");
-                require(std::all_of(p.hostD.begin(),
-                                    p.hostD.end(),
-                                    [](auto value) { return std::isnan(__half2float(value)); }),
-                        "Failed helper preflight wrote D");
-                require(std::all_of(workspace.begin(),
-                                    workspace.end(),
-                                    [](auto value) { return value == 0xa5; }),
-                        "Failed helper preflight wrote workspace");
-            };
-            p.reset();
-            check(hipMemsetAsync(p.workspace, 0xa5, workspaceBytes, p.stream),
-                  "Set workspace sentinel");
-            require(runC(selected.algo, workspaceBytes) != HIPBLAS_STATUS_SUCCESS,
-                    "C API accepted a missing later helper");
-            unchanged();
-            const auto previousName = gemm.getKernelName();
-            require(gemm.initialize(selected.algo, p.workspace, false, p.stream)
-                        != HIPBLAS_STATUS_SUCCESS,
-                    "Extension initialize accepted a missing later helper");
-            unchanged();
-            require(gemm.getKernelName() == previousName,
-                    "Failed helper preflight changed the prepared context");
-            p.changeInputs();
-            p.reset();
-            check(gemm.run(p.stream), "Retained extension after helper failure");
-            p.verify("Retained extension after helper failure");
-            std::cout
-                << "C API/extension missing-helper preflight left D/workspace unchanged PASS\n";
-            return;
-        }
         p.reset();
         check(runC(selected.algo, workspaceBytes), "Second generated algorithm");
         p.verify("Second private bundle");
@@ -509,14 +461,14 @@ int main(int argc, char** argv)
     {
         std::cerr << "Usage: " << argv[0]
                   << " --replay BUNDLE [--second-replay BUNDLE --m M --n N --k K --trans-b N|T "
-                     "--amax 0|1]\n";
+                     "--amax 0|1 --alpha-zero 0|1 --workspace-fallback 0|1]\n";
         return 2;
     }
     try
     {
         Generation options;
         options.replay = {argv[2]};
-        auto integer = [](const std::string& value) {
+        auto integer   = [](const std::string& value) {
             size_t consumed = 0;
             int    result   = std::stoi(value, &consumed);
             require(consumed == value.size(), "Expected integer option value");
@@ -530,8 +482,6 @@ int main(int argc, char** argv)
                 allowWorkspaceFallback = integer(value) != 0;
             else if(key == "--second-replay")
                 secondReplay = value;
-            else if(key == "--expect-helper-failure")
-                expectHelperFailure = integer(value) != 0;
             else if(key == "--alpha-zero")
                 zeroAlphaInputs = integer(value) != 0;
             else if(key == "--amax")

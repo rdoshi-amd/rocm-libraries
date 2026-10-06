@@ -1051,12 +1051,15 @@ void CDNA5ReadyQueue::resetActiveWindow() {
     wmmaBatchOpen_ = false;
 }
 
-// True if \p wmma may join the open batch: room left, the window still open, and
-// no D->A/B dependence on any member (a dependent WMMA must wait for its data).
+// True if \p wmma may join the open batch: room left, the window still open, the
+// same VGPR MSB bank as the last member, and no D->A/B dependence on any member (a
+// dependent WMMA must wait for its data). A bank change makes InsertVgprMsbPass put
+// an s_set_vgpr_msb between the two WMMAs, which ends the hardware batch.
 bool CDNA5ReadyQueue::canJoinWmmaBatch(const DAGNode* wmma) const {
     if (!wmmaBatchOpen_ || activeWmmaBatch_.empty()) return false;
     if ((int)activeWmmaBatch_.size() >= wmmaBatchSize()) return false;
     if (coIssueCyclePos_ >= activeWmmaLatency_) return false;
+    if (wmma->requiredMsb != activeWmmaNode_->requiredMsb) return false;
     for (const DAGNode* member : activeWmmaBatch_)
         if (wmmaToWmmaCoexecOverlap(*member->inst, *wmma->inst)) return false;
     return true;

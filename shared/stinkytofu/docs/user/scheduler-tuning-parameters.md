@@ -51,7 +51,7 @@ Each parameter resolves independently, first match wins:
 
 | Module option | Default | CLI | Meaning |
 |---|---|---|---|
-| `WmmaBatchSize` | 0 → arch default 1 | `--wmma-batch-size=N` | Max independent, data-ready WMMAs issued back-to-back as one batch. A WMMA reading a batch member's D cannot join; any non-WMMA pick closes the batch. 1 = no batching. |
+| `WmmaBatchSize` | 0 → arch default 1 | `--wmma-batch-size=N` | Max independent, data-ready WMMAs issued back-to-back as one batch. A WMMA reading a batch member's D, or needing a different VGPR MSB bank (an `s_set_vgpr_msb` would split the batch), cannot join; any non-WMMA pick closes the batch. 1 = no batching. |
 
 With N > 1, window-based mechanisms follow the batch window: the ds_load cap
 span, the ds budget window, the filler quota and co-issue slots, the

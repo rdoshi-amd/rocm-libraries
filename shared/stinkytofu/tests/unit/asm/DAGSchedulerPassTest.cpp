@@ -1286,6 +1286,33 @@ TEST_F(DAGSchedulerPassTest, WmmaBatch_DependentWmmaDoesNotJoin) {
     EXPECT_FALSE(isMatrixInstruction(*order[2])) << "batch of 2 is full; a fill follows";
 }
 
+// A WMMA in another VGPR MSB bank would need an s_set_vgpr_msb between it and the
+// batch, which ends the hardware batch, so it does not join; a same-bank one does.
+TEST_F(DAGSchedulerPassTest, WmmaBatch_MsbBankChangeDoesNotJoin) {
+    for (int i = 0; i < 4; ++i) createVAddInBlock(bb, arch, 100 + 3 * i, 101 + 3 * i, 102 + 3 * i);
+    StinkyInstruction* w0 = createWmmaF32_16x16x16_bf16(200, 120);  // all bank 0
+    StinkyInstruction* w1 = createWmmaF32_16x16x16_bf16(264, 136);  // dst bank 1
+    StinkyInstruction* w2 = createWmmaF32_16x16x16_bf16(208, 152);  // all bank 0
+    ASSERT_TRUE(w0 && w1 && w2);
+
+    PassContext ctx;
+    ctx.setGemmTileConfig(config);
+    PassFeatureConfig pfc;
+    pfc.loopConfig.unrollGemm = true;
+    pfc.dagFeatures.wmmaBatchSize = 3;
+    ctx.setPassFeatureConfig(pfc);
+    pass->run(*func, ctx, am);
+
+    std::vector<const StinkyInstruction*> order;
+    for (const IRBase& ir : *bb)
+        if (ir.getType() == IRBase::IRType::StinkyTofu)
+            order.push_back(cast<StinkyInstruction>(&ir));
+    ASSERT_GE(order.size(), 3u);
+    EXPECT_EQ(order[0], w0);
+    EXPECT_EQ(order[1], w2) << "same-bank WMMA joins; the bank-1 one would need an msb switch";
+    EXPECT_FALSE(isMatrixInstruction(*order[2])) << "w1 starts a new batch after a fill";
+}
+
 // ---------------------------------------------------------------------------
 // Co-execution hazard (regression test for destOverlapsActiveWmmaSrc):
 // a ds_load whose dest VGPRs overlap the in-flight WMMA's src VGPRs must NOT be

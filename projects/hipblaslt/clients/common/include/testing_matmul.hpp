@@ -1630,12 +1630,6 @@ std::tuple<hipDataType, hipDataType> derive_unset_compute_input_type(const Argum
 }
 
 #if HIPBLASLT_ENABLE_MXDATAGENERATOR
-// HostPreSwizzle/EXT generation is unchanged vs develop (generateMXInput +
-// GFX950 layout). The only harness delta is allocation size: develop's dimk
-// pad under-sizes the host buffer vs preSwizzleScalesGFX950 output
-// (ceil(MN/32)*32 × ceil(Kblocks/8)*8) for some K (e.g. K=128). EXT users
-// still supply already-swizzled buffers of that same output size — this is
-// not a new pad-before-API contract.
 inline bool mxNeedsHostPreSwizzleScaleBuf(hipblaslt_scaling_format fmt)
 {
     return fmt == hipblaslt_scaling_format::Block_32_UE8M0_32_8_EXT;

@@ -1199,10 +1199,6 @@ namespace TensileLite
             return m_maxProblemSize;
         }
 
-        // How setMXScaleA/B sizes MX scale tensor descriptors.
-        // Caution: the historical bool padScaleTensorFreeDim=false selected
-        // Gfx1250 (dimk pad), not "no padding". Use Compact explicitly for
-        // NoSwizzle / VEC32 (matches rocRoller {M, Ceil(K/mxBlock)}).
         enum class MXScaleTensorPad : int
         {
             Compact = 0, // NoSwizzle: CeilDivide(K, mxBlock), unpadded free dim

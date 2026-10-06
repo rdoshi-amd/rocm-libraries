@@ -8,6 +8,7 @@ from __future__ import annotations
 import math
 
 from kernels.common.attention_unified import (
+    UnifiedAttentionProblem,
     _3d_signature,
     _strided_3d_specs_from_problem,
     _validate_strided_3d_spec,
@@ -66,7 +67,14 @@ def make_candidate() -> KernelCandidate:
         ok, why = candidate.admits(request)
         if not ok:
             raise ValueError(why)
-        problem = tensors.get("problem") or _problem(request)
+        problem = tensors.get("problem")
+        if problem is None:
+            problem = _problem(request)
+        if not isinstance(problem, UnifiedAttentionProblem):
+            raise TypeError(
+                "tensors['problem'] must be a UnifiedAttentionProblem, got "
+                f"{type(problem).__name__}"
+            )
         validate_tuning_attention_contract(request, problem, spec)
         if problem.sliding_window != request.sliding_window:
             raise ValueError("request sliding_window disagrees with problem")

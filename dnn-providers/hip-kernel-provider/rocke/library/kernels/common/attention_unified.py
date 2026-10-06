@@ -4640,6 +4640,8 @@ def run_unified_attention_torch(
             tuning_spec=tuning_spec,
             kv_cache_layout=layout,
         )
+    # Paged-only specs (including 2D and gfx1250 3D) have no kv_layout field.
+    # Strided specs must declare it explicitly; validation above enforces that.
     if (
         tuning_spec is not None
         and getattr(tuning_spec.kernel_spec, "kv_layout", "paged") != "paged"

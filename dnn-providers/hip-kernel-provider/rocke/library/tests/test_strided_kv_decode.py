@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -349,6 +350,39 @@ def test_strided_binding_scale_stream_and_unknown_options(
     assert len(calls) == 2
 
 
+@pytest.mark.parametrize(
+    "problem", [False, 0, {}, "", [], True, 1, "invalid", object()]
+)
+def test_strided_binding_rejects_invalid_problem_type(strided_binding_case, problem):
+    req, result, tensors = strided_binding_case
+    with pytest.raises(TypeError, match="must be a UnifiedAttentionProblem"):
+        result.candidate.bind_torch(req, result.spec, {**tensors, "problem": problem})
+
+
+@pytest.mark.parametrize("mode", ["omitted", "none", "explicit"])
+def test_strided_binding_problem_default_and_identity(
+    strided_binding_case, monkeypatch, mode
+):
+    from kernels.common import attention_unified as au
+
+    req, result, tensors = strided_binding_case
+    expected = tensors.pop("problem")
+    if mode == "none":
+        tensors["problem"] = None
+    elif mode == "explicit":
+        tensors["problem"] = expected
+    calls = []
+    monkeypatch.setattr(
+        au, "run_unified_attention_torch", lambda **kw: calls.append(kw)
+    )
+    binding = result.candidate.bind_torch(req, result.spec, tensors)
+    binding.launch()
+    assert len(calls) == 1
+    assert calls[0]["problem"] == expected
+    if mode == "explicit":
+        assert calls[0]["problem"] is expected
+
+
 @pytest.mark.parametrize("extra", ["sinks", "alibi_slopes", "qq_bias", "bias"])
 def test_strided_binding_rejects_unconsumed_tensors(strided_binding_case, extra):
     req, result, tensors = strided_binding_case
@@ -438,24 +472,23 @@ def test_strided_runtime_rejects_ignored_scaling(
         )
 
 
-def test_strided_runtime_rejects_missing_storage_dtype(
-    strided_binding_case, monkeypatch
+@pytest.mark.parametrize("missing", ["kv_layout", "kv_storage_dtype"])
+def test_strided_runtime_rejects_missing_semantic_field(
+    strided_binding_case, monkeypatch, missing
 ):
     from kernels.common import attention_unified as au
 
     _, result, tensors = strided_binding_case
     segment = result.spec.kernel_spec
     values = {
-        f.name: getattr(segment, f.name)
-        for f in fields(segment)
-        if f.name != "kv_storage_dtype"
+        f.name: getattr(segment, f.name) for f in fields(segment) if f.name != missing
     }
     malformed_type = make_dataclass(
-        "MissingStorageDtype", [(name, object) for name in values], frozen=True
+        "MissingSemanticField", [(name, object) for name in values], frozen=True
     )
     spec = replace(result.spec, kernel_spec=malformed_type(**values))
     monkeypatch.setattr(au, "_resolve_attention_arch", lambda: "gfx942")
-    with pytest.raises(ValueError, match="missing kv_storage_dtype"):
+    with pytest.raises(ValueError, match=f"missing {missing}"):
         au.run_unified_attention_torch(
             **tensors,
             block_table=None,
@@ -464,6 +497,60 @@ def test_strided_runtime_rejects_missing_storage_dtype(
             tuning_spec=spec,
             kv_layout="strided",
         )
+
+
+@pytest.mark.parametrize(
+    "arch,path", [("gfx942", "2d"), ("gfx950", "2d"), ("gfx1250", "3d")]
+)
+def test_paged_runtime_accepts_specs_without_layout(arch, path, monkeypatch):
+    from dispatch.attention.common import AttentionTuningSpec, _problem
+    from kernels.common import attention_unified as au
+
+    monkeypatch.setattr(au, "_resolve_attention_arch", lambda: arch)
+    problem = _problem(
+        replace(
+            _strided_request(arch), kv_layout="paged", hdim_q=64, hdim_v=64, nhead_q=16
+        )
+    )
+    factory = (
+        au._tiled_3d_spec_from_problem if path == "3d" else au._tiled_spec_from_problem
+    )
+    kernel = factory(problem)
+    assert not hasattr(kernel, "kv_layout")
+    spec = AttentionTuningSpec(
+        path=path,
+        arch=arch,
+        builder_kind=f"tiled_{path}",
+        compile_backend="llvm",
+        candidate_name="paged_compatibility",
+        tuning_id="paged_compatibility",
+        kernel_spec=kernel,
+        num_kv_blocks=1,
+    )
+    calls = []
+
+    def stop_before_launch(problem, tuning_spec, kind):
+        calls.append((tuning_spec.kernel_spec, kind))
+        return False, "paged contract reached"
+
+    monkeypatch.setattr(au, "_explicit_path_supported", stop_before_launch)
+    # Exercise the public runtime boundary with real paged-only spec classes;
+    # stop at support checking before any device access or compilation.
+    with pytest.raises(NotImplementedError, match="paged contract reached"):
+        au.run_unified_attention_torch(
+            problem=problem,
+            q=object(),
+            k=SimpleNamespace(shape=(1,)),
+            v=object(),
+            out=object(),
+            cu_seqlens_q=object(),
+            seqused_k=object(),
+            block_table=SimpleNamespace(shape=(3, 1)),
+            softmax_scale=0.125,
+            softcap=0,
+            tuning_spec=spec,
+        )
+    assert calls == [(kernel, path)]
 
 
 @pytest.mark.parametrize("explicit", [False, True])

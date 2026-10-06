@@ -442,6 +442,7 @@ private:
                             const std::string& db_key,
                             const std::string& perf_db_key) const
     {
+        ResetCoutFormat();
         std::cout << "{\"performance\":{" << "\"name\":\"" << operation_name << wei_h << "x"
                   << wei_w << "u" << miopen::deref(convDesc).GetConvStrides()[0] << "\","
                   << "\"algorithm\":" << solution.algorithm << "," << "\"solution\":\""
@@ -481,6 +482,7 @@ private:
                             const std::string& db_key,
                             const std::string& perf_db_key) const
     {
+        ResetCoutFormat();
         std::cout << "{\"performance\":{" << "\"name\":\"" << operation_name << wei_d << "x"
                   << wei_h << "x" << wei_w << "u" << miopen::deref(convDesc).GetConvStrides()[0]
                   << "\"," << "\"algorithm\":" << solution.algorithm << "," << "\"solution\":\""
@@ -504,6 +506,7 @@ private:
     // Helper function to print tuning/lead time
     void PrintTuningJsonLog(const std::string& direction, float tuning_time) const
     {
+        ResetCoutFormat();
         std::cout
             << "{\"find_time_conv_ms\":" << tuning_time << "," << "\"direction\":\"" << direction
             << "\"," << "\"environment_variables\":{" << "\"MIOPEN_FIND_MODE\":"
@@ -4308,6 +4311,7 @@ int ConvDriver<Tgpu, Tref>::VerifyForward()
     {
         if(performance_logging_enabled)
         {
+            ResetCoutFormat();
             std::cout << "{\"verification\":{\"direction\":\"forward\",\"status\":\"FAILED\","
                       << "\"reference\":\"" << (UseGPUReference() ? "GPU" : "CPU") << "\","
                       << "\"error\":" << error << ",\"tolerance\":" << tolerance << "}}"
@@ -4322,6 +4326,7 @@ int ConvDriver<Tgpu, Tref>::VerifyForward()
 
     if(performance_logging_enabled)
     {
+        ResetCoutFormat();
         std::cout << "{\"verification\":{\"direction\":\"forward\",\"status\":\"OK\","
                   << "\"reference\":\"" << (UseGPUReference() ? "GPU" : "CPU") << "\","
                   << "\"error\":" << error << ",\"tolerance\":" << tolerance << "}}" << std::endl;
@@ -4377,6 +4382,7 @@ int ConvDriver<Tgpu, Tref>::VerifyBackward()
         {
             if(performance_logging_enabled)
             {
+                ResetCoutFormat();
                 std::cout
                     << "{\"verification\":{\"direction\":\"backward_data\",\"status\":\"FAILED\","
                     << "\"reference\":\"" << (UseGPUReference() ? "GPU" : "CPU") << "\","
@@ -4394,6 +4400,7 @@ int ConvDriver<Tgpu, Tref>::VerifyBackward()
         {
             if(performance_logging_enabled)
             {
+                ResetCoutFormat();
                 std::cout << "{\"verification\":{\"direction\":\"backward_data\",\"status\":\"OK\","
                           << "\"reference\":\"" << (UseGPUReference() ? "GPU" : "CPU") << "\","
                           << "\"error\":" << error_data << ",\"tolerance\":" << tolerance << "}}"
@@ -4456,6 +4463,7 @@ int ConvDriver<Tgpu, Tref>::VerifyBackward()
         {
             if(performance_logging_enabled)
             {
+                ResetCoutFormat();
                 std::cout << "{\"verification\":{\"direction\":\"backward_weights\",\"status\":"
                              "\"FAILED\","
                           << "\"reference\":\"" << (UseGPUReference() ? "GPU" : "CPU") << "\","
@@ -4473,6 +4481,7 @@ int ConvDriver<Tgpu, Tref>::VerifyBackward()
         {
             if(performance_logging_enabled)
             {
+                ResetCoutFormat();
                 std::cout
                     << "{\"verification\":{\"direction\":\"backward_weights\",\"status\":\"OK\","
                     << "\"reference\":\"" << (UseGPUReference() ? "GPU" : "CPU") << "\","
@@ -4501,6 +4510,7 @@ int ConvDriver<Tgpu, Tref>::VerifyBackward()
         {
             if(performance_logging_enabled)
             {
+                ResetCoutFormat();
                 std::cout
                     << "{\"verification\":{\"direction\":\"backward_bias\",\"status\":\"FAILED\","
                     << "\"reference\":\"" << (UseGPUReference() ? "GPU" : "CPU") << "\","
@@ -4518,6 +4528,7 @@ int ConvDriver<Tgpu, Tref>::VerifyBackward()
         {
             if(performance_logging_enabled)
             {
+                ResetCoutFormat();
                 std::cout << "{\"verification\":{\"direction\":\"backward_bias\",\"status\":\"OK\","
                           << "\"reference\":\"" << (UseGPUReference() ? "GPU" : "CPU") << "\","
                           << "\"error\":" << error_bias << ",\"tolerance\":" << tolerance << "}}"

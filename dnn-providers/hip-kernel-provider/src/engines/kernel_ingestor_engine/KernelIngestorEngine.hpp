@@ -5,7 +5,6 @@
 
 #ifdef HIPDNN_ENABLE_KERNEL_INGESTOR
 
-#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -44,15 +43,22 @@ std::vector<std::filesystem::path> descriptorSearchDirectories();
 /// descriptor costs its pack, never the provider. Memoized, so two scans can't disagree.
 const std::vector<hipdnn_plugin_sdk::ingestor::DescriptorSet>& discoverDescriptorSets();
 
-/// The state manager discovery built while validating set @p index of
-/// discoverDescriptorSets(), or null once taken. One-shot: the first engine constructed for
-/// that set takes it, and any later one -- a Container created after an earlier one was
-/// destroyed -- builds its own from the set, so no state manager is shared between two
-/// engines. A state manager no engine takes stays alive until the provider unloads, beside
-/// the retained set it was built from: a process that enumerates engines but never
-/// constructs a Container keeps one extra state manager per set.
+/// The state manager discovery built while validating the discoverDescriptorSets() entry
+/// whose engine id is @p engineId, or null once taken or when no set has that id.
+/// One-shot: the first engine constructed for that set takes it, and any later one -- a
+/// Container created after an earlier one was destroyed -- builds its own from the set, so
+/// no state manager is shared between two engines. One no engine takes stays alive beside
+/// its set until the provider unloads, so a process that never constructs a Container
+/// holds one extra state manager per set.
 std::unique_ptr<hipdnn_plugin_sdk::ingestor::KernelIngestorStateManager<Handle>>
-    takeDiscoveredStateManager(size_t index);
+    takeDiscoveredStateManager(const hipdnn_plugin_sdk::ingestor::DescriptorId& engineId);
+
+/// Test-only. Rescans the descriptor tree through the same path discovery takes and
+/// refills every takeDiscoveredStateManager() slot with the state manager that scan built.
+/// Thread-safe against concurrent takes.
+/// @throws std::logic_error the rescan does not reproduce discoverDescriptorSets() in
+///         order (e.g. the search directories changed); the slots are left unchanged.
+void rediscoverStateManagersForTesting();
 
 /// The device resolver every descriptor-backed engine in this provider shares.
 /// Process-lifetime: a device-property cache with no engine-specific state.

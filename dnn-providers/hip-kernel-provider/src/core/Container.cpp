@@ -106,10 +106,8 @@ const std::vector<Container::EngineDefinition>& Container::getEngineDefinitions(
 #ifdef HIPDNN_ENABLE_KERNEL_INGESTOR
         // One ingestor engine per discovered descriptor set, and a set is now a file on
         // disk: adding an engine is an install, not an edit here.
-        const auto& sets = kernel_ingestor_engine::discoverDescriptorSets();
-        for(size_t index = 0; index < sets.size(); ++index)
+        for(const auto& set : kernel_ingestor_engine::discoverDescriptorSets())
         {
-            const auto& set = sets[index];
             // engineNameToId, not a provider-side registration: the loader already interned
             // and registered this name, and a second registry over the same process-wide
             // string_view map risks a dangling view.
@@ -122,7 +120,7 @@ const std::vector<Container::EngineDefinition>& Container::getEngineDefinitions(
                  set.engine.name,
                  // set aliases discoverDescriptorSets()'s memoized, process-lifetime vector.
                  // Capture by reference: [set] would re-copy a DescriptorSet per engine.
-                 [&set, index](const device::IDevicePropertyProvider& /*devicePropertyProvider*/)
+                 [&set](const device::IDevicePropertyProvider& /*devicePropertyProvider*/)
                      -> std::unique_ptr<hipdnn_plugin_sdk::IEngine<Handle, Settings, Context>> {
                      try
                      {
@@ -131,7 +129,7 @@ const std::vector<Container::EngineDefinition>& Container::getEngineDefinitions(
                          // takes the state manager discovery already built; a later one
                          // builds its own.
                          if(auto stateManager
-                            = kernel_ingestor_engine::takeDiscoveredStateManager(index))
+                            = kernel_ingestor_engine::takeDiscoveredStateManager(set.engine.id))
                          {
                              return hipdnn_plugin_sdk::ingestor::
                                  makeEngine<Handle, Settings, Context>(

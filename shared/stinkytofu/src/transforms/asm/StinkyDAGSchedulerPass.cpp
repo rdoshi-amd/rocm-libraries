@@ -552,7 +552,26 @@ static void scheduleRegionWithMovableSideEffects(
         });
 
         struct DsInfo {
-            unsigned idx, affinity, srcReg, kindRank;
+            unsigned idx, affinity, srcReg, kindRank, consumer;
+        };
+
+        // DAG id of the earliest in-region matrix op fed by ds_load \p i, directly
+        // or through a parent VALU. UINT_MAX for a next-iteration preload: its
+        // consumers lie in a later trip, so nothing in this region waits on it.
+        auto earliestRegionMatrixConsumer = [&](unsigned i) {
+            unsigned consumer = UINT_MAX;
+            for (unsigned succId : dagGraph[i]) {
+                const DAGNode& succ = dagNodes[succId];
+                if (isMatrixInstruction(*succ.inst)) {
+                    consumer = std::min(consumer, succId);
+                    continue;
+                }
+                if (!succ.feedsWmma) continue;
+                for (unsigned mId : dagGraph[succId])
+                    if (isMatrixInstruction(*dagNodes[mId].inst))
+                        consumer = std::min(consumer, mId);
+            }
+            return consumer;
         };
 
         auto dsKindOf = [&](const StinkyInstruction& inst) -> int {
@@ -619,7 +638,7 @@ static void scheduleRegionWithMovableSideEffects(
             const bool feedsParentKind = parentKindMask && kind >= 0 &&
                                          (parentKindMask & (1u << static_cast<unsigned>(kind)));
             const unsigned kindRank = kind >= 0 ? static_cast<unsigned>(kind) : kDsNumKinds;
-            DsInfo info{i, affinity, srcReg, kindRank};
+            DsInfo info{i, affinity, srcReg, kindRank, earliestRegionMatrixConsumer(i)};
             if (feedsParentKind || userIsParentValu)
                 parentFed.push_back(info);
             else
@@ -630,8 +649,13 @@ static void scheduleRegionWithMovableSideEffects(
             if (dsReads.empty()) return;
 
             if (parentTier) {
-                // Parent-VALU inputs: A → B → MXSA → MXSB, then affinity / program order.
+                // Parent-VALU inputs: earliest in-region matrix consumer, then
+                // A → B → MXSA → MXSB, then affinity / program order. Consumer comes
+                // first because affinity does not see through the splat VALU, and
+                // under LockDsReadOrder a kind-first order chains the current trip's
+                // MXSB behind the next trip's barrier-gated MXSA preload.
                 std::sort(dsReads.begin(), dsReads.end(), [](const DsInfo& a, const DsInfo& b) {
+                    if (a.consumer != b.consumer) return a.consumer < b.consumer;
                     if (a.kindRank != b.kindRank) return a.kindRank < b.kindRank;
                     if (a.affinity != b.affinity) return a.affinity < b.affinity;
                     return a.idx < b.idx;

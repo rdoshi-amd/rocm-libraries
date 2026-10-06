@@ -307,7 +307,8 @@ namespace rocsparse
               typename I,
               typename J>
     ROCSPARSE_DEVICE_ILF void
-        csrgemm_symbolic_fill_wf_per_row_device(J m,
+        csrgemm_symbolic_fill_wf_per_row_device(J block_offset,
+                                                J m,
                                                 J nk,
                                                 const J* __restrict__ offset,
                                                 const J* __restrict__ perm,
@@ -336,8 +337,9 @@ namespace rocsparse
         // Wavefront id
         int wid = hipThreadIdx_x / WFSIZE;
 
-        // Each (sub)wavefront processes a row
-        J row = hipBlockIdx_x * BLOCKSIZE / WFSIZE + wid;
+        // Each (sub)wavefront processes a row (block_offset supplied by the grid-stride
+        // loop in the kernel wrapper so a grid clamped by get_grid_size_x still covers all rows)
+        J row = block_offset + wid;
 
         // Hash table in shared memory
         __shared__ J stable[BLOCKSIZE / WFSIZE * HASHSIZE];
@@ -468,7 +470,8 @@ namespace rocsparse
               typename I,
               typename J>
     ROCSPARSE_DEVICE_ILF void
-        csrgemm_symbolic_fill_block_per_row_device(J nk,
+        csrgemm_symbolic_fill_block_per_row_device(J block_id,
+                                                   J nk,
                                                    const J* __restrict__ offset_,
                                                    const J* __restrict__ perm,
                                                    const I* __restrict__ csr_row_ptr_A,
@@ -509,8 +512,9 @@ namespace rocsparse
         // Wait for all threads to finish initialization
         __syncthreads();
 
-        // Each block processes a row (apply permutation)
-        J row = perm[hipBlockIdx_x + *offset_];
+        // Each block processes a row (apply permutation; block_id supplied by the grid-stride
+        // loop in the kernel wrapper so a grid clamped by get_grid_size_x still covers all rows)
+        J row = perm[block_id + *offset_];
 
         // alpha * A * B part
         if(mul == true)

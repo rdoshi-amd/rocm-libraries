@@ -45,32 +45,28 @@ namespace rocsparse
                       rocsparse_index_base idx_base_in,
                       rocsparse_index_base idx_base_out)
     {
-        I idx = hipBlockIdx_x * BLOCKSIZE + hipThreadIdx_x;
-
-        if(idx >= size)
+        for(int64_t idx = static_cast<int64_t>(hipBlockIdx_x) * BLOCKSIZE + hipThreadIdx_x;
+            idx < size;
+            idx += static_cast<int64_t>(hipGridDim_x) * BLOCKSIZE)
         {
-            return;
+            out[idx] = in[idx] - idx_base_in + idx_base_out;
         }
-
-        out[idx] = in[idx] - idx_base_in + idx_base_out;
     }
 
     // Copy and scale an array
     template <uint32_t BLOCKSIZE, typename I, typename T>
     ROCSPARSE_DEVICE_ILF void csrgemm_copy_scale_device(I size, T alpha, const T* in, T* out)
     {
-        I idx = hipBlockIdx_x * BLOCKSIZE + hipThreadIdx_x;
-
-        if(idx >= size)
+        for(int64_t idx = static_cast<int64_t>(hipBlockIdx_x) * BLOCKSIZE + hipThreadIdx_x;
+            idx < size;
+            idx += static_cast<int64_t>(hipGridDim_x) * BLOCKSIZE)
         {
-            return;
+            out[idx] = alpha * in[idx];
         }
-
-        out[idx] = alpha * in[idx];
     }
 
     // Compute number of intermediate products of each row
-    template <uint32_t BLOCKSIZE, uint32_t WFSIZE, typename I, typename J>
+    template <uint32_t BLOCKSIZE, uint32_t WFSIZE, bool GRID_STRIDE, typename I, typename J>
     ROCSPARSE_KERNEL(BLOCKSIZE)
     void csrgemm_intermediate_products(J m,
                                        const I* __restrict__ csr_row_ptr_A,
@@ -88,50 +84,53 @@ namespace rocsparse
         // Lane id
         int lid = hipThreadIdx_x & (WFSIZE - 1);
 
-        // Each (sub)wavefront processes a row
-        J row = (hipBlockIdx_x * BLOCKSIZE + hipThreadIdx_x) / WFSIZE;
-
-        // Bounds check
-        if(row >= m)
+        // Each (sub)wavefront processes a row, grid-strided so a grid clamped by
+        // get_grid_size_x still covers every row. The first row fits in 32 bits because
+        // the dispatch caps grid.x * BLOCKSIZE below 2^32.
+        for(int64_t row = (hipBlockIdx_x * BLOCKSIZE + hipThreadIdx_x) / WFSIZE; row < m;
+            row += static_cast<int64_t>(hipGridDim_x) * (BLOCKSIZE / WFSIZE))
         {
-            return;
-        }
+            // Initialize intermediate product counter of current row
+            I nprod = 0;
 
-        // Initialize intermediate product counter of current row
-        I nprod = 0;
-
-        // alpha * A * B part
-        if(mul == true)
-        {
-            // Row begin and row end of A matrix
-            I row_begin_A = csr_row_ptr_A[row] - idx_base_A;
-            I row_end_A   = csr_row_ptr_A[row + 1] - idx_base_A;
-
-            // Loop over columns of A in current row
-            for(I j = row_begin_A + lid; j < row_end_A; j += WFSIZE)
+            // alpha * A * B part
+            if(mul == true)
             {
-                // Current column of A
-                J col_A = csr_col_ind_A[j] - idx_base_A;
+                // Row begin and row end of A matrix
+                I row_begin_A = csr_row_ptr_A[row] - idx_base_A;
+                I row_end_A   = csr_row_ptr_A[row + 1] - idx_base_A;
 
-                // Accumulate non zero entries of B in row col_A
-                nprod += (csr_row_ptr_B[col_A + 1] - csr_row_ptr_B[col_A]);
+                // Loop over columns of A in current row
+                for(I j = row_begin_A + lid; j < row_end_A; j += WFSIZE)
+                {
+                    // Current column of A
+                    J col_A = csr_col_ind_A[j] - idx_base_A;
+
+                    // Accumulate non zero entries of B in row col_A
+                    nprod += (csr_row_ptr_B[col_A + 1] - csr_row_ptr_B[col_A]);
+                }
+
+                // Gather nprod
+                nprod = rocsparse::wfreduce_sum<WFSIZE>(nprod);
             }
 
-            // Gather nprod
-            nprod = rocsparse::wfreduce_sum<WFSIZE>(nprod);
-        }
-
-        // Last lane writes result
-        if(lid == WFSIZE - 1)
-        {
-            // beta * D part
-            if(add == true)
+            // Last lane writes result
+            if(lid == WFSIZE - 1)
             {
-                nprod += (csr_row_ptr_D[row + 1] - csr_row_ptr_D[row]);
+                // beta * D part
+                if(add == true)
+                {
+                    nprod += (csr_row_ptr_D[row + 1] - csr_row_ptr_D[row]);
+                }
+
+                // Write number of intermediate products of the current row
+                int_prod[row] = nprod;
             }
 
-            // Write number of intermediate products of the current row
-            int_prod[row] = nprod;
+            if constexpr(!GRID_STRIDE)
+            {
+                break;
+            }
         }
     }
 
@@ -456,6 +455,7 @@ namespace rocsparse
               uint32_t WFSIZE,
               uint32_t HASHSIZE,
               uint32_t HASHVAL,
+              bool     GRID_STRIDE,
               typename I,
               typename J>
     ROCSPARSE_KERNEL(BLOCKSIZE)
@@ -485,84 +485,87 @@ namespace rocsparse
         // Wavefront id
         int wid = hipThreadIdx_x / WFSIZE;
 
-        // Each (sub)wavefront processes a row
-        J row = hipBlockIdx_x * BLOCKSIZE / WFSIZE + wid;
-
         // Hash table in shared memory
         __shared__ J stable[BLOCKSIZE / WFSIZE * HASHSIZE];
 
         // Local hash table
         J* table = &stable[wid * HASHSIZE];
 
-        // Initialize hash table
-        for(uint32_t i = lid; i < HASHSIZE; i += WFSIZE)
+        // Grid-stride over the (sub)wavefront rows so a grid clamped by get_grid_size_x
+        // covers all rows. The first row fits in 32 bits because the dispatch caps
+        // grid.x * BLOCKSIZE below 2^32.
+        for(int64_t idx = (hipBlockIdx_x * BLOCKSIZE + hipThreadIdx_x) / WFSIZE; idx < m;
+            idx += static_cast<int64_t>(hipGridDim_x) * (BLOCKSIZE / WFSIZE))
         {
-            table[i] = -1;
-        }
-
-        __threadfence_block();
-
-        // Bounds check
-        if(row >= m)
-        {
-            return;
-        }
-
-        // Apply permutation, if available
-        row = perm ? perm[row + *offset] : row;
-
-        // Initialize row nnz
-        J nnz = 0;
-
-        // alpha * A * B part
-        if(mul == true)
-        {
-            // Get row boundaries of the current row in A
-            I row_begin_A = csr_row_ptr_A[row] - idx_base_A;
-            I row_end_A   = csr_row_ptr_A[row + 1] - idx_base_A;
-
-            // Loop over columns of A in current row
-            for(I j = row_begin_A + lid; j < row_end_A; j += WFSIZE)
+            // Initialize hash table
+            for(uint32_t i = lid; i < HASHSIZE; i += WFSIZE)
             {
-                // Column of A in current row
-                J col_A = csr_col_ind_A[j] - idx_base_A;
+                table[i] = -1;
+            }
 
-                // Loop over columns of B in row col_A
-                I row_begin_B = csr_row_ptr_B[col_A] - idx_base_B;
-                I row_end_B   = csr_row_ptr_B[col_A + 1] - idx_base_B;
+            __threadfence_block();
 
-                // Insert all columns of B into hash table
-                for(I k = row_begin_B; k < row_end_B; ++k)
+            // Apply permutation, if available
+            J row = perm ? perm[idx + *offset] : static_cast<J>(idx);
+
+            // Initialize row nnz
+            J nnz = 0;
+
+            // alpha * A * B part
+            if(mul == true)
+            {
+                // Get row boundaries of the current row in A
+                I row_begin_A = csr_row_ptr_A[row] - idx_base_A;
+                I row_end_A   = csr_row_ptr_A[row + 1] - idx_base_A;
+
+                // Loop over columns of A in current row
+                for(I j = row_begin_A + lid; j < row_end_A; j += WFSIZE)
                 {
-                    // Count the actual insertions to obtain row nnz of C
-                    nnz += insert_key<HASHVAL, HASHSIZE>(csr_col_ind_B[k] - idx_base_B, table);
+                    // Column of A in current row
+                    J col_A = csr_col_ind_A[j] - idx_base_A;
+
+                    // Loop over columns of B in row col_A
+                    I row_begin_B = csr_row_ptr_B[col_A] - idx_base_B;
+                    I row_end_B   = csr_row_ptr_B[col_A + 1] - idx_base_B;
+
+                    // Insert all columns of B into hash table
+                    for(I k = row_begin_B; k < row_end_B; ++k)
+                    {
+                        // Count the actual insertions to obtain row nnz of C
+                        nnz += insert_key<HASHVAL, HASHSIZE>(csr_col_ind_B[k] - idx_base_B, table);
+                    }
                 }
             }
-        }
 
-        // beta * D part
-        if(add == true)
-        {
-            // Get row boundaries of the current row in D
-            I row_begin_D = csr_row_ptr_D[row] - idx_base_D;
-            I row_end_D   = csr_row_ptr_D[row + 1] - idx_base_D;
-
-            // Loop over columns of D in current row and insert all columns of D into hash table
-            for(I j = row_begin_D + lid; j < row_end_D; j += WFSIZE)
+            // beta * D part
+            if(add == true)
             {
-                // Count the actual insertions to obtain row nnz of C
-                nnz += insert_key<HASHVAL, HASHSIZE>(csr_col_ind_D[j] - idx_base_D, table);
+                // Get row boundaries of the current row in D
+                I row_begin_D = csr_row_ptr_D[row] - idx_base_D;
+                I row_end_D   = csr_row_ptr_D[row + 1] - idx_base_D;
+
+                // Loop over columns of D in current row and insert all columns of D into hash table
+                for(I j = row_begin_D + lid; j < row_end_D; j += WFSIZE)
+                {
+                    // Count the actual insertions to obtain row nnz of C
+                    nnz += insert_key<HASHVAL, HASHSIZE>(csr_col_ind_D[j] - idx_base_D, table);
+                }
             }
-        }
 
-        // Accumulate all row nnz within each (sub)wavefront to obtain the total row nnz
-        // of the current row
-        nnz = rocsparse::wfreduce_sum<WFSIZE>(nnz);
+            // Accumulate all row nnz within each (sub)wavefront to obtain the total row nnz
+            // of the current row
+            nnz = rocsparse::wfreduce_sum<WFSIZE>(nnz);
 
-        // Write result to global memory
-        if(lid == WFSIZE - 1)
-        {
-            row_nnz[row] = nnz;
+            // Write result to global memory
+            if(lid == WFSIZE - 1)
+            {
+                row_nnz[row] = nnz;
+            }
+
+            if constexpr(!GRID_STRIDE)
+            {
+                break;
+            }
         }
     }
 
@@ -571,10 +574,12 @@ namespace rocsparse
               uint32_t WFSIZE,
               uint32_t HASHSIZE,
               uint32_t HASHVAL,
+              bool     GRID_STRIDE,
               typename I,
               typename J>
     ROCSPARSE_KERNEL(BLOCKSIZE)
-    void csrgemm_nnz_block_per_row(const J* __restrict__ offset,
+    void csrgemm_nnz_block_per_row(J size,
+                                   const J* __restrict__ offset,
                                    const J* __restrict__ perm,
                                    const I* __restrict__ csr_row_ptr_A,
                                    const J* __restrict__ csr_col_ind_A,
@@ -599,91 +604,105 @@ namespace rocsparse
         // Wavefront id
         int wid = hipThreadIdx_x / WFSIZE;
 
-        // Each block processes a row (apply permutation)
-        J row = perm[hipBlockIdx_x + *offset];
-
         // Hash table in shared memory
         extern __shared__ char shared_memory[];
         J*                     table = (J*)shared_memory;
 
-        // Initialize hash table
-        for(uint32_t i = hipThreadIdx_x; i < HASHSIZE; i += BLOCKSIZE)
+        // Grid-stride over the block rows so a grid clamped by get_grid_size_x covers all rows
+        for(int64_t block_id = hipBlockIdx_x; block_id < size; block_id += hipGridDim_x)
         {
-            table[i] = -1;
-        }
+            // Each block processes a row (apply permutation)
+            J row = perm[block_id + *offset];
 
-        // Wait for all threads to finish initialization
-        __syncthreads();
-
-        // Initialize row nnz
-        J nnz = 0;
-
-        // alpha * A * B part
-        if(mul == true)
-        {
-            // Get row boundaries of the current row in A
-            I row_begin_A = csr_row_ptr_A[row] - idx_base_A;
-            I row_end_A   = csr_row_ptr_A[row + 1] - idx_base_A;
-
-            // Loop over columns of A in current row
-            for(I j = row_begin_A + wid; j < row_end_A; j += BLOCKSIZE / WFSIZE)
+            // Initialize hash table
+            for(uint32_t i = hipThreadIdx_x; i < HASHSIZE; i += BLOCKSIZE)
             {
-                // Column of A in current row
-                J col_A = csr_col_ind_A[j] - idx_base_A;
+                table[i] = -1;
+            }
 
-                // Loop over columns of B in row col_A
-                I row_begin_B = csr_row_ptr_B[col_A] - idx_base_B;
-                I row_end_B   = csr_row_ptr_B[col_A + 1] - idx_base_B;
+            // Wait for all threads to finish initialization
+            __syncthreads();
 
-                for(I k = row_begin_B + lid; k < row_end_B; k += WFSIZE)
+            // Initialize row nnz
+            J nnz = 0;
+
+            // alpha * A * B part
+            if(mul == true)
+            {
+                // Get row boundaries of the current row in A
+                I row_begin_A = csr_row_ptr_A[row] - idx_base_A;
+                I row_end_A   = csr_row_ptr_A[row + 1] - idx_base_A;
+
+                // Loop over columns of A in current row
+                for(I j = row_begin_A + wid; j < row_end_A; j += BLOCKSIZE / WFSIZE)
                 {
-                    // Count the actual insertions to obtain row nnz of C
-                    nnz += insert_key<HASHVAL, HASHSIZE>(csr_col_ind_B[k] - idx_base_B, table);
+                    // Column of A in current row
+                    J col_A = csr_col_ind_A[j] - idx_base_A;
+
+                    // Loop over columns of B in row col_A
+                    I row_begin_B = csr_row_ptr_B[col_A] - idx_base_B;
+                    I row_end_B   = csr_row_ptr_B[col_A + 1] - idx_base_B;
+
+                    for(I k = row_begin_B + lid; k < row_end_B; k += WFSIZE)
+                    {
+                        // Count the actual insertions to obtain row nnz of C
+                        nnz += insert_key<HASHVAL, HASHSIZE>(csr_col_ind_B[k] - idx_base_B, table);
+                    }
                 }
             }
-        }
 
-        // beta * D part
-        if(add == true)
-        {
-            // Get row boundaries of the current row in D
-            I row_begin_D = csr_row_ptr_D[row] - idx_base_D;
-            I row_end_D   = csr_row_ptr_D[row + 1] - idx_base_D;
-
-            // Loop over columns of D in current row and insert all columns of D into hash table
-            for(I j = row_begin_D + wid; j < row_end_D; j += BLOCKSIZE / WFSIZE)
+            // beta * D part
+            if(add == true)
             {
-                // Count the actual insertions to obtain row nnz of C
-                nnz += insert_key<HASHVAL, HASHSIZE>(csr_col_ind_D[j] - idx_base_D, table);
+                // Get row boundaries of the current row in D
+                I row_begin_D = csr_row_ptr_D[row] - idx_base_D;
+                I row_end_D   = csr_row_ptr_D[row + 1] - idx_base_D;
+
+                // Loop over columns of D in current row and insert all columns of D into hash table
+                for(I j = row_begin_D + wid; j < row_end_D; j += BLOCKSIZE / WFSIZE)
+                {
+                    // Count the actual insertions to obtain row nnz of C
+                    nnz += insert_key<HASHVAL, HASHSIZE>(csr_col_ind_D[j] - idx_base_D, table);
+                }
             }
-        }
 
-        // Wait for all threads to finish hash operation
-        __syncthreads();
+            // Wait for all threads to finish hash operation
+            __syncthreads();
 
-        // Accumulate all row nnz within each (sub)wavefront to obtain the total row nnz
-        // of the current row
-        nnz = rocsparse::wfreduce_sum<WFSIZE>(nnz);
+            // Accumulate all row nnz within each (sub)wavefront to obtain the total row nnz
+            // of the current row
+            nnz = rocsparse::wfreduce_sum<WFSIZE>(nnz);
 
-        // Write result to shared memory for final reduction by first wavefront
-        if(lid == WFSIZE - 1)
-        {
-            table[wid] = nnz;
-        }
+            // Write result to shared memory for final reduction by first wavefront
+            if(lid == WFSIZE - 1)
+            {
+                table[wid] = nnz;
+            }
 
-        // Wait for all threads to finish reduction
-        __syncthreads();
+            // Wait for all threads to finish reduction
+            __syncthreads();
 
-        // Gather row nnz for the whole block
-        nnz = (hipThreadIdx_x < BLOCKSIZE / WFSIZE) ? table[hipThreadIdx_x] : 0;
+            // Gather row nnz for the whole block
+            nnz = (hipThreadIdx_x < BLOCKSIZE / WFSIZE) ? table[hipThreadIdx_x] : 0;
 
-        // First wavefront computes final sum
-        nnz = rocsparse::wfreduce_sum<BLOCKSIZE / WFSIZE>(nnz);
+            // First wavefront computes final sum
+            nnz = rocsparse::wfreduce_sum<BLOCKSIZE / WFSIZE>(nnz);
 
-        // Write result to global memory
-        if(hipThreadIdx_x == BLOCKSIZE / WFSIZE - 1)
-        {
-            row_nnz[row] = nnz;
+            // Write result to global memory
+            if(hipThreadIdx_x == BLOCKSIZE / WFSIZE - 1)
+            {
+                row_nnz[row] = nnz;
+            }
+
+            if constexpr(GRID_STRIDE)
+            {
+                // The next row re-initialises the shared hash table read above
+                __syncthreads();
+            }
+            else
+            {
+                break;
+            }
         }
     }
 
@@ -695,7 +714,8 @@ namespace rocsparse
               typename I,
               typename J,
               typename T>
-    ROCSPARSE_DEVICE_ILF void csrgemm_fill_wf_per_row_device(J m,
+    ROCSPARSE_DEVICE_ILF void csrgemm_fill_wf_per_row_device(J block_offset,
+                                                             J m,
                                                              J nk,
                                                              const J* __restrict__ offset,
                                                              const J* __restrict__ perm,
@@ -730,8 +750,9 @@ namespace rocsparse
         // Wavefront id
         int wid = hipThreadIdx_x / WFSIZE;
 
-        // Each (sub)wavefront processes a row
-        J row = hipBlockIdx_x * BLOCKSIZE / WFSIZE + wid;
+        // Each (sub)wavefront processes a row (block_offset supplied by the grid-stride
+        // loop in the kernel wrapper so a grid clamped by get_grid_size_x still covers all rows)
+        J row = block_offset + wid;
 
         // Hash table in shared memory
         __shared__ J stable[BLOCKSIZE / WFSIZE * HASHSIZE];
@@ -862,7 +883,8 @@ namespace rocsparse
               typename I,
               typename J,
               typename T>
-    ROCSPARSE_DEVICE_ILF void csrgemm_fill_block_per_row_device(J nk,
+    ROCSPARSE_DEVICE_ILF void csrgemm_fill_block_per_row_device(J block_id,
+                                                                J nk,
                                                                 const J* __restrict__ offset_,
                                                                 const J* __restrict__ perm,
                                                                 T alpha,
@@ -911,8 +933,9 @@ namespace rocsparse
         // Wait for all threads to finish initialization
         __syncthreads();
 
-        // Each block processes a row (apply permutation)
-        J row = perm[hipBlockIdx_x + *offset_];
+        // Each block processes a row (apply permutation; block_id supplied by the grid-stride
+        // loop in the kernel wrapper so a grid clamped by get_grid_size_x still covers all rows)
+        J row = perm[block_id + *offset_];
 
         // alpha * A * B part
         if(mul == true)

@@ -45,7 +45,7 @@ implementation.
 | `img2col.py` | `Img2ColSpec` | `instances/convolution.md` |
 | `pooling.py` | `PoolingProblem`, `Pooling2DSpec`, `PoolOp` | `instances/convolution.md` |
 
-ABI: `(A, B, D, A_bytes, B_bytes, D_bytes)` for implicit-GEMM / direct grouped conv. Img2col writes `Y`. Pooling reads `X` and writes `Y`.
+ABI: conv kernels are ahead-of-time compiled and shape-generic. Every implicit-GEMM / direct grouped conv kernel takes `(A, B, D, A_bytes, B_bytes, D_bytes)` followed by the problem block -- extents, strides, padding, dilation, groups and the host-computed magic-division constants -- whose names and order come from `kernels.common.conv_abi` (`conv_arg_names(direction)` / `conv_direct_arg_names(direction)`; C++ twin `instance_conv_abi.h`). Hosts fill them with `kernels.common.conv_args.ConvArgs.from_problem(...).to_launch_values(...)`; wgrad appends the split-K `ks` / `ks_count` pair (and the two-stage `ws_ptr` / `ws_bytes`), dgrad its sub-GEMM table. See `instances/convolution.md`. Img2col writes `Y`. Pooling reads `X` and writes `Y`.
 
 Layouts: NHWC input, KYXC weight, NHWK output for conv. Grouping via `cpg`/`kpg`.
 
@@ -102,6 +102,22 @@ Three kernels: a fused prefill, and a two-phase split path (per-chunk tile
 builder, then state scan). gfx942 and gfx950 are bf16-only; prefill only, no varlen.
 Dispatch is `library/dispatch/kda/` (`dispatch_kda`), which defaults to the
 fused kernel and keeps the split halves opt-in.
+
+### GDN
+
+| File | Spec | Doc |
+|-----------------------------------|-------------------------------------------------------------------|------------------------------|
+| `gfx950/gdn_decode.py` | `GdnDecodeSpec` (gated delta rule; single-token decode over a paged recurrent state) | `instances/gdn.md` |
+
+Runtime entry points: `dispatch_gdn_decode(GdnDecodeRequest(...))` (single-token decode) and `dispatch_gdn_prefill(GdnPrefillRequest(...))` (split chunkwise prefill — the shared KDA chunkwise kernels run in `gate_kind="gdn"` mode; there is no fused single-kernel GDN prefill, so the caller pins `chunk_prep` then `chunk_scan`).
+
+Linear attention carries a fixed-size recurrent state per value head instead of re-reading past tokens, so cost per token does not grow with sequence length. GDN ships a single-token decode kernel and a split chunkwise prefill mode; gfx950.
+
+GDN decode uses the static `(2, 16, 8)` dispatcher default whenever it is legal;
+batch changes its grid, not its auto tile. GDN prefill picks `value_splits` per
+`batch_heads`. Both tune the same tension -- splitting a head's value dimension
+across workgroups buys parallelism when the natural grid starves, and costs
+redundant tile reads once it does not.
 
 ## Small Ops
 

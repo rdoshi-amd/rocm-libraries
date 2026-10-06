@@ -5,6 +5,10 @@ Documentation for rocSPARSE is available at
 
 ## (Unreleased) rocSPARSE 5.2.0
 
+### Added
+* Added the `rocsparse_spsort` and `rocsparse_spsort_buffer_size` generic routines, which sort a sparse matrix in place or into a separate target matrix. COO matrices are sorted by row or by column, and CSR and CSC matrices have the indices within each row or column sorted. The values are reordered with the indices. Uniform strided batched matrices are supported, including broadcasting a single source matrix to every sample of the target matrix.
+* Added the `rocsparse_spsort_descr_create`, `rocsparse_spsort_descr_destroy`, and `rocsparse_spsort_set_input` auxiliary routines, together with the `rocsparse_spsort_descr` type and the `rocsparse_spsort_alg`, `rocsparse_spsort_input`, and `rocsparse_spsort_stage` enums.
+
 ### Resolved issues
 * Fixed an overflow issue in `rocsparse_roti` and the generic `rocsparse_rot` routine. When using 64-bit indices and `nnz` >= `2^32`, a 32-bit element-index calculation could overflow, leaving some elements unrotated and causing low-index elements to be processed with incorrect data. The kernel now computes element indices in 64-bit arithmetic and uses a grid-stride loop with the launch grid clamped to the device limit.
 * Fixed an overflow issue in `rocsparse_Xsctr` and the generic `rocsparse_scatter` routine. When using 64-bit indices and `nnz` >= `2^32`, a 32-bit element-index calculation could overflow and prevent some elements from being scattered. The kernel now computes element indices in 64-bit arithmetic and uses a grid-stride loop with the launch grid clamped to the device limit.

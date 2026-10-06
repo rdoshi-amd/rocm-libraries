@@ -70,8 +70,8 @@ struct PackStridesKernel
             return;
 
         TDM_GROUP1 g{};
-        g.tensorDim0Stride(strides[i]);
-        g.tensorDim1Stride(strides[i]);
+        g.tensorDimStride(0, strides[i]);
+        g.tensorDimStride(1, strides[i]);
 
         uint32_t* w = out + i * kNumWord;
         w[0]        = g.sgpr0;

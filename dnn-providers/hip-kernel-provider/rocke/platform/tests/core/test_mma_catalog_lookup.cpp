@@ -7,6 +7,7 @@
 #include "rocke/error.hpp"
 #include "rocke/helper_rocke.core.arch.h"
 #include "rocke/instance_gemm_internal.h"
+#include "rocke/lower_hip.h"
 #include "rocke/wmma_scale_internal.h"
 
 #include <atomic>
@@ -469,12 +470,86 @@ static int test_independent_accumulator_width()
     return 0;
 }
 
+static int test_scaled_accumulator_contracts()
+{
+    const auto* arch = rocke_arch_target_from_gfx("gfx1250");
+    for(int i = 0; i < arch->mma.num_ops; ++i)
+    {
+        const auto& base = arch->mma.ops[i];
+        if(strcmp(base.family, "wmma_scaled") != 0)
+            continue;
+        CHECK(base.srcs[2].frag_len == 8 && base.dst.frag_len == 8);
+        CHECK(strstr(rocke_scaled_wmma_contract(&base).intrinsic, ".v8f32."));
+        for(int role = 0; role < 3; ++role)
+            for(int width : {0, 4, 7, 16})
+            {
+                auto invalid = base;
+                if(role != 1)
+                    invalid.srcs[2].frag_len = width;
+                if(role != 0)
+                    invalid.dst.frag_len = width;
+                CHECK(rejects_query([&] { rocke_scaled_wmma_contract(&invalid); }));
+            }
+    }
+    return 0;
+}
+
+static int test_scaled_hip_accumulator_values()
+{
+    for(const char* id : {"wmma_gfx1250_f32_16x16x128_fp8_fp8_scale_e8m0_e8m0_k32",
+                          "wmma_gfx1250_f32_16x16x128_fp8_fp8_scale_e8m0_e8m0_k16"})
+        for(int variant = 0; variant < 15; ++variant)
+        {
+            rocke_ir_builder_t b = {};
+            CHECK(rocke_ir_builder_init(&b, "scaled_values") == ROCKE_OK);
+            auto* a = rocke_b_param(&b, "a", rocke_vector_type(&b, rocke_i32(), 16), NULL);
+            auto* c = rocke_b_param(&b, "c", rocke_vector_type(&b, rocke_f32(), 8), NULL);
+            auto* s = rocke_b_param(&b, "s", strstr(id, "_k16") ? rocke_i64() : rocke_i32(), NULL);
+            rocke_value_t* scales[] = {s, s};
+            auto* result = rocke_b_mma(&b, id, a, a, c, scales, 2);
+            CHECK(result);
+            auto* op = result->op;
+            if(variant < 10)
+            {
+                const int widths[] = {4, 7, 16, 8, 8};
+                int kind = variant % 5;
+                const auto* type
+                    = kind == 3 ? rocke_f32()
+                                : rocke_vector_type(
+                                      &b, kind == 4 ? rocke_i32() : rocke_f32(), widths[kind]);
+                (variant < 5 ? c : result)->type = type;
+            }
+            rocke_value_t* operands[] = {a, a, c, s, s, s};
+            rocke_value_t extra = {"%extra", result->type, op};
+            rocke_value_t* results[] = {result, &extra};
+            op->operands = operands;
+            op->results = results;
+            if(variant == 10 || variant == 11)
+                op->num_operands = variant == 10 ? 4 : 6;
+            if(variant == 12 || variant == 13)
+                op->num_results = variant == 12 ? 0 : 2;
+            rocke_b_ret(&b);
+            rocke_strbuf_t hip;
+            CHECK(rocke_strbuf_init(&hip, 0) == 0);
+            rocke_lower_hip_opts_t opts = {};
+            opts.arch = "gfx1250";
+            auto status = rocke_lower_kernel_to_hip(&b, b.kernel, &opts, &hip);
+            if(status != (variant == 14 ? ROCKE_OK : ROCKE_ERR_VALUE))
+                fprintf(stderr, "scaled HIP: %s variant=%d status=%d\n", id, variant, status);
+            CHECK(status == (variant == 14 ? ROCKE_OK : ROCKE_ERR_VALUE));
+            rocke_strbuf_free(&hip);
+            rocke_ir_builder_free(&b);
+        }
+    return 0;
+}
+
 int main()
 {
     // Keep this first: no previous query may prime the shared family index.
     if(test_family_index_first_use() || test_family_index_duplicates() || test_mma_result_names()
        || test_scale_contracts() || test_scale_layouts_and_families()
-       || test_independent_accumulator_width())
+       || test_independent_accumulator_width() || test_scaled_accumulator_contracts()
+       || test_scaled_hip_accumulator_values())
         return 1;
     int checked = 0;
     for(const char* gfx : {"gfx950", "gfx1250"})

@@ -614,12 +614,19 @@ class Gfx1250Backend(Gfx12RdnaBackend):
 
     def _emit_wmma_scale(self, lowerer, op) -> None:
         """Emit the gfx1250 SCALE/SCALE16 intrinsic using the resolved operand contract."""
+        from ..ir import F32, VectorType
+
         if lowerer._flavor != "llvm23":
             raise NotImplementedError(
                 f"{op.name} requires llvm23 (ROCm 7.13+), got {lowerer._flavor}"
             )
-        if len(op.operands) != 5:
-            raise ValueError(f"{op.name} expects 5 operands, got {len(op.operands)}")
+        if len(op.operands) != 5 or len(op.results) != 1:
+            raise ValueError(f"{op.name} expects 5 operands and 1 result")
+        # The catalog lookup cannot validate the caller's actual SSA values.
+        if op.operands[2].type != VectorType(F32, 8) or op.result.type != VectorType(
+            F32, 8
+        ):
+            raise ValueError("scaled WMMA requires src2 and dst to be vec<f32x8>")
         spec = gfx1250_scaled_wmma(op.name)
         if spec is None:
             raise NotImplementedError(f"unsupported scaled WMMA op {op.name!r}")

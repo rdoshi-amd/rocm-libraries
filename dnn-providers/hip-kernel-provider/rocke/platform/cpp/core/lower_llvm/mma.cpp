@@ -214,11 +214,16 @@ static void _emit_wmma_scale(rocke_lower_t* L, const rocke_op_t* op)
                       op_name,
                       rocke_llvm_flavor_name(L->flavor));
     }
-    if(op->num_operands != 5)
+    if(op->num_operands != 5 || op->num_results != 1)
     {
-        rocke_ll_fail(
-            L, ROCKE_ERR_VALUE, "%s expects 5 operands, got %d", op_name, op->num_operands);
+        rocke_ll_fail(L, ROCKE_ERR_VALUE, "%s expects 5 operands and 1 result", op_name);
     }
+    // Re-resolving catalog metadata must not hide malformed SSA values.
+    const rocke_type_t* acc_types[] = {op->operands[2]->type, op->results[0]->type};
+    for(const auto* type : acc_types)
+        if(!type || type->kind != ROCKE_TYPE_VECTOR || type->count != 8
+           || !rocke_type_eq(type->elem, rocke_f32()))
+            rocke_ll_fail(L, ROCKE_ERR_VALUE, "scaled WMMA requires src2 and dst to be vec<f32x8>");
 
     char packed_type[8];
     snprintf(packed_type, sizeof(packed_type), "i%d", rocke_scale_word_bits(&spec->scales));

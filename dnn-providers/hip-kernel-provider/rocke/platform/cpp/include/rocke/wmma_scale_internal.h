@@ -123,7 +123,8 @@ static inline rocke_scaled_wmma_op_t rocke_scaled_wmma_contract(const rocke_mma_
     if((atom->srcs[0].scale_block_size != 16 && atom->srcs[0].scale_block_size != 32)
        || atom->srcs[0].scale_block_size != atom->srcs[1].scale_block_size
        || strcmp(atom->srcs[2].dtype, "fp32") != 0 || strcmp(atom->dst.dtype, "fp32") != 0
-       || atom->m != 16 || atom->n != 16 || atom->k != 128)
+       || atom->srcs[2].frag_len != 8 || atom->dst.frag_len != 8 || atom->m != 16 || atom->n != 16
+       || atom->k != 128)
         ckc::raise_status(ROCKE_ERR_VALUE, "unsupported scaled WMMA backend contract");
     spec.scales.block_k = atom->srcs[0].scale_block_size;
     const int count = atom->k / spec.scales.block_k;

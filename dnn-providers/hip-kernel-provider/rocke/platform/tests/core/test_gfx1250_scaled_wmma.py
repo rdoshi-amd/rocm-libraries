@@ -8,11 +8,13 @@ import unittest
 from dataclasses import replace
 from unittest import mock
 
+import pytest
+
 from rocke.core.arch import ArchTarget
 from rocke.core.arch.wmma_scale import gfx1250_scaled_wmma
 from rocke.core.backend import _cpp_strict, resolve_backend
 from rocke.core.isa.wmma_scale import ScaledWmmaLLVM
-from rocke.core.ir import F32, I32, I64, IRBuilder, PtrType
+from rocke.core.ir import F32, I32, I64, IRBuilder, PtrType, VectorType
 from rocke.core.ir_serialize import parse, serialize
 from rocke.core.lower_hip import lower_kernel_to_hip
 from rocke.core.lower_llvm import (
@@ -58,6 +60,99 @@ def _build_scaled_atom(*, scale16: bool):
     d = b.mma(_scaled_atom(scale16=scale16), fragment, fragment, c, scale, scale)
     b.global_store(accum, lane, b.vec_extract(d, 0))
     return b.kernel
+
+
+@pytest.mark.parametrize("scale16", [False, True])
+@pytest.mark.parametrize("role", ["src2", "dst", "both"])
+@pytest.mark.parametrize("width", [0, 4, 7, 16, 8.0])
+def test_scaled_backend_rejects_accumulator_widths(scale16, role, width):
+    atom = _scaled_atom(scale16=scale16)
+    if role in ("src2", "both"):
+        atom = replace(
+            atom, srcs=(*atom.srcs[:2], replace(atom.srcs[2], frag_len=width))
+        )
+    if role in ("dst", "both"):
+        atom = replace(atom, dst=replace(atom.dst, frag_len=width))
+    catalog = ArchTarget.from_gfx("gfx1250").mma
+    with mock.patch.object(catalog, "by_op_id", return_value=atom):
+        with pytest.raises(
+            ValueError, match="unsupported scaled WMMA backend contract"
+        ):
+            gfx1250_scaled_wmma(atom.op_id)
+
+
+def _scaled_call(scale16, concrete):
+    b = IRBuilder("scaled_operand_contract")
+    a = b.param("a", VectorType(I32, 16))
+    c = b.param("c", VectorType(F32, 8))
+    s = b.param("s", I64 if scale16 else I32)
+    b.mma(_scaled_atom(scale16=scale16), a, a, c, s, s)
+    call = b.kernel.body.ops[-1]
+    if concrete:
+        call.name = f"tile.{call.attrs.pop('op_id')}"
+    b.ret()
+    return b.kernel, call
+
+
+def _assert_scaled_lowering_rejects(kernel, message):
+    # Use the normal catalog; re-resolving op_id must not hide malformed SSA.
+    native = pytest.importorskip("rocke_engine")
+    ir = serialize(kernel)
+    neutral = any(op.name == "tile.mma" for op in kernel.body.ops)
+    for candidate in (kernel, parse(ir)):
+        # Concrete scaled names are supported directly by HIP; LLVM uses tile.mma.
+        if neutral:
+            with pytest.raises(ValueError, match=message):
+                _lower_kernel_to_llvm_python(
+                    candidate, arch="gfx1250", llvm_flavor="llvm23"
+                )
+        with pytest.raises(ValueError, match=message):
+            lower_kernel_to_hip(candidate, arch="gfx1250")
+    if neutral:
+        with pytest.raises(RuntimeError, match=message):
+            native.lower_serialized_ir(ir, arch="gfx1250", flavor="llvm23")
+
+
+@pytest.mark.parametrize("scale16", [False, True])
+@pytest.mark.parametrize("concrete", [False, True])
+@pytest.mark.parametrize("role", ["src2", "dst"])
+@pytest.mark.parametrize(
+    "bad_type",
+    [
+        VectorType(F32, 4),
+        VectorType(F32, 7),
+        VectorType(F32, 16),
+        F32,
+        VectorType(I32, 8),
+    ],
+)
+def test_scaled_lowering_rejects_accumulator_types(scale16, concrete, role, bad_type):
+    kernel, call = _scaled_call(scale16, concrete)
+    value = call.operands[2] if role == "src2" else call.result
+    value.type = bad_type
+    if role == "src2":
+        next(p for p in kernel.params if p.name == "c").type = bad_type
+    _assert_scaled_lowering_rejects(
+        kernel, "scaled WMMA requires src2 and dst to be vec<f32x8>"
+    )
+
+
+@pytest.mark.parametrize("scale16", [False, True])
+@pytest.mark.parametrize("concrete", [False, True])
+@pytest.mark.parametrize(
+    "arity", ["missing_operand", "extra_operand", "missing_result", "extra_result"]
+)
+def test_scaled_lowering_rejects_arity(scale16, concrete, arity):
+    kernel, call = _scaled_call(scale16, concrete)
+    if arity == "missing_operand":
+        call.operands.pop()
+    elif arity == "extra_operand":
+        call.operands.append(call.operands[-1])
+    elif arity == "missing_result":
+        call.results.clear()
+    else:
+        call.results.append(replace(call.result, name="%extra"))
+    _assert_scaled_lowering_rejects(kernel, "expects 5 operands and 1 result")
 
 
 class TestGfx1250ScaledWmma(unittest.TestCase):

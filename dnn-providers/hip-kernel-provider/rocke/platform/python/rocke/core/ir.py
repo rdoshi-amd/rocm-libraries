@@ -1533,7 +1533,9 @@ class IRBuilder:
     def cluster_workgroup_flat_id(self) -> Value:
         """``llvm.amdgcn.cluster.workgroup.flat.id`` — flattened id inside the cluster."""
         return self._op(
-            "gpu.cluster_workgroup_flat_id", result_types=[I32], result_name_hint="cwflat"
+            "gpu.cluster_workgroup_flat_id",
+            result_types=[I32],
+            result_name_hint="cwflat",
         ).result
 
     def cluster_workgroup_max_flat_id(self) -> Value:
@@ -4029,7 +4031,10 @@ class IRBuilder:
         matches CK Tile's ``TDM_GROUP0`` / ``TDM_GROUP1``.
         """
         name = "tdm_descriptor_2d"
-        if not isinstance(global_ptr.type, PtrType) or global_ptr.type.space != "global":
+        if (
+            not isinstance(global_ptr.type, PtrType)
+            or global_ptr.type.space != "global"
+        ):
             raise TypeError(
                 f"{name} global_ptr must be a global pointer, got {global_ptr.type}"
             )
@@ -4043,15 +4048,21 @@ class IRBuilder:
             self._check_i32_value(name, field, value)
         data_size = {1: 0, 2: 1, 4: 2, 8: 3}.get(elem_bytes)
         if data_size is None:
-            raise ValueError(f"{name} elem_bytes must be 1, 2, 4, or 8 (got {elem_bytes})")
+            raise ValueError(
+                f"{name} elem_bytes must be 1, 2, 4, or 8 (got {elem_bytes})"
+            )
         for field, value in (("tile_dim0", tile_dim0), ("tile_dim1", tile_dim1)):
             if not 1 <= value <= 0xFFFF:
                 raise ValueError(f"{name} {field} must be in 1..65535 (got {value})")
         if not 0 <= workgroup_mask <= 0xFFFF:
-            raise ValueError(f"{name} workgroup_mask must be in 0..65535 (got {workgroup_mask})")
+            raise ValueError(
+                f"{name} workgroup_mask must be in 0..65535 (got {workgroup_mask})"
+            )
         pad_enable = pad_interval is not None
         if pad_enable and not 0 <= pad_interval <= 7:
-            raise ValueError(f"{name} pad_interval must be in 0..7 (got {pad_interval})")
+            raise ValueError(
+                f"{name} pad_interval must be in 0..7 (got {pad_interval})"
+            )
         if not 0 <= pad_amount <= 0x7F or (pad_amount and not pad_enable):
             raise ValueError(
                 f"{name} pad_amount must be in 0..127 and needs pad_interval (got {pad_amount})"
@@ -4167,7 +4178,9 @@ class IRBuilder:
     def global_ptr_to_i64(self, ptr: Value) -> Value:
         """Return the 64-bit address of a global pointer (``ptrtoint``)."""
         if not isinstance(ptr.type, PtrType) or ptr.type.space != "global":
-            raise TypeError(f"global_ptr_to_i64 ptr must be a global pointer, got {ptr.type}")
+            raise TypeError(
+                f"global_ptr_to_i64 ptr must be a global pointer, got {ptr.type}"
+            )
         return self._op(
             "tile.global_ptr_to_i64",
             [ptr],

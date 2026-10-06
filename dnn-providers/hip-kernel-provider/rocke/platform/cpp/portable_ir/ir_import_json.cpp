@@ -1242,23 +1242,42 @@ static void import_params(importer_t* im, const jval_t* params)
     }
 }
 
-/* A kernel list attr of bare ints (e.g. cluster_dims), exported as
- * {"t":"l","v":[{"_":{"t":"i","v":N}}, ...]}. Other list shapes are skipped. */
-static void import_kernel_int_list(importer_t* im,
-                                   rocke_attr_map_t* m,
-                                   const char* key,
-                                   const jval_t* v)
+/* A kernel list attr of bare ints (e.g. cluster_dims, agpr_alloc), exported as
+ * {"t":"l","v":[{"_":{"t":"i","v":N}}, ...]}. Any other shape is an error: a
+ * dropped list would silently change what the kernel compiles to. */
+static void
+    import_kernel_int_list(importer_t* im, rocke_attr_map_t* m, const char* key, const jval_t* v)
 {
     int64_t ints[16];
-    if(v->kind != J_ARR || v->arr_len <= 0 || v->arr_len > (int)(sizeof ints / sizeof ints[0]))
+    const int cap = (int)(sizeof ints / sizeof ints[0]);
+    if(!v || v->kind != J_ARR)
+    {
+        imp_fail(im, "kernel attr '%s': list value must be an array", key);
         return;
+    }
+    if(v->arr_len > cap)
+    {
+        imp_fail(
+            im, "kernel attr '%s': list has %d items, at most %d supported", key, v->arr_len, cap);
+        return;
+    }
     for(int i = 0; i < v->arr_len; i++)
     {
         const jval_t* item = jobj_get(v->arr[i], "_");
         const char* t = jstr(jobj_get(item, "t"));
         const jval_t* n = jobj_get(item, "v");
         if(!t || strcmp(t, "i") != 0 || !n || n->kind != J_NUM)
+        {
+            imp_fail(im, "kernel attr '%s': item %d is not a bare int", key, i);
             return;
+        }
+        /* Range test first: the cast is undefined for out-of-range doubles. */
+        if(!(n->num >= -9007199254740992.0 && n->num <= 9007199254740992.0)
+           || n->num != (double)(int64_t)n->num)
+        {
+            imp_fail(im, "kernel attr '%s': item %d is not an integer", key, i);
+            return;
+        }
         ints[i] = (int64_t)n->num;
     }
     rocke_attr_set_int_list(im->b, m, key, ints, v->arr_len);
@@ -1277,6 +1296,11 @@ static void import_kernel_attrs(importer_t* im, const jval_t* attrs)
         const jval_t* tv = attrs->obj[i].val;
         const char* t = jstr(jobj_get(tv, "t"));
         const jval_t* v = jobj_get(tv, "v");
+        if(t && strcmp(t, "l") == 0)
+        {
+            import_kernel_int_list(im, &k->attrs, key, v);
+            continue;
+        }
         if(!t || !v)
             continue;
         if(strcmp(t, "i") == 0)
@@ -1287,8 +1311,6 @@ static void import_kernel_attrs(importer_t* im, const jval_t* attrs)
             rocke_attr_set_bool(im->b, &k->attrs, key, v->b);
         else if(strcmp(t, "s") == 0)
             rocke_attr_set_str(im->b, &k->attrs, key, v->str ? v->str : "");
-        else if(strcmp(t, "l") == 0)
-            import_kernel_int_list(im, &k->attrs, key, v);
     }
 }
 

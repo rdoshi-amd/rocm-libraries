@@ -793,15 +793,12 @@ static void op_tile_global_ptr_to_i64(rocke_lower_t* L, const rocke_op_t* op)
     if(!rocke_ll_live(L))
         return;
     if(op->num_operands != 1 || op->num_results != 1)
-        rocke_ll_fail(
-            L, ROCKE_ERR_VALUE, "global_ptr_to_i64 expects one operand and one result");
+        rocke_ll_fail(L, ROCKE_ERR_VALUE, "global_ptr_to_i64 expects one operand and one result");
     ptr = op->operands[0];
     if(strcmp(rocke_ll_value_ptr_type(L, ptr), "ptr addrspace(1)") != 0)
         rocke_ll_fail(L, ROCKE_ERR_VALUE, "global_ptr_to_i64 ptr must be a global pointer");
-    rocke_ll_emitf(L,
-                   "  %s = ptrtoint ptr addrspace(1) %s to i64",
-                   ll_res(op),
-                   rocke_ll_operand(L, ptr));
+    rocke_ll_emitf(
+        L, "  %s = ptrtoint ptr addrspace(1) %s to i64", ll_res(op), rocke_ll_operand(L, ptr));
 }
 
 /* ====================================================================== */
@@ -1584,8 +1581,8 @@ static void op_tile_cluster_load(rocke_lower_t* L, const rocke_op_t* op)
     ll_require_gfx1250_llvm23(L, "cluster_load");
     if(op->num_operands != 2 || op->num_results != 1)
         rocke_ll_fail(L, ROCKE_ERR_VALUE, "cluster_load expects two operands and one result");
-    ptr    = op->operands[0];
-    mask   = op->operands[1];
+    ptr = op->operands[0];
+    mask = op->operands[1];
     ptr_ty = rocke_ll_value_ptr_type(L, ptr);
     if(strcmp(ptr_ty, "ptr addrspace(1)") != 0)
         rocke_ll_fail(L, ROCKE_ERR_VALUE, "cluster_load ptr must be a global pointer");
@@ -1594,24 +1591,24 @@ static void op_tile_cluster_load(rocke_lower_t* L, const rocke_op_t* op)
     width = ll_attr_int(op, "width_bytes", 0);
     if(width == 4)
     {
-        bits     = "b32";
-        suffix   = "i32";
+        bits = "b32";
+        suffix = "i32";
         expected = "i32";
-        lanes    = 1;
+        lanes = 1;
     }
     else if(width == 8)
     {
-        bits     = "b64";
-        suffix   = "v2i32";
+        bits = "b64";
+        suffix = "v2i32";
         expected = "vec<i32x2>";
-        lanes    = 2;
+        lanes = 2;
     }
     else if(width == 16)
     {
-        bits     = "b128";
-        suffix   = "v4i32";
+        bits = "b128";
+        suffix = "v4i32";
         expected = "vec<i32x4>";
-        lanes    = 4;
+        lanes = 4;
     }
     else
         rocke_ll_fail(L,
@@ -1619,10 +1616,10 @@ static void op_tile_cluster_load(rocke_lower_t* L, const rocke_op_t* op)
                       "cluster_load width_bytes must be 4, 8, or 16, got %lld",
                       (long long)width);
     rty = op->results[0]->type;
-    if(lanes == 1 ? !ll_is_i32_value(op->results[0])
-                  : (!rty || rty->kind != ROCKE_TYPE_VECTOR || rty->count != lanes || !rty->elem
-                     || rty->elem->kind != ROCKE_TYPE_SCALAR
-                     || rty->elem->scalar != ROCKE_SCALAR_I32))
+    if(lanes == 1
+           ? !ll_is_i32_value(op->results[0])
+           : (!rty || rty->kind != ROCKE_TYPE_VECTOR || rty->count != lanes || !rty->elem
+              || rty->elem->kind != ROCKE_TYPE_SCALAR || rty->elem->scalar != ROCKE_SCALAR_I32))
         rocke_ll_fail(L,
                       ROCKE_ERR_VALUE,
                       "cluster_load result must be %s, got %s",
@@ -1664,8 +1661,8 @@ static void op_tile_cluster_load_async_to_lds(rocke_lower_t* L, const rocke_op_t
     ll_require_gfx1250_llvm23(L, "cluster_load_async_to_lds");
     if(op->num_operands != 3)
         rocke_ll_fail(L, ROCKE_ERR_VALUE, "cluster_load_async_to_lds expects three operands");
-    src  = op->operands[0];
-    lds  = op->operands[1];
+    src = op->operands[0];
+    lds = op->operands[1];
     mask = op->operands[2];
     if(strcmp(rocke_ll_value_ptr_type(L, src), "ptr addrspace(1)") != 0)
         rocke_ll_fail(
@@ -1699,7 +1696,7 @@ static void op_tile_cluster_load_async_to_lds(rocke_lower_t* L, const rocke_op_t
                       "cluster_load_async_to_lds cachepolicy must be in 0..31, got %lld",
                       (long long)cachepolicy);
     local = ll_lds_ptr_operand(L, "cluster_load_async_to_lds", lds);
-    key   = rocke_arena_printf(&L->arena, "cluster.load.async.to.lds.%s", suffix);
+    key = rocke_arena_printf(&L->arena, "cluster.load.async.to.lds.%s", suffix);
     rocke_ll_need(L, key);
     rocke_ll_emitf(L,
                    "  call void @llvm.amdgcn.cluster.load.async.to.lds.%s("

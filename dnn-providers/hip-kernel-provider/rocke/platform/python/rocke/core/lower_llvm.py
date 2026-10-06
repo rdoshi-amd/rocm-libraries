@@ -4367,9 +4367,7 @@ class _Lowerer:
                 f"global_prefetch ptr must be a global pointer, "
                 f"got {self._ptr_llvm_type(ptr)}"
             )
-        cp = self._check_cachepolicy(
-            "global_prefetch", op.attrs.get("cachepolicy", 0)
-        )
+        cp = self._check_cachepolicy("global_prefetch", op.attrs.get("cachepolicy", 0))
         self._need("global.prefetch")
         self._current().emit(
             f"  call void @llvm.amdgcn.global.prefetch("
@@ -4956,7 +4954,9 @@ class _Lowerer:
             raise ValueError("cluster_load_async_to_lds expects three operands")
         src_ptr, lds_ptr, mask = op.operands
         if self._ptr_llvm_type(src_ptr) != "ptr addrspace(1)":
-            raise TypeError("cluster_load_async_to_lds src_ptr must be a global pointer")
+            raise TypeError(
+                "cluster_load_async_to_lds src_ptr must be a global pointer"
+            )
         if mask.type != I32:
             raise TypeError("cluster_load_async_to_lds mask must be i32")
         width = int(op.attrs.get("width_bytes", 0))

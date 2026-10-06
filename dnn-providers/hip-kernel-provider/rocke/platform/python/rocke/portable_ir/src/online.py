@@ -585,9 +585,7 @@ def _read_plan(lib, handle) -> Dict:
                 if has_geom
                 else None
             ),
-            "cluster": (
-                (cluster.x, cluster.y, cluster.z) if has_cluster else None
-            ),
+            "cluster": ((cluster.x, cluster.y, cluster.z) if has_cluster else None),
         }
     finally:
         lib.rocke_launch_plan_free(handle)

@@ -1405,7 +1405,7 @@ void rocke_b_s_prefetch_inst(rocke_ir_builder_t* b, rocke_value_t* ptr, rocke_va
  * toolchain in use. */
 #define ROCKE_HW_REG_MODE 1
 #define ROCKE_MODE_SCALAR_PREFETCH_EN_BIT 24
-#define ROCKE_HWREG(id, offset, size) ((id) | ((offset) << 6) | (((size)-1) << 11))
+#define ROCKE_HWREG(id, offset, size) ((id) | ((offset) << 6) | (((size) - 1) << 11))
 void rocke_b_s_setreg(rocke_ir_builder_t* b, int simm16, rocke_value_t* value);
 void rocke_b_enable_scalar_prefetch(rocke_ir_builder_t* b);
 void rocke_b_s_prefetch_data(rocke_ir_builder_t* b, rocke_value_t* ptr, rocke_value_t* length);

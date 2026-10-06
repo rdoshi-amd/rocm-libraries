@@ -123,7 +123,9 @@ def _objdump_path() -> str:
 
 
 def _readelf_path() -> str:
-    return _llvm_tool_path("llvm-readelf", "LLVM_READELF", "code-object metadata validation")
+    return _llvm_tool_path(
+        "llvm-readelf", "LLVM_READELF", "code-object metadata validation"
+    )
 
 
 def _run_on_hsaco(hsaco: bytes, command: list[str], tool: str) -> str:
@@ -207,7 +209,9 @@ def compile_and_validate(
     isa_text = disassemble_hsaco(artifact.hsaco, arch)
     _assert_isa(isa_text, isa_required)
     if notes_required:
-        _assert_patterns(read_hsaco_notes(artifact.hsaco), notes_required, "code-object notes")
+        _assert_patterns(
+            read_hsaco_notes(artifact.hsaco), notes_required, "code-object notes"
+        )
     return ValidatedArtifact(artifact=artifact, isa_text=isa_text)
 
 
@@ -233,7 +237,9 @@ def record_compile_check(
     except Exception as exc:  # noqa: BLE001 - verifier must report toolchain failures
         reporter.failed(name, f"{type(exc).__name__}: {exc}")
         return None
-    detail = "LLVM, ISA, and metadata matched" if notes_required else "LLVM and ISA matched"
+    detail = (
+        "LLVM, ISA, and metadata matched" if notes_required else "LLVM and ISA matched"
+    )
     reporter.passed(name, detail)
     return validated
 

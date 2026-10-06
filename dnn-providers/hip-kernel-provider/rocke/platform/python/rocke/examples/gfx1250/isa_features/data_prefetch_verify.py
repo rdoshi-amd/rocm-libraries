@@ -93,7 +93,10 @@ def _run_functional(validated: object) -> tuple[bool, str]:
         )
         actual = device.read(output_dev, dtype=np.dtype(np.int32), shape=expected.shape)
     mismatch = int(np.count_nonzero(actual != expected))
-    return mismatch == 0, f"prefetch leaves the i32 transform exact, mismatches={mismatch}"
+    return (
+        mismatch == 0,
+        f"prefetch leaves the i32 transform exact, mismatches={mismatch}",
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

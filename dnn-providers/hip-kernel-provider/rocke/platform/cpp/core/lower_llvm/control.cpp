@@ -1418,11 +1418,8 @@ static void ll_lower_cluster_read(rocke_lower_t* L,
         if(axis == NULL)
             axis = "x";
         if(strcmp(axis, "x") != 0 && strcmp(axis, "y") != 0 && strcmp(axis, "z") != 0)
-            rocke_ll_fail(L,
-                          ROCKE_ERR_VALUE,
-                          "%s axis must be x, y, or z, got '%s'",
-                          short_name,
-                          axis);
+            rocke_ll_fail(
+                L, ROCKE_ERR_VALUE, "%s axis must be x, y, or z, got '%s'", short_name, axis);
         snprintf(key, sizeof key, "%s.%s", stem, axis);
     }
     else

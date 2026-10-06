@@ -87,7 +87,9 @@ def build_kernel() -> KernelDef:
 
     def store(value) -> None:
         nonlocal slot
-        builder.global_store(out, builder.add(base, builder.const_i32(slot)), value, align=4)
+        builder.global_store(
+            out, builder.add(base, builder.const_i32(slot)), value, align=4
+        )
         slot += 1
 
     store(builder.cluster_load(src, mask))
@@ -110,7 +112,11 @@ def build_kernel() -> KernelDef:
     zero = builder.const_i32(0)
     staged = builder.smem_load_vN(shared, lane, zero, dtype=I32, n=8)
     byte_shift = builder.const_i32(24)
-    store(builder.lshr(builder.shl(builder.vec_extract(staged, 0), byte_shift), byte_shift))
+    store(
+        builder.lshr(
+            builder.shl(builder.vec_extract(staged, 0), byte_shift), byte_shift
+        )
+    )
     for index in range(1, 8):
         store(builder.vec_extract(staged, index))
     assert slot == _SLOTS
@@ -143,7 +149,8 @@ def expected_output(source: np.ndarray, span: int) -> np.ndarray:
 def _run_functional(validated: ValidatedArtifact, span: int) -> tuple[bool, str]:
     words = _GRID[0] * _THREADS * _RECORD_WORDS
     source = (
-        np.arange(words, dtype=np.uint32) * np.uint32(0x01020409) + np.uint32(0x11223344)
+        np.arange(words, dtype=np.uint32) * np.uint32(0x01020409)
+        + np.uint32(0x11223344)
     ).astype(np.int32)
     expected = expected_output(source, span)
     runtime = Runtime()

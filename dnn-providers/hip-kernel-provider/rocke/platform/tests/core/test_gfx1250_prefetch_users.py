@@ -172,7 +172,8 @@ class TestBlockScaledGemmPrefetch(unittest.TestCase):
             _lower(_spec("wmma"), flavor="llvm22")
         # Flag off keeps lowering on every flavor the kernel supported before.
         self.assertIn(
-            "define amdgpu_kernel", _lower(_spec("wmma", prefetch=False), flavor="llvm22")
+            "define amdgpu_kernel",
+            _lower(_spec("wmma", prefetch=False), flavor="llvm22"),
         )
 
     def test_serialization_roundtrip(self):

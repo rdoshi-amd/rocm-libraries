@@ -51,12 +51,12 @@ def build_kernel(cluster: tuple[int, int, int] | None = None) -> KernelDef:
     builder.kernel.attrs["max_workgroup_size"] = _THREADS
     if cluster is not None:
         builder.set_cluster_dims(*cluster)
-    out = builder.param("out", PtrType(I32, "global"), writeonly=True, noalias=True, align=16)
+    out = builder.param(
+        "out", PtrType(I32, "global"), writeonly=True, noalias=True, align=16
+    )
     grid_x = builder.param("grid_x", I32)
     grid_y = builder.param("grid_y", I32)
-    row = builder.add(
-        builder.block_id_y(), builder.mul(grid_y, builder.block_id_z())
-    )
+    row = builder.add(builder.block_id_y(), builder.mul(grid_y, builder.block_id_z()))
     linear = builder.add(builder.block_id_x(), builder.mul(grid_x, row))
     base = builder.mul(linear, builder.const_i32(_SLOTS))
     slot = 0

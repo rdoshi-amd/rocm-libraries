@@ -55,11 +55,8 @@ rocke_value_t* rocke_b_block_id_z(rocke_ir_builder_t* b)
  * cluster: every id and max id inside the cluster reads 0 and the cluster id
  * equals the workgroup id. */
 
-static rocke_value_t* rocke_i_cluster_axis_read(rocke_ir_builder_t* b,
-                                                rocke_opcode_t op,
-                                                const char* name,
-                                                const char* axis,
-                                                const char* hint)
+static rocke_value_t* rocke_i_cluster_axis_read(
+    rocke_ir_builder_t* b, rocke_opcode_t op, const char* name, const char* axis, const char* hint)
 {
     rocke_attr_map_t a;
     if(!rocke_i_live(b))
@@ -95,7 +92,8 @@ rocke_value_t* rocke_b_cluster_workgroup_flat_id(rocke_ir_builder_t* b)
     if(!rocke_i_live(b))
         return NULL;
     a = rocke_i_attrs(b);
-    return rocke_i_op1(b, ROCKE_OP_GPU_CLUSTER_WORKGROUP_FLAT_ID, NULL, 0, rocke_i32(), &a, "cwflat");
+    return rocke_i_op1(
+        b, ROCKE_OP_GPU_CLUSTER_WORKGROUP_FLAT_ID, NULL, 0, rocke_i32(), &a, "cwflat");
 }
 rocke_value_t* rocke_b_cluster_workgroup_max_flat_id(rocke_ir_builder_t* b)
 {

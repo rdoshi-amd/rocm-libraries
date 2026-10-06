@@ -457,9 +457,7 @@ class KernelLauncher:
     def cluster_dims(self) -> Optional[Tuple[int, int, int]]:
         return self._cluster_dims
 
-    def _resolve_cluster(
-        self, config: LaunchConfig
-    ) -> Optional[Tuple[int, int, int]]:
+    def _resolve_cluster(self, config: LaunchConfig) -> Optional[Tuple[int, int, int]]:
         if config.cluster is None:
             return self._cluster_dims
         cluster = check_cluster_dims(config.cluster)

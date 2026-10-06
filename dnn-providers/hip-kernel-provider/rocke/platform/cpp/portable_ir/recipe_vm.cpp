@@ -850,27 +850,43 @@ static void rv_attrs(rvm_t* vm, const jd_val_t* attrs, rocke_attr_map_t* m)
     }
 }
 
-/* A kernel list attr of bare ints (e.g. cluster_dims), encoded by ir_export as
- * {"t":"l","v":[{"_":{"t":"i","v":N}}, ...]}. Other list shapes are skipped,
- * as before. */
-static void rv_kernel_int_list(rocke_ir_builder_t* b,
-                               rocke_attr_map_t* m,
-                               const char* key,
-                               const jd_val_t* v)
+/* A kernel list attr of bare ints (e.g. cluster_dims, agpr_alloc), encoded by
+ * ir_export as {"t":"l","v":[{"_":{"t":"i","v":N}}, ...]}. Any other shape is
+ * an error: a dropped list would silently change what the kernel compiles to. */
+static void rv_kernel_int_list(rvm_t* vm, rocke_attr_map_t* m, const char* key, const jd_val_t* v)
 {
     int64_t ints[16];
-    if(v->kind != JD_ARR || v->arr_len <= 0 || v->arr_len > (int)(sizeof ints / sizeof ints[0]))
+    const int cap = (int)(sizeof ints / sizeof ints[0]);
+    if(!v || v->kind != JD_ARR)
+    {
+        rv_fail(vm, "kernel attr '%s': list value must be an array", key);
         return;
+    }
+    if(v->arr_len > cap)
+    {
+        rv_fail(
+            vm, "kernel attr '%s': list has %d items, at most %d supported", key, v->arr_len, cap);
+        return;
+    }
     for(int i = 0; i < v->arr_len; i++)
     {
         const jd_val_t* item = rocke_jget(v->arr[i], "_");
         const char* t = rocke_jstr(rocke_jget(item, "t"));
         double d;
         if(!t || strcmp(t, "i") != 0 || !rocke_jnum(rocke_jget(item, "v"), &d))
+        {
+            rv_fail(vm, "kernel attr '%s': item %d is not a bare int", key, i);
             return;
+        }
+        /* Range test first: the cast is undefined for out-of-range doubles. */
+        if(!(d >= -9007199254740992.0 && d <= 9007199254740992.0) || d != (double)(int64_t)d)
+        {
+            rv_fail(vm, "kernel attr '%s': item %d is not an integer", key, i);
+            return;
+        }
         ints[i] = (int64_t)d;
     }
-    rocke_attr_set_int_list(b, m, key, ints, v->arr_len);
+    rocke_attr_set_int_list(vm->b, m, key, ints, v->arr_len);
 }
 
 /* ---------------------------------------------------------------- execute */
@@ -1364,17 +1380,17 @@ static rocke_status_t rv_run_root(jd_val_t* root,
     if(kattrs && kattrs->kind == JD_OBJ)
     {
         rocke_kernel_def_t* k = rocke_ir_builder_kernel(out_builder);
-        for(int i = 0; i < kattrs->obj_len; i++)
+        for(int i = 0; i < kattrs->obj_len && !vm.failed; i++)
         {
             const char* key = kattrs->obj[i].key;
             const jd_val_t* tv = kattrs->obj[i].val;
             const char* t = rocke_jstr(rocke_jget(tv, "t"));
             const jd_val_t* v = rocke_jget(tv, "v");
             double d;
-            if(t && v && strcmp(t, "i") == 0 && rocke_jnum(v, &d))
+            if(t && strcmp(t, "l") == 0)
+                rv_kernel_int_list(&vm, &k->attrs, key, v);
+            else if(t && v && strcmp(t, "i") == 0 && rocke_jnum(v, &d))
                 rocke_attr_set_int(out_builder, &k->attrs, key, (int64_t)d);
-            else if(t && v && strcmp(t, "l") == 0)
-                rv_kernel_int_list(out_builder, &k->attrs, key, v);
         }
     }
 

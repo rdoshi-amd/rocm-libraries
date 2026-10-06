@@ -123,7 +123,11 @@ def _int_list_attr(tv: Any) -> Optional[Tuple[Any, ...]]:
     """Values of a list-of-bare-ints attr as ir_export writes it --
     ``{"t": "l", "v": [{"_": {"t": "i", "v": 4}}, ...]}`` -- or None if ``tv``
     has any other shape."""
-    if not isinstance(tv, dict) or tv.get("t") != "l" or not isinstance(tv.get("v"), list):
+    if (
+        not isinstance(tv, dict)
+        or tv.get("t") != "l"
+        or not isinstance(tv.get("v"), list)
+    ):
         return None
     vals = []
     for item in tv["v"]:

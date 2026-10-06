@@ -100,7 +100,9 @@ class TestGfx1250Cluster(unittest.TestCase):
 
     def test_exact_declares(self):
         llvm = _lower(_build_all())
-        expected = [f"declare i32 @llvm.amdgcn.{s}.{a}()" for s in _AXIS_STEMS for a in _AXES]
+        expected = [
+            f"declare i32 @llvm.amdgcn.{s}.{a}()" for s in _AXIS_STEMS for a in _AXES
+        ]
         expected += [f"declare i32 @llvm.amdgcn.{n}()" for n in _FLAT]
         expected.append("declare void @llvm.amdgcn.s.cluster.barrier()")
         for text in expected:
@@ -110,7 +112,12 @@ class TestGfx1250Cluster(unittest.TestCase):
     def test_unused_ops_declare_nothing(self):
         llvm = _lower(_one(lambda b: b.cluster_id("z")))
         self.assertIn("call i32 @llvm.amdgcn.cluster.id.z()", llvm)
-        for name in ("cluster.id.x", "cluster.id.y", "cluster.workgroup", "s.cluster.barrier"):
+        for name in (
+            "cluster.id.x",
+            "cluster.id.y",
+            "cluster.workgroup",
+            "s.cluster.barrier",
+        ):
             with self.subTest(name=name):
                 self.assertNotIn(f"@llvm.amdgcn.{name}", llvm)
 
@@ -151,9 +158,21 @@ class TestGfx1250Cluster(unittest.TestCase):
         b = IRBuilder("bad")
         cases = (
             (b.cluster_id, "w", "cluster_id axis must be x, y, or z, got 'w'"),
-            (b.cluster_workgroup_id, "X", "cluster_workgroup_id axis must be x, y, or z, got 'X'"),
-            (b.cluster_workgroup_max_id, "", "cluster_workgroup_max_id axis must be x, y, or z"),
-            (b.cluster_size, "xy", "cluster_workgroup_max_id axis must be x, y, or z, got 'xy'"),
+            (
+                b.cluster_workgroup_id,
+                "X",
+                "cluster_workgroup_id axis must be x, y, or z, got 'X'",
+            ),
+            (
+                b.cluster_workgroup_max_id,
+                "",
+                "cluster_workgroup_max_id axis must be x, y, or z",
+            ),
+            (
+                b.cluster_size,
+                "xy",
+                "cluster_workgroup_max_id axis must be x, y, or z, got 'xy'",
+            ),
             (b.cluster_id, None, "cluster_id axis must be x, y, or z, got None"),
         )
         for fn, axis, msg in cases:
@@ -210,7 +229,10 @@ _BAD_DIMS = (
     ((1, -2, 1), r"cluster_dims \(1, -2, 1\): each dimension must be in 1..15"),
     ((16, 1, 1), r"cluster_dims \(16, 1, 1\): each dimension must be in 1..15"),
     ((1, 1, 16), "each dimension must be in 1..15"),
-    ((4, 4, 2), r"cluster_dims \(4, 4, 2\): 32 workgroups exceeds the cluster limit of 16"),
+    (
+        (4, 4, 2),
+        r"cluster_dims \(4, 4, 2\): 32 workgroups exceeds the cluster limit of 16",
+    ),
     ((3, 3, 2), "18 workgroups exceeds the cluster limit of 16"),
 )
 
@@ -227,16 +249,16 @@ class TestGfx1250ClusterDims(unittest.TestCase):
         ):
             with self.subTest(dims=dims):
                 attrs = _fn_attrs(_lower(_with_dims(dims)))
-                self.assertIn(f' "amdgpu-cluster-dims"="{text}" norecurse nounwind }}', attrs)
+                self.assertIn(
+                    f' "amdgpu-cluster-dims"="{text}" norecurse nounwind }}', attrs
+                )
                 self.assertEqual(attrs.count("amdgpu-cluster-dims"), 1)
 
     def test_absent_attr_changes_nothing(self):
         plain = _lower(_with_dims(None))
         self.assertNotIn("amdgpu-cluster-dims", plain)
         clustered = _lower(_with_dims((2, 1, 1)))
-        self.assertEqual(
-            plain, clustered.replace(' "amdgpu-cluster-dims"="2,1,1"', "")
-        )
+        self.assertEqual(plain, clustered.replace(' "amdgpu-cluster-dims"="2,1,1"', ""))
 
     def test_attr_is_independent_of_cluster_ops(self):
         b = IRBuilder("plain")

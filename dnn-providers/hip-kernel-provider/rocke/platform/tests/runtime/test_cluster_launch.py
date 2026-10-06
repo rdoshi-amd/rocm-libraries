@@ -165,7 +165,11 @@ def test_kernelparams_launch_with_cluster(hip):
         ((4, 1, 1), (2, 1), "three integers"),
         ((4, 1, 1), (16, 1, 1), "1..15"),
         ((8, 4, 1), (4, 4, 2), "limit of 16"),
-        ((3, 1, 1), (2, 1, 1), r"grid \(3, 1, 1\) is not a multiple of cluster \(2, 1, 1\) in x"),
+        (
+            (3, 1, 1),
+            (2, 1, 1),
+            r"grid \(3, 1, 1\) is not a multiple of cluster \(2, 1, 1\) in x",
+        ),
         ((4, 3, 1), (1, 2, 1), "in y"),
     ],
 )
@@ -283,7 +287,9 @@ def test_manifest_timing_passes_the_cluster_through_time_launches():
         run_manifest._launch_timed(
             rt, "fn", (4, 1, 1), (64, 1, 1), b"", 1, 1, cluster=(2, 1, 1)
         )
-    rt.launch.assert_called_once_with("fn", (4, 1, 1), (64, 1, 1), b"", cluster=(2, 1, 1))
+    rt.launch.assert_called_once_with(
+        "fn", (4, 1, 1), (64, 1, 1), b"", cluster=(2, 1, 1)
+    )
 
 
 def test_manifest_timing_passes_the_cluster_without_torch():

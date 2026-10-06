@@ -82,7 +82,10 @@ def _compare_isa(off: ValidatedArtifact, on: ValidatedArtifact) -> tuple[bool, s
     counts = {
         name: (_count(pattern, off.isa_text), _count(pattern, on.isa_text))
         for name, pattern in (
-            ("prefetch_enable", r"\bs_setreg\w*\s+hwreg\(HW_REG_WAVE_MODE, 24, 1\), 1\b"),
+            (
+                "prefetch_enable",
+                r"\bs_setreg\w*\s+hwreg\(HW_REG_WAVE_MODE, 24, 1\), 1\b",
+            ),
             ("s_prefetch_data", r"\bs_prefetch_data\b"),
             ("global_prefetch_b8", r"\bglobal_prefetch_b8\b"),
             ("v_wmma", r"\bv_wmma_\w+"),
@@ -117,7 +120,10 @@ def _run_functional(
     for got in results:
         check_result(got, expected, exact=native)
     same = results[0].tobytes() == results[1].tobytes()
-    return same, f"case {_CASE}: flag on {'matches' if same else 'differs from'} flag off bit for bit"
+    return (
+        same,
+        f"case {_CASE}: flag on {'matches' if same else 'differs from'} flag off bit for bit",
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

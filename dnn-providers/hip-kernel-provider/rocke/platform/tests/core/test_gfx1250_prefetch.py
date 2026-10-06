@@ -107,7 +107,12 @@ class TestGfx1250Prefetch(unittest.TestCase):
         b.ret()
         llvm = _lower(b.kernel)
         self.assertIn("call void @llvm.amdgcn.global.prefetch(", llvm)
-        for name in ("s.setreg", "s.prefetch.data", "s.buffer.prefetch", "flat.prefetch"):
+        for name in (
+            "s.setreg",
+            "s.prefetch.data",
+            "s.buffer.prefetch",
+            "flat.prefetch",
+        ):
             with self.subTest(name=name):
                 self.assertNotIn(f"@llvm.amdgcn.{name}", llvm)
 

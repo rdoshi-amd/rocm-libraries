@@ -382,7 +382,9 @@ def build_block_scaled_gemm(
         if not spec.prefetch or k_next >= spec.K:
             return
         for ptr, base in ((A, a_base), (B, b_base)):
-            ir.global_prefetch(ir.global_ptr_add(ptr, ir.add(base, ir.const_i32(k_next))))
+            ir.global_prefetch(
+                ir.global_ptr_add(ptr, ir.add(base, ir.const_i32(k_next)))
+            )
 
     def _load_frag(ptr, base, storage_ty, k0):
         if not native_scale:

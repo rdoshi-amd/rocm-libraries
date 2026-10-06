@@ -1666,7 +1666,10 @@ rocke_value_t* rocke_b_cluster_load(rocke_ir_builder_t* b,
     lanes = width_bytes == 4 ? 1 : width_bytes == 8 ? 2 : width_bytes == 16 ? 4 : 0;
     if(lanes == 0)
         return (rocke_value_t*)rocke_i_set_err(
-            b, ROCKE_ERR_VALUE, "cluster_load width_bytes must be 4, 8, or 16 (got %d)", width_bytes);
+            b,
+            ROCKE_ERR_VALUE,
+            "cluster_load width_bytes must be 4, 8, or 16 (got %d)",
+            width_bytes);
     if(!rocke_i_is_global_ptr(ptr))
         return (rocke_value_t*)rocke_i_set_err(
             b, ROCKE_ERR_VALUE, "cluster_load ptr must be a global pointer");
@@ -1674,7 +1677,7 @@ rocke_value_t* rocke_b_cluster_load(rocke_ir_builder_t* b,
         return NULL;
     if(!rocke_i_check_cachepolicy(b, "cluster_load", cachepolicy))
         return NULL;
-    rty   = lanes == 1 ? rocke_i32() : rocke_vector_type(b, rocke_i32(), lanes);
+    rty = lanes == 1 ? rocke_i32() : rocke_vector_type(b, rocke_i32(), lanes);
     attrs = rocke_i_attrs(b);
     rocke_attr_set_int(b, &attrs, "width_bytes", width_bytes);
     rocke_attr_set_int(b, &attrs, "cachepolicy", cachepolicy);
@@ -1777,10 +1780,18 @@ int rocke_b_tdm_descriptor_2d(rocke_ir_builder_t* b,
         return 0;
     switch(elem_bytes)
     {
-    case 1: data_size = 0; break;
-    case 2: data_size = 1; break;
-    case 4: data_size = 2; break;
-    case 8: data_size = 3; break;
+    case 1:
+        data_size = 0;
+        break;
+    case 2:
+        data_size = 1;
+        break;
+    case 4:
+        data_size = 2;
+        break;
+    case 8:
+        data_size = 3;
+        break;
     default:
         rocke_i_set_err(
             b, ROCKE_ERR_VALUE, "%s elem_bytes must be 1, 2, 4, or 8 (got %d)", name, elem_bytes);
@@ -1830,14 +1841,14 @@ int rocke_b_tdm_descriptor_2d(rocke_ir_builder_t* b,
     /* Group 0: count=1 | LDS byte address | global address lo | hi[24:0], type=2. */
     lds32 = lds_is_i32 ? lds_addr : rocke_b_trunc(b, lds_addr, rocke_i32());
     gaddr = rocke_b_global_ptr_to_i64(b, global_ptr);
-    g_hi  = rocke_b_trunc(b, rocke_b_lshr(b, gaddr, rocke_b_const_i64(b, 32)), rocke_i32());
+    g_hi = rocke_b_trunc(b, rocke_b_lshr(b, gaddr, rocke_b_const_i64(b, 32)), rocke_i32());
     group0[0] = rocke_b_const_i32(b, 1);
     group0[1] = lds32;
     group0[2] = rocke_b_trunc(b, gaddr, rocke_i32());
     /* Sibling builder calls are sequenced through temporaries: C leaves
      * argument evaluation order unspecified. */
-    lo        = rocke_b_land(b, g_hi, rocke_b_const_i32(b, 0x1FFFFFF));
-    hi        = rocke_i_tdm_word(b, 2u << 30);
+    lo = rocke_b_land(b, g_hi, rocke_b_const_i32(b, 0x1FFFFFF));
+    hi = rocke_i_tdm_word(b, 2u << 30);
     group0[3] = rocke_b_lor(b, lo, hi);
     /* Group 1: flags | tensor dims split 16/16 across words | tile dims |
      * dim-0 stride = row_stride; dim-1 stride = 1, as CK Tile programs rank 2. */
@@ -1845,11 +1856,11 @@ int rocke_b_tdm_descriptor_2d(rocke_ir_builder_t* b,
             | (uint32_t)(pad_enable ? pad_interval : 0) << 22 | (uint32_t)pad_amount << 25;
     group1[0] = rocke_i_tdm_word(b, flags);
     group1[1] = rocke_b_shl(b, tensor_dim0, c16);
-    lo        = rocke_b_lshr(b, tensor_dim0, c16);
-    hi        = rocke_b_shl(b, tensor_dim1, c16);
+    lo = rocke_b_lshr(b, tensor_dim0, c16);
+    hi = rocke_b_shl(b, tensor_dim1, c16);
     group1[2] = rocke_b_lor(b, lo, hi);
-    lo        = rocke_b_lshr(b, tensor_dim1, c16);
-    hi        = rocke_i_tdm_word(b, (uint32_t)tile_dim0 << 16);
+    lo = rocke_b_lshr(b, tensor_dim1, c16);
+    hi = rocke_i_tdm_word(b, (uint32_t)tile_dim0 << 16);
     group1[3] = rocke_b_lor(b, lo, hi);
     group1[4] = rocke_b_const_i32(b, tile_dim1);
     group1[5] = row_stride;
@@ -1861,7 +1872,7 @@ int rocke_b_tdm_descriptor_2d(rocke_ir_builder_t* b,
     for(i = 0; i < 8; ++i)
         group1[i] = rocke_b_readfirstlane(b, group1[i]);
     out[1] = rocke_b_vec_pack(b, group1, 8, rocke_i32());
-    zero4  = rocke_b_zero_vec(b, rocke_i32(), 4);
+    zero4 = rocke_b_zero_vec(b, rocke_i32(), 4);
     out[2] = zero4;
     out[3] = zero4;
     out[4] = rocke_b_zero_vec(b, rocke_i32(), 8);

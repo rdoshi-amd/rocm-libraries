@@ -831,8 +831,10 @@ void case_gfx1250_data_prefetch_gated()
          }},
         {"s_buffer_prefetch_data",
          [](rocke_ir_builder_t* b, rocke_value_t* s, rocke_value_t*) {
-             rocke_b_s_buffer_prefetch_data(
-                 b, rocke_b_buffer_rsrc(b, s, rocke_b_const_i32(b, 64)), rocke_b_const_i32(b, 1), 0);
+             rocke_b_s_buffer_prefetch_data(b,
+                                            rocke_b_buffer_rsrc(b, s, rocke_b_const_i32(b, 64)),
+                                            rocke_b_const_i32(b, 1),
+                                            0);
          }},
         {"global_prefetch",
          [](rocke_ir_builder_t* b, rocke_value_t* s, rocke_value_t*) {
@@ -1049,8 +1051,8 @@ void build_gfx1250_cluster(rocke_ir_builder_t* b)
 
 void case_gfx1250_cluster()
 {
-    const std::string ir = lower_one(
-        "gfx1250_cluster", build_gfx1250_cluster, "gfx1250", ROCKE_LLVM_FLAVOR_LLVM23);
+    const std::string ir
+        = lower_one("gfx1250_cluster", build_gfx1250_cluster, "gfx1250", ROCKE_LLVM_FLAVOR_LLVM23);
 
     static const char* const stems[]
         = {"cluster.id", "cluster.workgroup.id", "cluster.workgroup.max.id"};
@@ -1088,8 +1090,7 @@ void case_gfx1250_cluster_size()
         "cluster_size",
         [](rocke_ir_builder_t* b) {
             rocke_value_t* out = global_ptr_param(b, "out", rocke_i32());
-            rocke_b_global_store(
-                b, out, rocke_b_const_i32(b, 0), rocke_b_cluster_size(b, "y"), 4);
+            rocke_b_global_store(b, out, rocke_b_const_i32(b, 0), rocke_b_cluster_size(b, "y"), 4);
         },
         "gfx1250",
         ROCKE_LLVM_FLAVOR_LLVM23);
@@ -1252,7 +1253,8 @@ void case_gfx1250_cluster_lowerer_rechecks()
     if(st != ROCKE_ERR_VALUE || err.find(want) == std::string::npos)
     {
         char msg[ROCKE_ERR_MSG_CAP + 128];
-        snprintf(msg, sizeof(msg), "want \"%s\", status %d, err \"%s\"", want, (int)st, err.c_str());
+        snprintf(
+            msg, sizeof(msg), "want \"%s\", status %d, err \"%s\"", want, (int)st, err.c_str());
         fail(msg, __LINE__);
     }
 }
@@ -1291,14 +1293,14 @@ rocke_value_t* lds_stage(rocke_ir_builder_t* b)
 /* Mirrors _build_all in test_gfx1250_multicast.py. */
 void build_gfx1250_multicast(rocke_ir_builder_t* b)
 {
-    rocke_value_t* src   = global_ptr_param(b, "src", rocke_i32());
-    rocke_value_t* dst   = global_ptr_param(b, "dst", rocke_i32());
-    rocke_value_t* mask  = i32_param(b, "mask");
+    rocke_value_t* src = global_ptr_param(b, "src", rocke_i32());
+    rocke_value_t* dst = global_ptr_param(b, "dst", rocke_i32());
+    rocke_value_t* mask = i32_param(b, "mask");
     rocke_value_t* local = lds_stage(b);
-    rocke_value_t* v1    = rocke_b_cluster_load(b, src, mask, 4, 0);
-    rocke_value_t* v2    = rocke_b_cluster_load(b, src, mask, 8, 1);
-    rocke_value_t* v4    = rocke_b_cluster_load(b, src, mask, 16, 8);
-    rocke_value_t* zero  = rocke_b_const_i32(b, 0);
+    rocke_value_t* v1 = rocke_b_cluster_load(b, src, mask, 4, 0);
+    rocke_value_t* v2 = rocke_b_cluster_load(b, src, mask, 8, 1);
+    rocke_value_t* v4 = rocke_b_cluster_load(b, src, mask, 16, 8);
+    rocke_value_t* zero = rocke_b_const_i32(b, 0);
     rocke_b_global_store(b, dst, zero, v1, 4);
     rocke_b_global_store(b, dst, zero, rocke_b_vec_extract(b, v2, 1), 4);
     rocke_b_global_store(b, dst, zero, rocke_b_vec_extract(b, v4, 3), 4);
@@ -1322,9 +1324,7 @@ void case_gfx1250_multicast()
               " = call <4 x i32> @llvm.amdgcn.cluster.load.b128.v4i32("
               "ptr addrspace(1) %src, i32 8, i32 %mask)");
     EXPECT_IR_COUNT(
-        ir,
-        "declare i32 @llvm.amdgcn.cluster.load.b32.i32(ptr addrspace(1), i32 immarg, i32)",
-        1);
+        ir, "declare i32 @llvm.amdgcn.cluster.load.b32.i32(ptr addrspace(1), i32 immarg, i32)", 1);
     EXPECT_IR_COUNT(
         ir,
         "declare <2 x i32> @llvm.amdgcn.cluster.load.b64.v2i32(ptr addrspace(1), i32 immarg, i32)",
@@ -1501,17 +1501,17 @@ void case_gfx1250_multicast_builder_rejects()
         std::string err;
         try
         {
-            rocke_value_t* src  = global_ptr_param(&b, "src", rocke_i32());
+            rocke_value_t* src = global_ptr_param(&b, "src", rocke_i32());
             rocke_value_t* flat = private_ptr_param(&b, "flat", rocke_i32());
             r.emit(&b, src, flat, lds_stage(&b));
-            rejected           = rocke_ir_builder_status(&b) == ROCKE_ERR_VALUE;
-            const char* msg    = rocke_ir_builder_error(&b);
-            err                = msg ? msg : "";
+            rejected = rocke_ir_builder_status(&b) == ROCKE_ERR_VALUE;
+            const char* msg = rocke_ir_builder_error(&b);
+            err = msg ? msg : "";
         }
         catch(const std::exception& e)
         {
             rejected = true;
-            err      = e.what();
+            err = e.what();
         }
         if(!rejected || err.find(r.want) == std::string::npos)
         {
@@ -1530,10 +1530,9 @@ void emit_raw_cluster_load(rocke_ir_builder_t* b, int64_t width, int64_t cachepo
     rocke_attr_map_init(&attrs);
     rocke_attr_set_int(b, &attrs, "width_bytes", width);
     rocke_attr_set_int(b, &attrs, "cachepolicy", cachepolicy);
-    rocke_value_t* src        = global_ptr_param(b, "src", rocke_i32());
+    rocke_value_t* src = global_ptr_param(b, "src", rocke_i32());
     rocke_value_t* operands[] = {src, rocke_b_const_i32(b, 1)};
-    const rocke_type_t* rty
-        = lanes == 1 ? rocke_i32() : rocke_vector_type(b, rocke_i32(), lanes);
+    const rocke_type_t* rty = lanes == 1 ? rocke_i32() : rocke_vector_type(b, rocke_i32(), lanes);
     rocke_op_t* op = rocke_b_op(
         b, ROCKE_OP_TILE_CLUSTER_LOAD, operands, 2, &rty, 1, &attrs, nullptr, 0, "cld", nullptr);
     rocke_value_t* v = rocke_op_result(b, op);
@@ -1621,23 +1620,23 @@ void case_gfx1250_multicast_purity()
 
 struct TdmShape
 {
-    int elem_bytes     = 4;
-    int tile_dim0      = 64;
-    int tile_dim1      = 16;
+    int elem_bytes = 4;
+    int tile_dim0 = 64;
+    int tile_dim1 = 16;
     int workgroup_mask = 0;
-    int pad_interval   = -1;
-    int pad_amount     = 0;
+    int pad_interval = -1;
+    int pad_amount = 0;
 };
 
 /* Mirrors _build_round_trip in test_gfx1250_tdm.py: global -> LDS -> global
  * through one 64x16 i32 tile. */
 void build_gfx1250_tdm(rocke_ir_builder_t* b, const TdmShape& s)
 {
-    const int shape[]     = {64 * 16};
-    rocke_value_t* src    = global_ptr_param(b, "src", rocke_i32());
-    rocke_value_t* dst    = global_ptr_param(b, "dst", rocke_i32());
-    rocke_value_t* dim0   = i32_param(b, "dim0");
-    rocke_value_t* dim1   = i32_param(b, "dim1");
+    const int shape[] = {64 * 16};
+    rocke_value_t* src = global_ptr_param(b, "src", rocke_i32());
+    rocke_value_t* dst = global_ptr_param(b, "dst", rocke_i32());
+    rocke_value_t* dim0 = i32_param(b, "dim0");
+    rocke_value_t* dim1 = i32_param(b, "dim1");
     rocke_value_t* stride = i32_param(b, "stride");
     rocke_value_t* lds
         = rocke_b_smem_addr_of(b, rocke_b_smem_alloc(b, rocke_i32(), shape, 1, "tile"));
@@ -1688,7 +1687,7 @@ std::vector<std::string> tdm_readfirstlane_args(const std::string& ir)
     for(size_t at = ir.find(needle); at != std::string::npos; at = ir.find(needle, at + 1))
     {
         const size_t start = at + sizeof(needle) - 1;
-        const size_t end   = ir.find(')', start);
+        const size_t end = ir.find(')', start);
         if(end == std::string::npos)
             break;
         args.push_back(ir.substr(start, end - start));
@@ -1744,8 +1743,8 @@ void case_gfx1250_tdm_round_trip()
     {
         size_t index;
         const char* want;
-    } constant_words[] = {
-        {0, "1"}, {4, "131072"}, {8, "16"}, {9, "%stride"}, {10, "65536"}, {11, "0"}};
+    } constant_words[]
+        = {{0, "1"}, {4, "131072"}, {8, "16"}, {9, "%stride"}, {10, "65536"}, {11, "0"}};
     for(size_t base : {size_t(0), size_t(12)})
         for(const auto& w : constant_words)
             expect_arg(args, base + w.index, w.want, __LINE__);
@@ -1761,8 +1760,8 @@ void case_gfx1250_tdm_round_trip()
         if(at == std::string::npos)
             continue;
         const std::string line = ir.substr(at, ir.find('\n', at) - at);
-        const size_t g2        = line.find("<4 x i32> %cz");
-        const size_t g3        = g2 == std::string::npos ? g2 : line.find("<4 x i32> %cz", g2 + 1);
+        const size_t g2 = line.find("<4 x i32> %cz");
+        const size_t g3 = g2 == std::string::npos ? g2 : line.find("<4 x i32> %cz", g2 + 1);
         if(g2 == std::string::npos || g3 == std::string::npos
            || line.substr(g2, line.find(',', g2) - g2) != line.substr(g3, line.find(',', g3) - g3)
            || line.find("<8 x i32> %cz") == std::string::npos
@@ -1787,7 +1786,7 @@ void case_gfx1250_tdm_flag_words()
     };
     for(const auto& c : cases)
     {
-        const TdmShape s     = c.shape;
+        const TdmShape s = c.shape;
         const std::string ir = lower_one(
             "tdm_flags",
             [&s](rocke_ir_builder_t* b) { build_gfx1250_tdm(b, s); },
@@ -1797,7 +1796,7 @@ void case_gfx1250_tdm_flag_words()
     }
     /* tile_dim0 = 0xFFFF shifts into bit 31 of dword 3: printed signed. */
     TdmShape wide;
-    wide.tile_dim0       = 0xFFFF;
+    wide.tile_dim0 = 0xFFFF;
     const std::string ir = lower_one(
         "tdm_wide",
         [&wide](rocke_ir_builder_t* b) { build_gfx1250_tdm(b, wide); },
@@ -1813,7 +1812,7 @@ void case_gfx1250_tdm_i32_lds_address()
         [](rocke_ir_builder_t* b) {
             rocke_value_t* src = global_ptr_param(b, "src", rocke_i32());
             rocke_value_t* lds = i32_param(b, "lds");
-            rocke_value_t* n   = rocke_b_const_i32(b, 64);
+            rocke_value_t* n = rocke_b_const_i32(b, 64);
             rocke_value_t* g[5];
             rocke_b_tdm_descriptor_2d(b, src, lds, 4, n, n, n, 64, 1, 0, -1, 0, g);
             rocke_b_tensor_load_to_lds(b, g[0], g[1], g[2], g[3], g[4], 0);
@@ -1829,7 +1828,7 @@ void case_gfx1250_tdm_group_types()
     rocke_ir_builder_t b;
     rocke_ir_builder_init(&b, "types");
     rocke_value_t* src = global_ptr_param(&b, "src", rocke_i32());
-    rocke_value_t* n   = rocke_b_const_i32(&b, 8);
+    rocke_value_t* n = rocke_b_const_i32(&b, 8);
     rocke_value_t* g[5];
     if(!rocke_b_tdm_descriptor_2d(&b, src, rocke_b_const_i32(&b, 0), 4, n, n, n, 8, 8, 0, -1, 0, g))
         fail("tdm_descriptor_2d failed", __LINE__);
@@ -1871,14 +1870,14 @@ void case_global_ptr_to_i64()
     try
     {
         rocke_b_global_ptr_to_i64(&b, private_ptr_param(&b, "flat", rocke_f32()));
-        rejected        = rocke_ir_builder_status(&b) == ROCKE_ERR_VALUE;
+        rejected = rocke_ir_builder_status(&b) == ROCKE_ERR_VALUE;
         const char* msg = rocke_ir_builder_error(&b);
-        err             = msg ? msg : "";
+        err = msg ? msg : "";
     }
     catch(const std::exception& e)
     {
         rejected = true;
-        err      = e.what();
+        err = e.what();
     }
     if(!rejected || err.find("global_ptr_to_i64 ptr must be a global pointer") == std::string::npos)
         fail("global_ptr_to_i64 must reject a non-global pointer", __LINE__);
@@ -1905,8 +1904,7 @@ void case_gfx1250_tdm_gated()
         if(st != ROCKE_ERR_VALUE || err.find(t.want) == std::string::npos)
         {
             char msg[ROCKE_ERR_MSG_CAP + 128];
-            snprintf(
-                msg, sizeof(msg), "%s: status %d, err \"%s\"", t.arch, (int)st, err.c_str());
+            snprintf(msg, sizeof(msg), "%s: status %d, err \"%s\"", t.arch, (int)st, err.c_str());
             fail(msg, __LINE__);
         }
     }
@@ -2006,18 +2004,18 @@ void case_gfx1250_tdm_builder_rejects()
         std::string err;
         try
         {
-            rocke_value_t* src  = global_ptr_param(&b, "src", rocke_i32());
+            rocke_value_t* src = global_ptr_param(&b, "src", rocke_i32());
             rocke_value_t* flat = private_ptr_param(&b, "flat", rocke_f32());
             r.emit(&b, src, flat, rocke_b_const_i32(&b, 8));
-            rejected        = rocke_ir_builder_status(&b) == ROCKE_ERR_VALUE;
+            rejected = rocke_ir_builder_status(&b) == ROCKE_ERR_VALUE;
             const char* msg = rocke_ir_builder_error(&b);
-            err             = msg ? msg : "";
+            err = msg ? msg : "";
         }
         catch(const std::exception& e)
         {
             /* Builder errors surface as ckc::ValueError inside the library. */
             rejected = true;
-            err      = e.what();
+            err = e.what();
         }
         if(!rejected || err.find(r.want) == std::string::npos)
         {
@@ -2089,17 +2087,61 @@ void case_gfx1250_cluster_dims_rejects()
         rocke_llvm_flavor_t flavor;
         const char* want;
     } rejects[] = {
-        {{2, 2}, 2, "gfx1250", ROCKE_LLVM_FLAVOR_LLVM23, "cluster_dims must be three integers (x, y, z)"},
-        {{2, 2, 1, 1}, 4, "gfx1250", ROCKE_LLVM_FLAVOR_LLVM23, "cluster_dims must be three integers (x, y, z)"},
-        {{0, 1, 1}, 3, "gfx1250", ROCKE_LLVM_FLAVOR_LLVM23, "cluster_dims (0, 1, 1): each dimension must be in 1..15"},
-        {{1, -2, 1}, 3, "gfx1250", ROCKE_LLVM_FLAVOR_LLVM23, "cluster_dims (1, -2, 1): each dimension must be in 1..15"},
-        {{16, 1, 1}, 3, "gfx1250", ROCKE_LLVM_FLAVOR_LLVM23, "cluster_dims (16, 1, 1): each dimension must be in 1..15"},
-        {{1, 1, 16}, 3, "gfx1250", ROCKE_LLVM_FLAVOR_LLVM23, "cluster_dims (1, 1, 16): each dimension must be in 1..15"},
-        {{4, 4, 2}, 3, "gfx1250", ROCKE_LLVM_FLAVOR_LLVM23, "cluster_dims (4, 4, 2): 32 workgroups exceeds the cluster limit of 16"},
-        {{3, 3, 2}, 3, "gfx1250", ROCKE_LLVM_FLAVOR_LLVM23, "cluster_dims (3, 3, 2): 18 workgroups exceeds the cluster limit of 16"},
-        {{2, 1, 1}, 3, "gfx950", ROCKE_LLVM_FLAVOR_LLVM22, "cluster_dims requires gfx1250, got gfx950"},
-        {{2, 1, 1}, 3, "gfx1201", ROCKE_LLVM_FLAVOR_LLVM23, "cluster_dims requires gfx1250, got gfx1201"},
-        {{2, 1, 1}, 3, "gfx1250", ROCKE_LLVM_FLAVOR_LLVM22, "cluster_dims requires LLVM flavor llvm23, got llvm22"},
+        {{2, 2},
+         2,
+         "gfx1250",
+         ROCKE_LLVM_FLAVOR_LLVM23,
+         "cluster_dims must be three integers (x, y, z)"},
+        {{2, 2, 1, 1},
+         4,
+         "gfx1250",
+         ROCKE_LLVM_FLAVOR_LLVM23,
+         "cluster_dims must be three integers (x, y, z)"},
+        {{0, 1, 1},
+         3,
+         "gfx1250",
+         ROCKE_LLVM_FLAVOR_LLVM23,
+         "cluster_dims (0, 1, 1): each dimension must be in 1..15"},
+        {{1, -2, 1},
+         3,
+         "gfx1250",
+         ROCKE_LLVM_FLAVOR_LLVM23,
+         "cluster_dims (1, -2, 1): each dimension must be in 1..15"},
+        {{16, 1, 1},
+         3,
+         "gfx1250",
+         ROCKE_LLVM_FLAVOR_LLVM23,
+         "cluster_dims (16, 1, 1): each dimension must be in 1..15"},
+        {{1, 1, 16},
+         3,
+         "gfx1250",
+         ROCKE_LLVM_FLAVOR_LLVM23,
+         "cluster_dims (1, 1, 16): each dimension must be in 1..15"},
+        {{4, 4, 2},
+         3,
+         "gfx1250",
+         ROCKE_LLVM_FLAVOR_LLVM23,
+         "cluster_dims (4, 4, 2): 32 workgroups exceeds the cluster limit of 16"},
+        {{3, 3, 2},
+         3,
+         "gfx1250",
+         ROCKE_LLVM_FLAVOR_LLVM23,
+         "cluster_dims (3, 3, 2): 18 workgroups exceeds the cluster limit of 16"},
+        {{2, 1, 1},
+         3,
+         "gfx950",
+         ROCKE_LLVM_FLAVOR_LLVM22,
+         "cluster_dims requires gfx1250, got gfx950"},
+        {{2, 1, 1},
+         3,
+         "gfx1201",
+         ROCKE_LLVM_FLAVOR_LLVM23,
+         "cluster_dims requires gfx1250, got gfx1201"},
+        {{2, 1, 1},
+         3,
+         "gfx1250",
+         ROCKE_LLVM_FLAVOR_LLVM22,
+         "cluster_dims requires LLVM flavor llvm23, got llvm22"},
     };
     for(const auto& r : rejects)
     {
@@ -2113,7 +2155,12 @@ void case_gfx1250_cluster_dims_rejects()
         if(st != ROCKE_ERR_VALUE || err.find(r.want) == std::string::npos)
         {
             char msg[ROCKE_ERR_MSG_CAP + 256];
-            snprintf(msg, sizeof(msg), "want \"%s\", status %d, err \"%s\"", r.want, (int)st, err.c_str());
+            snprintf(msg,
+                     sizeof(msg),
+                     "want \"%s\", status %d, err \"%s\"",
+                     r.want,
+                     (int)st,
+                     err.c_str());
             fail(msg, __LINE__);
         }
     }

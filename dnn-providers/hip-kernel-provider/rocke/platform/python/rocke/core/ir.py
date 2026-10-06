@@ -103,6 +103,9 @@ NON_TEMPORAL = 3  # GLC + SLC — bypass cache hierarchy entirely.
 # LLVM ``syncscope`` values accepted by the cross-workgroup fence / flag ops.
 # ``system`` renders as the empty (default) scope.
 _FENCE_SCOPES = ("workgroup", "agent", "system")
+# Orderings each op accepts; the verifier checks serialized IR against these.
+_FENCE_ORDERINGS = ("acquire", "release", "acq_rel", "seq_cst")
+_FLAG_STORE_ORDERINGS = ("monotonic", "release", "seq_cst")
 
 
 # ----- target-neutral MMA metadata ---------------------------------------
@@ -1441,7 +1444,7 @@ class IRBuilder:
         """
         if scope not in _FENCE_SCOPES:
             raise ValueError(f"unknown fence scope {scope!r}")
-        if ordering not in ("acquire", "release", "acq_rel", "seq_cst"):
+        if ordering not in _FENCE_ORDERINGS:
             raise ValueError(f"unknown fence ordering {ordering!r}")
         self._op("memref.fence", [], attrs={"scope": scope, "ordering": ordering})
 
@@ -1465,7 +1468,7 @@ class IRBuilder:
             )
         if scope not in _FENCE_SCOPES:
             raise ValueError(f"unknown flag scope {scope!r}")
-        if ordering not in ("monotonic", "release", "seq_cst"):
+        if ordering not in _FLAG_STORE_ORDERINGS:
             raise ValueError(f"unknown flag store ordering {ordering!r}")
         self._op(
             "memref.global_flag_store",

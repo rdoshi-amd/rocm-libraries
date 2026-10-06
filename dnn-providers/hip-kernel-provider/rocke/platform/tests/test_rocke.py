@@ -3372,6 +3372,39 @@ class TestNewTargetIntrinsics(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unknown flag scope"):
             b.global_flag_wait_eq(flags, b.const_i32(0), b.const_i32(1), scope="gpu")
 
+    def test_verifier_rejects_malformed_flag_ops(self):
+        # Serialized IR can carry flag ops the builder would have refused; the
+        # verifier has to catch them before a lowerer unpacks the operands.
+        from rocke.core.ir import F32
+        from rocke.core.verify import ERROR, verify
+
+        b = self._builder("flagverify")
+        flags = self._flag_kernel(b)
+        b.fence(scope="agent", ordering="release")
+        b.global_flag_store(flags, b.const_i32(0), b.const_i32(1))
+        b.global_flag_wait_eq(flags, b.const_i32(0), b.const_i32(1))
+        b.ret()
+        ops = {op.name: op for op in b.kernel.body.ops}
+        self.assertEqual(
+            [d for d in verify(b.kernel) if d.severity == ERROR], [], "well-formed"
+        )
+        ops["memref.fence"].attrs["ordering"] = "monotonic"
+        ops["memref.global_flag_store"].attrs["scope"] = "gpu"
+        wait = ops["memref.global_flag_wait_eq"]
+        wait.operands[2] = b.const_f32(1.0)
+        msgs = [d.message for d in verify(b.kernel) if d.severity == ERROR]
+        for needle in (
+            "memref.fence: unknown ordering 'monotonic'",
+            "memref.global_flag_store: unknown scope 'gpu'",
+            f"memref.global_flag_wait_eq: value must be i32, got {F32.name}",
+        ):
+            self.assertTrue(any(needle in m for m in msgs), (needle, msgs))
+        del wait.operands[2]
+        msgs = [d.message for d in verify(b.kernel) if d.severity == ERROR]
+        self.assertTrue(
+            any("expected 3 operands / 0 results, got 2 / 0" in m for m in msgs), msgs
+        )
+
     # ---- ds_swizzle (raw offset + XOR-butterfly encoding) ----
     def test_ds_swizzle_passes_raw_offset_immediate(self):
         ll = self._lower("dssw", lambda b: b.ds_swizzle(b.const_i32(1), 0x041F))

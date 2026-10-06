@@ -24,6 +24,7 @@
 #include "rocke/lower_hip.h"
 #include "rocke/lower_llvm.h"
 #include "rocke/strbuf.h"
+#include "rocke/verify.h"
 
 namespace
 {
@@ -690,6 +691,74 @@ void expect_flag_attr_rejected(rocke_opcode_t kind, const char* key, const char*
     rocke_ir_builder_free(&b);
 }
 
+/* The verifier rejects what the builder would have refused (serialized IR),
+ * and the LLVM lowerer refuses a flag op it cannot unpack. */
+void case_flag_ops_verify_and_llvm_arity()
+{
+    rocke_ir_builder_t b;
+    rocke_ir_builder_init(&b, "flag_verify");
+    rocke_value_t* f = global_ptr_param(&b, "flags", rocke_i32());
+    rocke_value_t* two[] = {f, rocke_b_const_i32(&b, 0)};
+    rocke_attr_map_t fence_attrs;
+    rocke_attr_map_init(&fence_attrs);
+    rocke_attr_set_str(&b, &fence_attrs, "scope", "agent");
+    rocke_attr_set_str(&b, &fence_attrs, "ordering", "monotonic");
+    rocke_b_op(&b,
+               ROCKE_OP_MEMREF_FENCE,
+               nullptr,
+               0,
+               nullptr,
+               0,
+               &fence_attrs,
+               nullptr,
+               0,
+               nullptr,
+               nullptr);
+    rocke_attr_map_t store_attrs;
+    rocke_attr_map_init(&store_attrs);
+    rocke_attr_set_str(&b, &store_attrs, "scope", "agent");
+    rocke_attr_set_str(&b, &store_attrs, "ordering", "release");
+    rocke_b_op(&b,
+               ROCKE_OP_MEMREF_GLOBAL_FLAG_STORE,
+               two,
+               2,
+               nullptr,
+               0,
+               &store_attrs,
+               nullptr,
+               0,
+               nullptr,
+               nullptr);
+    rocke_b_ret(&b);
+
+    rocke_diag_t* diags = nullptr;
+    size_t n = 0;
+    rocke_verify(rocke_ir_builder_kernel(&b), &diags, &n);
+    bool saw_ordering = false, saw_arity = false;
+    for(size_t i = 0; i < n; ++i)
+    {
+        const std::string m = diags[i].message ? diags[i].message : "";
+        saw_ordering |= m.find("memref.fence: unknown ordering 'monotonic'") != std::string::npos;
+        saw_arity |= m.find("memref.global_flag_store: expected 3 operands / 0 results, got 2 / 0")
+                     != std::string::npos;
+    }
+    rocke_diags_free(diags, n);
+    if(!saw_ordering)
+        fail("verifier must reject a fence ordering outside the builder's set", __LINE__);
+    if(!saw_arity)
+        fail("verifier must reject a two-operand flag store", __LINE__);
+
+    char* ll = nullptr;
+    char err[ROCKE_ERR_MSG_CAP];
+    err[0] = '\0';
+    const rocke_status_t st = rocke_lower_kernel_to_llvm_ex(
+        rocke_ir_builder_kernel(&b), ROCKE_LLVM_FLAVOR_AUTO, "gfx950", &ll, err, sizeof(err));
+    if(st != ROCKE_ERR_VALUE)
+        fail("LLVM lowering must reject a two-operand flag store", __LINE__);
+    std::free(ll);
+    rocke_ir_builder_free(&b);
+}
+
 void case_flag_ops_hip_reject_bad_attrs()
 {
     expect_flag_attr_rejected(ROCKE_OP_MEMREF_FENCE, "ordering", "bogus");
@@ -1115,6 +1184,7 @@ const TestCase k_cases[] = {
     {"fence_system_scope", case_fence_system_scope},
     {"flag_ops_hip", case_flag_ops_hip},
     {"flag_ops_hip_reject_bad_attrs", case_flag_ops_hip_reject_bad_attrs},
+    {"flag_ops_verify_and_llvm_arity", case_flag_ops_verify_and_llvm_arity},
     {"opcode_names_are_aligned", case_opcode_names_are_aligned},
 };
 

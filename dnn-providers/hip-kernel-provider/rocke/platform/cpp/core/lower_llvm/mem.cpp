@@ -203,6 +203,8 @@ static void op_memref_fence(rocke_lower_t* L, const rocke_op_t* op)
 /* Python _op_memref_global_flag_store. */
 static void op_memref_global_flag_store(rocke_lower_t* L, const rocke_op_t* op)
 {
+    if(op->num_operands != 3)
+        rocke_ll_fail(L, ROCKE_ERR_VALUE, "memref.global_flag_store expects three operands");
     const rocke_value_t* ptr = op->operands[0];
     const rocke_value_t* idx = op->operands[1];
     const rocke_value_t* val = op->operands[2];
@@ -224,6 +226,8 @@ static void op_memref_global_flag_store(rocke_lower_t* L, const rocke_op_t* op)
  * acquire atomic load; the fall-through block becomes current. */
 static void op_memref_global_flag_wait_eq(rocke_lower_t* L, const rocke_op_t* op)
 {
+    if(op->num_operands != 3)
+        rocke_ll_fail(L, ROCKE_ERR_VALUE, "memref.global_flag_wait_eq expects three operands");
     const rocke_value_t* ptr = op->operands[0];
     const rocke_value_t* idx = op->operands[1];
     const rocke_value_t* expect = op->operands[2];

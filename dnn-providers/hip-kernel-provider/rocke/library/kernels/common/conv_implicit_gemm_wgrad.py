@@ -1211,10 +1211,19 @@ def wgrad_streamk_default_ctas(spec: "WgradConvSpec", arch: str) -> int:
     dispatch front can wait on one that has not started, and they hold a
     bounded number of slots (one for linear, about one per round for tree).
     """
+    return wgrad_streamk_default_pool(spec.streamk_reduction, arch)
+
+
+def wgrad_streamk_default_pool(reduction: str, arch: str) -> int:
+    """:func:`wgrad_streamk_default_ctas` for a bare ``reduction`` name.
+
+    Lets selection policy size the pool a launch will use before any spec
+    exists.
+    """
     from rocke.helpers.split_k import _ARCH_NUM_CUS, _DEFAULT_NUM_CUS
 
     num_cus = _ARCH_NUM_CUS.get(arch, _DEFAULT_NUM_CUS)
-    if spec.streamk_reduction in ("linear", "tree"):
+    if reduction in ("linear", "tree"):
         return num_cus
     return num_cus * _STREAMK_CTAS_PER_CU
 

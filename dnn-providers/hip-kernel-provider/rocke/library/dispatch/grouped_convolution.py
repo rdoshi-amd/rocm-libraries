@@ -156,6 +156,7 @@ from kernels.common.conv_implicit_gemm_wgrad import (
     _DEFAULT_WS_REPLICAS as _WGRAD_WS_REPLICAS,
     is_valid_wgrad_spec as _wgrad_is_valid_spec,
     wgrad_atomic_epilogue_available as _wgrad_atomic_epilogue_available,
+    wgrad_streamk_default_pool as _wgrad_streamk_default_pool,
     wgrad_streamk_grid as _wgrad_streamk_grid,
     wgrad_streamk_launch_values as _wgrad_streamk_launch_values,
 )
@@ -493,9 +494,22 @@ _WGRAD_STREAMK_MIN_ITERS_PER_TILE = 1024
 
 
 def _wgrad_streamk_auto(
-    req: ConvGroupedRequest, tile_m: int, tile_n: int, tile_k: int
+    req: ConvGroupedRequest,
+    tile_m: int,
+    tile_n: int,
+    tile_k: int,
+    reduction: str = "workspace",
 ) -> bool:
-    """Whether ``streamk="auto"`` should pick stream-K for this request."""
+    """Whether ``streamk="auto"`` should pick stream-K for this request.
+
+    Besides the two thresholds, the partition the launch will use must give
+    the stream-K CTAs work: a pool larger than ``tiles * iters_per_tile``
+    (one tile on a bigger arch's pool) falls back to all-DP, which runs each
+    tile's whole reduction on one CTA, slower than the split-K path it would
+    replace.
+    """
+    from rocke.helpers.streamk import streamk_iter_partition
+
     p = _problem(req)
     spatial = (p.Z if p.is_3d else 1) * p.Y * p.X
     wg_M = p.K // p.groups
@@ -503,10 +517,18 @@ def _wgrad_streamk_auto(
     wg_K = p.N * p.Ho * p.Wo * (p.Do if p.is_3d else 1)
     tiles = -(-wg_M // tile_m) * -(-wg_N // tile_n) * p.groups
     iters_per_tile = -(-wg_K // tile_k)
-    return (
-        tiles <= _WGRAD_STREAMK_MAX_TILES
-        and iters_per_tile >= _WGRAD_STREAMK_MIN_ITERS_PER_TILE
+    if (
+        tiles > _WGRAD_STREAMK_MAX_TILES
+        or iters_per_tile < _WGRAD_STREAMK_MIN_ITERS_PER_TILE
+    ):
+        return False
+    part = streamk_iter_partition(
+        m_tiles=tiles,
+        n_tiles=1,
+        iters_per_tile=iters_per_tile,
+        max_active_wgs=_wgrad_streamk_default_pool(reduction, req.arch),
     )
+    return part.sk_ctas > 0
 
 
 def _wgrad_streamk_choice(
@@ -517,19 +539,19 @@ def _wgrad_streamk_choice(
     The one resolver every wgrad candidate's instance spec, dispatch spec and
     grid go through, so they cannot disagree on whether the kernel is stream-K.
     """
-    mode = req.streamk
-    if mode == "auto":
-        mfma = req.arch in ("gfx942", "gfx950")
-        mode = (
-            "dp_sk"
-            if mfma and _wgrad_streamk_auto(req, tile_m, tile_n, tile_k)
-            else "off"
-        )
     # The f32 workspace reduction never waits on another CTA, so its pool can be
     # sized for occupancy; it is also the fastest of the reductions measured.
     reduction = (
         "workspace" if req.streamk_reduction == "auto" else req.streamk_reduction
     )
+    mode = req.streamk
+    if mode == "auto":
+        mfma = req.arch in ("gfx942", "gfx950")
+        mode = (
+            "dp_sk"
+            if mfma and _wgrad_streamk_auto(req, tile_m, tile_n, tile_k, reduction)
+            else "off"
+        )
     return mode, reduction
 
 

@@ -476,6 +476,23 @@ class TestStreamKSelection(unittest.TestCase):
         self.assertGreater(16 * 144, _WGRAD_STREAMK_MAX_TILES)
         self.assertFalse(_wgrad_streamk_auto(many, 64, 64, 64))
 
+    def test_auto_skips_an_all_dp_partition(self):
+        # One output tile with 1024..1215 iterations clears both thresholds,
+        # but on gfx942 that is below the 1216-CTA workspace pool, so the
+        # partition would be all-DP: one CTA running the whole reduction.
+        # Auto keeps split-K there; gfx950's 1024-CTA pool still splits it.
+        for N, arch, mode in (
+            (64, "gfx942", "off"),
+            (72, "gfx942", "off"),
+            (76, "gfx942", "dp_sk"),
+            (64, "gfx950", "dp_sk"),
+        ):
+            req = _wgrad(
+                arch, N=N, Hi=32, Wi=32, Y=1, X=1, pad_h=0, pad_w=0, dtype="bf16"
+            )
+            with self.subTest(arch=arch, N=N):
+                self.assertEqual(dispatch_conv_grouped(req).spec.streamk, mode)
+
     def test_off_and_gfx1250_never_pick_streamk(self):
         req = _wgrad("gfx950", N=128, C=24, K=96, Hi=96, Wi=96, streamk="off")
         self.assertEqual(dispatch_conv_grouped(req).spec.streamk, "off")

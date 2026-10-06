@@ -4,8 +4,8 @@
 # hipBLASLt + TensileLite tests on a gfx1250 runner, run against a prebuilt ROCm
 # artifact inside a container.
 #
-# On-demand only: workflow_dispatch. A developer supplies the run-id of a completed
-# "TheRock Multi-Arch CI" gfx1250-strict build and picks which suites to run. There is
+# On-demand only: workflow_dispatch. A developer supplies the run-id of the PR's
+# gfx1250-strict "TheRock Multi-Arch CI" build and picks which suites to run. There is
 # no per-PR auto-trigger — the gfx1250 runners are scarce, so runs are manual.
 
 name: gfx1250 HW hipBLASLt + TensileLite Tests
@@ -15,9 +15,9 @@ on:
   workflow_dispatch:
     inputs:
       build_run_id:
-        description: "CI run-id of the gfx1250 build to fetch (manual runs only)"
+        description: "CI run-id of the PR's gfx1250-strict build"
         type: string
-        required: false
+        required: true
       build_repo:
         description: "Repo that produced the artifact (e.g. ROCm/TheRock for validation)"
         type: string
@@ -77,6 +77,8 @@ jobs:
         shell: bash
     env:
       ROCM: ${{ github.workspace }}/rocm
+      # TensileLite and HIP look up tools under ROCM_PATH first: keep them on the artifact's.
+      ROCM_PATH: ${{ github.workspace }}/rocm
       LD_LIBRARY_PATH: ${{ github.workspace }}/rocm/lib:${{ github.workspace }}/rocm/lib/llvm/lib:${{ github.workspace }}/rocm/lib/rocm_sysdeps/lib
       # Run both suites as gfx1250-strict, against the gfx1250-strict artifact.
       HSA_DISABLE_GFX12_STRICT: "0"
@@ -139,7 +141,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           if [ -z "$BUILD_RUN_ID" ]; then
-            echo "::error::No build run-id (provide build_run_id for manual runs)"; exit 1
+            echo "::error::No build run-id: provide the PR's gfx1250-strict build_run_id"; exit 1
           fi
           set +e
           python TheRock/build_tools/install_rocm_from_artifacts.py \
@@ -196,6 +198,15 @@ jobs:
             "$ROCM"/*) ;;
             *) echo "::error::hipblaslt-test links '${LIB:-nothing}', not the fetched artifact's libhipblaslt"; exit 1 ;;
           esac
+          # The strict library must exist with its code objects labelled
+          # gfx1250-strict: a stale bundler at build time leaves the label empty,
+          # and then no GEMM kernel loads.
+          CO="$(find "$ROCM/lib/hipblaslt/library/gfx1250-strict" -name 'TensileLibrary*.co' -print -quit 2>/dev/null)"
+          [ -n "$CO" ] || { echo "::error::no gfx1250-strict hipBLASLt library; build_run_id must be a gfx1250-strict build"; exit 1; }
+          IDS="$("$ROCM/lib/llvm/bin/clang-offload-bundler" --list --type=o --input="$CO")" \
+            || { echo "::error::cannot list a hipBLASLt code object with the artifact's clang-offload-bundler"; exit 1; }
+          grep -q -- '-gfx1250-strict$' <<<"$IDS" \
+            || { echo "::error::hipBLASLt code objects are not labelled gfx1250-strict"; exit 1; }
           export HIPBLASLT_TEST_TIMEOUT=3600
           FILTER=()
           [ -n "$GTEST_FILTER_ARG" ] && FILTER+=(--gtest_filter="$GTEST_FILTER_ARG")

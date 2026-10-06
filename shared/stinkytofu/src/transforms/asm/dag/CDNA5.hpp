@@ -37,6 +37,7 @@
 #include <cstdint>
 #include <limits>
 #include <map>
+#include <optional>
 #include <tuple>
 #include <unordered_set>
 #include <utility>
@@ -890,6 +891,12 @@ class CDNA5ReadyQueue : public ReadyQueue {
         return false;
     }
     void stampPipeOpGates(const StinkyInstruction& inst);
+    // A VALU overwriting ds_load addresses is ordered after the barrier wait that hands
+    // those loads' LDS buffer back, when its consumers are planned this many windows later.
+    static constexpr int kOverwriteAfterBarrierMinWindows = 4;
+    void orderAddressOverwritesAfterBarrier(IRList::iterator regionStart,
+                                            IRList::iterator regionEnd,
+                                            const RegionDependencies& deps);
     int nodeElapseKey(DAGNode* node) const;
     DAGNode* pickFreeBest(const ReadySetByDAGid& queue, int* outWait = nullptr,
                           bool allowHiddenStall = false) const;
@@ -2697,6 +2704,143 @@ void CDNA5ReadyQueue::onFinishBB() {
 // pickOneFromWMMA). Rule (2): seedWmmaDsLatencyFromPrefix. Rule (5): head
 // balance. Barrier thresholds: computeBarrierAfterThresholds /
 // computeBarrierBeforeThresholds.
+// A VALU that overwrites the address VGPR of ds_loads on LDS token k (the swap of a
+// double-buffered read address) only has a WAR edge to those loads, so it can land while
+// they are still queued and pay a vm_vsrc(0). StinkyWaitCntInsertion drains the token's
+// loads with an s_wait_dscnt ahead of the barrier that hands buffer k back, and
+// InsertWaitAlu credits that drain, so ordering the VALU after that barrier's wait removes
+// the wait. Requested only when every consumer of the VALU is planned at least
+// kOverwriteAfterBarrierMinWindows after the barrier, so the edge cannot delay them.
+void CDNA5ReadyQueue::orderAddressOverwritesAfterBarrier(IRList::iterator regionStart,
+                                                         IRList::iterator regionEnd,
+                                                         const RegionDependencies& deps) {
+    std::vector<StinkyInstruction*> order;
+    std::unordered_map<const StinkyInstruction*, size_t> posOf;
+    for (IRList::iterator it = regionStart; it != regionEnd; ++it) {
+        if (auto* inst = dyn_cast<StinkyInstruction>(it.getNodePtr())) {
+            posOf[inst] = order.size();
+            order.push_back(inst);
+        }
+    }
+
+    // The single LDS token an instruction reads, or nullopt for none or several.
+    auto tokenOf = [](const StinkyInstruction& inst) -> std::optional<uint32_t> {
+        std::optional<uint32_t> token;
+        for (const StinkyRegister& src : inst.getSrcRegs()) {
+            if (!isPseudoReg(src) || src.reg.type != RegType::LDS) continue;
+            if (token && *token != src.reg.idx) return std::nullopt;
+            token = src.reg.idx;
+        }
+        return token;
+    };
+    auto isWaitOn = [&](const StinkyInstruction& inst, uint32_t token) {
+        return isBarrier(inst) && isBarrierWait(inst) && tokenOf(inst) == token;
+    };
+    auto plannedWindow = [&](StinkyInstruction* barrier) -> std::optional<int> {
+        auto it = barrierWmmaThresholds_.find(barrier);
+        if (it == barrierWmmaThresholds_.end()) return std::nullopt;
+        return it->second;
+    };
+    auto isFiller = [](const StinkyInstruction& i) {
+        return isVectorALU(i) || isTranscendental(i) || isScalarALU(i);
+    };
+
+    // Per VGPR, the ds_loads that read it since its last write. A reader that is not a
+    // single-token ds_load (another memory op) poisons it: dscnt does not drain that.
+    struct Readers {
+        uint32_t token = 0;
+        size_t lastPos = 0;
+        bool dsOnly = true;
+    };
+    std::map<unsigned, Readers> readers;
+    for (size_t pos = 0; pos < order.size(); ++pos) {
+        StinkyInstruction* inst = order[pos];
+        const std::optional<uint32_t> readToken =
+            isDSRead(*inst) ? tokenOf(*inst) : std::optional<uint32_t>{};
+        const bool dsRead = readToken.has_value();
+        const uint32_t dsToken = readToken.value_or(0);
+        const bool memReader = !isFiller(*inst) && !isMatrixInstruction(*inst);
+        for (const StinkyRegister& src : inst->getSrcRegs()) {
+            if (!src.isRegister() || isPseudoReg(src) || src.reg.type != RegType::V) continue;
+            for (unsigned i = 0; i < src.reg.num; ++i) {
+                if (!dsRead && !memReader) continue;
+                auto [it, fresh] = readers.try_emplace(src.reg.idx + i);
+                Readers& r = it->second;
+                if (fresh) r.token = dsToken;
+                r.dsOnly = r.dsOnly && dsRead && dsToken == r.token;
+                r.lastPos = pos;
+            }
+        }
+        // Collect what this instruction overwrites; only a VALU overwrite is a candidate.
+        uint32_t token = 0;
+        size_t lastPos = 0;
+        bool candidate = isVectorALU(*inst);
+        bool overwritesRead = false;
+        for (const StinkyRegister& dst : inst->getDestRegs()) {
+            if (!dst.isRegister() || isPseudoReg(dst) || dst.reg.type != RegType::V) continue;
+            for (unsigned i = 0; i < dst.reg.num; ++i) {
+                auto it = readers.find(dst.reg.idx + i);
+                if (it == readers.end()) continue;
+                if (!it->second.dsOnly || (overwritesRead && token != it->second.token))
+                    candidate = false;
+                overwritesRead = true;
+                token = it->second.token;
+                lastPos = std::max(lastPos, it->second.lastPos);
+                readers.erase(it);
+            }
+        }
+        if (!candidate || !overwritesRead) continue;
+
+        // The barrier wait that hands buffer `token` back: the first one after the reads.
+        StinkyInstruction* wait = nullptr;
+        for (size_t p = lastPos + 1; p < order.size() && wait == nullptr; ++p)
+            if (isWaitOn(*order[p], token)) wait = order[p];
+        const auto waitWindow = wait ? plannedWindow(wait) : std::nullopt;
+        if (!waitWindow) continue;
+
+        // Earliest planned window among the VALU's consumers, through filler chains. A
+        // ds_load is planned at the barrier wait that opens its buffer; a consumer past the
+        // region is planned at its end. Anything else declines.
+        auto idIt = deps.dag.instToId.find(inst);
+        if (idIt == deps.dag.instToId.end()) continue;
+        int consumerWindow = wmmaTotalThisRegion_;
+        bool known = true;
+        std::vector<unsigned> work{idIt->second};
+        std::unordered_set<unsigned> seen{idIt->second};
+        while (!work.empty() && known) {
+            const unsigned id = work.back();
+            work.pop_back();
+            for (unsigned succ : deps.dag.graph[id]) {
+                if (!seen.insert(succ).second) continue;
+                StinkyInstruction* use = deps.dag.nodes[succ].inst;
+                if (isFiller(*use)) {
+                    work.push_back(succ);
+                    continue;
+                }
+                const auto useToken = isDSRead(*use) ? tokenOf(*use) : std::nullopt;
+                auto usePos = posOf.find(use);
+                StinkyInstruction* opener = nullptr;
+                if (useToken && usePos != posOf.end())
+                    for (size_t p = usePos->second; p-- > 0 && opener == nullptr;)
+                        if (isWaitOn(*order[p], *useToken)) opener = order[p];
+                const auto useWindow = opener ? plannedWindow(opener) : std::nullopt;
+                if (!useWindow) {
+                    known = false;
+                    break;
+                }
+                consumerWindow = std::min(consumerWindow, *useWindow);
+            }
+        }
+        const bool request =
+            known && consumerWindow - *waitWindow >= kOverwriteAfterBarrierMinWindows;
+        PASS_DEBUG(std::cerr << "[CDNA5 overwriteAfterBarrier] valu=" << inst << " token=" << token
+                             << " wait=" << wait << " waitWindow=" << *waitWindow
+                             << " consumerWindow=" << (known ? consumerWindow : -1)
+                             << (request ? " request" : " decline") << "\n");
+        if (request) deps.requestedConstraints.emplace_back(wait, inst);
+    }
+}
+
 void CDNA5ReadyQueue::onInitRegion(IRList::iterator regionStart, IRList::iterator regionEnd,
                                    IRList::iterator blockBegin, const RegionDependencies& deps) {
     regionDag_ = &deps.dag;
@@ -3347,6 +3491,8 @@ void CDNA5ReadyQueue::onInitRegion(IRList::iterator regionStart, IRList::iterato
             }
         }
     }
+
+    orderAddressOverwritesAfterBarrier(regionStart, regionEnd, deps);
 
     // Run after every barrier placement and normalization step so the analysis
     // sees the same final thresholds that the scheduler will enforce.

@@ -1115,6 +1115,50 @@ TEST_F(DAGSchedulerPassTest, LockDsReadOrderDoesNotCrossMemoryTokens) {
         << "ds_loads on different memory tokens must not be chained together";
 }
 
+// A double-buffered stage: ds_loads read buffer 0 through v300, the swap overwrites
+// v300, and the reads of buffer 1 through the new v300 follow buffer 1's barrier. The
+// barrier on token 0 hands buffer 0 back once its reads are done, which is where
+// WaitCntInsertion drains them. With few buffer-0 reads that barrier is planned well
+// before buffer 1's reads, so the swap is ordered after its wait. With many, it is
+// planned next to them, and ordering the swap behind it could delay them, so it is not.
+TEST_F(DAGSchedulerPassTest, AddressOverwriteOrderedAfterBufferBarrier) {
+    auto schedule = [&](int buffer0Reads, int buffer1Reads) {
+        am.clear();
+        func = std::make_unique<Function>("double_buffer_swap");
+        setFunctionArch(*func, arch);
+        bb = func->createBasicBlock("loop_body");
+        bb->addSuccessor(bb);
+
+        for (int i = 0; i < buffer0Reads; ++i) {
+            createMovableDsLoad(/*destReg=*/100 + i * 8, /*addrReg=*/300, /*ldsToken=*/0);
+            createWmmaF32_16x16x16_bf16_in(bb, /*destStart=*/500 + i * 8,
+                                           /*src0Start=*/100 + i * 8);
+        }
+        StinkyInstruction* swap = createVAddInBlock(bb, arch, /*dest=*/300, 301, 300);
+        createMovableWorkgroupBarrier(bb, /*ldsToken=*/1);
+        for (int i = 0; i < buffer1Reads; ++i) {
+            createMovableDsLoad(/*destReg=*/700 + i * 8, /*addrReg=*/300, /*ldsToken=*/1);
+            createWmmaF32_16x16x16_bf16_in(bb, /*destStart=*/900 + i * 8,
+                                           /*src0Start=*/700 + i * 8);
+        }
+        auto [handBackSignal, handBackWait] = createMovableWorkgroupBarrier(bb, /*ldsToken=*/0);
+        (void)handBackSignal;
+        createMovableTensorLoad(bb, /*s0=*/40, /*s1=*/48, /*ldsToken=*/0);
+
+        if (testDumpEnabled()) std::cerr << "\n=== INPUT:" << scheduleOrder(*bb) << "\n";
+        runPassWithUnrollGemm();
+        if (testDumpEnabled()) std::cerr << "\n=== OUTPUT:" << scheduleOrder(*bb) << "\n";
+        return std::pair{positionOf(*bb, swap), positionOf(*bb, handBackWait)};
+    };
+
+    const auto [farSwap, farWait] = schedule(/*buffer0Reads=*/4, /*buffer1Reads=*/12);
+    EXPECT_GT(farSwap, farWait) << "the swap must follow the barrier that hands buffer 0 back";
+
+    const auto [nearSwap, nearWait] = schedule(/*buffer0Reads=*/12, /*buffer1Reads=*/2);
+    EXPECT_LT(nearSwap, nearWait)
+        << "the swap must not wait for buffer 0's barrier when its consumers come first";
+}
+
 // DS reads + WMMAs: scheduler must not issue WMMAs back-to-back when other
 // instructions exist. With real ds_load latency, WMMAs are not latency-free
 // until ds_reads are issued and latency elapses, so we get: 4 ds_load, then 2

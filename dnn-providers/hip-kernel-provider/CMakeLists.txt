@@ -334,11 +334,12 @@ if(HIPDNN_ENABLE_KERNEL_INGESTOR)
     set(HIPKERNELPROVIDER_PRODUCTION_DESCRIPTOR_SOURCE_ROOT
         "${CMAKE_CURRENT_SOURCE_DIR}/src/engines/kernel_ingestor_engine/descriptors")
 
-    # With HIPKERNELPROVIDER_ENABLE_ROCKE ON, the shipped rocKE bundles are not in git:
-    # each is a DVC-tracked folder (<bundle>.dvc beside it, remote 'ingestor'). Fail
-    # configure when a bundle folder is missing or holds fewer files than its pointer
-    # records, so a missing descriptor never reaches the packer. With the option OFF,
-    # rocKE descriptors are not consumed and DVC is not needed.
+    # With HIPKERNELPROVIDER_ENABLE_ROCKE ON, the large rocKE bundle files (the KDPs, and
+    # any kernel object) are not in git: each is a DVC output with a <file>.dvc pointer
+    # beside it (remote 'ingestor'). Fail configure when such a file is missing or its
+    # size differs from the pointer, so a missing or truncated descriptor never reaches
+    # the packer. The small descriptors stay in git. With the option OFF, rocKE
+    # descriptors are not consumed and DVC is not needed.
     # Only the root this build packs from is checked: a build that overrides
     # HIPKERNELPROVIDER_PRODUCTION_SOURCE_ROOT does not need the shipped bundles.
     if(HIPKERNELPROVIDER_ENABLE_ROCKE)
@@ -349,15 +350,17 @@ if(HIPDNN_ENABLE_KERNEL_INGESTOR)
         endif()
         file(GLOB_RECURSE _rocke_pointers "${_rocke_root}/rocKE/*.dvc")
         foreach(_pointer IN LISTS _rocke_pointers)
-            string(REGEX REPLACE "\\.dvc$" "" _bundle "${_pointer}")
-            file(STRINGS "${_pointer}" _nfiles_line REGEX "^  nfiles: [0-9]+$")
-            string(REGEX REPLACE "[^0-9]" "" _expected "${_nfiles_line}")
-            file(GLOB_RECURSE _present "${_bundle}/*")
-            list(LENGTH _present _count)
-            if(NOT _expected OR _count LESS _expected)
+            string(REGEX REPLACE "\\.dvc$" "" _file "${_pointer}")
+            file(STRINGS "${_pointer}" _size_line REGEX "^  size: [0-9]+$")
+            string(REGEX REPLACE "[^0-9]" "" _expected "${_size_line}")
+            set(_actual -1)
+            if(EXISTS "${_file}")
+                file(SIZE "${_file}" _actual)
+            endif()
+            if(NOT _expected OR NOT _actual EQUAL _expected)
                 message(FATAL_ERROR
-                    "hip-kernel-provider: rocKE descriptor bundle ${_bundle} is "
-                    "missing or incomplete (${_count} of ${_expected} files).\n"
+                    "hip-kernel-provider: rocKE descriptor ${_file} is missing or "
+                    "incomplete (${_actual} bytes, expected ${_expected}).\n"
                     "Run: dvc pull -r ingestor ${_pointer}")
             endif()
         endforeach()

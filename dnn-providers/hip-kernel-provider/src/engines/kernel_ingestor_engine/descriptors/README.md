@@ -3,7 +3,7 @@
 This root holds the descriptors the provider **ships**. Its sibling `test_descriptors/`
 stages into the build tree for the unit and integration binaries and is installed only
 under `HIPKERNELPROVIDER_ENABLE_TESTS`. It holds one bundle,
-`rocKE/gfx950_attention_dense/` (stored in DVC, see "rocKE bundles live in DVC" below), whose KDP declares gfx950 only, so production packaging
+`rocKE/gfx950_attention_dense/` (its KDP is stored in DVC, see "Large rocKE files live in DVC" below), whose KDP declares gfx950 only, so production packaging
 runs for a build whose GPU targets include gfx950 and is dormant for every other build
 unless the cache variable below is pointed elsewhere.
 
@@ -55,42 +55,51 @@ a native pack registers the symbols their UKDs name. The Linux superbuild CI lan
 overrides `HIPKERNELPROVIDER_PRODUCTION_SOURCE_ROOT` to that fixture tree, so that lane
 packs the fixtures and never this root.
 
-## rocKE bundles live in DVC
+## Large rocKE files live in DVC
 
-Bundles under `rocKE/` are not stored in git. Each bundle folder is one DVC output:
+Only the large files of a rocKE bundle are stored in DVC: the KDPs (`*.kdp.json`) and any
+kernel object (`*.co`, `*.hsaco`). The other descriptors (KMD, UDD, UED, UHD, UMD) are small,
+human-readable JSON and stay in git, so their changes show in review. Each DVC file has a
+pointer beside it:
 
 ```
-rocKE/<bundle>.dvc      tracked in git: md5 of the folder, file count, remote: ingestor
-rocKE/<bundle>/         not in git (ignored): the uncompressed descriptor files
+rocKE/<bundle>/<name>.kdp.json.dvc   in git: md5, size, remote: ingestor
+rocKE/<bundle>/<name>.kdp.json       not in git (ignored): the file itself
 ```
 
 The blobs live in the `ingestor` remote (`s3://therock-dvc/rocm-libraries/hipdnn/ingestor`,
-anonymous read, declared in `.dvc/config`). Each file is stored as-is under its md5.
+anonymous read, declared in `.dvc/config`). Each file is stored as-is under its md5, with
+no compression. The packer reads only `*.json`, so the `.dvc` and `.gitignore` files beside
+the descriptors are ignored.
 
 **Fetch.** TheRock's `build_tools/fetch_sources.py` pulls every `*.dvc` pointer in
-`rocm-libraries`, so a source fetch populates the bundle folder. By hand:
+`rocm-libraries`, so a source fetch populates these files. By hand:
 
 ```
-dvc pull -r ingestor dnn-providers/hip-kernel-provider/src/engines/kernel_ingestor_engine/descriptors/rocKE/<bundle>.dvc
+dvc pull -r ingestor dnn-providers/hip-kernel-provider/src/engines/kernel_ingestor_engine/descriptors/rocKE/<bundle>/<name>.kdp.json.dvc
 ```
 
 **Build behavior.** Keyed on the existing `HIPKERNELPROVIDER_ENABLE_ROCKE`:
 
-- `ON`: configure fails if a bundle folder is missing or holds fewer files than its
-  pointer's `nfiles`. The error names the `dvc pull` command. Only the root the build
-  packs from is checked, so a build that sets `HIPKERNELPROVIDER_PRODUCTION_SOURCE_ROOT`
-  elsewhere does not need these bundles.
+- `ON`: configure fails if a DVC file is missing or its size differs from its pointer. The
+  error names the `dvc pull` command. Only the root the build packs from is checked, so a
+  build that sets `HIPKERNELPROVIDER_PRODUCTION_SOURCE_ROOT` elsewhere does not need these
+  files.
 - `OFF`: rocKE descriptors are not consumed and DVC is not needed.
 
-**Add or change a bundle.** Author the folder, then:
+**Add or change a large file.**
 
 ```
-cd .../descriptors/rocKE
-dvc add <bundle>
-printf '  remote: ingestor\n' >> <bundle>.dvc   # add under the single outs entry
-dvc push -r ingestor                            # needs S3 write access, see below
-git add <bundle>.dvc .gitignore
+cd .../descriptors/rocKE/<bundle>
+dvc add <name>.kdp.json
+printf '  remote: ingestor\n' >> <name>.kdp.json.dvc   # new pointers only; dvc add keeps it later
+dvc push -r ingestor                                   # needs S3 write access, see below
+git add <name>.kdp.json.dvc .gitignore
 ```
+
+Commit the `.dvc` file in the same change as the push. Any change to the file changes its
+md5, so the pointer must be updated with it. The pointer diff shows only the new md5 and
+size, not the content change; describe the change in the commit message.
 
 **Pushing needs a signed request.** The committed `.dvc/config` sets
 `allow_anonymous_login = true` on `ingestor` so that CI and `fetch_sources` can pull
@@ -108,6 +117,3 @@ any config file. The identity needs `s3:PutObject` and `s3:ListBucket` on
 `s3://therock-dvc/rocm-libraries/hipdnn/ingestor/`. `dvc push -r ingestor` uploads every
 object in your local cache, not only this bundle, so do not pull other remotes' data
 into the same worktree before pushing.
-
-Commit the `.dvc` file in the same change as the push. A changed file changes the folder
-md5, so the pointer must be updated whenever the folder content changes.

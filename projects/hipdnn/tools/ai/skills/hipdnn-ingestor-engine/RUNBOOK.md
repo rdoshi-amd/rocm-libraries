@@ -343,7 +343,7 @@ a KDP is what arch pruning consumes. Outcomes:
 | KDP present, pruned on every arch, built-in default root | Dormant, so configuring for an undeclared arch is not a build error |
 | Root set but not a directory | Fatal at configure |
 
-rocKE bundles under that root are DVC outputs (`rocKE/<bundle>.dvc`, remote `ingestor`), not git files: run `dvc pull -r ingestor <pointer>` before configuring with `HIPKERNELPROVIDER_ENABLE_ROCKE=ON`, which fails configure on a missing or incomplete bundle. See `descriptors/README.md`.
+The large rocKE bundle files under that root (KDPs, kernel objects) are DVC outputs (`<file>.dvc` pointer beside the file, remote `ingestor`), not git files: run `dvc pull -r ingestor <pointer>` before configuring with `HIPKERNELPROVIDER_ENABLE_ROCKE=ON`, which fails configure on a missing or truncated file. See `descriptors/README.md`.
 
 That default root is `$PROVIDER/src/engines/kernel_ingestor_engine/descriptors/`, which
 holds the bundles the provider ships. Packaging from it skips when nothing under it

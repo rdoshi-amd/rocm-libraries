@@ -17,7 +17,8 @@ if(HIPBLASLT_ENABLE_JIT)
     target_sources(hipblaslt PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/hipblaslt-jit-code-object.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/hipblaslt-jit-builder.cpp"
-        "${CMAKE_CURRENT_SOURCE_DIR}/hipblaslt-jit-loader.cpp")
+        "${CMAKE_CURRENT_SOURCE_DIR}/hipblaslt-jit-loader.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/hipblaslt-jit-component.cpp")
 endif()
 
 if(HIPBLASLT_BUILD_TESTING)

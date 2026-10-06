@@ -60,7 +60,7 @@ namespace
 
     bool isJit(hipblasLtMatmulAlgo_t algo)
     {
-        return hipblaslt_ext::getIndexFromAlgo(algo) == -1;
+        return hipblaslt_ext::getIndexFromAlgo(algo) >= (1 << 30);
     }
 
     Listed queryC(hipblasLtHandle_t            handle,

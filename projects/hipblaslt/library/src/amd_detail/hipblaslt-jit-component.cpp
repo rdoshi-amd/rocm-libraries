@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "hipblaslt-jit-component.hpp"
+#include "hipblaslt-jit-library.hpp"
 #include <algorithm>
 #include <cerrno>
 #include <new>
@@ -20,8 +21,10 @@ namespace hipblaslt_jit
 
     std::shared_ptr<const Jit> makeJit(std::shared_ptr<const Backend> backend)
     {
-        return std::make_shared<const Jit>(
-            Jit::Components{std::move(backend), makeComgrBuilder(), makeTensileLoader()});
+        const auto info  = backend->info();
+        auto       store = makeLibraryStore(JitLibrary::process(), info, jitCodeObjectVersion);
+        return std::make_shared<const Jit>(Jit::Components{
+            std::move(backend), makeComgrBuilder(), makeTensileLoader(), std::move(store)});
     }
 
     namespace
@@ -120,6 +123,10 @@ namespace hipblaslt_jit
             return "support";
         case Stage::Load:
             return "load";
+        case Stage::Lookup:
+            return "lookup";
+        case Stage::Publish:
+            return "publish";
         }
         return "unknown stage";
     }
@@ -172,8 +179,8 @@ namespace hipblaslt_jit
         outcome.summary = std::move(status.message);
 
         const BuildRequest build{target.targetId, generation.codeObjectVersion, scratch->path()};
-        std::vector<std::pair<BuiltSolution, std::vector<int>>> supported;
-        size_t                                                  solutions = 0;
+        SupportedSolutions supported;
+        size_t             solutions = 0;
         for(const auto& solution : generated)
         {
             if(solutions == count)
@@ -201,24 +208,45 @@ namespace hipblaslt_jit
             supported.emplace_back(std::move(built), std::move(indices));
         }
 
-        for(const auto& entry : supported)
+        bool load = true;
+        if(c.store && !supported.empty())
         {
-            const auto& built   = entry.first;
-            const auto& indices = entry.second;
-            std::vector<std::shared_ptr<const KernelBundle>> bundles;
-            status = guarded([&] {
-                return c.loader->load(built, request, target, workspaceLimit, indices, bundles);
-            });
-            if(status.ok()
-               && (bundles.size() != indices.size()
-                   || std::find(bundles.begin(), bundles.end(), nullptr) != bundles.end()))
+            std::vector<int32_t> indices;
+            status = guarded([&] { return c.store->publish(request, target, supported, indices); });
+            if(status.ok() && indices.size() != solutions)
                 status = {Status::Code::Failed,
-                          Stage::Load,
-                          "Loader did not return a bundle for each solution"};
+                          Stage::Publish,
+                          "Solution store returned " + std::to_string(indices.size())
+                              + " indices for " + std::to_string(solutions) + " solutions"};
             if(status.ok())
-                outcome.bundles.insert(outcome.bundles.end(), bundles.begin(), bundles.end());
+            {
+                outcome.indices = std::move(indices);
+                load            = false;
+            }
             else
-                record(Stage::Load, std::move(status));
+                record(Stage::Publish, std::move(status));
+        }
+        if(load)
+        {
+            for(const auto& entry : supported)
+            {
+                const auto& built   = entry.first;
+                const auto& indices = entry.second;
+                std::vector<std::shared_ptr<const KernelBundle>> bundles;
+                status = guarded([&] {
+                    return c.loader->load(built, request, target, workspaceLimit, indices, bundles);
+                });
+                if(status.ok()
+                   && (bundles.size() != indices.size()
+                       || std::find(bundles.begin(), bundles.end(), nullptr) != bundles.end()))
+                    status = {Status::Code::Failed,
+                              Stage::Load,
+                              "Loader did not return a bundle for each solution"};
+                if(status.ok())
+                    outcome.bundles.insert(outcome.bundles.end(), bundles.begin(), bundles.end());
+                else
+                    record(Stage::Load, std::move(status));
+            }
         }
 
         if(!outcome.failures.empty())

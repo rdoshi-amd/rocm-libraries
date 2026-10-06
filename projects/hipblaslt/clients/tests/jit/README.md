@@ -33,13 +33,15 @@ The CTest tests are:
 - `jit-cpu`: `jit-bundles`, `jit-source-bundle` and `jit-builder`. A build
   with `HIPBLASLT_ENABLE_JIT=OFF` has `jit-source-bundle` and `jit-disabled`.
   CTest runs `jit-bundles` before each test that reads a bundle.
-- `jit-gpu`: `jit-loader`, `jit-end-to-end`, `jit-heuristic-off`,
+- `jit-gpu`: `jit-loader`, `jit-library`, `jit-library-concurrency`,
+  `jit-end-to-end`, `jit-end-to-end-library`, `jit-heuristic-off`,
   `jit-heuristic-fallback` and `jit-heuristic-forced`, when `GPU_TARGETS`
-  include an architecture with committed bundles. A build with
-  `HIPBLASLT_ENABLE_JIT=OFF` has `jit-heuristic-ignored` instead, which sets
-  `HIPBLASLT_JIT=2` and requires that the queries still do not return JIT
-  algorithms. A build with `HIPBLASLT_ENABLE_YAML=ON` has none of them, because
-  the library entry is MsgPack.
+  include an architecture with committed bundles. The library tests load no
+  code, but TensileLite queries the current device when it reads a library
+  entry. A build with `HIPBLASLT_ENABLE_JIT=OFF` has `jit-heuristic-ignored`
+  instead, which sets `HIPBLASLT_JIT=2` and requires that the queries still do
+  not return JIT algorithms. A build with `HIPBLASLT_ENABLE_YAML=ON` has none
+  of them, because the library entries are MsgPack.
 
 ## What each test checks
 
@@ -50,6 +52,9 @@ The CTest tests are:
 | `jit-builder` | The comgr builder, without a GPU, building the hand-written HIP kernel `builder_test_kernel.hip` for each written bundle's target, then each bundle's assembly linked with that kernel into one code object; each code object defines its kernels and has the builder's code-object version, and a kernel name it does not define fails the build |
 | `jit-loader` | `plain` and `plain-pair` built with comgr for device 0 and loaded through the TensileLite loader. `plain` selects its solution for the FP16 GEMM it was generated for; `plain-pair` selects its first solution for K=512 and its second for K=256; neither selects anything for a transposed A. The loader rejects an entry with solutions 0 and 2, a solution whose kernel was not built, and a built kernel no solution names. Launches no kernel |
 | `jit-end-to-end` | `plain-pair` replayed, built with comgr and loaded. `getJitAlgo` returns its first solution for K=512 and its second for K=256, and each runs through `hipblasLtMatmul` and `hipblaslt_ext::Gemm` with D checked against a host reference; a problem neither solution solves is not supported |
+| `jit-end-to-end-library` | `getLibraryAlgos` publishes the first `plain-pair` solution for K=512 and the second for K=256 into a fresh JIT solution library, each as its own entry, and returns two reserved indices, which `getAlgosFromIndex` and `hipblasLtMatmul` run with checked numerics. Later queries return the same indices from the library without generating. A second process runs the indices before any query, then finds them the same way |
+| `jit-library` | The JIT solution library: cache-key fields and compiler-environment filtering; rejected group- or other-writable, linked and non-directory roots; the stock TensileLite loader reading a published library; exact-size matching with the solution predicates still applied; deduplication, hash collisions, order, count and excluded kernels; mismatched and tampered keys ignored and left untouched; index allocation up to `INT32_MAX` and exhaustion; a publisher killed after each publication step; readers reloading after another instance publishes; and a fused GEMM and all-to-all problem rejected by lookup, publication and the ProblemType key without touching the library, even beside a plain solution of the same sizes |
+| `jit-library-concurrency` | Eight processes publish shared and private entries into one library while another process looks them up: shared entries get one index, private ones unique indices with no gaps, and every reader snapshot loads |
 | `jit-disabled` | The JIT headers are absent from the public include tree, `hipblaslt-ext.hpp` compiles without them, and the extension API links against the disabled library |
 | `jit-heuristic-off` | `HIPBLASLT_JIT=0`. Both heuristic queries for the plain-pair FP16 GEMM return no JIT algorithm |
 | `jit-heuristic-fallback` | `HIPBLASLT_JIT=1`. With no device library, every returned algorithm is JIT and the first result for K=512 matches the host. With a device library, an Equality size returns Equality algorithms, then JIT, then the others, with no repeated kernel, and an untuned size starts with JIT. Without such a library the ordering check prints `SKIP heuristic-provider-order: the build has no device library with an Equality size` |
@@ -71,3 +76,18 @@ architecture. `hipblaslt-jit-source-bundle-test` takes a scratch directory.
 and for the first three the bundle directory. CTest sets `HIPBLASLT_JIT`. The
 test sets `HIPBLASLT_JIT_TEST_REPLAY` to that directory's `plain-pair` before
 either heuristic query. `getIndexFromAlgo` is -1 for a JIT algorithm.
+
+With `--library` after the output directory, `hipblaslt-jit-end-to-end-test`
+runs the `jit-end-to-end-library` checks instead and starts its second process
+itself. That mode empties `HIPBLASLT_JIT_LIBRARY_PATH` first and refuses to run
+unless it is set, so that it never publishes into the default library.
+
+## JIT solution library tests
+
+`hipblaslt-jit-library-test` compiles the JIT solution library directly. It
+takes the written gfx950 `plain` bundle, whose library entry it publishes
+under several kernel names with stand-in code objects, and a scratch directory
+for the libraries it creates; it ignores `HIPBLASLT_JIT_LIBRARY_PATH`. Adding
+`--writers N --per-writer M` runs the multi-process check instead: N writer
+processes each publish M entries shared by all writers and M of their own,
+while one reader process looks them up.

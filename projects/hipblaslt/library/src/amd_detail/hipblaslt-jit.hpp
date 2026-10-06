@@ -67,15 +67,30 @@ namespace hipblaslt_ext::experimental::jit
         std::string message;
     };
 
-    // Compile synchronously on the current HIP device (which must equal device).
-    // Call before stream capture. Unsupported operation/backend pairs return
-    // NOT_SUPPORTED. The solution lives in this process only.
+    // Compile synchronously on the current HIP device (which must equal device),
+    // after looking up the JIT solution library. A hit is returned without
+    // generating. A capturing stream may return a hit and does not start a
+    // build. Unsupported operation/backend pairs return NOT_SUPPORTED.
+    // getGemmAlgo turns the solution into a library index.
     HIPBLASLT_EXPORT hipblasStatus_t getJitAlgo(int            device,
                                                 const Request& request,
                                                 const Backend& backend,
                                                 size_t         maxWorkspaceBytes,
                                                 Solution&      solution,
                                                 Diagnostics&   diagnostics);
+
+    // Up to count solution indices for exactly this request: those already in the
+    // JIT solution library in the order they were published, then solutions
+    // generated with backend and published now, best first, under the same device
+    // rules as getJitAlgo. The indices persist across processes; pass them to
+    // hipblaslt_ext::getAlgosFromIndex.
+    HIPBLASLT_EXPORT hipblasStatus_t getLibraryAlgos(int                   device,
+                                                     const Request&        request,
+                                                     const Backend&        backend,
+                                                     size_t                count,
+                                                     size_t                maxWorkspaceBytes,
+                                                     std::vector<int32_t>& indices,
+                                                     Diagnostics&          diagnostics);
 
     // Build the implemented GEMM request from existing hipBLASLt descriptors.
     // Other operations can add factories without changing getJitAlgo or Backend.
@@ -94,12 +109,12 @@ namespace hipblaslt_ext::experimental::jit
                                                      Request&                request,
                                                      Diagnostics&            diagnostics);
 
-    // Adapt a GEMM solution to hipblasLtMatmul / hipblaslt_ext::Gemm. Other
-    // operation kinds return NOT_SUPPORTED. The resulting algorithm retains its
-    // modules until process exit; copies work only on their original device in
-    // this process. Never persist algorithm bytes or use them as prebuilt indices.
-    // Execution preserves existing handle, workspace and stream requirements;
-    // sharing a backend or solution does not relax those concurrency requirements.
+    // Adapt a GEMM solution to hipblasLtMatmul / hipblaslt_ext::Gemm. The
+    // algorithm is the solution's JIT library index, from 2^30, and any process
+    // that can read the library can run it. Other operation kinds return
+    // NOT_SUPPORTED. Execution preserves existing handle, workspace and stream
+    // requirements; sharing a backend or solution does not relax those
+    // concurrency requirements.
     HIPBLASLT_EXPORT hipblasStatus_t getGemmAlgo(const Solution&                   solution,
                                                  hipblasLtMatmulHeuristicResult_t& result,
                                                  Diagnostics&                      diagnostics);

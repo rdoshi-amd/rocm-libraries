@@ -59,6 +59,7 @@
 #include <hipblaslt/hipblaslt.h>
 #include <iomanip>
 #include <map>
+#include <memory>
 #include <numeric>
 #include <omp.h>
 #include <optional>
@@ -4106,7 +4107,7 @@ void testing_matmul_with_bias(const Arguments& arg,
         HIPBLAS_STATUS_SUCCESS);
 
     // set workspace
-    device_vector<unsigned char>* dWorkspace     = nullptr;
+    std::unique_ptr<device_vector<unsigned char>> dWorkspace;
     size_t                        workspace_size = 0;
 
     // set user args
@@ -5111,7 +5112,7 @@ void testing_matmul_with_bias(const Arguments& arg,
     // A placed workspace replaces the normal one, which placement runs never use: placement
     // requires fast_check, and fast_check refuses timing runs.
     const bool placeWorkspace = !strcmp(arg.placement, "workspace");
-    dWorkspace                = new device_vector<unsigned char>(
+    dWorkspace                = std::make_unique<device_vector<unsigned char>>(
         placeWorkspace ? 0 : workspace_size * block_count, 1, HMM);
     CHECK_DEVICE_ALLOCATION(dWorkspace->memcheck());
 
@@ -6706,8 +6707,6 @@ void testing_matmul_with_bias(const Arguments& arg,
         }
     }
 
-    if(dWorkspace != nullptr)
-        delete dWorkspace;
     if(userArgs != nullptr)
         CHECK_HIP_ERROR(hipFree(userArgs));
     if(d_userArgs != nullptr)

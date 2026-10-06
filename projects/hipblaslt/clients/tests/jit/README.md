@@ -33,10 +33,13 @@ The CTest tests are:
 - `jit-cpu`: `jit-bundles`, `jit-source-bundle` and `jit-builder`. A build
   with `HIPBLASLT_ENABLE_JIT=OFF` has `jit-source-bundle` and `jit-disabled`.
   CTest runs `jit-bundles` before each test that reads a bundle.
-- `jit-gpu`: `jit-loader` and `jit-end-to-end`, when `GPU_TARGETS` include an
-  architecture with committed bundles. A build with
-  `HIPBLASLT_ENABLE_YAML=ON` has neither, because the library entry is
-  MsgPack.
+- `jit-gpu`: `jit-loader`, `jit-end-to-end`, `jit-heuristic-off`,
+  `jit-heuristic-fallback` and `jit-heuristic-forced`, when `GPU_TARGETS`
+  include an architecture with committed bundles. A build with
+  `HIPBLASLT_ENABLE_JIT=OFF` has `jit-heuristic-ignored` instead, which sets
+  `HIPBLASLT_JIT=2` and requires that the queries still do not return JIT
+  algorithms. A build with `HIPBLASLT_ENABLE_YAML=ON` has none of them, because
+  the library entry is MsgPack.
 
 ## What each test checks
 
@@ -48,6 +51,10 @@ The CTest tests are:
 | `jit-loader` | `plain` and `plain-pair` built with comgr for device 0 and loaded through the TensileLite loader. `plain` selects its solution for the FP16 GEMM it was generated for; `plain-pair` selects its first solution for K=512 and its second for K=256; neither selects anything for a transposed A. The loader rejects an entry with solutions 0 and 2, a solution whose kernel was not built, and a built kernel no solution names. Launches no kernel |
 | `jit-end-to-end` | `plain-pair` replayed, built with comgr and loaded. `getJitAlgo` returns its first solution for K=512 and its second for K=256, and each runs through `hipblasLtMatmul` and `hipblaslt_ext::Gemm` with D checked against a host reference; a problem neither solution solves is not supported |
 | `jit-disabled` | The JIT headers are absent from the public include tree, `hipblaslt-ext.hpp` compiles without them, and the extension API links against the disabled library |
+| `jit-heuristic-off` | `HIPBLASLT_JIT=0`. Both heuristic queries for the plain-pair FP16 GEMM return no JIT algorithm |
+| `jit-heuristic-fallback` | `HIPBLASLT_JIT=1`. With no device library, every returned algorithm is JIT and the first result for K=512 matches the host. With a device library, an Equality size returns Equality algorithms, then JIT, then the others, with no repeated kernel, and an untuned size starts with JIT. Without such a library the ordering check prints `SKIP heuristic-provider-order: the build has no device library with an Equality size` |
+| `jit-heuristic-forced` | `HIPBLASLT_JIT=2`. Both queries return only JIT algorithms. K=512 selects the solution ending in `_K512_WGM8` and K=256 the one ending in `_WGM1`. A transposed A returns no algorithm. The first K=512 result matches the host |
+| `jit-heuristic-ignored` | Built only with `HIPBLASLT_ENABLE_JIT=OFF`, with `HIPBLASLT_JIT=2`. The queries do not return JIT algorithms |
 
 ## Test arguments
 
@@ -60,3 +67,7 @@ generation runs no generator, and solves FP16 problems with M=256, N=128 and
 K=512 or 256. `hipblaslt-jit-loader-test` takes the output directory and a
 scratch directory, and checks the same problems with the bundles of the same
 architecture. `hipblaslt-jit-source-bundle-test` takes a scratch directory.
+`hipblaslt-jit-heuristic-test` takes `off`, `fallback`, `forced` or `ignored`,
+and for the first three the bundle directory. CTest sets `HIPBLASLT_JIT`. The
+test sets `HIPBLASLT_JIT_TEST_REPLAY` to that directory's `plain-pair` before
+either heuristic query. `getIndexFromAlgo` is -1 for a JIT algorithm.

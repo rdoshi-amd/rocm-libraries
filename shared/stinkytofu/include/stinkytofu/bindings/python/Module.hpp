@@ -108,6 +108,8 @@
     X(DsReadDrainLatency, int)                    \
     X(TensorLoadWmmaSpace, int)                   \
     X(WmmaBatchSize, int)                         \
+    X(WmmaBatchProfile, std::string)              \
+    X(WmmaBatchProfilePhase, int)                 \
     X(GlobalReadQueueDepth, int)                  \
     X(GlobalReadDrainLatency, int)                \
     X(DsReadOrder, int)                           \

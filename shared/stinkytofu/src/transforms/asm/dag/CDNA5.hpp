@@ -35,6 +35,7 @@
 #include <climits>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <limits>
 #include <map>
 #include <tuple>
@@ -270,6 +271,38 @@ static bool srcVGPRsOverlap(const StinkyInstruction& inst,
         }
     }
     return false;
+}
+
+// Parse dagFeatures.wmmaBatchProfile, "N:Q,N:Q,...": N >= 1 WMMAs per batch, Q >= 0
+// ds_loads after it. Empty string = no profile.
+static std::vector<std::pair<int, int>> parseWmmaBatchProfile(const std::string& s) {
+    std::vector<std::pair<int, int>> out;
+    size_t pos = 0;
+    while (pos < s.size()) {
+        size_t end = s.find(',', pos);
+        if (end == std::string::npos) end = s.size();
+        const std::string tok = s.substr(pos, end - pos);
+        const size_t colon = tok.find(':');
+        int n = -1, q = -1;
+        if (colon != std::string::npos) {
+            char* e1 = nullptr;
+            char* e2 = nullptr;
+            const std::string ns = tok.substr(0, colon), qs = tok.substr(colon + 1);
+            const long nv = std::strtol(ns.c_str(), &e1, 10);
+            const long qv = std::strtol(qs.c_str(), &e2, 10);
+            if (!ns.empty() && !qs.empty() && *e1 == '\0' && *e2 == '\0') {
+                n = static_cast<int>(nv);
+                q = static_cast<int>(qv);
+            }
+        }
+        if (n < 1 || q < 0) {
+            report_fatal_error("invalid WmmaBatchProfile entry '" + tok +
+                               "': expected N:Q with N >= 1 and Q >= 0 (e.g. \"2:2,4:7,14:0\").");
+        }
+        out.emplace_back(n, q);
+        pos = end + 1;
+    }
+    return out;
 }
 
 static inline int popcount16(uint16_t v) {
@@ -522,7 +555,8 @@ class CDNA5ReadyQueue : public ReadyQueue {
     // period follows the batch window (see autoWmmaBatchSize). Placeholder: -1 selects
     // auto with an initial sizing formula, expected to be refined; requires Periodic.
     bool autoWmmaBatch() const {
-        return getPassContext().getPassFeatureConfig().dagFeatures.wmmaBatchSize == -1;
+        return getPassContext().getPassFeatureConfig().dagFeatures.wmmaBatchSize == -1 &&
+               !profileActive();
     }
     // Whether to run the per-window hide-budget policy at the top of each region.
     // The gfx1250 production backend enables it; the standalone pass keeps an
@@ -610,6 +644,18 @@ class CDNA5ReadyQueue : public ReadyQueue {
     // carried into the next window so the long-run rate is exactly cap / span.
     int dsAllotCarry_ = 0;
     int dsAllotCarryNext_ = 0;
+    // wmmaBatchProfile: parsed entries (N, Q); the entry the next batch takes; ds_loads
+    // still allowed in the open batch's window.
+    std::vector<std::pair<int, int>> profile_;
+    size_t profileIdx_ = 0;
+    int profileDsQuota_ = 0;
+    bool profileActive() const {
+        return !profile_.empty();
+    }
+    // ds_loads are free before a region's first batch opens, then limited by the quota.
+    bool profileAllowsDs() const {
+        return !profileActive() || profileDsQuota_ > 0 || wmmaIssuedCountThisRegion_ == 0;
+    }
 
     // Non-WMMA fills since the active WMMA opened its window. A dependent next
     // WMMA is held in Phase B until this reaches popcount(coIssueWindow)+1
@@ -1229,6 +1275,7 @@ DAGNode* CDNA5ReadyQueue::popNonWmma(DAGNode* node, int pickKind) {
     } else if (pickKind == kLocalRead) {
         localReadQueue.erase(node);
         ++dsIssuedThisRegion_;
+        if (profileActive() && profileDsQuota_ > 0) --profileDsQuota_;
         dsReadInflight_.pushWithThrottle(dsReadThrottleLatency());
         dsIssueCap_.push(dsIssueCapSpan());
     } else if (pickKind == kOther) {
@@ -1566,6 +1613,11 @@ DAGNode* CDNA5ReadyQueue::pickOneFromWMMA(DAGNode* pick) {
         activeWmmaBatch_.push_back(node);
         batchLimit_ =
             autoWmmaBatch() ? autoWmmaBatchSize(node->inst->latencyCycles) : wmmaBatchSize();
+        if (profileActive()) {
+            batchLimit_ = profile_[profileIdx_].first;
+            profileDsQuota_ = profile_[profileIdx_].second;
+            profileIdx_ = (profileIdx_ + 1) % profile_.size();
+        }
         dsAllotCarry_ = dsAllotCarryNext_;
         nonWmmaFillsSinceActiveWmma_ = 0;  // new window: restart WMMA->WMMA fill count
         fillsThisWindow_ = 0;
@@ -1677,8 +1729,8 @@ bool CDNA5ReadyQueue::findSmallestPickableNonWmma(DAGNode* pickedDS, DAGNode** o
             : 0;
     const bool warGateRelief = dsIssuedThisRegion_ < expectedDs;
     const bool warTooClose = !warGateRelief && pipeOpGateBlocks(pickedDS);
-    const bool dsBaseOk =
-        pickedDS && dsBudgetAllowsIssue && !warTooClose && !destOverlapsActiveWmmaSrc(pickedDS);
+    const bool dsBaseOk = pickedDS && dsBudgetAllowsIssue && profileAllowsDs() && !warTooClose &&
+                          !destOverlapsActiveWmmaSrc(pickedDS);
     int dsThrottleWait = 0;
     bool dsProtect = false;
     if (dsBaseOk) {
@@ -2484,7 +2536,11 @@ DAGNode* CDNA5ReadyQueue::pickOne() {
         // surplus fillers; otherwise the count applies as before.
         const bool nonWmmaOwed = !quotaClosedWindow && nonWmmaIssuedThisRegion_ < hideBudget;
         const bool blockWmmaForHideBudget =
-            hasPickableNonWmma && (nonWmmaOwed || dsLoadIssuedThisRegion_ < dsLoadBudget);
+            hasPickableNonWmma &&
+            (nonWmmaOwed || (!profileActive() && dsLoadIssuedThisRegion_ < dsLoadBudget));
+        // The next batch waits for the open batch's ds quota while a ds_load is ready.
+        const bool blockWmmaForProfile =
+            profileActive() && profileDsQuota_ > 0 && pickedDS != nullptr && hasPickableNonWmma;
         PASS_DEBUG(std::cerr << "[CDNA5 pickOne] Phase B candidate wmmaId=" << bestWMMA->id
                              << " bestLatency=" << bestLatency
                              << " blockLoopHead=" << blockWmmaForLoopHeadBalance
@@ -2502,7 +2558,7 @@ DAGNode* CDNA5ReadyQueue::pickOne() {
                              << "\n");
         if (bestLatency <= 0 && !blockWmmaForLoopHeadBalance && !blockWmmaForActiveWindow &&
             !blockWmmaForAtLeastOneNonWmmaInterleaving && !blockWmmaForCoexecSpacing &&
-            !blockWmmaForHideBudget) {
+            !blockWmmaForHideBudget && !blockWmmaForProfile) {
             DAGNode* node = pickOneFromWMMA(bestWMMA);
             PASS_DEBUG(std::cerr << "[CDNA5 pickOne] Phase B picked WMMA dagId=" << node->id
                                  << "\n");
@@ -2746,12 +2802,15 @@ void CDNA5ReadyQueue::onInit(IRList::iterator regionStart, IRList::iterator regi
     // carrying the cap window would be code with no effect until that is fixed.
     // Auto batch anchors each ds cap period to its batch window, which only has a
     // meaning for the Periodic cap; reject any other mode instead of guessing.
+    profile_ =
+        parseWmmaBatchProfile(getPassContext().getPassFeatureConfig().dagFeatures.wmmaBatchProfile);
     const auto capMode = getPassContext().getPassFeatureConfig().dagFeatures.dsIssueCapMode;
     if (autoWmmaBatch() && capMode != PassFeatureConfig::DsIssueCapMode::Periodic) {
         report_fatal_error(
             "dagFeatures.wmmaBatchSize = -1 (auto) requires dsIssueCapMode = Periodic (1).");
     }
-    dsIssueCap_ = DsIssueCap(capMode, dsReadPerCap());
+    // A profile sets the ds count per batch itself, so the cap never limits.
+    dsIssueCap_ = DsIssueCap(capMode, profileActive() ? (1 << 20) : dsReadPerCap());
     dsAllotCarry_ = dsAllotCarryNext_ = 0;
     assert(dsIssueCap_.depth() > 0 && "rule (4) cap must have a positive depth");
     const int dsDepth = dsReadQueueDepth();
@@ -2898,6 +2957,13 @@ void CDNA5ReadyQueue::onInitRegion(IRList::iterator regionStart, IRList::iterato
                                    IRList::iterator blockBegin, const RegionDependencies& deps) {
     regionDag_ = &deps.dag;
     wmmaIssuedCountThisRegion_ = 0;
+    profileIdx_ =
+        profileActive()
+            ? static_cast<size_t>(std::max(
+                  0, getPassContext().getPassFeatureConfig().dagFeatures.wmmaBatchProfilePhase)) %
+                  profile_.size()
+            : 0;
+    profileDsQuota_ = 0;
     lastPickedNode_ = nullptr;
     // SCC chain locks are per-region: chain ids index the prior region's
     // DAGNodeList, and region boundaries are side-effect cuts no reordering

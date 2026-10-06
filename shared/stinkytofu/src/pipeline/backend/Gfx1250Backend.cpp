@@ -185,6 +185,9 @@ bool buildGfx1250Pipeline(ModulePassManager& mpm, StinkyAsmModule& module, const
                 passFeatureConfig.dagFeatures.tensorLoadDsLoadGapCycles =
                     moduleOptions.TensorLoadDsLoadGapCycles;
                 passFeatureConfig.dagFeatures.wmmaBatchSize = moduleOptions.WmmaBatchSize;
+                passFeatureConfig.dagFeatures.wmmaBatchProfile = moduleOptions.WmmaBatchProfile;
+                passFeatureConfig.dagFeatures.wmmaBatchProfilePhase =
+                    moduleOptions.WmmaBatchProfilePhase;
                 passFeatureConfig.dagFeatures.dsIssueCapSpanCycles =
                     moduleOptions.DsIssueCapSpanCycles;
                 passFeatureConfig.dagFeatures.dsIssueCapMode =

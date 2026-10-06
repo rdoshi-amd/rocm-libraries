@@ -1885,6 +1885,51 @@ TEST_F(DAGSchedulerPassTest, AutoWmmaBatch_FewPendingGivesSmallBatch) {
     EXPECT_EQ(wdShape(mnemonicSequence(*bb)), "WddWWW");
 }
 
+// WmmaBatchProfile "N:Q": batches of N WMMAs, then Q ds_loads, repeating.
+namespace {
+void profileFeatures(PassFeatureConfig& p, const char* profile, int phase = 0) {
+    p.dagFeatures.wmmaBatchProfile = profile;
+    p.dagFeatures.wmmaBatchProfilePhase = phase;
+    p.dagFeatures.dsReadQueueDepth = 16;
+    p.dagFeatures.dsReadThrottleLatency = 1;
+}
+}  // namespace
+
+// All registers stay below v256: another VGPR MSB bank would end the batch.
+TEST_F(DAGSchedulerPassTest, WmmaBatchProfile_PlacesDsPerBatch) {
+    for (int i = 0; i < 12; i++) createMovableDsLoad(200 + i * 4, 80, i + 1);
+    for (int i = 0; i < 8; i++) createWmmaF32_16x16x16_bf16(8 * i, 100 + 8 * i);
+    runWithDsCapMode(PassFeatureConfig::DsIssueCapMode::Sliding,
+                     [](PassFeatureConfig& p) { profileFeatures(p, "2:3"); });
+    EXPECT_EQ(wdShape(mnemonicSequence(*bb)), "WWdddWWdddWWdddWWddd");
+}
+
+// Entries with Q = 0 chain WMMAs back-to-back; the phase starts the pattern mid-list.
+TEST_F(DAGSchedulerPassTest, WmmaBatchProfile_PhaseRotatesThePattern) {
+    for (int phase = 0; phase < 2; ++phase) {
+        SetUp();
+        for (int i = 0; i < 12; i++) createMovableDsLoad(200 + i * 4, 80, i + 1);
+        for (int i = 0; i < 8; i++) createWmmaF32_16x16x16_bf16(8 * i, 100 + 8 * i);
+        runWithDsCapMode(PassFeatureConfig::DsIssueCapMode::Sliding,
+                         [&](PassFeatureConfig& p) { profileFeatures(p, "2:6,2:0", phase); });
+        EXPECT_EQ(wdShape(mnemonicSequence(*bb)),
+                  phase == 0 ? "WWddddddWWWWddddddWW" : "WWWWddddddWWWWdddddd")
+            << "phase " << phase;
+    }
+}
+
+TEST_F(DAGSchedulerPassTest, WmmaBatchProfile_RejectsMalformedEntries) {
+    createMovableDsLoad(0, 80, 1);
+    createWmmaF32_16x16x16_bf16(200, 300);
+    PassContext ctx;
+    ctx.setGemmTileConfig(config);
+    PassFeatureConfig pfc;
+    pfc.loopConfig.unrollGemm = true;
+    profileFeatures(pfc, "2:3,oops");
+    ctx.setPassFeatureConfig(pfc);
+    EXPECT_DEATH(pass->run(*func, ctx, am), "invalid WmmaBatchProfile entry 'oops'");
+}
+
 // Auto anchors the cap period to the batch window: only Periodic is accepted.
 TEST_F(DAGSchedulerPassTest, AutoWmmaBatch_RequiresPeriodicCap) {
     createMovableDsLoad(0, 80, 1);

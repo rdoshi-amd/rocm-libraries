@@ -138,6 +138,15 @@ struct PassFeatureConfig {
         /// Periodic. 0 = per-arch default
         /// (CDNA5Config::wmmaBatchSize, 1 = no batching).
         int wmmaBatchSize = 0;
+        /// Explicit WMMA batch / ds_load pattern, a repeating list of "N:Q" entries:
+        /// a batch of up to N WMMAs, then at most Q ds_loads before the next batch
+        /// (e.g. "2:2,2:2,2:2,2:6,4:7,2:5,4:8,14:0" is one 32-WMMA block). Empty = off.
+        /// When set it replaces the ds cap, auto batch size and the ds hide-budget
+        /// gating; the queue model (dsReadThrottleLatency) still applies.
+        std::string wmmaBatchProfile;
+        /// Entry the profile starts at in each scheduling region (mod its length):
+        /// rotates the pattern relative to the stage's barrier and tensor_load.
+        int wmmaBatchProfilePhase = 0;
         /// Max cycle-distance between two adjacent barrier groups for
         /// StinkyMergeBarrierPass to merge them into a single multi-token
         /// barrier group. 0 = use the CDNA5 default (kCdna5MergeBarrierThreshold).

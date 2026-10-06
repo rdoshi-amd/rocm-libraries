@@ -103,15 +103,46 @@ _DATALAYOUT_LLVM22 = (
     "-v32:32-v48:64-v96:128-v192:256-v256:256-v512:512-v1024:1024-v2048:2048"
     "-n32:64-S32-A5-G1-ni:7:8:9"
 )
-# LLVM 23 (ROCm 7.13+): re-derived on an LLVM 23 host (AMD clang 23.0.0git,
-# ROCm 7.13) and found to drift from LLVM 22 by one field -- LLVM 23 emits the
-# ELF symbol-mangling spec ``m:e`` that LLVM 20 and LLVM 22 omit. Otherwise the
-# p8-indexed layout is identical to LLVM 22 for every wired arch. Regenerate via
-# ``test_datalayout_matches_hipcc_emitted_ir`` if a future LLVM 23 build drifts
-# further.
+# Layout emitted for rocKE's ``llvm23`` flavor. Relative to our ``llvm22``
+# constant it adds two independent things:
+#
+#   1. the ELF symbol-mangling spec ``m:e``, which LLVM 20 and LLVM 22 omit;
+#   2. address spaces ``p10``-``p15``, introduced upstream by ``5bf967cb132b``.
+#
+# Both were re-derived from the clang on an amd-staging host and confirmed
+# gfx-invariant there across every wired arch
+# (gfx90a/942/950/1100/1151/1201/1250).
+#
+# This is rocKE's flavor constant, NOT a claim about what every LLVM 23+ /
+# ROCm 7.13+ build emits: compiler builds vary, and older ones -- including some
+# builds numbered LLVM 23 or later -- omit ``p10``-``p15``. The drift guard
+# ``test_datalayout_matches_hipcc_emitted_ir`` accommodates exactly that
+# variation.
+#
+# Why we carry the longer form. LLVM's backend has long rejected a module whose
+# DataLayout is incompatible with the target's ("Can't create a MachineFunction
+# using a Module with a Target-incompatible DataLayout attached" -- the check is
+# already in LLVM 22's MachineFunction.cpp, so it predates ``fc6829a3``). What
+# changed in ``fc6829a3`` ("clang: Do not overwrite a module's DataLayout in the
+# backend") is that clang stopped replacing an explicitly supplied layout, which
+# exposes that pre-existing check to the layout rocKE hands it. On the clang
+# builds we tested, the consequence is concrete:
+#
+#   * against staging clang (post-``fc6829a3``), a module carrying the short
+#     form fails codegen outright, and the long form builds and links;
+#   * against the older ``/opt/rocm`` clang we tested, whose own layout omits
+#     ``p10``-``p15``, the long form is still accepted (rc=0) because that clang
+#     overwrites the supplied layout before codegen.
+#
+# That is an observation about the builds we exercised, not a proof about every
+# toolchain. It is still the right trade: do NOT "fix" a mismatch against an
+# older hipcc by deleting ``p10``-``p15``, since that re-breaks every kernel on a
+# current toolchain. Regenerate via ``test_datalayout_matches_hipcc_emitted_ir``
+# if a future build drifts further.
 _DATALAYOUT_LLVM23 = (
     "e-m:e-p:64:64-p1:64:64-p2:32:32-p3:32:32-p4:64:64-p5:32:32-p6:32:32"
-    "-p7:160:256:256:32-p8:128:128:128:48-p9:192:256:256:32-i64:64-v16:16-v24:32"
+    "-p7:160:256:256:32-p8:128:128:128:48-p9:192:256:256:32-p10:32:32-p11:32:32"
+    "-p12:32:32-p13:32:32-p14:32:32-p15:32:32-i64:64-v16:16-v24:32"
     "-v32:32-v48:64-v96:128-v192:256-v256:256-v512:512-v1024:1024-v2048:2048"
     "-n32:64-S32-A5-G1-ni:7:8:9"
 )
@@ -694,6 +725,8 @@ _INTRINSIC_DECLS: Dict[str, str] = {
         "<8 x half>, <8 x half>, <16 x float>, "
         "i32 immarg, i32 immarg, i32 immarg)"
     ),
+    "mfma.f32.16x16x8.xf32": "declare <4 x float> @llvm.amdgcn.mfma.f32.16x16x8.xf32(<2 x float>, <2 x float>, <4 x float>, i32 immarg, i32 immarg, i32 immarg)",
+    "mfma.f32.32x32x4.xf32": "declare <16 x float> @llvm.amdgcn.mfma.f32.32x32x4.xf32(<2 x float>, <2 x float>, <16 x float>, i32 immarg, i32 immarg, i32 immarg)",
     "mfma.f32.16x16x4f32": (
         "declare <4 x float> @llvm.amdgcn.mfma.f32.16x16x4f32("
         "float, float, <4 x float>, "
@@ -1131,7 +1164,7 @@ def _llvm_type(t: Type) -> str:
         return "i8"
     if t.name == "i16":
         return "i16"
-    if t.name == "i32":
+    if t.name in ("i32", "tf32"):
         return "i32"
     if t.name == "i64":
         return "i64"
@@ -1990,6 +2023,7 @@ class _Lowerer:
             "f16": 2,
             "bf16": 2,
             "i32": 4,
+            "tf32": 4,
             "f32": 4,
             "i64": 8,
         }
@@ -2171,6 +2205,11 @@ class _Lowerer:
     # ----- per-op lowerings -----
 
     def lower_op(self, op: Op) -> None:
+        from .tf32 import tf32_op_error
+
+        error = tf32_op_error(op)
+        if error:
+            raise ValueError(error)
         method = getattr(self, f"_op_{op.name.replace('.', '_')}", None)
         if method is None:
             raise NotImplementedError(f"no LLVM lowering for op {op.name!r}")
@@ -3192,6 +3231,7 @@ class _Lowerer:
             "f16": 2,
             "bf16": 2,
             "i32": 4,
+            "tf32": 4,
             "f32": 4,
             "i64": 8,
         }.get(value.type.name, 2)
@@ -3256,6 +3296,7 @@ class _Lowerer:
             "f16": 2,
             "bf16": 2,
             "i32": 4,
+            "tf32": 4,
             "f32": 4,
             "i64": 8,
         }.get(
@@ -3333,11 +3374,20 @@ class _Lowerer:
         elem_ty = _llvm_type(op.result.type.elem)  # type: ignore[attr-defined]
         # Element byte size drives the vector alignment. 16-bit
         # (f16 / bf16): 2 bytes; 32-bit (f32 / i32): 4 bytes.
-        elem_bytes = {"i8": 1, "f16": 2, "bf16": 2, "i32": 4, "f32": 4, "i64": 8}.get(
+        elem_bytes = {
+            "i8": 1,
+            "f16": 2,
+            "bf16": 2,
+            "i32": 4,
+            "tf32": 4,
+            "f32": 4,
+            "i64": 8,
+        }.get(
             op.result.type.elem.name,
             2,  # type: ignore[attr-defined]
         )
-        align = vec * elem_bytes
+        # New 96-bit widths guarantee only element alignment, including FP8.
+        align = 12 // vec if vec in (3, 6, 12) else vec * elem_bytes
         # gfx1250: mark 8-wide (128-bit) LDS loads volatile to block the WMMA-aware
         # pass from substituting ds_load_tr16_b128 (transposed) in place of the plain
         # sequential ds_read_b128.  Only 8-wide loads feed the 16x16x32 WMMA fragment
@@ -3375,6 +3425,10 @@ class _Lowerer:
         self._backend.emit_wmma(self, op)
 
     def _op_tile_mma(self, op: Op) -> None:
+        from .tf32 import TF32_MMA
+
+        if op.attrs.get("op_id") in TF32_MMA and self._backend.arch.gfx != "gfx942":
+            raise ValueError("XF32 MMA requires gfx942")
         # Target-neutral MMA: the ISA backend maps ``op.attrs["op_id"]`` to the
         # matching MFMA (CDNA) or WMMA (RDNA) emission. CDNA backends reuse the
         # existing ``_op_tile_<op_id>`` handler verbatim, so the output is
@@ -3432,6 +3486,31 @@ class _Lowerer:
             f"<8 x bfloat> {self._operand(b)}, "
             f"<4 x float> {self._operand(c)}, "
             f"i32 0, i32 0, i32 0)"
+        )
+
+    def _op_tile_mfma_f32_16x16x8_xf32(self, op: Op) -> None:
+        self._emit_xf32(op, "mfma.f32.16x16x8.xf32", 4)
+
+    def _op_tile_mfma_f32_32x32x4_xf32(self, op: Op) -> None:
+        self._emit_xf32(op, "mfma.f32.32x32x4.xf32", 16)
+
+    def _emit_xf32(self, op: Op, intrinsic: str, count: int) -> None:
+        if self._backend.arch.gfx != "gfx942":
+            raise ValueError("XF32 MMA requires gfx942")
+        a, b, c = op.operands
+        self._need(intrinsic)
+        a_cast = self._fresh("mfma_a_i16")
+        b_cast = self._fresh("mfma_b_i16")
+        self._current().emit(
+            f"  {a_cast} = bitcast <2 x i32> {self._operand(a)} to <2 x float>"
+        )
+        self._current().emit(
+            f"  {b_cast} = bitcast <2 x i32> {self._operand(b)} to <2 x float>"
+        )
+        self._current().emit(
+            f"  {op.result.name} = call <{count} x float> @llvm.amdgcn.{intrinsic}("
+            f"<2 x float> {a_cast}, <2 x float> {b_cast}, "
+            f"<{count} x float> {self._operand(c)}, i32 0, i32 0, i32 0)"
         )
 
     def _op_tile_mfma_f32_16x16x4_f32(self, op: Op) -> None:
@@ -5535,10 +5614,15 @@ class _Lowerer:
             "f16": 2,
             "bf16": 2,
             "i32": 4,
+            "tf32": 4,
             "f32": 4,
             "i64": 8,
         }.get(elem_name, 2)
-        align = vec * elem_bytes
+        align = int(op.attrs.get("align", vec * elem_bytes))
+        if align <= 0 or align & (align - 1):
+            raise ValueError(
+                "global_store_vN: alignment must be a positive power of two"
+            )
         ty = _llvm_type(val.type)
         self._current().emit(
             f"  store {ty} {self._operand(val)}, ptr addrspace(1) {gep}, align {align}"

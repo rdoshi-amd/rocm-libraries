@@ -13,9 +13,8 @@ target_sources(hipblaslt
 )
 
 if(HIPBLASLT_ENABLE_JIT)
-    find_package(ZLIB REQUIRED)
     find_package(amd_comgr CONFIG REQUIRED)
-    target_link_libraries(hipblaslt PRIVATE ZLIB::ZLIB amd_comgr)
+    target_link_libraries(hipblaslt PRIVATE amd_comgr)
     target_compile_definitions(hipblaslt PRIVATE HIPBLASLT_ENABLE_JIT)
     target_sources(hipblaslt PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/hipblaslt-jit-code-object.cpp"
@@ -29,15 +28,15 @@ if(HIPBLASLT_ENABLE_JIT)
         "${CMAKE_CURRENT_SOURCE_DIR}/hipblaslt-jit-origami-predictor.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/hipblaslt-jit-tuning-knowledge.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/hipblaslt-jit-problem-type.cpp"
-        "${CMAKE_CURRENT_SOURCE_DIR}/hipblaslt-jit-component.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/hipblaslt-jit-loader.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/hipblaslt-jit-component.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/hipblaslt-jit-backend.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/hipblaslt-jit-process-backend.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/hipblaslt-jit-report.cpp")
     # Heuristic queries generate with the one makeDefaultProcessBackend provider linked.
     set(hipblaslt_jit_process_backend hipblaslt-jit-no-backend.cpp)
     if(HIPBLASLT_JIT_TESTING)
-        target_sources(hipblaslt PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/hipblaslt-jit-mock-backend.cpp")
+        target_sources(hipblaslt PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/hipblaslt-jit-replay-backend.cpp")
         set(hipblaslt_jit_process_backend hipblaslt-jit-test-backend.cpp)
     endif()
     target_sources(hipblaslt PRIVATE

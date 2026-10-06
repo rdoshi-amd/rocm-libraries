@@ -16,6 +16,7 @@ import math
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 
 IGNORED = (
@@ -67,7 +68,7 @@ def entries(library):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("bench", type=Path)
-    parser.add_argument("fresh_output", type=Path)
+    parser.add_argument("output", type=Path, help="a directory this run empties first")
     parser.add_argument(
         "--replay", action="append", type=Path, help="a bundle for the test backend to replay"
     )
@@ -76,8 +77,9 @@ def main():
     if args.jit_off == bool(args.replay):
         parser.error("give either --jit-off or --replay")
     bench = args.bench.resolve(strict=True)
-    args.fresh_output.mkdir(parents=True, exist_ok=False)
-    output = args.fresh_output.resolve()
+    shutil.rmtree(args.output, ignore_errors=True)
+    args.output.mkdir(parents=True)
+    output = args.output.resolve()
     empty = output / "empty-device-library"
     empty.mkdir()
     (output / "tmp").mkdir()

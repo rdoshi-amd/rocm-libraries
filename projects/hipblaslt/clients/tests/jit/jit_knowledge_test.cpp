@@ -792,7 +792,7 @@ int main(int argc, char** argv)
             return predict(argv[2], std::stoi(argv[3]), argv + 4);
         if(argc != 2)
         {
-            std::cerr << "Usage: " << argv[0] << " FRESH_OUTPUT_DIRECTORY\n"
+            std::cerr << "Usage: " << argv[0] << " OUTPUT_DIRECTORY\n"
                       << "       " << argv[0] << " --decode KNOWLEDGE_FILE\n"
                       << "       " << argv[0]
                       << " --nearest KNOWLEDGE_FILE CORE_KEY M N BATCH K CU_COUNT\n"
@@ -800,9 +800,9 @@ int main(int argc, char** argv)
             return 2;
         }
         const fs::path dir = argv[1];
+        fs::remove_all(dir);
         fs::create_directories(dir);
         const auto log = dir / "debug.log";
-        fs::remove(log);
         setEnvironment("HIPBLASLT_JIT", "1");
         setEnvironment("HIPBLASLT_JIT_DEBUG", "knowledge");
         setEnvironment("HIPBLASLT_JIT_DEBUG_FILE", log.string().c_str());

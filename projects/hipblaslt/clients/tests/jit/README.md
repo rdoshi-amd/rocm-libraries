@@ -1,12 +1,13 @@
 # Validate the JIT implementation
 
-The JIT tests check the Jit stages, the `HIPBLASLT_JIT_DEBUG` lines, the comgr
-code-object builder, the source bundle reader and, through the mock backend, the internal entry points that run
-JIT solutions with the GEMM APIs, and `HIPBLASLT_JIT` through the public
-heuristic queries and `hipblaslt-bench`. The JIT headers are not installed. The
-tests include them from `library/src/amd_detail`. They build the gfx950 source
-bundles committed in [`data`](data/README.md), so they need no generator. The
-Python tests run with the interpreter CMake finds, which needs `msgpack`.
+The JIT tests check the comgr code-object builder, the `HIPBLASLT_JIT_DEBUG`
+lines, the source bundle reader, the TensileLite loader and, through the replay
+backend, the internal entry points that run a JIT solution with the GEMM APIs,
+and `HIPBLASLT_JIT` through the public heuristic queries and `hipblaslt-bench`.
+The JIT headers are not installed. The tests include them from
+`library/src/amd_detail`. They build the gfx950 source bundles committed in
+[`data`](data/README.md), so they need no generator. The Python tests run with
+the interpreter CMake finds, which needs `msgpack`.
 
 ## Build and run from a checkout
 
@@ -23,59 +24,59 @@ ctest --test-dir "$project_build/clients/tests/jit" -L jit-gpu --output-on-failu
 ```
 
 `-L jit-cpu` runs the tests that need no GPU. `-L jit-gpu` runs the tests that
-need device 0, which must be a gfx950. Each test writes under
-`clients/tests/jit/scratch` in the build directory, which CTest empties before
-the tests run.
+need device 0, which must be one of the build's `GPU_TARGETS`. Each test
+empties its own directory under `clients/tests/jit/scratch` in the build
+directory before it runs.
 
-`HIPBLASLT_JIT_TESTING=ON` links the mock backend that
-`hipblaslt-jit-mock-backend-test` and `hipblaslt-jit-api-test` replay bundles
-through. It also makes the test backend the process's JIT backend: heuristic
-queries rank candidates with Origami and replay the bundles that
-`HIPBLASLT_JIT_TEST_REPLAY` lists, separated by `:` (`;` on Windows).
-`HIPBLASLT_JIT_TEST_FAULT` set to `generate`, `build`, `record` or `trap`
-injects the mock's fault, and `record` appends each request to the file that
-`HIPBLASLT_JIT_TEST_RECORD` names. The CTest tests are:
+`HIPBLASLT_JIT_TESTING=ON` makes the test backend the process's JIT backend:
+heuristic queries rank candidates with Origami and replay, through the replay
+backend, the bundles that `HIPBLASLT_JIT_TEST_REPLAY` lists, separated by `:`
+(`;` on Windows). `HIPBLASLT_JIT_TEST_FAULT` set to `generate`, `build`,
+`record` or `trap` injects the replay backend's fault, and `record` appends
+each request to the file that `HIPBLASLT_JIT_TEST_RECORD` names. The CTest
+tests are:
 
-- `jit-cpu`: `jit-source-bundle`, `jit-component`, `jit-debug`,
-  `jit-code-object` and `jit-knowledge`. A build with `HIPBLASLT_ENABLE_JIT=OFF` has
-  `jit-source-bundle` and `jit-disabled`.
+- `jit-cpu`: `jit-source-bundle`, `jit-builder`, `jit-component`, `jit-debug`,
+  `jit-code-object` and `jit-knowledge`. A build with `HIPBLASLT_ENABLE_JIT=OFF`
+  has `jit-source-bundle` and `jit-disabled`.
 - `jit-gpu`: `jit-code-object-gpu`, `jit-library`, `jit-library-concurrency`
   and `jit-bundle-freshness`, which read library entries; TensileLite queries
-  the current device when it reads one.
-  With `HIPBLASLT_JIT_TESTING=ON` in a build for gfx950 it also has
-  `jit-mock-backend`, `jit-mock-backend-library`, `jit-bundle-failures`,
-  `jit-helper-failures` and `jit-api-splitk`, `jit-api-streamk`,
-  `jit-api-streamk-hybrid`, `jit-api-amax` and `jit-api-alpha-zero`,
-  `jit-heuristic-<route>` for each heuristic route in
-  the table below, run through the test backend replaying the `rank-1`,
-  `rank-2` and `splitk` bundles, and with `HIPBLASLT_ENABLE_CLIENT=ON`
-  `jit-bench-smoke`. A build with `HIPBLASLT_ENABLE_JIT=OFF` has
-  `jit-heuristic-jit-off`, and with `HIPBLASLT_ENABLE_CLIENT=ON`
-  `jit-bench-smoke-jit-off`.
+  the current device when it reads one. When `GPU_TARGETS` include gfx950 it
+  also has `jit-loader`, and in a build with `HIPBLASLT_JIT_TESTING=ON` also
+  `jit-end-to-end`, `jit-end-to-end-splitk`, `jit-failure`, `jit-api-splitk`,
+  `jit-api-streamk`, `jit-api-streamk-hybrid`, `jit-api-amax`,
+  `jit-api-alpha-zero`, `jit-replay-backend`, `jit-replay-backend-library`,
+  `jit-heuristic-<route>` for each heuristic route in the table below, run
+  through the test backend replaying the `rank-1`, `rank-2` and `splitk`
+  bundles, and with `HIPBLASLT_ENABLE_CLIENT=ON` `jit-bench-smoke`. A build
+  with `HIPBLASLT_ENABLE_JIT=OFF` has `jit-heuristic-jit-off`, and with
+  `HIPBLASLT_ENABLE_CLIENT=ON` `jit-bench-smoke-jit-off`.
 
 A build with `HIPBLASLT_ENABLE_YAML=ON` has no `jit-knowledge`, `jit-library`,
-`jit-library-concurrency` or `jit-bundle-freshness` and none of the tests that
-replay bundles, because the library entries are MsgPack.
+`jit-library-concurrency`, `jit-bundle-freshness`, `jit-loader` or test that
+replays a bundle, because the library entries are MsgPack.
 
 ## What each test checks
 
 | CTest test | Behavior under test |
 | --- | --- |
-| `jit-source-bundle` | The source bundle reader: relative paths, symbolic links that escape the bundle, size limits and library formats |
-| `jit-component` | Jit over fake stages, without a GPU: missing components rejected, the generator's units reaching the builder, count limiting, excluded kernels, the stage of each failure, publish and load ordering, scratch lifetime, concurrent generation, prediction only for backends that consume one and only candidates they transport, contract validation, the composed store version, and the catalog seeds; with `HIPBLASLT_JIT_DEBUG=all`, the order of the generation events and the outcome and failure stage of each solution, and the `prediction` line of a ranked and a failed prediction |
+| `jit-source-bundle` | The source bundle reader: relative paths, symbolic links that escape the bundle, size limits, and a library entry that is missing, empty or not named `library/TensileLibrary.dat` |
+| `jit-builder` | The comgr builder building the committed bundle's assembly and a HIP helper unit for the bundle's target, without a GPU; the code object defines both kernels and has the builder's code-object version |
+| `jit-component` | `Jit` over fake stages that break the stage contracts: a missing backend, builder or loader is rejected; a zero count generates nothing; solutions beyond the count are not built; failures, exceptions and a load without a bundle are reported at the stage `Jit` was running; a store that throws or returns too few indices fails at publish, and the solutions load instead; a backend that consumes predictions without a predictor and knowledge is rejected; candidates of a contract the backend does not transport are dropped; a failed or empty prediction stops before generation; allocation failures propagate; no scratch directory is left behind; the catalog knowledge's seeds for each architecture; and, with `HIPBLASLT_JIT_DEBUG=all`, the order of the generation events and the outcome and failure stage of each solution when some solutions of a generation fail to build or are unsupported, and the `prediction` line of a ranked and a failed prediction |
 | `jit-knowledge` | The tuning knowledge files, without a GPU, on fixture files it writes: nearest-set order, ties, the cap and at most two sets per tile shape; the ProblemType with the fewest extra epilogue features; branch order by PCI chip ID, CU count, fallback chip and generic, falling through a branch without the ProblemType; only the requested group's block inflated, and a corrupt block disabling only its group; the lookup per architecture and in a flat directory, with one `knowledge` debug line for a loaded file, a wrong architecture or schema, a missing file and `HIPBLASLT_JIT_KNOWLEDGE=none`; and a version that changes with the content. On modeled gfx942, gfx950 and gfx1250 devices, Origami ranks the catalog's data-parallel and Hybrid Stream-K candidates together: a Stream-K launch splits the grid over the output tiles, its hybrid mode is dynamic only on gfx950, an equal-latency data-parallel candidate comes first, and without workspace or with an auxiliary output only data-parallel candidates remain. Run by hand, `--decode <file>` reports the first-use time of a file's largest group, `--nearest <file> <core key> <M> <N> <batch> <K> <CU count>` prints the sets the matcher picks for a plain GEMM, and `--predict <architecture> <CU count> <M> <N> <K>` prints the catalog's ranking of an FP16 NN GEMM on a modeled device |
 | `jit-debug` | The `HIPBLASLT_JIT_DEBUG` line writer, without a GPU: value parsing and its warning, JSON escaping and truncation, the line size cap, per-process file names, lines from several threads and processes intact in one file, and rate limiting with aggregate lines |
 | `jit-code-object` | comgr assembly, HIP helper compilation and linking for gfx950, build options, the time of each comgr action without a change to the output, concurrent builds, and the status and log of each kind of failed build, without a GPU; with `--bundle`, the same for the committed split-K bundle |
-| `jit-code-object-gpu` | The same code objects loaded and launched on the GPU, with their results checked |
-| `jit-bundle-freshness` | Each committed bundle's layout and code-object versions against this tree, its library entry read by the host library, and its build; a manifest with another layout version must be reported stale |
-| `jit-mock-backend` | The in-process mock backend replaying the `splitk` source bundle through Jit and the comgr builder: C/C++ numerics, owned scalar values, copied algorithms outliving their owners, name lookups, 65 streams, insufficient workspace, forged tokens, the wrong device, NOT_SUPPORTED for a non-GEMM request or another ProblemType, generation, build and record faults, a replay after an Origami prediction, rejected mock options, and bundle lifetime |
-| `jit-mock-backend-library` | `getLibraryAlgos` publishes the mock solution into a fresh JIT solution library and returns a reserved index, which `getAlgosFromIndex` and `hipblasLtMatmul` run with checked numerics. A query for two solutions generates only for the shortfall and skips the published kernel. A second process then runs that index before any lookup, and `getLibraryAlgos` finds it there with a backend that aborts the process if it generates |
+| `jit-code-object-gpu` | The same code objects built for device 0, loaded and launched, with their results checked; the split-K bundle only in a build for gfx950 |
+| `jit-bundle-freshness` | Each committed bundle's layout and code-object versions against this tree, its library entry read by the host library, and its build; a copy whose manifest has another layout version must be reported stale |
+| `jit-loader` | The committed bundle built with comgr for device 0 and loaded through the Tensile loader; its library selects its solution for the FP16 GEMM it was generated for and nothing for a transposed A. Launches no kernel |
+| `jit-end-to-end`, `jit-end-to-end-splitk` | The `plain` or `splitk` bundle replayed, built with comgr and loaded, then run through `hipblasLtMatmul` and `hipblaslt_ext::Gemm` with D checked against a host reference; a problem the bundle does not solve is not supported |
+| `jit-failure` | The replay backend, comgr builder and TensileLite loader through `Jit`: count, order and excluded kernels, a workspace limit failing support, generation and build faults that keep their log, a code object for another XNACK setting failing to load, damaged bundles rejected with their message, and a split-K solution without its helper kernels rejected before `hipblasLtMatmul` or `Gemm::initialize` writes D or the workspace |
+| `jit-api-splitk`, `jit-api-streamk`, `jit-api-streamk-hybrid`, `jit-api-amax` | The bundle of that name replayed and run through `hipblasLtMatmul` and `hipblaslt_ext::Gemm`: copied algorithms, forged tokens and indices rejected, the workspace rules, repeated runs with changed inputs, a second solution beside the first, and a rejected reinitialization that keeps the prepared solution; D, and the amax output, checked against a host reference. `streamk-hybrid` is a Hybrid Stream-K kernel whose grid, reduction, hybrid mode, mapping and stagger the runtime chooses at each launch |
+| `jit-api-alpha-zero` | Alpha=0 with null A and B and a nonzero K still computes beta*C and the amax output through both APIs |
+| `jit-replay-backend` | The `splitk` bundle replayed through Jit and run through `hipblasLtMatmul` and `hipblaslt_ext::Gemm`: the request owns its scalars, copied algorithms and changed pointers and scalars reuse the solution, too little workspace, a forged token and a nonzero index are rejected before submission, a wrong device is rejected before generation, non-GEMM and mismatched requests are not supported, the record fault records each request, only a backend with a modeled contract replays after an Origami prediction, under the composed version, an unmodeled contract is rejected, and a loaded bundle stays alive while an algorithm refers to it |
+| `jit-replay-backend-library` | `getLibraryAlgos` publishes the replayed solution into a fresh JIT solution library and returns a reserved index, which `getAlgosFromIndex` and `hipblasLtMatmul` run with checked numerics. A query for two solutions generates only for the shortfall and skips the published kernel. A second process then runs that index before any lookup, and `getLibraryAlgos` finds it there with a backend that aborts the process if it generates |
 | `jit-library` | The JIT solution library: cache-key fields and compiler-environment filtering; rejected group- or other-writable, linked and non-directory roots; the stock TensileLite loader reading a published library; exact-size matching with the solution predicates still applied; deduplication, hash collisions, order, count and excluded kernels; mismatched and tampered keys ignored and left untouched; index allocation up to `INT32_MAX` and exhaustion; a publisher killed after each publication step; readers reloading after another instance publishes; and a fused GEMM and all-to-all problem rejected by lookup, publication and the ProblemType key without touching the library, even beside a plain solution of the same sizes |
 | `jit-library-concurrency` | Eight processes publish shared and private entries into one library while another process looks them up: shared entries get one index, private ones unique indices with no gaps, and every reader snapshot loads |
-| `jit-api-splitk`, `jit-api-streamk`, `jit-api-streamk-hybrid`, `jit-api-amax` | Public execution, copied algorithms, workspace rules, repeated calls and state retained after failed preparation, on the replayed bundle of that name, each run checked against the CPU reference. `streamk-hybrid` is a Hybrid Stream-K kernel whose grid, reduction, hybrid mode, mapping and stagger the runtime chooses at each launch |
-| `jit-api-alpha-zero` | Alpha=0 with nonzero descriptor K and null A/B still computes beta*C and output-amax through both public APIs |
-| `jit-helper-failures` | A missing helper source or renamed helper symbols are detected before output/workspace writes; an earlier C++ launch remains usable |
-| `jit-bundle-failures` | Damaged source bundles are rejected through the public API: a foreign target, an escaping symbolic link, missing sources or main assembly, an undefined main kernel, invalid assembly or helper source (the message names the comgr log), corrupt or truncated library entries, missing helper source or symbols, and unsupported problems |
 | `jit-disabled` | The JIT headers are absent from the public include tree, `hipblaslt-ext.hpp` compiles without them, and the extension API links against the disabled library |
 | `jit-heuristic-fallback-c`, `jit-heuristic-fallback-cpp` | `HIPBLASLT_JIT=1` with an empty device library: the C or C++ heuristic query returns only JIT indices for one and three requested solutions, each checked through `hipblasLtMatmul` or `Gemm`, publishes them, and reports any shortfall as a warning |
 | `jit-heuristic-forced` | `HIPBLASLT_JIT=2` with an empty and with the build's device library: both queries return only JIT indices with checked numerics |
@@ -99,31 +100,44 @@ replay bundles, because the library entries are MsgPack.
 | `jit-bench-smoke-jit-off` | `hipblaslt-bench` in a build without JIT prints one warning for `HIPBLASLT_JIT=2` and creates no JIT solution library |
 
 The `GemmPointerCheck` tests in `hipblaslt-test` check that `Gemm::setProblem`
-rejects a null A or B when alpha is nonzero, also with K=0, in builds with and
-without JIT.
+rejects a null A or B when alpha is nonzero, also with K=0, and accepts them
+when alpha is zero, in builds with and without JIT.
 
-## Mock backend and Jit component tests
+## Test arguments
 
-`hipblaslt-jit-mock-backend-test` takes one argument, a source bundle
-directory; CTest passes `data/gfx950/splitk`. It creates the mock backend with
-`jit::mock::createBackend` from `hipblaslt-jit-mock.hpp`, so generation runs no
-generator, and checks an FP16 problem with M=256, N=128, K=512, the record
-fault, a replay after an Origami prediction and rejected mock options. With `--library` after the bundle it runs the
-`jit-mock-backend-library` checks instead, and starts its second process
-itself. That mode refuses to run unless `HIPBLASLT_JIT_LIBRARY_PATH` is set, so
-that it never publishes into the default library.
-`hipblaslt-jit-component-test` takes one argument, a fresh directory that it
-uses as the scratch parent; it needs no GPU. `hipblaslt-jit-debug-test` takes a
-fresh output directory too, needs no GPU and starts its child processes itself.
-They are built only with `HIPBLASLT_ENABLE_JIT=ON`.
+`hipblaslt-jit-end-to-end-test` takes a source bundle directory; CTest passes
+`data/gfx950/plain` and `data/gfx950/splitk`. It creates the replay backend
+with `jit::replay::createBackend` from `hipblaslt-jit-replay.hpp`, so
+generation runs no generator, and solves an FP16 problem with M=256, N=128 and
+K=512. `hipblaslt-jit-failure-test` takes the `plain` and `splitk` bundles and
+a scratch directory, which it also uses as the temporary directory, so that it
+can find the scratch directories that `Jit` keeps. It damages copies of the
+bundles there, and selects the replay backend's generation and build faults
+with `replay::Options::fault`.
+`hipblaslt-jit-builder-test` and `hipblaslt-jit-loader-test` take the `plain`
+bundle and a scratch directory; the loader test uses the same problem.
+`hipblaslt-jit-bundle-freshness-test` takes the `data` directory and a scratch
+directory. `hipblaslt-jit-component-test`, `hipblaslt-jit-debug-test` and
+`hipblaslt-jit-source-bundle-test` take a scratch directory; the component and
+debug tests start their child processes themselves.
 
-`hipblaslt-jit-api-test --replay BUNDLE` runs the public execution checks on a
-solution the mock backend replays from `BUNDLE`; `--m`, `--n`, `--k`,
-`--amax`, `--alpha-zero` and `--workspace-fallback` shape the problem, and
-`--second-replay` names the bundle of its second solution.
-`test_bundle_failures.py` and `test_helper_failures.py` take that binary, a
-valid split-K source bundle and a fresh output directory; they damage copies of
-the bundle and replay them.
+`hipblaslt-jit-api-test --replay BUNDLE` runs the API checks on the solution
+the replay backend replays from `BUNDLE`. `--m`, `--n`, `--k`, `--trans-b`,
+`--amax` and `--alpha-zero` shape the problem, `--workspace-fallback 1` expects
+a run with too little workspace to succeed, as Stream-K's does, and
+`--second-replay` names the bundle of the second solution. CTest runs the
+Stream-K case with `TENSILE_PERSISTENT_FIXED_GRID=16` and
+`TENSILE_PERSISTENT_DYNAMIC_GRID=0`.
+
+`hipblaslt-jit-replay-backend-test` takes the `splitk` bundle. It also selects
+two more replay faults: the record fault, which appends each generation
+request to the file that `replay::Options::record` names and fails the
+generation, and the trap fault, which aborts the process when a generation
+starts, so a wrong device must be rejected before generation. With
+`--library` after the bundle it runs the `jit-replay-backend-library` checks
+instead, and starts its second process itself. That mode empties
+`HIPBLASLT_JIT_LIBRARY_PATH` first and refuses to run unless it is set, so that
+it never publishes into the default library.
 
 ## JIT solution library tests
 
@@ -161,26 +175,26 @@ own handles; with `--barrier DIR` each thread claims a `ready-<n>` file in
 `DIR` after creating its first handle and waits for `DIR/go` before its first
 query, so that threads in several processes start together.
 
-`test_heuristic.py <binary> <route> <fresh-output> --replay BUNDLE` runs the
-binary for one route in fresh processes, each with its own JIT solution
-library, temporary and cache directories under the output directory, and an
-empty `HIPBLASLT_TENSILE_LIBPATH` unless the route uses the build's device
-library. `--replay` is repeated once per bundle; the `jit-off` route takes
+`test_heuristic.py <binary> <route> <output> --replay BUNDLE` empties
+`<output>`, then runs the binary for one route in fresh processes, each with
+its own JIT solution library, temporary and cache directories under
+`<output>`, and an empty `HIPBLASLT_TENSILE_LIBPATH` unless the route uses the
+build's device library. `--replay` is repeated once per bundle; the `jit-off` route takes
 none. The build's JIT backend must be the test backend: the routes replay
 those bundles, and its record fault stands in for a backend that fails if it
 generates. In a build without a device library, `partial-fill` and
 `provider-order` print SKIP, and `capture` skips its pre-tuned part.
 
-`test_bench_smoke.py <hipblaslt-bench> <fresh-output> --replay BUNDLE` runs
+`test_bench_smoke.py <hipblaslt-bench> <output> --replay BUNDLE` runs
 `hipblaslt-bench` the same way, and `--jit-off` instead checks a build without
 JIT.
 
 ## Code-object tests
 
 `hipblaslt-jit-code-object-test` compiles the comgr code-object builder
-directly. `--out` names a fresh results directory, and either `--target`
-selects a compile-only run for that target ID or `--gpu` also loads and runs
-the results on device 0, which must match the target. `--ffm` runs the GPU part
-on the simulator that `HSA_MODEL_TOPOLOGY` and `HSA_MODEL_LIB` select. Simulator
-runs are manual; CTest does not run `--ffm`. `--bundle` adds the checks for a
-TensileLite source bundle. `--only` selects tests by name.
+directly. `--out` names its results directory, and either `--target` selects a
+compile-only run for that target ID or `--gpu` also loads and runs the results
+on device 0. `--ffm` runs the GPU part on the simulator that
+`HSA_MODEL_TOPOLOGY` and `HSA_MODEL_LIB` select; simulator runs are manual, and
+CTest does not run `--ffm`. `--bundle` adds the checks for a TensileLite source
+bundle, whose target the device must match. `--only` selects tests by name.

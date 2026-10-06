@@ -420,8 +420,9 @@ TEST(TestGpuSdpaRaggedFwdPlanBuilder, PlanConstruction)
     EXPECT_NE(casted, nullptr);
 }
 
-// The plan must run the same kernel as a direct fpropRagged call, including the bf16
-// probability mode and the LSE. Equal lengths leave no padding, so whole tensors are compared.
+// The plan must run the same kernel as a direct fpropRagged call, including the LSE. Equal
+// lengths leave no padding, so whole tensors are compared. ExecuteUsesBfloat16ProbabilityMode
+// checks the probability mode, which this tolerance cannot tell apart.
 TEST(TestGpuSdpaRaggedFwdPlan, ExecuteMatchesDirectFpropRaggedBf16)
 {
     SKIP_IF_NO_DEVICES();
@@ -509,6 +510,87 @@ TEST(TestGpuSdpaRaggedFwdPlan, ExecuteMatchesDirectFpropRaggedBf16)
     const CpuFpReferenceValidation<float> lseValidation(tolerance, tolerance);
     EXPECT_TRUE(lseValidation.allClose(lseDirect, lsePlan))
         << "Plan LSE differs from direct fpropRagged LSE";
+}
+
+// All-bf16 graphs round P to bf16 (RTNE) before P@V, as AITER does. Large V values make that
+// rounding visible: the FLOAT and BFLOAT16_RTNE outputs differ, and the plan must match RTNE
+// exactly. One query token against four keys, H = D = 1, so the default scale is 1.
+TEST(TestGpuSdpaRaggedFwdPlan, ExecuteUsesBfloat16ProbabilityMode)
+{
+    SKIP_IF_NO_DEVICES();
+
+    using hipdnn_gpu_ref::GpuFpReferenceSdpaRagged;
+    using hipdnn_gpu_ref::SdpaSoftmaxProbabilityMode;
+
+    const auto qDims = raggedDims(1, 1, 1, 1);
+    const auto kvDims = raggedDims(1, 4, 1, 1);
+    auto graphBuilder = createRaggedSdpaFwdGraph(Q_UID,
+                                                 K_UID,
+                                                 V_UID,
+                                                 O_UID,
+                                                 RAGGED_OFFSET_Q_UID,
+                                                 RAGGED_OFFSET_KV_UID,
+                                                 /*batch=*/1,
+                                                 qDims,
+                                                 kvDims,
+                                                 kvDims,
+                                                 qDims,
+                                                 DataType::BFLOAT16);
+    auto graphWrap = hipdnn_flatbuffers_sdk::flatbuffer_utilities::GraphWrapper(
+        graphBuilder.GetBufferPointer(), graphBuilder.GetSize());
+    const Bf16Builder bf16Builder;
+    auto plan = bf16Builder.buildNodePlan(graphWrap, graphWrap.getNode(0));
+
+    Tensor<bfloat16> q(qDims, raggedStrides(qDims));
+    Tensor<bfloat16> k(kvDims, raggedStrides(kvDims));
+    Tensor<bfloat16> v(kvDims, raggedStrides(kvDims));
+    q.memory().hostData()[0] = bfloat16(1.0f);
+    const std::vector<float> kValues = {2.0f, 0.0f, 1.0f, 0.0f};
+    const std::vector<float> vValues = {1000.0f, -1000.0f, 500.0f, 1000.0f};
+    for(size_t i = 0; i < kValues.size(); ++i)
+    {
+        k.memory().hostData()[i] = bfloat16(kValues[i]);
+        v.memory().hostData()[i] = bfloat16(vValues[i]);
+    }
+    auto offQ = makeRaggedOffset({1}, /*seqStride=*/1);
+    auto offKv = makeRaggedOffset({4}, /*seqStride=*/1);
+
+    Tensor<bfloat16> oPlan(qDims, raggedStrides(qDims));
+    plan->execute({
+        {Q_UID, q.memory().deviceData()},
+        {K_UID, k.memory().deviceData()},
+        {V_UID, v.memory().deviceData()},
+        {O_UID, oPlan.memory().deviceData()},
+        {RAGGED_OFFSET_Q_UID, offQ.memory().deviceData()},
+        {RAGGED_OFFSET_KV_UID, offKv.memory().deviceData()},
+    });
+    oPlan.markDeviceModified();
+
+    const auto direct = [&](SdpaSoftmaxProbabilityMode mode) {
+        Tensor<bfloat16> o(qDims, raggedStrides(qDims));
+        GpuFpReferenceSdpaRagged::fpropRagged<bfloat16, bfloat16, bfloat16, bfloat16, float>(
+            q,
+            k,
+            v,
+            o,
+            offQ,
+            offKv,
+            offKv,
+            offQ,
+            std::nullopt,
+            -1,
+            -1,
+            true,
+            nullptr,
+            nullptr,
+            mode);
+        return static_cast<float>(o.memory().hostData()[0]);
+    };
+    const float oRtne = direct(SdpaSoftmaxProbabilityMode::BFLOAT16_RTNE);
+    const float oFloat = direct(SdpaSoftmaxProbabilityMode::FLOAT);
+
+    ASSERT_NE(oRtne, oFloat);
+    EXPECT_EQ(static_cast<float>(oPlan.memory().hostData()[0]), oRtne);
 }
 
 // fp8: the plan must pass the Q/K/V descales from the variant pack through to fpropRagged.

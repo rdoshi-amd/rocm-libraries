@@ -536,23 +536,24 @@ When adding or changing a native replay test:
   to its working directory so relocation works. Do not infer artifact presence
   or location from test-file paths, nearby source files, or conventional build
   directories. Install required content through CMake and the artifact manifest.
-- Keep a suite-specific fixture local to its module. Do not change shared
-  environment settings or add an autouse fixture that changes other suites'
-  native-lane discovery or skips. A shared fixture needs an intentional consumer
-  contract and validation of every affected suite.
+- Keep a suite-specific fixture local to its module. Do not mutate shared
+  environment settings during fixture setup or add an autouse fixture that
+  changes other suites' native-lane discovery or skips. Shared launcher wiring
+  or fixtures need an intentional consumer contract and validation of every
+  affected suite.
 
 The existing replay CLI target is `rocke_portable_ir_replay_cli`; its installed
-location is `tests/portable_ir/`. Current launcher settings have separate consumers:
-
-| Setting | Consumer |
-|---|---|
-| `ROCKE_REPLAY_CLI` | Existing portable-IR replay suites |
-| `ROCKE_TEST_TF32_REPLAY_CLI` | Module-local TF32 replay fixture, supplied by installed CTest |
+location is `tests/portable_ir/`. `ROCKE_REPLAY_CLI` is the single launcher setting
+for native CLI replay, including TF32 and the portable-IR suites. Installed CTest
+supplies the relative executable path once for the pytest run, enabling all
+consumers of that artifact.
 
 For source execution, build the target first and supply its executable through
-the setting for the intended suite. Do not set another suite's variable as a
-side effect. For validation, check absent and present artifacts, a broken
-executable, and unrelated suites' skips. Repeat the native lane in a clean
+`ROCKE_REPLAY_CLI`. Reuse this setting for new replay consumers rather than adding
+a kernel-specific setting. When changing its launcher wiring, validate every
+consumer, including suites whose native lanes previously skipped. Check absent
+and present artifacts, a broken executable, and unrelated suites' skips.
+Repeat the native lane in a clean
 relocated install without source directories or native caches available; a
 source-only pass cannot establish installed-artifact support.
 

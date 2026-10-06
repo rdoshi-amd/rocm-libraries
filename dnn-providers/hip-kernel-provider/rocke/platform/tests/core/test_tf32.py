@@ -364,10 +364,10 @@ def test_parsed_mma_rejects_wrong_operands():
 
 @pytest.fixture(scope="module")
 def tf32_recipe_replay_cli():
-    """The launcher supplies TF32's native VM without changing other suites."""
-    executable = os.environ.get("ROCKE_TEST_TF32_REPLAY_CLI")
+    """Use the launcher-supplied native VM shared by replay suites."""
+    executable = os.environ.get("ROCKE_REPLAY_CLI")
     if not executable:
-        pytest.skip("Set ROCKE_TEST_TF32_REPLAY_CLI to the prebuilt native replay CLI")
+        pytest.skip("Set ROCKE_REPLAY_CLI to the prebuilt native replay CLI")
     path = Path(executable).resolve()
     if not path.is_file():
         pytest.skip(f"TF32 native replay CLI not found: {path}")

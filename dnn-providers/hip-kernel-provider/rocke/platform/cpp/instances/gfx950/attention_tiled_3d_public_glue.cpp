@@ -730,7 +730,7 @@ bool rocke_gfx950_attn_tiled_3d_config_from_spec(
             b, ROCKE_ERR_VALUE, "attn_tiled_3d: T/BS=%d outside [1,8]", out->N_BLOCKS_PER_TILE);
         return false;
     }
-    out->PAGE_IDS = out->N_BLOCKS_PER_TILE > 1;
+    out->PAGE_IDS = !out->KV_FP8;
     out->tokens_per_call = out->KV_HALVES_PER_CALL / out->HD;
     out->calls_per_block = 0;
     if(out->PAGE_IDS)

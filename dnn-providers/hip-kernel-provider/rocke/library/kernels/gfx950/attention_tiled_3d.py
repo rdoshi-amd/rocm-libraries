@@ -670,14 +670,14 @@ def build_unified_attention_3d_tiled(
     # produces the final byte address for one async DMA call.
     N_BLOCKS_PER_TILE = spec.n_blocks_per_tile
     seq_base = b.mul(seq_idx, bt_stride_p)
-    # Multi-page tiles (fp16/bf16 only) look up each page id once per tile, as
-    # a wave-uniform value, instead of once per async call inside a
-    # descriptor. K and V of a tile share the ids, and the loop fetches the
-    # next tile's ids one iteration ahead (the loop-carried ``pid*`` values),
-    # so the vmcnt wait on a table read doesn't drain the K/V copies already
-    # in flight. The page base goes into soffset; the per-lane part of the
-    # address is loop-invariant.
-    PAGE_IDS = N_BLOCKS_PER_TILE > 1
+    # fp16/bf16 tiles look up each page id once per tile, as a wave-uniform
+    # value. K and V of a tile share the ids, and the loop fetches the next
+    # tile's ids one iteration ahead (the loop-carried ``pid*`` values), so the
+    # vmcnt wait on a table read doesn't drain the K/V copies already in
+    # flight. The page base goes into soffset; the per-lane part of the address
+    # is loop-invariant. The fp8 sync loader (page-sized tiles only) keeps the
+    # paged-KV descriptor.
+    PAGE_IDS = not KV_FP8
     if not PAGE_IDS:
         paged_kv_desc = TensorDescriptor.naive(
             "paged_kv_bytes",
@@ -691,11 +691,12 @@ def build_unified_attention_3d_tiled(
             unmerge("linear_half", into=("token", "dim"), dims=(T, HD)),
         )
     else:
-        # A sequence's last tile can reach past its last page; the table
-        # entries there are not the sequence's (uninitialized, or the next
-        # row). Those pages reuse the tile's first page id, always a live page
-        # of the sequence; the in_prefix mask discards their tokens.
-        seq_pages = b.div(b.add(seq_len, b.const_i32(BS - 1)), b.const_i32(BS))
+        if N_BLOCKS_PER_TILE > 1:
+            # A sequence's last tile can reach past its last page; the table
+            # entries there are not the sequence's (uninitialized, or the next
+            # row). Those pages reuse the tile's first page id, always a live
+            # page of the sequence; the in_prefix mask discards their tokens.
+            seq_pages = b.div(b.add(seq_len, b.const_i32(BS - 1)), b.const_i32(BS))
         tokens_per_call = KV_HALVES_PER_CALL // HD
         assert BS % tokens_per_call == 0, (
             f"page-id loader needs whole calls per page (BS={BS}, HD={HD})"
@@ -730,11 +731,10 @@ def build_unified_attention_3d_tiled(
         return ids
 
     def _issue_paged_tile(
-        src: Value, lds_base: Value, buf_idx: Value, page_ids
+        src: Value, src_rsrc: Value, lds_base: Value, buf_idx: Value, page_ids
     ) -> None:
         buf_off_i64 = b.zext(b.mul(buf_idx, b.const_i32(bytes_per_buf)), I64)
         buf_base = b.smem_ptr_add(lds_base, buf_off_i64)
-        src_rsrc = key_rsrc if src is key else value_rsrc
         for call in range(kv_calls_per_tile):
             blk = call // calls_per_block
             tok0 = (call % calls_per_block) * tokens_per_call
@@ -752,68 +752,6 @@ def build_unified_attention_3d_tiled(
                 soff = b.mul(page_ids[blk], b.const_i32(kv_stride_blk_b))
             dst = b.smem_ptr_add(buf_base, b.const_i64(call * bytes_per_call))
             b.async_buffer_load_lds_addr(call_rsrc, dst, voff, soff, 4)
-
-    def _issue_k_load(kv_tile_idx: Value, buf_idx: Value, page_ids=None) -> None:
-        if PAGE_IDS:
-            _issue_paged_tile(key, K_lds_addr, buf_idx, page_ids)
-            return
-        buf_off_i32 = b.mul(buf_idx, b.const_i32(bytes_per_buf))
-        buf_off_i64 = b.zext(buf_off_i32, I64)
-        K_buf_base = b.smem_ptr_add(K_lds_addr, buf_off_i64)
-        for call in range(kv_calls_per_tile):
-            linear_half = b.add(b.const_i32(call * KV_HALVES_PER_CALL), lane_half_base)
-            call_rsrc = key_rsrc
-            if I64_KV_ADDR:
-                base_i64, voff, _ = paged_kv_desc.offset_i64_split(
-                    b,
-                    "physical_block",
-                    tile_idx=kv_tile_idx,
-                    linear_half=linear_half,
-                    kv_head=kv_head_idx,
-                )
-                call_rsrc = b.buffer_rsrc(
-                    b.global_ptr_add(key, base_i64), kv_block_bytes_c
-                )
-            else:
-                voff, _ = paged_kv_desc.offset(
-                    b,
-                    tile_idx=kv_tile_idx,
-                    linear_half=linear_half,
-                    kv_head=kv_head_idx,
-                )
-            k_dst = b.smem_ptr_add(K_buf_base, b.const_i64(call * bytes_per_call))
-            b.async_buffer_load_lds_addr(call_rsrc, k_dst, voff, zero_soff, 4)
-
-    def _issue_v_load(kv_tile_idx: Value, buf_idx: Value, page_ids=None) -> None:
-        if PAGE_IDS:
-            _issue_paged_tile(value, V_lds_addr, buf_idx, page_ids)
-            return
-        buf_off_i32 = b.mul(buf_idx, b.const_i32(bytes_per_buf))
-        buf_off_i64 = b.zext(buf_off_i32, I64)
-        V_buf_base = b.smem_ptr_add(V_lds_addr, buf_off_i64)
-        for call in range(kv_calls_per_tile):
-            linear_half = b.add(b.const_i32(call * KV_HALVES_PER_CALL), lane_half_base)
-            call_rsrc = value_rsrc
-            if I64_KV_ADDR:
-                base_i64, voff, _ = paged_kv_desc.offset_i64_split(
-                    b,
-                    "physical_block",
-                    tile_idx=kv_tile_idx,
-                    linear_half=linear_half,
-                    kv_head=kv_head_idx,
-                )
-                call_rsrc = b.buffer_rsrc(
-                    b.global_ptr_add(value, base_i64), kv_block_bytes_c
-                )
-            else:
-                voff, _ = paged_kv_desc.offset(
-                    b,
-                    tile_idx=kv_tile_idx,
-                    linear_half=linear_half,
-                    kv_head=kv_head_idx,
-                )
-            v_dst = b.smem_ptr_add(V_buf_base, b.const_i64(call * bytes_per_call))
-            b.async_buffer_load_lds_addr(call_rsrc, v_dst, voff, zero_soff, 4)
 
     # FP8 K/V cache: sync dequant loader. See attention_tiled_2d.py for the
     # rationale. The FP8 path stores the working dtype (bf16/fp16) into LDS,
@@ -901,13 +839,13 @@ def build_unified_attention_3d_tiled(
         if KV_FP8:
             _issue_fp8_dequant_loads(tile_idx, buf_idx, "K")
         else:
-            _issue_k_load(tile_idx, buf_idx, page_ids)
+            _issue_paged_tile(key, key_rsrc, K_lds_addr, buf_idx, page_ids)
 
     def _issue_v(tile_idx: Value, buf_idx: Value, page_ids=None) -> None:
         if KV_FP8:
             _issue_fp8_dequant_loads(tile_idx, buf_idx, "V")
         else:
-            _issue_v_load(tile_idx, buf_idx, page_ids)
+            _issue_paged_tile(value, value_rsrc, V_lds_addr, buf_idx, page_ids)
 
     first_page_ids = _tile_page_ids(tile_start) if PAGE_IDS else None
     _issue_k(tile_start, b.const_i32(0), first_page_ids)

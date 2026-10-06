@@ -72,3 +72,45 @@ rocprofiler-sdk:
         - architectures:
             - gfx1250
           expression: reduce(TX_PERF_SEL_VMW_LDS_INPUT_ACTIVE,max)
+    - name: GL2C_BUSY_max
+      description: max across GL2C channel instances (hot-spot check).
+      properties: []
+      definitions:
+        - architectures:
+            - gfx1250
+          expression: reduce(GL2C_BUSY,max)
+    - name: GL2C_BUSY_min
+      description: min across GL2C channel instances (hot-spot check).
+      properties: []
+      definitions:
+        - architectures:
+            - gfx1250
+          expression: reduce(GL2C_BUSY,min)
+    - name: GL2C_REQ_max
+      description: max across GL2C channel instances (hot-spot check).
+      properties: []
+      definitions:
+        - architectures:
+            - gfx1250
+          expression: reduce(GL2C_REQ,max)
+    - name: GL2C_REQ_min
+      description: min across GL2C channel instances (hot-spot check).
+      properties: []
+      definitions:
+        - architectures:
+            - gfx1250
+          expression: reduce(GL2C_REQ,min)
+    - name: GL2C_READ_SECTORS_max
+      description: max across GL2C channel instances (hot-spot check).
+      properties: []
+      definitions:
+        - architectures:
+            - gfx1250
+          expression: reduce(GL2C_READ_SECTORS,max)
+    - name: GL2C_READ_SECTORS_min
+      description: min across GL2C channel instances (hot-spot check).
+      properties: []
+      definitions:
+        - architectures:
+            - gfx1250
+          expression: reduce(GL2C_READ_SECTORS,min)

@@ -27,7 +27,7 @@ from rocisa.instruction import (
     SAddCU32, SAddU32, SAddU64, SAndB32, SMaxI32, SMinU32, SMovB32, SMovB64, SMulI32,
     SNop, SOrB32, SSubI32, SXorB32,
     SCBranchSCC1, SCmpEQU32, SCSelectB32, SEndpgm,
-    SLShiftLeftB64, SLShiftRightB32,
+    SLShiftLeftB32, SLShiftLeftB64, SLShiftRightB32,
     VAddU32, VAndB32, VCmpXEqU32,
     VLShiftLeftB32, VLShiftRightB32, VMovB32,
     TensorLoadToLds,
@@ -1106,13 +1106,55 @@ def tdmGlobalOffsetSubtile(writer, kernel, tP):
   return mod
 
 
+class _MxScaleTdmShape:
+  """Per-wave split of one DepthU of MX scales for subtile TDM.
+
+  Global layout is InMemorySwizzle {K group, M/N, mxUnit} (K group row stride
+  Size * mxUnit * bpe). LDS layout is [M/N chunk][K group][chunk bytes], what the
+  scale LR expects (InstructionEmitter, ldsChunkBytes). Wave w loads K group
+  w // spansPerKGroup, span w % spansPerKGroup of the WG's rowBytes: spanBytes
+  contiguous global bytes as rows of `chunk` bytes, which TDM LDS padding of
+  chunk * (numKGroups - 1) bytes spreads to the chunk * numKGroups pitch.
+  """
+  def __init__(self, writer, kernel, tc):
+    subTc = tc[-1]
+    ti = _subtileTileInfo(writer, tc)
+    mxBlock = kernel["ProblemType"][f"MXBlock{subTc}"]
+    self.mxUnit = kernel["MatrixInstK"] // mxBlock
+    self.bpe = int(ti.bpe)
+    self.mt = kernel["MacroTile0"] if subTc == "A" else kernel["MacroTile1"]
+    self.numWaves = prod(kernel["MIWaveGroup"])
+    self.numKGroups = (kernel["DepthU"] // mxBlock) // self.mxUnit
+    self.chunk = int(ti.ldsChunkBytes)
+    self.kGroupRowBytes = self.mxUnit * self.bpe   # times Size = global K-group row stride
+    self.rowBytes = self.mt * self.mxUnit * self.bpe
+    assert self.numWaves % self.numKGroups == 0, \
+        f"{tc}: {self.numWaves} waves cannot split {self.numKGroups} scale K groups"
+    self.spansPerKGroup = self.numWaves // self.numKGroups
+    self.spanBytes = self.rowBytes // self.spansPerKGroup
+    partitionBytes = self.rowBytes // kernel["MIWaveGroup"][0 if subTc == "A" else 1]
+    assert self.chunk % int(ti.lrSubtileSize) == 0 and partitionBytes % self.chunk == 0 \
+        and self.spanBytes % self.chunk == 0, \
+        f"{tc}: scale chunk {self.chunk} B does not tile LR group {ti.lrSubtileSize} B, " \
+        f"wave partition {partitionBytes} B and TDM span {self.spanBytes} B"
+    self.rowsPerSpan = self.spanBytes // self.chunk
+
+  def emitWaveSplit(self, mod, wavelen, kGroupSgpr, spanSgpr):
+    """kGroupSgpr = wId // spansPerKGroup, spanSgpr = wId % spansPerKGroup."""
+    mod.add(VReadfirstlaneB32(sgpr(spanSgpr), vgpr("Serial"), "first tId"))
+    mod.add(SLShiftRightB32(sgpr(spanSgpr), ceil(log2(wavelen)), sgpr(spanSgpr),
+            "wId = fTid // wavelen"))
+    mod.add(SLShiftRightB32(sgpr(kGroupSgpr), int(log2(self.spansPerKGroup)), sgpr(spanSgpr),
+            f"scale K group = wId // {self.spansPerKGroup}"))
+    mod.add(SAndB32(sgpr(spanSgpr), sgpr(spanSgpr), self.spansPerKGroup - 1,
+            f"scale span = wId % {self.spansPerKGroup}"))
+
+
 def _tdmGlobalOffsetSubtileMX(writer, kernel, tP):
   """InMemorySwizzle start address for subtile MX TDM.
 
-  Same packing as classic calculateStartAddrWaveSeparated for MXS, but every
-  wave of the WG loads this scale tensor (no even/odd split). WG offset is
-  mxUnit * MT * bpe. Wave offset is M/N-split when there are fewer k_groups
-  than waves, else K-split along SizeI/J.
+  WG offset is mxUnit * MT * bpe along M/N. Wave offset is its K group row
+  (kGroup * Size * mxUnit * bpe) plus its span along M/N (_MxScaleTdmShape).
   """
   tc = tP["tensorChar"]
   tIdx = tP["idx"]
@@ -1121,10 +1163,8 @@ def _tdmGlobalOffsetSubtileMX(writer, kernel, tP):
   mxBlock = kernel["ProblemType"][f"MXBlock{subTc}"]
   mxUnit = kernel["MatrixInstK"] // mxBlock
   mt = kernel["MacroTile0"] if subTc == "A" else kernel["MacroTile1"]
-  wavelen = kernel["WavefrontSize"]
   numWaves = prod(kernel["MIWaveGroup"])
-  mxDU = kernel["DepthU"] // mxBlock
-  numMxKGroups = mxDU // mxUnit
+  shape = _MxScaleTdmShape(writer, kernel, tc)
   mod = Module(f"TDM Global Offset Subtile {tc}")
 
   with writer.allocTmpSgpr(max(3, writer.states.laneSGPRCount)) as tmpSgprRes:
@@ -1140,21 +1180,16 @@ def _tdmGlobalOffsetSubtileMX(writer, kernel, tP):
                      comment=f"wgId * mxUnit({mxUnit}) * MT({mt}) * bpe({bpe})"))
 
     if numWaves > 1:
-      mod.add(VReadfirstlaneB32(dst=sgpr(waveOff), src=vgpr("Serial"), comment="first tId"))
-      mod.add(SLShiftRightB32(dst=sgpr(waveOff), src=sgpr(waveOff),
-                               shiftHex=hex(int(ceil(log2(wavelen)))), comment=f"wId = tId / {wavelen}"))
-      if numMxKGroups >= numWaves:
-        scale = mxUnit * numMxKGroups // numWaves
-        sizeName = f"Size{INDEX_CHARS[tIdx]}"
-        mod.add(SMulI32(dst=sgpr(waveOff), src0=sgpr(waveOff), src1=scale,
-                         comment=f"waveOff = waveId * mxUnit * numMxKGroups // numWaves"))
-        mod.add(SMulI32(dst=sgpr(waveOff), src0=sgpr(waveOff), src1=sgpr(sizeName),
-                         comment=f"waveOff *= {sizeName}"))
-      else:
-        perWave = int(mt // numWaves * mxUnit * bpe)
-        mod.add(SMulI32(dst=sgpr(waveOff), src0=sgpr(waveOff), src1=perWave,
-                         comment=f"waveOff = waveId * (MT/{numWaves}) * mxUnit * bpe"))
+      kGroup = tmp + 1
+      shape.emitWaveSplit(mod, kernel["WavefrontSize"], kGroup, waveOff)
+      mod.add(SMulI32(dst=sgpr(waveOff), src0=sgpr(waveOff), src1=shape.spanBytes,
+                       comment=f"waveOff = span * {shape.spanBytes}"))
       mod.add(SAddU32(dst=sgpr(tmp), src0=sgpr(tmp), src1=sgpr(waveOff), comment="+= waveOff"))
+      mod.add(SMulI32(dst=sgpr(kGroup), src0=sgpr(kGroup), src1=sgpr(f"Size{INDEX_CHARS[tIdx]}"),
+                       comment=f"kGroup * Size{INDEX_CHARS[tIdx]}"))
+      mod.add(SMulI32(dst=sgpr(kGroup), src0=sgpr(kGroup), src1=shape.kGroupRowBytes,
+                       comment=f"*= mxUnit * bpe ({shape.kGroupRowBytes})"))
+      mod.add(SAddU32(dst=sgpr(tmp), src0=sgpr(tmp), src1=sgpr(kGroup), comment="+= K group row"))
 
     mod.add(SAddU32(dst=sgpr(f"Address{tc}"), src0=sgpr(f"Address{tc}"), src1=sgpr(tmp),
                      comment=f"+= offset(lo)"))
@@ -1233,23 +1268,19 @@ def _emitSubtileDataLdsTracking(writer, tc, mt, du, bpe, numWaves, wavelen,
   return mod
 
 
-def _emitSubtileMxLdsTracking(writer, tc, mt, du, bpe, numWaves, wavelen,
-                              ldsConstOffset, padIntervalBytes, padAmountBytes):
+def _emitSubtileMxLdsTracking(writer, kernel, tc, ldsConstOffset):
+  shape = _MxScaleTdmShape(writer, kernel, tc)
   mod = Module(f"TDM LDS tracking {tc}")
-  with writer.allocTmpSgpr(1) as tmpSgprRes:
+  with writer.allocTmpSgpr(2) as tmpSgprRes:
     waveOffsetSgprIdx = tmpSgprRes.idx
-    mod.add(VReadfirstlaneB32(sgpr(waveOffsetSgprIdx), vgpr("Serial"), "first tId"))
-    mod.add(SLShiftRightB32(sgpr(waveOffsetSgprIdx), ceil(log2(wavelen)), sgpr(waveOffsetSgprIdx),
-            "wId=fTid // wavelen"))
-    perWaveBytes = round(mt // numWaves * du * bpe)
-    if padIntervalBytes != 0 and padAmountBytes != 0:
-      padBytes = perWaveBytes // padIntervalBytes * padAmountBytes
-      perWaveBytes = perWaveBytes + padBytes
-    if numWaves > 1:
-      mod.add(SMulI32(sgpr(waveOffsetSgprIdx), sgpr(waveOffsetSgprIdx), perWaveBytes,
-              f"woffset = wId * {perWaveBytes}"))
-    else:
-      mod.add(SMovB32(sgpr(waveOffsetSgprIdx), 0, "single wave: LDS wave offset 0"))
+    kGroup = tmpSgprRes.idx + 1
+    shape.emitWaveSplit(mod, kernel["WavefrontSize"], kGroup, waveOffsetSgprIdx)
+    mod.add(SMulI32(sgpr(waveOffsetSgprIdx), sgpr(waveOffsetSgprIdx),
+            shape.spanBytes * shape.numKGroups,
+            f"woffset = span * {shape.spanBytes} * {shape.numKGroups} K groups"))
+    mod.add(SMulI32(sgpr(kGroup), sgpr(kGroup), shape.chunk, f"kGroup * chunk ({shape.chunk})"))
+    mod.add(SAddU32(sgpr(waveOffsetSgprIdx), sgpr(waveOffsetSgprIdx), sgpr(kGroup),
+            "woffset += K group column"))
     mod.add(SAddU32(sgpr(waveOffsetSgprIdx), sgpr(waveOffsetSgprIdx), ldsConstOffset,
             f"ldsOffset = woffset + {ldsConstOffset} (subtile LDS offset for {tc})"))
     _commitSubtileLdsTracking(mod, tc, waveOffsetSgprIdx, writer.ldsTotalSize)
@@ -1268,16 +1299,7 @@ def initTDMLdsTrackingSubtile(writer, kernel, tP):
   numWaves = prod(kernel["MIWaveGroup"])
   wavelen = kernel["WavefrontSize"]
   if tc.startswith("MX"):
-    subTc = tc[-1]
-    mxBlock = kernel["ProblemType"][f"MXBlock{subTc}"]
-    mt = kernel["MacroTile0"] if subTc == "A" else kernel["MacroTile1"]
-    du = kernel["DepthU"] // mxBlock
-    tileInfo = _subtileTileInfo(writer, tc)
-    padAmountBytes = int(getattr(tileInfo, "ldsRowPadBytes", 0))
-    padIntervalBytes = int(du * bpe) if padAmountBytes else 0
-    return _emitSubtileMxLdsTracking(
-        writer, tc, mt, du, bpe, numWaves, wavelen,
-        getattr(writer, f"ldsStartOffset{tc}", 0), padIntervalBytes, padAmountBytes)
+    return _emitSubtileMxLdsTracking(writer, kernel, tc, getattr(writer, f"ldsStartOffset{tc}", 0))
   ti = tP["idx"]
   mt = kernel[f"MacroTile{ti}"]
   du = kernel["DepthU"]
@@ -1444,16 +1466,10 @@ def _initTDMDescriptorSubtileMX(writer, kernel, tP, refresh=False):
   comp = TensorDataMoverLoad.find(writer)
   tc = tP['tensorChar']
   tIdx = tP["idx"]
-  bpe = tP["bpeGR"]
   dtype = kernel["ProblemType"][f"DataType{tc}"]
-  subTc = tc[-1]
-  mxBlock = kernel["ProblemType"][f"MXBlock{subTc}"]
-  mxUnit = kernel["MatrixInstK"] // mxBlock
-  mt = kernel["MacroTile0"] if subTc == "A" else kernel["MacroTile1"]
-  du = kernel["DepthU"] // mxBlock
-  numMxKGroups = du // mxUnit
-  numWaves = prod(kernel["MIWaveGroup"])
-  wavelen = kernel["WavefrontSize"]
+  shape = _MxScaleTdmShape(writer, kernel, tc)
+  assert shape.bpe == 1, f"{tc}: subtile scale TDM expects 1-byte scales, got {shape.bpe}"
+  chunk = shape.chunk
   ldsConstOffset = getattr(writer, f"ldsStartOffset{tc}", 0)
   sizeName = f"Size{INDEX_CHARS[tIdx]}"
   wgName = f"WorkGroup{tIdx}"
@@ -1462,54 +1478,49 @@ def _initTDMDescriptorSubtileMX(writer, kernel, tP, refresh=False):
   def descSgprName(idx):
     return f"tdm{tc}Group{idx}"
 
-  tileInfo = _subtileTileInfo(writer, tc)
-  padAmountBytes = int(getattr(tileInfo, "ldsRowPadBytes", 0))
-  padIntervalBytes = int(du * bpe) if padAmountBytes else 0
-
+  # The wave's span is read as a dense (chunk, rowsPerSpan) tensor; LDS padding
+  # leaves room for the other K groups' chunks between rows.
+  padAmountBytes = chunk * (shape.numKGroups - 1)
   _emitSubtileGroup1Base(
       mod, comp, writer, kernel, descSgprName(0), descSgprName(1), tc, dtype,
-      padIntervalBytes, padAmountBytes, False)
+      chunk if padAmountBytes else 0, padAmountBytes, False)
 
   ldsTrackSgpr = f"tdmLdsAddr{tc}"
-  if refresh:
-    mod.add(comp.setLdsAddr(descSgprName(0), sgpr(ldsTrackSgpr)))
-  else:
-    mod.add(_emitSubtileMxLdsTracking(
-        writer, tc, mt, du, bpe, numWaves, wavelen,
-        ldsConstOffset, padIntervalBytes, padAmountBytes))
-    mod.add(comp.setLdsAddr(descSgprName(0), sgpr(ldsTrackSgpr)))
+  if not refresh:
+    mod.add(_emitSubtileMxLdsTracking(writer, kernel, tc, ldsConstOffset))
+  mod.add(comp.setLdsAddr(descSgprName(0), sgpr(ldsTrackSgpr)))
 
-  sizeShifter = 1 if dtype.isFloat4() else 0
-
+  # dim1 = rows of this wave's span inside the tensor, so an edge tile zero-fills
+  # whole chunks past Size. A partial last chunk still reads up to chunk - mxUnit
+  # bytes past Size (into the next K group row, or past the end for the last one);
+  # those scales only reach out-of-range rows of D.
   with writer.allocTmpSgpr(2) as tmpSgprRes:
     remain = tmpSgprRes.idx
-    waveRowStart = tmpSgprRes.idx + 1
-    mod.add(SMulI32(sgpr(remain), mt, sgpr(wgName), f"MT({mt}) * wgId"))
+    span = tmpSgprRes.idx + 1
+    mod.add(SMulI32(sgpr(remain), shape.mt, sgpr(wgName), f"MT({shape.mt}) * wgId"))
     mod.add(SSubI32(sgpr(remain), sgpr(sizeName), sgpr(remain),
             f"remaining M/N = {sizeName} - MT*wgId"))
-    if numWaves > 1:
-      perWaveRows = mt // numWaves
-      mod.add(VReadfirstlaneB32(sgpr(waveRowStart), vgpr("Serial"), "first tId"))
-      mod.add(SLShiftRightB32(sgpr(waveRowStart), ceil(log2(wavelen)), sgpr(waveRowStart),
+    mod.add(SMulI32(sgpr(remain), sgpr(remain), shape.kGroupRowBytes,
+            f"remaining bytes (* {shape.kGroupRowBytes})"))
+    if shape.spansPerKGroup > 1:
+      mod.add(VReadfirstlaneB32(sgpr(span), vgpr("Serial"), "first tId"))
+      mod.add(SLShiftRightB32(sgpr(span), ceil(log2(kernel["WavefrontSize"])), sgpr(span),
               "wId = fTid // wavelen"))
-      if numMxKGroups < numWaves:
-        mod.add(SMulI32(sgpr(waveRowStart), sgpr(waveRowStart), perWaveRows,
-                f"waveGlobalRowStart = wId * {perWaveRows}"))
-        mod.add(SSubI32(dst=sgpr(remain), src0=sgpr(remain), src1=sgpr(waveRowStart),
-                        comment="Size_free - waveGlobalRowStart"))
-        mod.add(SMaxI32(dst=sgpr(remain), src0=sgpr(remain), src1=0,
-                        comment="saturate negative remainder to 0"))
-    mod.add(comp.setTensorDim0(descSgprName(1), remain, writer, ceil(log2(mxUnit)), True, overwrite=True))
-    mod.add(comp.setTensorDim1(descSgprName(1), f"Size{INDEX_CHARS[3]}", writer,
-                               ceil(log2(mxBlock * mxUnit)), True, overwrite=True))
-
-  if numMxKGroups >= numWaves:
-    mod.add(comp.setTensorTile0(descSgprName(1), mt * mxUnit, writer, sizeShifter, overwrite=True))
-    mod.add(comp.setTensorTile1(descSgprName(1), numMxKGroups // numWaves, writer, overwrite=True))
-  else:
-    mod.add(comp.setTensorTile0(descSgprName(1), mt * mxUnit // numWaves, writer, sizeShifter, overwrite=True))
-    mod.add(comp.setTensorTile1(descSgprName(1), numMxKGroups, writer, overwrite=True))
-  mod.add(comp.setTensorStride0(descSgprName(1), sizeName, ceil(log2(mxUnit)), True, zeroHigh=False))
+      mod.add(SAndB32(sgpr(span), sgpr(span), shape.spansPerKGroup - 1,
+              f"scale span = wId % {shape.spansPerKGroup}"))
+      mod.add(SMulI32(sgpr(span), sgpr(span), shape.spanBytes, f"span * {shape.spanBytes}"))
+      mod.add(SSubI32(sgpr(remain), sgpr(remain), sgpr(span), "- span start"))
+    mod.add(SMaxI32(sgpr(remain), sgpr(remain), 0, "saturate negative remainder to 0"))
+    mod.add(SMinU32(sgpr(remain), sgpr(remain), shape.spanBytes,
+            f"clamp to span bytes ({shape.spanBytes})"))
+    mod.add(SAddU32(sgpr(remain), sgpr(remain), chunk - 1, "round up to whole chunks"))
+    mod.add(SLShiftRightB32(sgpr(remain), int(log2(chunk)), sgpr(remain),
+            f"rows = ceil(bytes / {chunk})"))
+    mod.add(SMovB32(sgpr(f"{descSgprName(1)}+1"), hex(chunk << 16), f"dim0 = {chunk}"))
+    mod.add(SLShiftLeftB32(sgpr(f"{descSgprName(1)}+2"), 16, sgpr(remain), "dim1 = rows"))
+  mod.add(SMovB32(sgpr(f"{descSgprName(1)}+3"), hex(chunk << 16), f"tile0 = {chunk}"))
+  mod.add(SMovB32(sgpr(f"{descSgprName(1)}+4"), shape.rowsPerSpan, f"tile1 = {shape.rowsPerSpan}"))
+  mod.add(SMovB32(sgpr(f"{descSgprName(1)}+5"), chunk, f"row stride = {chunk}"))
   mod.add(SMovB64(sgpr(f"{descSgprName(1)}+6", 2), 0, comment="Group1+6/+7 reserved"))
   return mod
 
@@ -1537,7 +1548,6 @@ def tdmApplyStreamKOffsetSubtile(writer, kernel, tP):
   """
   tc = tP["tensorChar"]
   ti = _subtileTileInfo(writer, tc)
-  inc = int(ti.depthUBytes)  # per-unroll TDM advance; same source as _emitGRPtrUpdate_TLU0
   group0 = f"tdm{tc}Group0"
   mod = Module(f"TDM StreamK K-offset subtile {tc}")
   # DP-only: StreamKLocalStart == 0, so the K-start offset is 0 and this is a
@@ -1546,8 +1556,15 @@ def tdmApplyStreamKOffsetSubtile(writer, kernel, tP):
     return mod
   with writer.allocTmpSgpr(2, alignment=2, tag="tdmSkOffset") as tmpSgprRes:
     o = tmpSgprRes.idx
-    mod.add(SMulI32(dst=sgpr(o), src0=sgpr("StreamKLocalStart"), src1=inc,
-                    comment=f"SK K-start * depthU*bpe ({inc})"))
+    if tc.startswith("MX"):
+      from .SubtileScaleEmit import emitScaleTdmStepBytes
+      mod.add(SMulI32(dst=sgpr(o), src0=sgpr("StreamKLocalStart"), src1=sgpr(f"Size{INDEX_CHARS[tP['idx']]}"),
+                      comment="SK K-start * Size"))
+      mod.add(emitScaleTdmStepBytes(ti, kernel, sgpr(o), sgpr(o), "SK K-start * scale step"))
+    else:
+      inc = int(ti.depthUBytes)  # per-unroll TDM advance; same source as _emitGRPtrUpdate_TLU0
+      mod.add(SMulI32(dst=sgpr(o), src0=sgpr("StreamKLocalStart"), src1=inc,
+                      comment=f"SK K-start * depthU*bpe ({inc})"))
     mod.add(SMovB32(dst=sgpr(o + 1), src=0, comment="SK K-start offset hi = 0"))
     mod.add(SAddU32(dst=sgpr(f"Address{tc}+0"), src0=sgpr(f"Address{tc}+0"), src1=sgpr(o),
                     comment="Address += SK K-start offset (lo)"))

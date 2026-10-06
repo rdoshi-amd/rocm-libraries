@@ -240,10 +240,12 @@ class InstructionEmitter:
                 groupKey = scaleGroupIdx * lrGran.mn
                 kGroupIdx = placement.tiles.subIterK_start // ti.lrSubtileShape[1]
                 numKGroups = ti.lrLocalSubtileGrid[1]
-                # InMemorySwizzle is {kGroup, M/N, 4}: TDM lands one M/N group's
-                # K groups back to back, each lrSubtileSize bytes long.
-                groupStride = int(ti.lrSubtileSize) * numKGroups
-                dsOffset = groupStride * scaleGroupIdx + int(ti.lrSubtileSize) * kGroupIdx
+                # LDS holds [M/N chunk][K group][chunk] (see ldsChunkBytes); a chunk
+                # packs one or more LR groups of lrSubtileSize bytes.
+                chunk = int(ti.ldsChunkBytes)
+                groupPos = int(ti.lrSubtileSize) * scaleGroupIdx
+                dsOffset = (groupPos // chunk) * chunk * numKGroups + chunk * kGroupIdx \
+                    + groupPos % chunk
                 vdst = next(iter(vgprTilesScale[tile_map[groupKey]]))
                 module.add(DSLoadB32(
                     dst=vgpr(vdst),

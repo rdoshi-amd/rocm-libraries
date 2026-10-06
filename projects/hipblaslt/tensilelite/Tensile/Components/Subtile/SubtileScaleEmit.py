@@ -197,14 +197,31 @@ def emitScaleLRLoad(ti, writer, kernel):
 # Scale GR ptr update
 # ---------------------------------------------------------------------------
 
+def emitScaleTdmStepBytes(ti, kernel, dst, src, comment):
+  """dst = src * (bytes of one DepthU of scales per M/N index).
+
+  The TDM scale layout is {K/(mxBlock*mxUnit), M/N, mxUnit}, so one DepthU is
+  DepthU / mxBlock bytes per M/N index (times bpe), and the per-iteration step is
+  that times Size, not times MT (ti.depthUBytes).
+  """
+  mult = int(ti.scaleDepthU * ti.bpe)
+  if mult & (mult - 1) == 0:
+    return SLShiftLeftB32(dst=dst, shiftHex=int(math.log2(mult)), src=src, comment=f"{comment} ({mult})")
+  return SMulI32(dst=dst, src0=src, src1=mult, comment=f"{comment} ({mult})")
+
+
 def emitScaleGRPtrUpdate(ti, writer, kernel):
   """Advance scale SRD / TDM address by one depthU iteration."""
   module = Module()
   tc = ti.tc
   if kernel.get("enableTDMA", False) and kernel.get("enableTDMB", False):
-    inc = int(ti.depthUBytes)
-    module.addComment0("TDM addr update: %s += %u" % (tc, inc))
-    module.add(SAddU64(dst=sgpr("Address%s" % tc, 2), src0=sgpr("Address%s" % tc, 2), src1=inc))
+    sizeName = "SizeI" if tc == "MXSA" else "SizeJ"
+    module.addComment0("TDM addr update: %s += %s * %u" % (tc, sizeName, ti.scaleDepthU * ti.bpe))
+    with writer.allocTmpSgpr(1, tag="scaleTdmStep") as tmpSgprRes:
+      inc = tmpSgprRes.idx
+      module.add(emitScaleTdmStepBytes(ti, kernel, sgpr(inc), sgpr(sizeName), "scale step"))
+      module.add(SAddU32(dst=sgpr("Address%s+0" % tc), src0=sgpr("Address%s+0" % tc), src1=sgpr(inc)))
+      module.add(SAddCU32(dst=sgpr("Address%s+1" % tc), src0=sgpr("Address%s+1" % tc), src1=0))
     group0 = "tdm%sGroup0" % tc
     module.add(SMovB64(dst=sgpr("%s+2" % group0, 2), src=sgpr("Address%s" % tc, 2),
                        comment="sync descriptor global addr"))

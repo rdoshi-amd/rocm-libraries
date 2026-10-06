@@ -33,6 +33,58 @@ Sizes are (M, N, batch, K).
 - Not yet checked: the same sizes with StreamK 0, and whether the non-subtile MXF4 kernel
   (`configs/ref_nonsubtile_mxf4.yaml`) passes them.
 
+## Scale addressing bugs hidden by validation (fixed 2026-10-06)
+
+With the client's MX data generation every block gets the same scale, so validation passes no
+matter which scale bytes the kernel reads. For `init-a/b=Random` (mapped to `rand_int`) and
+`SerialIdx` (`Sequential`), all of these pass on (256..4096, 256..4096, 1, 2048..8192):
+the scale address step per iteration set to 0 (every iteration reads K block 0's scales),
+all waves reading wave 0's M rows, and the main-loop scale loads removed. The step-0 build's
+D is bit-identical to the unmodified build's. `init-scaleA/B` are the scale-AB tensors and
+`init-mx-a/b` is ignored unless the data init is random-like and the scale init is constant.
+
+So the passing results in this file say nothing about scale addressing. The client option
+`mx-scale-jitter=N` (`client/src/DataInitialization.cpp`) shifts each generated E8 scale by a
+hash-based amount in [-N, N] before the upload permute, so every block gets its own scale. With
+`mx-scale-jitter=4` the MT128x64 subtile kernel still passes and the MT256x256x256 kernel fails
+on every size, including (256, 256, 1, 256). The HEAD build fails the same way. Two bugs:
+
+- **Scale LDS layout.** The scale reads (`scaleMXSA/B[group g, K=k]`) expect
+  [MMA group][K group][W bytes] per 128-row (A) or 128-column (B) partition: A at
+  partition * 1024 + g * 256 + k * 128, B at partition * 1024 + g * 128 + k * 64, plus lane * 4.
+  The TDM load writes each wave's 2 x 256 B as [K group 0: 64 rows x 4 B][K group 1: ...] at
+  wave * 512. The two agree only for MT128-like geometry.
+- **Scale step.** The TDM path advances the scale address by `ti.depthUBytes` =
+  (DepthU / 32) * MT = 2048 bytes per iteration (`emitScaleGRPtrUpdate`) and per StreamK
+  iteration (`tdmApplyStreamKOffsetSubtile`). The descriptor reads the {K/128, M, 4} layout
+  (row stride `SizeI * 4`), where one iteration is (DepthU / 128) * Size * 4 = Size * 8 bytes.
+  The two agree only when Size = MT. The non-subtile path (`KernelWriter.py`, around line
+  10012) already uses Size * DepthU / MXBlock.
+
+Both are fixed in the generator (2026-10-06). The scale LDS layout is now
+[M/N chunk][K group][128 B] for TDM, written by the TDM load and read by `InstructionEmitter`
+(details in the TDM supply section). The scale step and StreamK offset are
+Size * DepthU / MXBlock bytes (`emitScaleTdmStepBytes`). With `mx-scale-jitter=4`:
+
+- MT256x256 passes (256, 256, 1, 256), (256, 256, 1, 2048), (512, 256, 1, 2048),
+  (256, 512, 1, 2048), (512, 512, 1, 2048), (2048, 1024, 1, 384), (4096, 4096, 1, 8192) and the
+  edge size (384, 320, 1, 2048).
+- Both kernels give the same pass/fail result on the regression sizes in the first section as
+  without jitter. The failing sizes have about the same wrong-value counts with and without
+  jitter, so those failures are not scale addressing. The MT256 counts dropped: 4627 (was 25445)
+  and 1154 (was 13786). (300, 200, 1, 1024) and (1000, 1500, 1, 2048) fail with and without
+  jitter, and with the old kernel; their counts change between runs.
+
+Edge tiles: each wave's TDM row count is clamped to its part of the tensor, so whole 128 B
+chunks past Size are zero-filled. A partial last chunk (Size not a multiple of 32) still reads up
+to 124 bytes past Size. That is in the next K group's row, or past the end of the buffer for the
+last one. Those scales only reach out-of-range rows of D. The K dimension is not bounded
+(it was not before either). A K tail reads scale rows past K, past the end of the buffer for the
+last batch. Those scales multiply zero-filled data, so they only matter if a byte is 0xFF (NaN).
+
+`patch_scale_split.py` and `patch_scale_pad.py` apply the same fixes to a finished build (full
+tiles only). (1024, 768, 1, 4096) faults with or without the patch (the StreamK crash above).
+
 ## Main-loop overhead vs the BF16 subtile kernel (open, found 2026-10-05)
 
 Compared against BF16 MT256x256x128, PGR 2, StreamK 3, TDMInst 3 (from
@@ -79,6 +131,72 @@ delay goes. The loop is paced by something outside the waves' instruction stream
 TDM data supply: 68 KiB per workgroup per iteration (A and B 32 KiB each, scales 2 KiB each)
 is about 16.5 TB/s over 256 CUs at 1.08 us per iteration. Removing the overheads above only
 pays off once that limit moves.
+
+## TDM supply: 256-byte scale rows cost 17% (fixed in the generator 2026-10-06)
+
+The scale TDM loads read 2 rows of 256 B per wave (tile0 256 x 1 B, tile1 2, row stride
+`SizeI * 4`). Rows wider than 128 B reach GL1 as a slow request type. Each costs about 2.1
+GL1A busy cycles against about 0.19 for a 128 B A/B row, and GL1A is about 90% busy, so the
+scales' 4 KiB of the 68 KiB per workgroup iteration cost 46 us of 275 us. Reading the same
+bytes as 128 B rows removes almost all of it.
+
+`patch_tdm.py` and `patch_scale.py` change the main-loop TDM loads of a finished build (timing
+only, results are wrong). 8 alternating rounds per group on GPU 3 with `alt_timing.py`, size
+(4096, 4096, 1, 65536); the unmodified kernel is 275.1 to 275.9 us in every group:
+
+| Main-loop scale loads (per wave, per tensor) | Time |
+| --- | --- |
+| Unmodified, 2 rows x 256 B | 275.3 us |
+| None, `s_wait_tensorcnt 2` (`dropS_w2`) | 228.3 to 229.2 us |
+| 4 rows x 128 B, same bytes (`c128x4`) | 230.8 us |
+| 8 rows x 64 B, same bytes (`c64x8`) | 232.9 us |
+| 2 rows x 128 B, half the bytes (`c128x2`) | 229.8 us |
+| 1 row x 256 B, half the bytes (`half`) | 250.7 us |
+| 1 row x 512 B, same bytes (`r1`) | 267.8 us |
+| 2 rows x 64 x 4 B elements, same bytes (`w4`) | 276.1 us |
+| Issued before A and B (`order`) | 278.1 us |
+| All workgroups read the same scales (`shareall`) | 277.8 us |
+| Each workgroup reads a private copy (`noshare`) | 273.6 us |
+| No TDM loads at all (`dropAll`), for reference | 159.8 us |
+
+- Counters (`pmc_tdm.sh`), unmodified vs no scales: `TX_VMW_GL1_REQ_READ` +1.04M (one per
+  256 B row), none of them counted as `TX_VMW_GL1_REQ_READ_128B` or `_64B`; `GL1A_BUSY` 8.43M
+  vs 6.27M; `TX_VMW_GL1_PENDING_STALL` 110.8M vs 71.5M; GL1-to-GL2 latency from
+  `GL1C_GL2_REQ_READ_LEVEL` about 462 vs 331 cycles. With `c128x4` the scale requests are
+  counted as 128 B and `GL1A_BUSY` is 6.33M.
+- Ruled out: L2 hot spots (GL2C busy 84% vs 83% of GL2C cycles, busiest channel about 1.1x
+  the mean, all scale requests hit), same-address sharing (`shareall`, `noshare`), element size
+  (`w4`), issue order (`order`), UTCL0 and set conflicts (no misses, zero stalls).
+- `dropS` (scale loads removed, wait left at 4) measured 205 us earlier, but two loads per
+  iteration under a wait of 4 lets the previous iteration's A/B loads stay in flight (deeper
+  prefetch, and a race on their data). Only the `dropS_w2` number is a fair "no scales" time.
+- TDM merges contiguous rows narrower than 128 B into the slow request type. With B in 64 B
+  rows (`patch_scale_pad.py` without `bpair`) B's 8 contiguous 64 B rows per wave become 2
+  slow requests (0.52M non-128 B requests, `GL1A_BUSY` 7.40M, 253 us). 64 B rows 16 KiB apart
+  are not merged.
+
+Correct variants, which also fix the layout and step bugs in the validation section (same
+rounds and size):
+
+| Scale loads per wave and tensor | TDM per iteration | Time |
+| --- | --- | --- |
+| Unmodified (wrong results) | 4 | 276.2 us |
+| `split`: A 2 x (2 x 128 B), B 4 x (2 x 64 B), one row per K group | 8 | 249.1 us |
+| `pad`: 1 load of 512 contiguous bytes, 128 B rows (A) and 64 B rows (B) | 4 | 253.1 us |
+| `pad bpair=1`: as `pad`, both in 128 B rows, B reads re-addressed | 4 | 233.0 us |
+
+The generator now emits `pad bpair=1`. Built from `configs/segil2_timing.yaml`
+(`logs/*-gen-v2`), it runs at 232.5 us against 275.9 us unmodified (8 alternating rounds, 9.46 PF).
+Segment-conflict stalls are 0.089 M (0.08% of CU cycles; 0.119 M before).
+`logs/*-gen-v1` was built from `tensile_mxf4_att.yaml`, which has no `LDSSegmentInterleave`.
+It has 24.4 M stall cycles (22%) but the same time, 232.6 us. In general terms (`_MxScaleTdmShape` in `SubtileGREmit.py`,
+`ldsChunkBytes` in `Kernel.py`), for MT256x256: wave w loads K group w >> 1, rows or columns
+(w & 1) * 128 to +128, as 4 rows of 128 B (row stride 128). TDM LDS padding of 128 B every
+128 B (control `(1 << 20) | (4 << 22) | (31 << 25)`) spreads them to a 256 B pitch, starting at
+LDS (w & 1) * 1024 + (w >> 1) * 128, from global (w >> 1) * Size * 4 + (w & 1) * 512. The B
+scale reads move from g * 128 + k * 64 to (g >> 1) * 256 + k * 128 + (g & 1) * 64, matching A's
+[pair of MMA groups][K group][128 B]. `GL1A_BUSY` is 6.39M and all 35.65M GL1 reads are 128 B
+requests, the same as `c128x4`.
 
 ## LDS segment conflicts: nearly eliminated, no timing change (2026-09-30, finished 2026-10-05)
 

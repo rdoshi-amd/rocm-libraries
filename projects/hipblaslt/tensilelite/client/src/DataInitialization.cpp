@@ -965,6 +965,7 @@ namespace TensileLite
             , m_workspaceSize(problemFactory.workspaceSize())
             , m_pruneMode(args["prune-mode"].as<PruneSparseMode>())
             , m_mxScaleFormat(args["mx-scale-format"].as<int>())
+            , m_mxScaleJitter(args["mx-scale-jitter"].as<int>())
 
         {
             {
@@ -2134,6 +2135,12 @@ namespace TensileLite
                   auto         stride     = dataDesc.strides()[1];
                   size_t const batchCount = dataDesc.sizes().size() > 2 ? dataDesc.sizes()[2] : 1;
 
+                  // The jitter edits the canonical scale bytes after generation. A
+                  // separately generated swizzled copy would not see it, so let the
+                  // upload path permute the jittered canonical copy instead.
+                  if(m_mxScaleJitter > 0)
+                      swizzleLayout = MXScaleLayout::None;
+
                   auto& pristineData = m_vdata[dataTensorEnum].pristine[dataDesc.dataType()];
                   auto& pristineScale = m_vdata[scaleTensorEnum].pristine[scaleEltType];
 
@@ -2248,6 +2255,26 @@ namespace TensileLite
                       if(kFast)
                           restrideMXScaleBufferKFast(
                               scalePtr, compactFree, compactKBlocks, paddedKBlocks, scaleElemSize);
+                  }
+
+                  // The generators give (nearly) every block the same scale, which
+                  // hides kernels that read the wrong scale bytes. Shift each E8
+                  // exponent by a hash of its byte offset. Zero bytes are padding,
+                  // and 0xFF is NaN in E8, so results stay within [1, 254].
+                  if(m_mxScaleJitter > 0 && scaleEltType == rocisa::DataType::E8)
+                  {
+                      auto*        bytes = static_cast<uint8_t*>(pristineScale.cpuInput.valid.get());
+                      size_t const n     = scaleDesc.totalAllocatedBytes();
+                      int const    span  = 2 * m_mxScaleJitter + 1;
+                      for(size_t i = 0; i < n; i++)
+                      {
+                          if(bytes[i] == 0)
+                              continue;
+                          uint64_t h = (i + 1) * 0x9E3779B97F4A7C15ull;
+                          h ^= h >> 29;
+                          int const shifted = int(bytes[i]) + int(h % span) - m_mxScaleJitter;
+                          bytes[i]          = uint8_t(std::clamp(shifted, 1, 254));
+                      }
                   }
 
                   // When the kernel needs a swizzled scale, regenerate it with the

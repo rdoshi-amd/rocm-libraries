@@ -565,6 +565,10 @@ class TileInfo:
       # Packed InMemorySwizzle footprint of one DepthU: scaleK * MT * bpe.
       self.depthUBytes = int(self.scaleDepthU * self.macroTile * geometry.bpe) if isTDM \
           else int(self.scaleDepthU * geometry.bpe)
+      # LDS scale layout is [M/N chunk][K group][ldsChunkBytes]. TDM writes each chunk as one
+      # global row, and rows wider than 128 B are a slow GL1 request type, so TDM packs
+      # narrower LR groups into 128 B chunks.
+      self.ldsChunkBytes = max(int(self.lrSubtileSize), 128) if isTDM else int(self.lrSubtileSize)
       self.ldsRowPadBytes = 0
       self.ldsBlockSizePerPadBytes = 0
 

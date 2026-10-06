@@ -1186,6 +1186,7 @@ namespace TensileLite
             ContractionProblemGemm const* m_currentGemmProblem = nullptr;
 
             int m_mxScaleFormat = 0;
+            int m_mxScaleJitter = 0;
             MXScaleLayout m_mxScaleLayout = MXScaleLayout::None;
             // Set by initializeMXData when a preswizzled scale was uploaded
             // straight into gpuInput.valid (i.e. copySwizzledToGPUBuffer can

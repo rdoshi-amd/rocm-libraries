@@ -486,7 +486,10 @@ class TestGfx1250MxSubtileTdm:
         _setup_sgprs_mx(writer)
         ti = tiSA if tc == 'MXSA' else tiSB
         asm = str(emitScaleGRPtrUpdate(ti, writer, kernel))
-        assert "s_add_u64" in asm
+        # One DepthU of {K group, M/N, 4} scales is Size * DepthU / MXBlock bytes.
+        sizeName = "SizeI" if tc == 'MXSA' else "SizeJ"
+        assert "s[sgpr%s]" % sizeName in asm
+        assert "s_addc_u32 s[sgprAddress%s+1]" % tc in asm
         assert "sync descriptor global addr" in asm
         assert "Srd%s" % tc not in asm
 
@@ -509,9 +512,10 @@ class TestGfx1250MxSubtileTdm:
         _setup_sgprs_mx(writer)
         asm = str(tdmGlobalOffsetSubtile(writer, kernel, _mx_tp(tc)))
         assert "wgId * mxUnit(4) * MT(%u) * bpe(1)" % mt in asm
-        # 2 k-groups, 4 waves: M/N split, not K-split; every wave loads this tensor.
-        assert "waveOff = waveId * (MT/4) * mxUnit * bpe" in asm
-        assert "numMxKGroups // numWaves" not in asm
+        # 2 K groups, 4 waves: wave w loads K group w // 2, half w % 2 of the MT * 4 bytes.
+        assert "scale K group = wId // 2" in asm
+        assert "waveOff = span * %u" % (mt * 4 // 2) in asm
+        assert "kGroup * Size%s" % ("I" if tc == 'MXSA' else "J") in asm
 
     @pytest.mark.parametrize("tc,lds", [('MXSA', 8192), ('MXSB', 9216)])
     def test_scale_tdm_descriptor_uses_mxs_lds_base(self, tc, lds):

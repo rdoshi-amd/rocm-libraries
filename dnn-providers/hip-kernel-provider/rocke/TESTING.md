@@ -515,9 +515,10 @@ GPUs each leave different coverage gaps. Host pytest is not a full GPU job repla
 
 TF32 recipe replay uses the prebuilt `rocke_portable_ir_replay_cli` installed
 under `tests/portable_ir/`. It compares native CBOR replay with Python lowering
-for both gfx942 atom shapes, every preparation mode, and LLVM 20/22/23. Missing
-replay executables configured by installed CTest fail the test; installed tests
-never attempt to configure a source build. CTest supplies the executable through
+for both gfx942 atom shapes, every preparation mode, and LLVM 20/22/23. When the
+replay executable is unset or missing, the native lane skips like the other
+portable-IR replay tests. CLI execution errors and IR mismatches fail the test;
+installed tests never attempt to configure a source build. CTest supplies it through
 `ROCKE_TEST_TF32_REPLAY_CLI`, relative to its working directory so the artifact
 remains relocatable. In a source checkout, build that target and set the same
 variable to its executable path. The fixture is local to the TF32 module and

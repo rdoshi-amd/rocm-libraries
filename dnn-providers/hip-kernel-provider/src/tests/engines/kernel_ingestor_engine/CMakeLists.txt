@@ -10,3 +10,12 @@ target_sources(hip_kernel_provider_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/packs/TestPointwisePacks.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/packs/TestConvFwdPack.cpp
 )
+
+# The FlyDSL suite rides FlyDSL's gate, not the ingestor's: every case reads the staged
+# shard through loadedSet(), which throws rather than skipping when no shard is there.
+# The sources above are the generic ingestor suites and stay ungated.
+if(HIPKERNELPROVIDER_FLYDSL_ACTIVE)
+    target_sources(hip_kernel_provider_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/packs/TestFlydslRmsNormPack.cpp
+    )
+endif()

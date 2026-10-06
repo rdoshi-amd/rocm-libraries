@@ -1,0 +1,82 @@
+{
+  "version": "1.0",
+  "id": "1b4b4ac7-3db2-58bd-bd97-4891e318babd",
+  "name": "rmsnorm_f16_n5120_bt256",
+  "arch": [
+    "gfx1151"
+  ],
+  "kernel_source": {
+    "kind": "kpack",
+    "library": "kpack/hip_kernel_provider_flydsl_gfx1151.kpack",
+    "toc_key": "rmsnorm/rmsnorm_f16_n5120_bt256.hsaco",
+    "symbol": "rmsnorm_kernel_0",
+    "sha256": "63490f0cfbe1f31668b75c8a7fdaf54259a50a001e120af4bf9f00fac7a860b6",
+    "signature": [
+      {
+        "kind": "global_buffer",
+        "size": 8,
+        "offset": 0
+      },
+      {
+        "kind": "by_value",
+        "size": 16,
+        "offset": 8
+      },
+      {
+        "kind": "global_buffer",
+        "size": 8,
+        "offset": 24
+      },
+      {
+        "kind": "by_value",
+        "size": 4,
+        "offset": 32
+      },
+      {
+        "kind": "global_buffer",
+        "size": 8,
+        "offset": 40
+      },
+      {
+        "kind": "by_value",
+        "size": 4,
+        "offset": 48
+      },
+      {
+        "kind": "global_buffer",
+        "size": 8,
+        "offset": 56
+      },
+      {
+        "kind": "by_value",
+        "size": 16,
+        "offset": 64
+      }
+    ]
+  },
+  "metadata": {
+    "dtype": "f16",
+    "N": 5120,
+    "block_threads": 256
+  },
+  "priority": 100,
+  "provenance": {
+    "specialization_contract": {
+      "schema_version": 1,
+      "consumers": [
+        {
+          "engine_id": "43c4a81e-f427-56ec-b01f-688019b91f85",
+          "kmd_id": "50b317c4-05a1-5d32-a5ba-08ce1d39ae62",
+          "metadata_fields": [],
+          "matcher_only_fields": [
+            "dtype",
+            "N",
+            "block_threads"
+          ],
+          "bindings": {},
+          "vocabulary": {}
+        }
+      ]
+    }
+  }
+}

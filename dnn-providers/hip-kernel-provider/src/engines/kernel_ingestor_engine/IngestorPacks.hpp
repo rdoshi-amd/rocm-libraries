@@ -48,6 +48,10 @@ void resetPointwiseModuleCache();
 void registerConvFwdSymbols(hipdnn_plugin_sdk::ingestor::SymbolScope<Handle>& scope);
 void resetConvFwdModuleCache();
 
+/// @see packs/FlydslRmsNormNative.cpp
+void registerFlydslRmsNormSymbols(hipdnn_plugin_sdk::ingestor::SymbolScope<Handle>& scope);
+void resetFlydslRmsNormModuleCache();
+
 /// Drops every pack's cached kpack modules, so the next dispatch re-reads its archive
 /// from disk.
 ///

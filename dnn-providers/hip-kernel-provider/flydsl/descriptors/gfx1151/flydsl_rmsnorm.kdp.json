@@ -1,0 +1,27 @@
+{
+  "version": "1.0",
+  "id": "9de46973-3abe-5c12-9d1d-cf0154658a4d",
+  "name": "flydsl rmsnorm kernels (gfx1151)",
+  "arch": [
+    "gfx1151"
+  ],
+  "matchers": [
+    "dd69ba28-01e1-52e7-acbf-b22a64603271"
+  ],
+  "engine": "43c4a81e-f427-56ec-b01f-688019b91f85",
+  "dispatch": "133230ec-8d29-53b0-bb80-3a2c58159494",
+  "kernelDescriptors": [
+    "436e9033-e47b-5f11-8070-f20b0fb6b40d",
+    "93217bd4-950e-5a59-ba26-cc7fad89a829",
+    "5de7f973-9962-5e72-989f-177100ad80ce",
+    "b1fc8aa4-1281-5d7e-a64e-b9ef3272a609",
+    "8f61a57a-eeaf-590c-a52f-822accf92574",
+    "a53e469e-2af6-5527-95b2-d75307a2f8f8",
+    "cb0e6527-8af5-575c-a4e0-08d33b35b248",
+    "0aac4bd8-4642-5ec7-ac4c-ae906728e4f0",
+    "07312f4c-7d71-5761-a35e-fe0df5c7c01b",
+    "29de7dee-f859-58e7-aea8-bf9416a6c336",
+    "1b4b4ac7-3db2-58bd-bd97-4891e318babd",
+    "05c08874-765b-5262-b0d8-c055adef4414"
+  ]
+}

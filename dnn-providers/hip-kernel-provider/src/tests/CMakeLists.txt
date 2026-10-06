@@ -156,6 +156,14 @@ if(HIPDNN_ENABLE_KERNEL_INGESTOR)
         endif()
     endforeach()
 
+    # FlyDSL stages its shard from a target of its own, for the same reason and with the
+    # same failure mode. Guarded on the target rather than on the flag so this reads the
+    # one fact it depends on -- that something stages that shard -- and stays correct if
+    # FlyDSL is dormant for the requested architectures.
+    if(TARGET flydsl_kernel_kpack)
+        add_dependencies(hip_kernel_provider_tests flydsl_kernel_kpack)
+    endif()
+
     # The parent of the unit descriptor sets, and the only root this binary reads.
     # A walk of a parent reaches every subtree staged under it, so a further pack
     # there comes under the check with no edit here.
@@ -191,6 +199,28 @@ if(HIPDNN_ENABLE_KERNEL_INGESTOR)
             MatchersCoverBothScopes
             SubtractsInTheRightDirection
     )
+
+    # The same census over FlyDSL's shard, which flydsl/ stages rather than lowers and
+    # registers into the same registry. ACTIVE rather than the option: with the option ON
+    # for an architecture no kernels are checked in for, FlyDSL stands down and there is
+    # no shard for an entry to address.
+    #
+    # TestFlydslRmsNormPack is the one suite in FlyDSL's file that qualifies. Its GPU
+    # suites skip, which a census entry treats as a failure; its matcher-acceptance suites
+    # are TEST_P; and its remaining host suites build graphs in-process instead of reading
+    # loadedSet(), so censusing one would stay green against an empty shard -- the exact
+    # miss the census exists to catch. Every case below opens by reading the staged set.
+    if(HIPKERNELPROVIDER_FLYDSL_ACTIVE)
+        hkp_register_census_tests(
+            TARGET hip_kernel_provider_tests
+            PACK_NAME flydsl
+            SUITES TestFlydslRmsNormPack
+            EXPECTED_CASES
+                IsOnePackWithAGraphMatchAndOneKernelScopedMatcher
+                ShipsBothTiersForBothDtypes
+                EveryKernelDeclaresTheEightSlotSignature
+        )
+    endif()
 endif()
 
 clang_tidy_check(hip_kernel_provider_tests)

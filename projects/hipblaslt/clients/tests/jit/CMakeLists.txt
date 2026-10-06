@@ -82,11 +82,9 @@ hipblaslt_jit_test(jit-loader jit-gpu hipblaslt-jit-loader-test
     "${hipblaslt_jit_bundles}" "${hipblaslt_jit_scratch}/loader")
 set_tests_properties(jit-loader PROPERTIES FIXTURES_REQUIRED jit-bundles)
 
-if(HIPBLASLT_JIT_TESTING)
-    add_executable(hipblaslt-jit-end-to-end-test jit_end_to_end_test.cpp)
-    target_include_directories(hipblaslt-jit-end-to-end-test PRIVATE "${hipblaslt_jit_source}")
-    target_link_libraries(hipblaslt-jit-end-to-end-test PRIVATE roc::hipblaslt hip::device)
-    hipblaslt_jit_test(jit-end-to-end jit-gpu hipblaslt-jit-end-to-end-test
-        "${hipblaslt_jit_bundles}")
-    set_tests_properties(jit-end-to-end PROPERTIES FIXTURES_REQUIRED jit-bundles)
-endif()
+add_executable(hipblaslt-jit-end-to-end-test jit_end_to_end_test.cpp)
+target_include_directories(hipblaslt-jit-end-to-end-test PRIVATE "${hipblaslt_jit_source}")
+target_link_libraries(hipblaslt-jit-end-to-end-test PRIVATE roc::hipblaslt hip::device)
+hipblaslt_jit_test(jit-end-to-end jit-gpu hipblaslt-jit-end-to-end-test
+    "${hipblaslt_jit_bundles}")
+set_tests_properties(jit-end-to-end PROPERTIES FIXTURES_REQUIRED jit-bundles)

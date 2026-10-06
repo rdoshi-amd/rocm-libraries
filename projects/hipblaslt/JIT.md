@@ -48,13 +48,12 @@ APIs:
 
 The header is internal, as are `hipblaslt-jit-replay.hpp` and
 `hipblaslt-jit-gemm-internal.hpp`: they are not installed and
-`hipblaslt-ext.hpp` does not include them. `libhipblaslt.so` exports three
+`hipblaslt-ext.hpp` does not include them. `libhipblaslt.so` exports four
 functions and one type from them with `HIPBLASLT_EXPORT` for the JIT test
 binaries, which link against the shared library: `jit::makeGemmRequest`,
 `jit::getJitAlgo`, `jit::getGemmAlgo` and the `jit::detail::GemmRequest`
-request type. A build with `HIPBLASLT_JIT_TESTING=ON` also exports
-`jit::replay::createBackend`. No installed header declares them, and they are
-not a supported API.
+request type, and `jit::replay::createBackend`. No installed header declares
+them, and they are not a supported API.
 
 The backend's configuration belongs to the options of its factory. The
 application owns its buffers and workspace. The request owns descriptor values
@@ -116,10 +115,10 @@ The implementations are:
   bundles with a solution whose predicates accept the device and problem, until
   they hold the requested count of such solutions. It skips a bundle when every
   such solution's kernel is excluded; the comgr builder still builds them.
-  Tests reach it through `jit::replay::createBackend` in
-  `hipblaslt-jit-replay.hpp`. Only
-  builds with `HIPBLASLT_JIT_TESTING=ON` compile it; it is not a production
-  backend.
+  It implements `Backend`, so `Jit` builds and loads its entries with the same
+  builder and loader as any other backend. Tests reach it through
+  `jit::replay::createBackend` in `hipblaslt-jit-replay.hpp`, and every JIT
+  build compiles it.
 
 ### Build
 
@@ -139,9 +138,7 @@ cmake -S "$project_root/projects/hipblaslt" -B "$project_build" \
 cmake --build "$project_build" --parallel
 ```
 
-`HIPBLASLT_JIT_TESTING`, off by default, also compiles the replay backend into
-the library and adds the tests that use it. The
-[JIT test guide](clients/tests/jit/README.md) lists the test targets and the
+The [JIT test guide](clients/tests/jit/README.md) lists the test targets and the
 validation commands.
 
 ### Algorithm lifetime and failures

@@ -16,7 +16,7 @@ From the repository root, with `project_build` set as in the
 
 ```bash
 cmake -S projects/hipblaslt -B "$project_build" \
-  -DHIPBLASLT_ENABLE_JIT=ON -DHIPBLASLT_JIT_TESTING=ON -DHIPBLASLT_BUILD_TESTING=ON \
+  -DHIPBLASLT_ENABLE_JIT=ON -DHIPBLASLT_BUILD_TESTING=ON \
   -DHIPBLASLT_ENABLE_HOST=ON -DHIPBLASLT_ENABLE_DEVICE=OFF -DGPU_TARGETS=gfx950
 cmake --build "$project_build" --parallel
 ctest --test-dir "$project_build/clients/tests/jit" -L jit-cpu --output-on-failure
@@ -33,9 +33,8 @@ The CTest tests are:
 - `jit-cpu`: `jit-bundles`, `jit-source-bundle` and `jit-builder`. A build
   with `HIPBLASLT_ENABLE_JIT=OFF` has `jit-source-bundle` and `jit-disabled`.
   CTest runs `jit-bundles` before each test that reads a bundle.
-- `jit-gpu`: `jit-loader`, and `jit-end-to-end` in a build with
-  `HIPBLASLT_JIT_TESTING=ON`, when `GPU_TARGETS` include an architecture with
-  committed bundles. A build with
+- `jit-gpu`: `jit-loader` and `jit-end-to-end`, when `GPU_TARGETS` include an
+  architecture with committed bundles. A build with
   `HIPBLASLT_ENABLE_YAML=ON` has neither, because the library entry is
   MsgPack.
 

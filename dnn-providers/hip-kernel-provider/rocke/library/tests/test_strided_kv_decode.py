@@ -161,6 +161,40 @@ def test_strided_dispatch_is_exclusive(arch):
 
 
 @pytest.mark.parametrize("arch", ["gfx942", "gfx950"])
+def test_strided_dispatch_pin_roundtrip(arch):
+    from dispatch.attention import attention_tuning_spec, dispatch_attention
+
+    req = _strided_request(arch)
+    result = dispatch_attention(req)
+    replay = dispatch_attention(result.request)
+    assert replay.candidate is result.candidate
+    assert replay.spec == result.spec
+    assert replay.kernel_id == result.kernel_id
+    assert result.request.tuning_id == "strided"
+    assert result.request.tuning_knobs == ()
+    assert attention_tuning_spec(req, "strided_decode", "strided") == result.spec
+
+
+@pytest.mark.parametrize("arch", ["gfx942", "gfx950"])
+@pytest.mark.parametrize(
+    "changes",
+    [{"tuning_id": "missing"}, {"tuning_knobs": {"waves_per_eu": 3}}],
+)
+def test_strided_dispatch_rejects_unresolved_pins(arch, changes):
+    from dispatch.attention import dispatch_attention
+    from rocke.dispatch.core import PinRefused
+
+    req = replace(
+        _strided_request(arch),
+        algorithm="strided_decode",
+        spec_id="strided_decode",
+        **changes,
+    )
+    with pytest.raises(PinRefused, match="tuning_id|tuning_knobs"):
+        dispatch_attention(req)
+
+
+@pytest.mark.parametrize("arch", ["gfx942", "gfx950"])
 @pytest.mark.parametrize("flavor", ["llvm20", "llvm22", "llvm23"])
 @pytest.mark.parametrize("waves_per_eu", [None, 3])
 def test_native_strided_builder_matches_python(arch, flavor, waves_per_eu, monkeypatch):

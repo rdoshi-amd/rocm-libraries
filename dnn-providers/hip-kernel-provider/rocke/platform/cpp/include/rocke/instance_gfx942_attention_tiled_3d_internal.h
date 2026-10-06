@@ -58,7 +58,6 @@
 #ifndef ROCKE_INSTANCE_GFX942_ATTENTION_TILED_3D_INTERNAL_H
 #define ROCKE_INSTANCE_GFX942_ATTENTION_TILED_3D_INTERNAL_H
 
-#include "rocke/instance_attention_strided_kv_internal.h"
 #include <stdbool.h>
 #include <stddef.h>
 
@@ -66,6 +65,7 @@
 #include "rocke/helper_rocke.helpers.atoms.h" /* rocke_mfma_atom_t                  */
 #include "rocke/helper_rocke.helpers.distribution.h" /* rocke_tile_distribution_t          */
 #include "rocke/helper_rocke.helpers.transforms.h" /* rocke_tensor_descriptor_t          */
+#include "rocke/instance_attention_strided_kv_internal.h"
 #include "rocke/instance_gfx942_attention_tiled_3d.h"
 #include "rocke/ir.h"
 /* The five "new helper" symbols this kernel threads (already ported). */

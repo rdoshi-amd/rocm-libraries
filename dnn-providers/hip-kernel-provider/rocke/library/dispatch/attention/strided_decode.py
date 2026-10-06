@@ -40,6 +40,10 @@ def make_candidate() -> KernelCandidate:
             return False, "strided decode uses bottom-right causal alignment"
         if req.nhead_q // req.nhead_k not in (1, 2, 4, 8, 16):
             return False, "GQA ratio must divide the 16-row query tile"
+        if req.tuning_id not in ("auto", "strided"):
+            return False, "unknown strided decode tuning_id"
+        if req.tuning_knobs:
+            return False, "strided decode does not accept tuning_knobs"
         return _selector_matches(req, candidate)
 
     def select(req):
@@ -153,5 +157,7 @@ def make_candidate() -> KernelCandidate:
     return candidate
 
 
-def register(registry) -> None:
-    registry.register(make_candidate())
+def register(route, execution) -> None:
+    candidate = make_candidate()
+    route.register(candidate)
+    execution.register(candidate)

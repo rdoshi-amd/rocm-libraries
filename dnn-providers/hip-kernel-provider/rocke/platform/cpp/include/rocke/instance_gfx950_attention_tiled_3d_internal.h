@@ -84,7 +84,6 @@
 #ifndef ROCKE_INSTANCE_GFX950_ATTENTION_TILED_3D_INTERNAL_H
 #define ROCKE_INSTANCE_GFX950_ATTENTION_TILED_3D_INTERNAL_H
 
-#include "rocke/instance_attention_strided_kv_internal.h"
 #include <stdbool.h>
 #include <stddef.h>
 
@@ -93,6 +92,7 @@
 #include "rocke/helper_rocke.helpers.distribution.h" /* rocke_tile_distribution_t             */
 #include "rocke/helper_rocke.helpers.layouts.h" /* rocke_transpose_lds_reader_t (PV read)*/
 #include "rocke/helper_rocke.helpers.transforms.h" /* rocke_tensor_descriptor_t             */
+#include "rocke/instance_attention_strided_kv_internal.h"
 #include "rocke/instance_gfx950_attention_tiled_3d.h"
 #include "rocke/ir.h"
 /* apply_softcap_log2, binary_search_seq_idx, wave64_reduce_max/sum (+ the wide-K

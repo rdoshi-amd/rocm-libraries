@@ -6,8 +6,9 @@
 #ifndef ROCKE_INSTANCE_ATTENTION_STRIDED_KV_INTERNAL_H
 #define ROCKE_INSTANCE_ATTENTION_STRIDED_KV_INTERNAL_H
 
-#include "rocke/ir.h"
 #include <stdio.h>
+
+#include "rocke/ir.h"
 
 typedef struct rocke_strided_kv_params
 {

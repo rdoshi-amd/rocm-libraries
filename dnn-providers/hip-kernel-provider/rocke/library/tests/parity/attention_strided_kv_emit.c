@@ -1,13 +1,14 @@
 /* Copyright (c) Advanced Micro Devices, Inc., or its affiliates.
  * SPDX-License-Identifier: MIT
  * Mirrors attention_strided_kv_emit.py without changing public spec layouts. */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
 #include "rocke/instance_gfx942_attention_tiled_3d.h"
 #include "rocke/instance_gfx950_attention_tiled_3d.h"
 #include "rocke/ir_serialize.h"
 #include "rocke/verify.h"
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 
 int main(int argc, char** argv)
 {

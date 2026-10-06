@@ -437,6 +437,7 @@ def test_parse_args(monkeypatch):
     assert args.indices == "0,3"
     assert args.skipMI is True
     assert args.input.endswith("in.yaml")
+    assert args.keep_epilogues is False
 
 
 def test_main_single_index(monkeypatch):
@@ -446,11 +447,27 @@ def test_main_single_index(monkeypatch):
     monkeypatch.setattr(
         M,
         "TensileLibLogicToYaml",
-        lambda inp, idx, out, skip, runCfg, useRunCfg: calls.append((idx, out)),
+        lambda inp, idx, out, skip, runCfg, useRunCfg, keepEpi: calls.append((idx, out, keepEpi)),
     )
     M.main()
     assert len(calls) == 1
     assert calls[0][0] == 0
+    assert calls[0][2] is False
+
+
+def test_main_forwards_keep_epilogues(monkeypatch):
+    monkeypatch.setitem(M.globalParameters, "ClientLogLevel", 0)
+    monkeypatch.setattr(
+        M.sys, "argv", ["prog", "-i", "in.yaml", "-d", "0", "-o", "out.yaml", "--keep-epilogues"]
+    )
+    calls = []
+    monkeypatch.setattr(
+        M,
+        "TensileLibLogicToYaml",
+        lambda inp, idx, out, skip, runCfg, useRunCfg, keepEpi: calls.append(keepEpi),
+    )
+    M.main()
+    assert calls == [True]
 
 
 def test_main_multi_index_suffixes(monkeypatch):
@@ -460,7 +477,7 @@ def test_main_multi_index_suffixes(monkeypatch):
     monkeypatch.setattr(
         M,
         "TensileLibLogicToYaml",
-        lambda inp, idx, out, skip, runCfg, useRunCfg: calls.append((idx, out)),
+        lambda inp, idx, out, skip, runCfg, useRunCfg, keepEpi: calls.append((idx, out)),
     )
     M.main()
     assert [c[0] for c in calls] == [1, 2]

@@ -6,7 +6,8 @@
 # validParameters, values are judged by Tensile's own validator, and the
 # problem type is reduced by rebuilding it. These tests pin that contract,
 # including a round trip through the config-driven solution path. See
-# DECISIONS D48 / ADR 0031.
+# DECISIONS D48 / ADR 0031; leaving the epilogue settings out by default is
+# DECISIONS D49 / ADR 0032.
 ################################################################################
 import copy
 import importlib
@@ -328,6 +329,82 @@ def test_problem_size_carries_gate_types():
     assert list(data["BenchmarkFinalParameters"][1]["GateTypeArgs"]) == [4]
 
 
+def test_problem_size_without_bias_or_gate_types_holds_only_sizes():
+    data = M.formProblemSize(None, 0, {}, problemSizes=[{"Exact": [8, 8, 1, 8]}])
+    assert data["BenchmarkFinalParameters"] == [{"ProblemSizes": [{"Exact": [8, 8, 1, 8]}]}]
+
+
+# ---------------------------------------------------------------------------
+# Epilogues: left out unless kept (DECISIONS D49 / ADR 0032)
+# ---------------------------------------------------------------------------
+def _source(problemType, solution=None, biasTypeArgs=None):
+    return M.SolutionSource(
+        versionString={"MinimumRequiredVersion": "5.0.0"},
+        scheduleName="aquavanjaram",
+        architectureName="gfx942",
+        deviceNames=["Device 0000"],
+        problemType=problemType,
+        solution=_miSolution() if solution is None else solution,
+        biasTypeArgs=biasTypeArgs,
+    )
+
+
+def test_presence_turns_activation_and_bias_on():
+    # Why the epilogue keys are removed rather than set to off.
+    off = dict(_problemType(BIAS_ACT_LOGIC), Activation=False, UseBias=0)
+    del off["BiasDataTypeList"]
+    state = M.buildProblemTypeState(M.normalizedLogicProblemType(off), strict=False)
+    assert state["ActivationType"] == "hipblaslt_all"
+    assert state["BiasDataTypeList"]
+
+
+def test_without_epilogues_removes_only_the_epilogue_keys():
+    block = _problemType(BIAS_ACT_LOGIC)
+    stripped = M.withoutEpilogues(block)
+    assert stripped == {k: v for k, v in block.items() if k not in M.EPILOGUE_PROBLEM_TYPE_KEYS}
+    assert "ActivationType" in block
+
+
+def test_epilogue_settings_name_what_changes_the_problem_type():
+    block = _problemType(BIAS_ACT_LOGIC)
+    # UseScaleAlphaVec 0 and UseScaleAB "" are recorded, but change nothing.
+    assert M.epilogueSettings(block) == ["Activation", "ActivationType", "UseBias", "BiasDataTypeList"]
+    assert M.epilogueSettings(M.withoutEpilogues(block)) == []
+
+
+def test_epilogue_settings_of_an_unbuildable_problem_type_are_its_recorded_keys():
+    assert M.epilogueSettings({"OperationType": "GEMM", "UseBias": 1, "Batched": True}) == ["UseBias"]
+
+
+def test_problem_type_for_config_leaves_epilogues_out_by_default(capsys):
+    block = _problemType(BIAS_ACT_LOGIC)
+    problemType, biasTypeArgs = M.problemTypeForConfig(_source(block, biasTypeArgs=[0, 7]), False)
+    assert problemType == M.withoutEpilogues(block)
+    assert biasTypeArgs is None
+    out = capsys.readouterr().out
+    assert "Left out the epilogue settings (Activation, ActivationType, UseBias, BiasDataTypeList)" in out
+    assert "--keep-epilogues" in out
+
+
+def test_problem_type_for_config_keeps_epilogues_when_asked(capsys):
+    block = _problemType(BIAS_ACT_LOGIC)
+    assert M.problemTypeForConfig(_source(block, biasTypeArgs=[0, 7]), True) == (block, [0, 7])
+    assert "epilogue" not in capsys.readouterr().out
+
+
+def test_problem_type_for_config_keeps_a_handwritten_kernels_epilogues(capsys):
+    block = _problemType(BIAS_ACT_LOGIC)
+    source = _source(block, solution={"CustomKernelName": "Custom_Handwritten"})
+    assert M.problemTypeForConfig(source, False) == (block, None)
+    assert "Kept the epilogue settings" in capsys.readouterr().out
+
+
+def test_problem_type_for_config_is_quiet_without_epilogues(capsys):
+    block = M.withoutEpilogues(_problemType(BIAS_ACT_LOGIC))
+    assert M.problemTypeForConfig(_source(block), False) == (block, None)
+    assert "epilogue" not in capsys.readouterr().out
+
+
 # ---------------------------------------------------------------------------
 # Readers restore the solution the way Tensile reads it
 # ---------------------------------------------------------------------------
@@ -469,9 +546,36 @@ def test_emitted_config_carries_file_defaults_and_target(tmp_path):
     forks = {k: v for d in config["BenchmarkProblems"][0][1]["ForkParameters"] for k, v in d.items()}
     assert forks["MaxOccupancy"] == [40]
     assert forks["LdsPadMetadata"] == [0]
-    assert config["BenchmarkProblems"][0][0]["ActivationType"] == "hipblaslt_all"
 
 
+def test_emitted_config_leaves_epilogues_out(tmp_path):
+    out = tmp_path / "config.yaml"
+    M.TensileLibLogicToYaml(DICT_LOGIC, 0, str(out), False, useRunConfig=False)
+    problem = yaml.safe_load(out.read_text())["BenchmarkProblems"][0]
+    assert not set(M.EPILOGUE_PROBLEM_TYPE_KEYS) & set(problem[0])
+    assert [list(entry) for entry in problem[1]["BenchmarkFinalParameters"]] == [["ProblemSizes"]]
+
+
+def test_emitted_config_keeps_epilogues_when_asked(tmp_path):
+    out = tmp_path / "config.yaml"
+    M.TensileLibLogicToYaml(DICT_LOGIC, 0, str(out), False, useRunConfig=False, keepEpilogues=True)
+    problem = yaml.safe_load(out.read_text())["BenchmarkProblems"][0]
+    assert problem[0]["ActivationType"] == "hipblaslt_all"
+    assert "BiasTypeArgs" in problem[1]["BenchmarkFinalParameters"][1]
+
+
+def _logicWithoutEpilogues(path, directory):
+    data = _load(path)
+    if isinstance(data, dict):
+        data["ProblemType"] = M.withoutEpilogues(data["ProblemType"])
+    else:
+        data[4] = M.withoutEpilogues(data[4])
+    stripped = directory / "logic_without_epilogues.yaml"
+    stripped.write_text(yaml.safe_dump(data))
+    return str(stripped)
+
+
+@pytest.mark.parametrize("keepEpilogues", [True, False], ids=["kept", "default"])
 @pytest.mark.parametrize(
     "path, index, arch",
     [
@@ -482,14 +586,18 @@ def test_emitted_config_carries_file_defaults_and_target(tmp_path):
     ],
     ids=lambda p: os.path.basename(p) if isinstance(p, str) and p.endswith(".yaml") else None,
 )
-def test_emitted_config_regenerates_the_same_kernel(tmp_path, path, index, arch):
+def test_emitted_config_regenerates_the_same_kernel(tmp_path, path, index, arch, keepEpilogues):
     import codegen_harness
     import config_harness
     from Tensile.SolutionStructs.Naming import getKernelNameMin, getSolutionNameMin
 
-    original = codegen_harness.solutions_from_logic(path)[index]
+    # By default the config tunes the logic's kernel without its epilogues.
+    logic = path if keepEpilogues else _logicWithoutEpilogues(path, tmp_path)
+    original = codegen_harness.solutions_from_logic(logic)[index]
     out = tmp_path / "config.yaml"
-    M.TensileLibLogicToYaml(path, index, str(out), False, useRunConfig=False)
+    M.TensileLibLogicToYaml(
+        path, index, str(out), False, useRunConfig=False, keepEpilogues=keepEpilogues
+    )
     regenerated = config_harness.solutions_from_config(str(out), arch=arch)
 
     assert len(regenerated) == 1

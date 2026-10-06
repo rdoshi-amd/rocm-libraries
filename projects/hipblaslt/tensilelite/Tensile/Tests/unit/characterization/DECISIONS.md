@@ -689,3 +689,9 @@ tests carry the evidence for this change.
 **ADR:** [`adr/0031-carry-every-settable-parameter.md`](adr/0031-carry-every-settable-parameter.md)
 
 **Decision:** The converter chose what to emit from two defaults tables, so every settable parameter without a default entry (`PrefetchGlobalReadA`/`B`, `TDMFuse`, `ActivationType`, ...) was dropped, and dict-format solutions lost their file's `DefaultSolution`. It now carries every `validParameters` key a solution records, filtered by Tensile's validator, reduces the problem type by rebuilding it, names the build target, and requires a version Tensile accepts. `test_form_fork_params_includes_nondefault_fork_key` stops patching the removed lookup, `test_set_global_params_non_i8` records an accepted version, and the gfx950 `test_TensileLibLogicToYaml` golden is re-recorded. Intended behavior change.
+
+## D49 — TensileLibLogicToYaml: epilogue settings left out by default
+
+**ADR:** [`adr/0032-leave-epilogues-out-by-default.md`](adr/0032-leave-epilogues-out-by-default.md)
+
+**Decision:** geko's merge adds the epilogue settings (`Activation`, `ActivationType`, `UseBias`, `BiasDataTypeList`, `UseScaleAlphaVec`, `UseScaleAB`) to every library after tuning, so carrying them (D48) made the extracted config tune the shipped epilogue kernel rather than the kernel the run tuned. They are now removed unless `--keep-epilogues` is given (a handwritten custom kernel keeps them), a benchmark header's bias types go with them, and an empty `BiasTypeArgs` is no longer written. The gfx950 `test_TensileLibLogicToYaml` golden loses those four lines, `test_benchmark_tree_to_config` no longer expects the header's bias types, and the `main()` stubs take the new argument; the kept behavior moves to new tests. Intended behavior change.

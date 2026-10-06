@@ -129,6 +129,19 @@ PROBLEM_TYPE_ALWAYS_EMITTED = (
     "TransposeB",
 )
 
+#: The problem type settings geko adds to a library after tuning
+#: (Library.add_epilogues) and leaves out of a config it tunes without
+#: epilogues. ProblemType turns activation and bias on by the presence of
+#: Activation and UseBias, so the keys are removed rather than set to off.
+EPILOGUE_PROBLEM_TYPE_KEYS = (
+    "Activation",
+    "ActivationType",
+    "UseBias",
+    "BiasDataTypeList",
+    "UseScaleAlphaVec",
+    "UseScaleAB",
+)
+
 #: Solution keys emitted somewhere other than ForkParameters: MatrixInstruction
 #: and WorkGroup in the Groups block, ISA as the build target in
 #: GlobalParameters, and CustomKernel as a CustomKernels entry when the kernel
@@ -355,6 +368,26 @@ def formProblemTypeYamlData(problemTypeState: dict) -> dict:
         if key != "OperationType":
             data[key] = makeFlow(value)
     return data
+
+
+def withoutEpilogues(problemTypeState: dict) -> dict:
+    """A copy of a recorded problem type with its epilogue settings removed."""
+    return {
+        key: value
+        for key, value in problemTypeState.items()
+        if key not in EPILOGUE_PROBLEM_TYPE_KEYS
+    }
+
+
+def epilogueSettings(problemTypeState: dict) -> List[str]:
+    """The epilogue settings that change a recorded problem type, in EPILOGUE_PROBLEM_TYPE_KEYS order."""
+    recorded = buildProblemTypeState(normalizedLogicProblemType(problemTypeState), strict=False)
+    stripped = buildProblemTypeState(
+        normalizedLogicProblemType(withoutEpilogues(problemTypeState)), strict=False
+    )
+    if recorded is None or stripped is None:
+        return [key for key in EPILOGUE_PROBLEM_TYPE_KEYS if key in problemTypeState]
+    return [key for key in EPILOGUE_PROBLEM_TYPE_KEYS if recorded[key] != stripped[key]]
 
 
 def formGroups(MIInstruction9Bits: dict) -> dict:
@@ -635,11 +668,13 @@ def formProblemSize(
     biasTypeArgs = normalizeBiasTypeArgs(biasTypeArgs)
     if not biasTypeArgs:
         biasTypeArgs = effectiveDataTypes(problemTypeStat, "BiasDataTypeList")
-    temp["BiasTypeArgs"] = FlowList(biasTypeArgs)
+    if biasTypeArgs:
+        temp["BiasTypeArgs"] = FlowList(biasTypeArgs)
     gateTypeArgs = effectiveDataTypes(problemTypeStat, "GateResidualDataTypeList")
     if gateTypeArgs:
         temp["GateTypeArgs"] = FlowList(gateTypeArgs)
-    data["BenchmarkFinalParameters"].append(temp)
+    if temp:
+        data["BenchmarkFinalParameters"].append(temp)
 
     return data
 
@@ -870,6 +905,33 @@ def readSource(data, solutionIndex: int) -> SolutionSource:
             return source
 
     raise RuntimeError("Unrecognized input file format.")
+
+
+def problemTypeForConfig(
+    source: SolutionSource, keepEpilogues: bool
+) -> Tuple[dict, Optional[list]]:
+    """The problem type and benchmark bias types to emit for `source`.
+
+    Unless `keepEpilogues`, the epilogue settings are left out, so the config
+    tunes the kernel the way geko tunes it with EPILOGUES off. A handwritten
+    custom kernel keeps them: its problem type is fixed by its source, and
+    Tensile exits when a config names a custom kernel whose problem type differs.
+    """
+    settings = [] if keepEpilogues else epilogueSettings(source.problemType)
+    if settings and handwrittenCustomKernelName(source.solution):
+        tPrint(
+            1,
+            "Kept the epilogue settings ({}): a handwritten custom kernel's problem type "
+            "is fixed by its source.".format(", ".join(settings)),
+        )
+    elif settings:
+        tPrint(
+            1,
+            "Left out the epilogue settings ({}), so the config tunes the kernel without "
+            "them. Pass --keep-epilogues to keep them.".format(", ".join(settings)),
+        )
+        return withoutEpilogues(source.problemType), None
+    return source.problemType, source.biasTypeArgs
 
 
 @dataclass(frozen=True)
@@ -1421,13 +1483,16 @@ def TensileLibLogicToYaml(
     skipMI: bool,
     runConfigPath: Optional[str] = None,
     useRunConfig: bool = True,
+    keepEpilogues: bool = False,
 ) -> Optional[str]:
     """Generate a config from a library logic or a benchmark data file.
 
     Extracts one solution and emits a Tensile config for it. GlobalParameters and
     LibraryLogic are inherited from the config that produced the input when it can
     be found, so the generated config reproduces the original run rather than a
-    set of assumed defaults.
+    set of assumed defaults. The epilogue settings (activation, bias,
+    scale-alpha-vector, scale-AB) are left out unless keepEpilogues is set, as
+    geko leaves them out of the configs it tunes without epilogues.
 
     Args:
         logicFilePath: Library logic or benchmark data yaml to extract from.
@@ -1437,6 +1502,7 @@ def TensileLibLogicToYaml(
         runConfigPath: Tuning config to inherit run settings from. Located
             automatically from the input path when omitted.
         useRunConfig: Set False to emit built-in defaults instead of inheriting.
+        keepEpilogues: Set True to keep the epilogue settings the input records.
 
     Returns:
         The generated config file name, otherwise None.
@@ -1469,27 +1535,28 @@ def TensileLibLogicToYaml(
         raise RuntimeError("At least one solution idx should be provided")
 
     source = readSource(libYaml, solutionIndex)
+    problemType, biasTypeArgs = problemTypeForConfig(source, keepEpilogues)
     runSettings = resolveRunSettings(logicFilePath, runConfigPath, useRunConfig)
     libraryLogic = formLibraryLogic(source, runSettings)
     target = buildTarget(libraryLogic)
 
     tensileYamlFileData = {}
     tensileYamlFileData["GlobalParameters"] = setGlobalParams(
-        source.versionString, source.problemType, runSettings
+        source.versionString, problemType, runSettings
     )
     addBuildTarget(tensileYamlFileData["GlobalParameters"], target)
 
     benchmarkProblems = [[]]
-    benchmarkProblems[0].append(formProblemTypeYamlData(source.problemType))
+    benchmarkProblems[0].append(formProblemTypeYamlData(problemType))
 
     benchmarkProblemsData = formForkParams(source.solution, skipMI, target)
     benchmarkProblemsData.update(
         formProblemSize(
             source.exactLogic,
             solutionIndex,
-            source.problemType,
+            problemType,
             source.problemSizes,
-            source.biasTypeArgs,
+            biasTypeArgs,
         )
     )
     benchmarkProblems[0].append(benchmarkProblemsData)
@@ -1512,6 +1579,7 @@ def parseArgs():
         "skipMI": "Skips the MatrixInstruction field in the tensile yaml file",
         "runConfig": "Tuning config to inherit GlobalParameters and LibraryLogic from. Located automatically from the input path when omitted.",
         "noRunConfig": "Emit built-in defaults instead of inheriting run settings from the originating config.",
+        "keepEpilogues": "Keep the epilogue settings (activation, bias, scale-alpha-vector, scale-AB) the input records. By default they are left out, as in a config geko tunes without epilogues.",
     }
 
     argParser.add_argument(
@@ -1558,6 +1626,13 @@ def parseArgs():
         help=argHelp["noRunConfig"],
     )
     argParser.add_argument(
+        "--keep-epilogues",
+        action="store_true",
+        default=False,
+        required=False,
+        help=argHelp["keepEpilogues"],
+    )
+    argParser.add_argument(
         "--skipMI",
         "-s",
         action="store_true",
@@ -1585,6 +1660,7 @@ def main():
             args.skipMI,
             args.run_config,
             not args.no_run_config,
+            args.keep_epilogues,
         )
         tensileYamlFiles.append(tensileYamlFile)
     tPrint(1, f"Tensile Files generated: {tensileYamlFiles}")

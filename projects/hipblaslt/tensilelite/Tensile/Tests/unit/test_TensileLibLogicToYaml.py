@@ -382,7 +382,6 @@ VALID_CONFIG_FILE_CONTENT = """GlobalParameters:
   - [9, 5, 0]
 BenchmarkProblems:
 - - OperationType: GEMM
-    Activation: true
     Batched: true
     ComputeDataType: 0
     DataType: 7
@@ -390,8 +389,6 @@ BenchmarkProblems:
     HighPrecisionAccumulate: true
     TransposeA: true
     TransposeB: false
-    UseBias: 1
-    UseScaleAlphaVec: 1
   - InitialSolutionParameters:
     BenchmarkCommonParameters:
     - KernelLanguage: [Assembly]
@@ -442,7 +439,6 @@ BenchmarkProblems:
     BenchmarkFinalParameters:
     - ProblemSizes:
       - Exact: [768, 3072, 1, 3840, 768, 768, 3840, 3840]
-    - BiasTypeArgs: [0, 7]
 LibraryLogic:
   ScheduleName: "gfx950"
   DeviceNames: ["Device 75a0"]

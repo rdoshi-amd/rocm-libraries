@@ -347,8 +347,16 @@ def test_benchmark_tree_to_config(tmp_path):
         "DeviceNames": ["Device 75a0"],
         "ArchitectureName": "gfx950",
     }
+    # The header's bias types go with the epilogue settings (DECISIONS D49).
     final = config["BenchmarkProblems"][0][1]["BenchmarkFinalParameters"]
-    assert final[0]["ProblemSizes"] == [{"Exact": [256, 512, 1, 128]}]
+    assert final == [{"ProblemSizes": [{"Exact": [256, 512, 1, 128]}]}]
+
+
+def test_benchmark_tree_keeps_header_bias_types_with_epilogues(tmp_path):
+    data = _writeBenchmarkTree(tmp_path)
+    out = tmp_path / "config.yaml"
+    M.TensileLibLogicToYaml(str(data), 0, str(out), False, keepEpilogues=True)
+    final = yaml.safe_load(out.read_text())["BenchmarkProblems"][0][1]["BenchmarkFinalParameters"]
     assert final[1]["BiasTypeArgs"] == [0, 4]
 
 

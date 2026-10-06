@@ -949,6 +949,7 @@ int main(int argc, char** argv)
     {
         Context ctx;
         ctx.scratch = fs::absolute(argv[2]);
+        fs::remove_all(ctx.scratch);
         fs::create_directories(ctx.scratch);
         ctx.entry.bytes    = artifacts::readSourceBundle(fs::u8path(argv[1])).library;
         const auto library = std::dynamic_pointer_cast<hj::GemmMaster>(

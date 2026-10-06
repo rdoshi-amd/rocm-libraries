@@ -41,35 +41,21 @@ std::vector<std::string> names(const std::vector<a::SourceFile>& files)
 int main(int argc, char** argv)
 try
 {
-    check(argc == 2, "Usage: artifact-test NEW_DIRECTORY");
+    check(argc == 2, "Usage: hipblaslt-jit-source-bundle-test SCRATCH");
     const auto root = fs::u8path(argv[1]);
-    check(fs::create_directory(root), "Fixture directory already exists");
+    fs::remove_all(root);
+    fs::create_directories(root);
 
-    const auto        library = root / fs::u8path("library π.dat.zlib");
+    const auto        library = root / fs::u8path("library π.dat");
     const std::string payload = std::string(200000, 'x') + "serialized solution bytes";
-    uLongf            size    = compressBound(payload.size());
-    std::string       compressed(size, '\0');
-    check(compress(reinterpret_cast<Bytef*>(compressed.data()),
-                   &size,
-                   reinterpret_cast<const Bytef*>(payload.data()),
-                   payload.size())
-              == Z_OK,
-          "Cannot compress fixture");
-    compressed.resize(size);
-    write(library, compressed);
-    const auto decoded = a::readLibrary(library);
-    check(std::string(decoded.begin(), decoded.end()) == payload,
-          "Library decompression changed bytes");
-    write(library, compressed.substr(0, compressed.size() - 1));
-    reject([&] { a::readLibrary(library); });
-    write(library, compressed + "trailing");
-    reject([&] { a::readLibrary(library); });
-    write(library, "not zlib");
-    reject([&] { a::readLibrary(library); });
+    write(library, payload);
+    const auto bytes = a::readArtifact(library);
+    check(std::string(bytes.begin(), bytes.end()) == payload, "Artifact bytes changed");
+    write(library, "");
+    reject([&] { a::readArtifact(library); });
     const auto raw = root / "raw.dat";
     write(raw, payload);
-    check(a::readLibrary(raw) == decoded, "Raw library bytes changed");
-    std::cout << "PASS native Unicode paths and raw/compressed library validation\n";
+    std::cout << "PASS native Unicode paths and complete, non-empty artifacts\n";
 
     reject([&] { a::artifact(root, "../outside.co"); });
     reject([&] { a::artifact(root, fs::absolute(raw).u8string()); });
@@ -88,7 +74,7 @@ try
     const auto bundle = root / fs::u8path("bundle π");
     fs::create_directories(bundle / "library");
     fs::create_directories(bundle / "sources");
-    write(bundle / "library/TensileLibrary.dat.zlib", compressed);
+    write(bundle / "library/TensileLibrary.dat", payload);
     for(const auto* name : {"b.s", "a.s", "Kernels.cpp", "Kernels.h", "TensileTypes.h"})
         write(bundle / "sources" / name, std::string("// ") + name + "\n");
     const auto sources = a::readSourceBundle(bundle);
@@ -113,12 +99,19 @@ try
     };
     damage([&] { fs::rename(bundle / "sources", root / "moved"); },
            [&] { fs::rename(root / "moved", bundle / "sources"); });
-    damage([&] { write(bundle / "library/TensileLibrary.yaml", "second library"); },
-           [&] { fs::remove(bundle / "library/TensileLibrary.yaml"); });
+    damage(
+        [&] {
+            fs::rename(bundle / "library/TensileLibrary.dat",
+                       bundle / "library/TensileLibrary.yaml");
+        },
+        [&] {
+            fs::rename(bundle / "library/TensileLibrary.yaml",
+                       bundle / "library/TensileLibrary.dat");
+        });
     damage([&] { fs::rename(bundle / "library", root / "moved"); },
            [&] { fs::rename(root / "moved", bundle / "library"); });
-    damage([&] { write(bundle / "library/TensileLibrary.dat.zlib", "not zlib"); },
-           [&] { write(bundle / "library/TensileLibrary.dat.zlib", compressed); });
+    damage([&] { write(bundle / "library/TensileLibrary.dat", ""); },
+           [&] { write(bundle / "library/TensileLibrary.dat", payload); });
     damage(
         [&] {
             fs::rename(bundle / "sources/a.s", root / "a.s");

@@ -12,6 +12,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -68,8 +69,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("test", type=Path, help="hipblaslt-jit-hipkittens-test")
     parser.add_argument("bench", type=Path, help="hipblaslt-bench")
-    parser.add_argument("output", type=Path)
+    parser.add_argument("output", type=Path, help="a directory this run empties first")
     args = parser.parse_args()
+    shutil.rmtree(args.output, ignore_errors=True)
     args.output.mkdir(parents=True)
     no_headers = args.output / "no-headers"
     no_headers.mkdir()

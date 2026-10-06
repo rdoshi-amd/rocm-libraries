@@ -246,6 +246,7 @@ namespace hipblaslt_jit
         if(trace)
             trace->record().count("generated", static_cast<int64_t>(generated.size()));
 
+        const BuildRequest build{target.targetId, generation.codeObjectVersion, scratch->path()};
         std::vector<BuiltSolution> supported;
         std::vector<size_t>        ranks; // of supported, in generated
         for(size_t rank = 0; rank < generated.size(); ++rank)
@@ -256,7 +257,7 @@ namespace hipblaslt_jit
             debug::Scope  scope(trace ? &trace->solution(rank, solution.kernelName) : nullptr);
             BuiltSolution built;
             debug::Phase  buildPhase("build");
-            status = guarded([&] { return c.builder->build(solution, generation, built); });
+            status = guarded([&] { return c.builder->build(solution, build, built); });
             buildPhase.stop();
             if(trace)
                 trace->built(rank, status.ok() ? "built" : "build_failed", status.message);
@@ -334,15 +335,15 @@ namespace hipblaslt_jit
                                    status.ok() ? "loaded" : "load_failed",
                                    status.ok() ? std::string() : status.message);
                 if(status.ok())
-                    outcome.unpublished.push_back(std::move(bundle));
+                    outcome.bundles.push_back(std::move(bundle));
                 else
                     record(Stage::Load, std::move(status));
             }
             loadPhase.stop();
             if(trace && !supported.empty())
             {
-                trace->record().count("loaded", static_cast<int64_t>(outcome.unpublished.size()));
-                trace->loaded(outcome.unpublished.size());
+                trace->record().count("loaded", static_cast<int64_t>(outcome.bundles.size()));
+                trace->loaded(outcome.bundles.size());
             }
         }
 

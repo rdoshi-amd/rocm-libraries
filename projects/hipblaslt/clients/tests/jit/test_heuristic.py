@@ -16,6 +16,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import time
 
@@ -1148,7 +1149,7 @@ def jit_off(run, output):
     print("PASS jit-off: HIPBLASLT_JIT ignored with one warning")
 
 
-# The multi- routes replace the build's backends with mocks that replay the
+# The multi- routes replace the build's backends with replay backends of the
 # committed gfx950 bundles, which HIPBLASLT_JIT_TESTING builds read from
 # HIPBLASLT_JIT_TEST_BACKENDS.
 DATA = Path(__file__).resolve().parent / "data" / "gfx950"
@@ -1156,12 +1157,12 @@ A = ("rank-1", "rank-2")
 B = ("splitk",)
 
 
-def mock(name, bundles, *flags):
+def backend(name, bundles, *flags):
     """One HIPBLASLT_JIT_TEST_BACKENDS item: id[+flag...]=bundle[,bundle...]."""
     return "+".join((name, *flags)) + "=" + ",".join(str(DATA / b) for b in bundles)
 
 
-def mocks(*items, select=None):
+def backends(*items, select=None):
     env = dict(HIPBLASLT_JIT="2", HIPBLASLT_JIT_TEST_BACKENDS=";".join(items))
     if select is not None:
         env["HIPBLASLT_JIT_BACKENDS"] = select
@@ -1185,19 +1186,21 @@ def returned(records, expected, apis=("c", "cpp")):
 
 
 def multi_both(run, output):
-    both = mocks(mock("mock-a", A), mock("mock-b", B), select="mock-a,mock-b")
+    both = backends(backend("replay-a", A), backend("replay-b", B), select="replay-a,replay-b")
     stderr, records = run("both", ["--api", "both", "--requested", "4"], **both)
     check_jit_results(stderr, records, ("c", "cpp"), 4)
     returned(records, kernels(*A, *B))
     (line,) = reports(stderr)
     require(
-        "returned 3 of 4 requested solutions" in line and "mock-a 2" in line and "mock-b 1" in line,
+        "returned 3 of 4 requested solutions" in line
+        and "replay-a 2" in line
+        and "replay-b 1" in line,
         f"The shortfall was not broken down by backend: {line}",
     )
     keys = {path.parent for path in entries(output / "lib")}
     require(len(keys) == 2, f"Expected two key directories, got {keys}")
-    trapped = mocks(
-        mock("mock-a", A, "trap"), mock("mock-b", B, "trap"), select="mock-a,mock-b"
+    trapped = backends(
+        backend("replay-a", A, "trap"), backend("replay-b", B, "trap"), select="replay-a,replay-b"
     )
     stderr, again = run("reuse", ["--api", "both", "--requested", "3"], **trapped)
     published = queries(records, "c")[0]["indices"]
@@ -1211,23 +1214,23 @@ def multi_both(run, output):
 
 
 def multi_order(run, output):
-    both = (mock("mock-a", A), mock("mock-b", B))
+    both = (backend("replay-a", A), backend("replay-b", B))
     args = ["--api", "both", "--requested", "3", "--no-run"]
-    stderr, records = run("b-a", args, **mocks(*both, select="mock-b,mock-a"))
+    stderr, records = run("b-a", args, **backends(*both, select="replay-b,replay-a"))
     returned(records, kernels(*B, *A))
     require(not reports(stderr), "Reordering reported a JIT problem")
     args = ["--api", "both", "--requested", "2", "--handles", "2", "--no-run"]
-    stderr, records = run("a", args, **mocks(*both, select="mock-a"))
+    stderr, records = run("a", args, **backends(*both, select="replay-a"))
     returned(records, kernels(*A))
-    stderr, records = run("unknown", args, **mocks(*both, select="mock-a,mock-z"))
+    stderr, records = run("unknown", args, **backends(*both, select="replay-a,replay-z"))
     returned(records, kernels(*A))
     require(
         reports(stderr)
         == [
-            "hipblaslt warning: JIT backend mock-z in HIPBLASLT_JIT_BACKENDS is not in this"
+            "hipblaslt warning: JIT backend replay-z in HIPBLASLT_JIT_BACKENDS is not in this"
             " build; ignored"
         ],
-        f"Expected one warning naming mock-z: {reports(stderr)}",
+        f"Expected one warning naming replay-z: {reports(stderr)}",
     )
     print(
         "PASS heuristic-multi-order: HIPBLASLT_JIT_BACKENDS orders and selects the"
@@ -1237,13 +1240,13 @@ def multi_order(run, output):
 
 def multi_optin(run, output):
     two, three = (["--api", "both", "--no-run", "--requested", str(n)] for n in (2, 3))
-    a, b = mock("mock-a", A), mock("mock-b", B, "optin")
-    stderr, records = run("unset", two, **mocks(a, b))
+    a, b = backend("replay-a", A), backend("replay-b", B, "optin")
+    stderr, records = run("unset", two, **backends(a, b))
     returned(records, kernels(*A))
-    stderr, records = run("named", three, **mocks(a, b, select="mock-a,mock-b"))
+    stderr, records = run("named", three, **backends(a, b, select="replay-a,replay-b"))
     returned(records, kernels(*A, *B))
-    unavailable = mock("mock-b", B, "optin", "unavailable")
-    stderr, records = run("never-configured", two, **mocks(a, unavailable))
+    unavailable = backend("replay-b", B, "optin", "unavailable")
+    stderr, records = run("never-configured", two, **backends(a, unavailable))
     returned(records, kernels(*A))
     require(not reports(stderr), f"An unselected backend was configured: {reports(stderr)}")
     print(
@@ -1253,7 +1256,9 @@ def multi_optin(run, output):
 
 
 def multi_unavailable(run, output):
-    env = mocks(mock("mock-a", A), mock("mock-b", B, "unavailable"), select="mock-a,mock-b")
+    env = backends(
+        backend("replay-a", A), backend("replay-b", B, "unavailable"), select="replay-a,replay-b"
+    )
     args = ["--api", "both", "--requested", "2", "--handles", "2", "--queries", "2"]
     stderr, records = run("unavailable", args, **env)
     returned(records, kernels(*A))
@@ -1261,8 +1266,8 @@ def multi_unavailable(run, output):
     require(
         len(lines) == 1
         and lines[0].startswith("hipblaslt warning: JIT configure failed")
-        and "JIT backend mock-b not available" in lines[0],
-        f"Expected one 'not available' warning naming mock-b: {lines}",
+        and "JIT backend replay-b not available" in lines[0],
+        f"Expected one 'not available' warning naming replay-b: {lines}",
     )
     print(
         "PASS heuristic-multi-unavailable: a backend that fails configuration is"
@@ -1271,14 +1276,16 @@ def multi_unavailable(run, output):
 
 
 def multi_count(run, output):
-    both = mocks(mock("mock-a", A), mock("mock-b", B), select="mock-a,mock-b")
+    both = backends(backend("replay-a", A), backend("replay-b", B), select="replay-a,replay-b")
     args = ["--api", "both", "--no-run", "--requested"]
     stderr, records = run("one", args + ["1"], **both)
     returned(records, kernels(A[0]))
     stderr, records = run("two", args + ["2"], **both)
     returned(records, kernels(A[0], *B))
     require(not reports(stderr), f"A JIT problem was reported: {reports(stderr)}")
-    failing = mocks(mock("mock-a", A, "generate"), mock("mock-b", B), select="mock-a,mock-b")
+    failing = backends(
+        backend("replay-a", A, "generate"), backend("replay-b", B), select="replay-a,replay-b"
+    )
     library = output / "lib-failing"
     stderr, records = run(
         "failing", args + ["2"], HIPBLASLT_JIT_LIBRARY_PATH=str(library), **failing
@@ -1288,8 +1295,8 @@ def multi_count(run, output):
     require(
         len(lines) == 1
         and lines[0].startswith("hipblaslt warning: JIT generate failed")
-        and ": mock-a: Mock generation fault" in lines[0],
-        f"Expected one generate warning naming mock-a: {lines}",
+        and ": replay-a: Replay generation fault" in lines[0],
+        f"Expected one generate warning naming replay-a: {lines}",
     )
     print(
         "PASS heuristic-multi-count: one slot is kept for each later backend, and"
@@ -1298,13 +1305,17 @@ def multi_count(run, output):
 
 
 def multi_domain(run, output):
-    env = mocks(mock("mock-a", A), mock("mock-b", B, "unsupported"), select="mock-a,mock-b")
+    env = backends(
+        backend("replay-a", A), backend("replay-b", B, "unsupported"), select="replay-a,replay-b"
+    )
     stderr, records = run("one-rejects", ["--api", "both", "--requested", "2"], **env)
     check_jit_results(stderr, records, ("c", "cpp"), 2)
     returned(records, kernels(*A))
     require(not reports(stderr), f"A rejection was reported: {reports(stderr)}")
-    env = mocks(
-        mock("mock-a", A, "unsupported"), mock("mock-b", B, "unsupported"), select="mock-a,mock-b"
+    env = backends(
+        backend("replay-a", A, "unsupported"),
+        backend("replay-b", B, "unsupported"),
+        select="replay-a,replay-b",
     )
     args = ["--api", "both", "--handles", "2", "--queries", "2", "--no-run"]
     stderr, records = run("both-reject", args, **env)
@@ -1323,7 +1334,7 @@ def multi_domain(run, output):
 
 
 def multi_exclude(run, output):
-    env = mocks(mock("mock-a", B), mock("mock-b", B), select="mock-a,mock-b")
+    env = backends(backend("replay-a", B), backend("replay-b", B), select="replay-a,replay-b")
     stderr, records = run("same-bundle", ["--api", "both", "--requested", "2"], **env)
     check_jit_results(stderr, records, ("c", "cpp"), 2)
     returned(records, kernels(*B))
@@ -1331,7 +1342,9 @@ def multi_exclude(run, output):
 
 
 def multi_fellshort(run, output):
-    env = mocks(mock("mock-a", A[:1]), mock("mock-b", (A[1], *B)), select="mock-a,mock-b")
+    env = backends(
+        backend("replay-a", A[:1]), backend("replay-b", (A[1], *B)), select="replay-a,replay-b"
+    )
     args = ["--api", "c", "--requested", "3", "--queries", "2", "--no-run"]
     stderr, records = run("fellshort", args, HIPBLASLT_JIT_DEBUG="progress", **env)
     returned(records, kernels(*A, *B), apis=("c",))
@@ -1352,10 +1365,12 @@ def multi_capture(run, output):
     stderr, records = run(
         "seed",
         ["--api", "c", "--requested", "1", "--no-run"],
-        **mocks(mock("mock-a", A), mock("mock-b", B), select="mock-b"),
+        **backends(backend("replay-a", A), backend("replay-b", B), select="replay-b"),
     )
     returned(records, kernels(*B), apis=("c",))
-    env = mocks(mock("mock-a", A, "trap"), mock("mock-b", B, "trap"), select="mock-a,mock-b")
+    env = backends(
+        backend("replay-a", A, "trap"), backend("replay-b", B, "trap"), select="replay-a,replay-b"
+    )
     stderr, records = run(
         "captured", ["--api", "none", "--null-algo", "--capture", "global"], **env
     )
@@ -1414,15 +1429,16 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("executable", type=Path)
     parser.add_argument("route", choices=ROUTES)
-    parser.add_argument("fresh_output", type=Path)
+    parser.add_argument("output", type=Path, help="a directory this run empties first")
     parser.add_argument(
         "--replay", action="append", type=Path, help="a bundle for the test backend to replay"
     )
     args = parser.parse_args()
     if (args.route != "jit-off" and not args.route.startswith("multi-")) != bool(args.replay):
         parser.error("--replay is required for every route but jit-off and the multi- routes")
-    args.fresh_output.mkdir(parents=True, exist_ok=False)
-    output = args.fresh_output.resolve()
+    shutil.rmtree(args.output, ignore_errors=True)
+    args.output.mkdir(parents=True)
+    output = args.output.resolve()
     replay = args.replay and os.pathsep.join(str(path.resolve(strict=True)) for path in args.replay)
     runner = Runner(args.executable.resolve(strict=True), output, replay)
     ROUTES[args.route](runner, output)

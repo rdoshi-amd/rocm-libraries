@@ -567,7 +567,7 @@ int main(int argc, char** argv)
         }
         if(argc != 2)
         {
-            std::cerr << "Usage: " << argv[0] << " FRESH_OUTPUT_DIRECTORY\n";
+            std::cerr << "Usage: " << argv[0] << " OUTPUT_DIRECTORY\n";
             return 2;
         }
 #ifdef _WIN32
@@ -585,7 +585,8 @@ int main(int argc, char** argv)
         self = fs::absolute(argv[0]);
 #endif
         root = fs::absolute(argv[1]);
-        require(fs::create_directories(root), "Output directory already exists");
+        fs::remove_all(root);
+        fs::create_directories(root);
         parsing();
         disabled();
         quoting();

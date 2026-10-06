@@ -13,7 +13,7 @@
 #include <stdexcept>
 #include <utility>
 #ifdef HIPBLASLT_JIT_TESTING
-#include "hipblaslt-jit-mock.hpp"
+#include "hipblaslt-jit-replay.hpp"
 #endif
 
 namespace hipblaslt_jit
@@ -28,14 +28,14 @@ namespace hipblaslt_jit
         };
 
 #ifdef HIPBLASLT_JIT_TESTING
-        // HIPBLASLT_JIT_TEST_BACKENDS: ';'-separated mock backends that replace
+        // HIPBLASLT_JIT_TEST_BACKENDS: ';'-separated replay backends that replace
         // the build's, each id[+flag...]=bundle[,bundle...]. The flags are optin,
-        // unavailable (configuration fails), and the mock faults unsupported,
+        // unavailable (configuration fails), and the replay faults unsupported,
         // generate and trap.
         std::vector<Candidate> testCandidates(const std::string& variable)
         {
-            namespace mock     = hipblaslt_ext::experimental::jit::mock;
-            using Fault        = mock::Options::Fault;
+            namespace replay   = hipblaslt_ext::experimental::jit::replay;
+            using Fault        = replay::Options::Fault;
             const auto invalid = [&](const std::string& why) {
                 return std::invalid_argument("HIPBLASLT_JIT_TEST_BACKENDS=" + variable + ": "
                                              + why);
@@ -47,7 +47,7 @@ namespace hipblaslt_jit
                 const auto equals = item.find('=');
                 if(equals == std::string::npos)
                     throw invalid(item + " lists no bundle");
-                mock::Options      options;
+                replay::Options    options;
                 bool               optIn = false, unavailable = false;
                 std::istringstream head(item.substr(0, equals));
                 std::getline(head, options.id, '+');
@@ -76,7 +76,7 @@ namespace hipblaslt_jit
                                                "JIT backend " + options.id
                                                    + " not available: HIPBLASLT_JIT_TEST_BACKENDS"
                                                      " marks it unavailable"};
-                                   made.backend = mock::makeBackend(options);
+                                   made.backend = replay::makeBackend(options);
                                    return {};
                                }});
             }

@@ -38,8 +38,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("build", type=Path)
     parser.add_argument("test", type=Path, help="hipblaslt-jit-hipkittens-test")
-    parser.add_argument("output", type=Path)
+    parser.add_argument("output", type=Path, help="a directory this run empties first")
     args = parser.parse_args()
+    shutil.rmtree(args.output, ignore_errors=True)
     args.output.mkdir(parents=True)
     first, moved = args.output / "a", args.output / "b"
     library = args.output / "jit-library"

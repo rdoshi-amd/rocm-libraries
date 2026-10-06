@@ -53,19 +53,6 @@ namespace hipblaslt_ext::experimental::jit::detail
                                                        const rocblaslt_matmul_algo& algo,
                                                        const GemmRequest&           request,
                                                        size_t&                      workspaceBytes);
-    rocblaslt_status                        prepareJit(rocblaslt_handle                       handle,
-                                                       const rocblaslt_matmul_algo&           algo,
-                                                       const GemmRequest&                     request,
-                                                       void*                                  workspace,
-                                                       size_t                                 workspaceBytes,
-                                                       hipStream_t                            stream,
-                                                       std::shared_ptr<const PreparedLaunch>& launch);
-    rocblaslt_status                        runJit(rocblaslt_handle             handle,
-                                                   const rocblaslt_matmul_algo& algo,
-                                                   const PreparedLaunch&        launch,
-                                                   hipStream_t                  stream,
-                                                   hipEvent_t                   start = nullptr,
-                                                   hipEvent_t                   stop  = nullptr);
 
     // Captures the common descriptor translation without invoking any provider.
     rocblaslt_status createGemmRequest(rocblaslt_handle                    handle,

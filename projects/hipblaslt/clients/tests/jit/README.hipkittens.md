@@ -7,8 +7,8 @@ them.
 ## Build and run from a checkout
 
 `hipblaslt-jit-hipkittens-test` exists only in a build configured with
-`-DHIPBLASLT_JIT_ENABLE_HIPKITTENS=ON` and gfx950 among `GPU_TARGETS`; the
-`jit` preset sets the option. Every mode needs a gfx950 device, so the CTest
+`-DHIPBLASLT_JIT_ENABLE_HIPKITTENS=ON` and gfx950 among `GPU_TARGETS`. Every
+mode needs a gfx950 device, so the CTest
 tests that run it have the `jit-gpu` label. `jit-hipkittens-install` is
 registered only when install rules are generated (not with
 `CMAKE_SKIP_INSTALL_RULES=ON`), and `jit-hipkittens-bench` and
@@ -27,17 +27,17 @@ The binary takes a mode:
 
 | Mode | Runs |
 | --- | --- |
-| `host <fresh-scratch>` | The `jit-hipkittens-backend` checks; needs a device but runs no kernel |
-| `gpu` | The `jit-hipkittens-gemm` checks on gfx950; requires `HIPBLASLT_JIT_LIBRARY_PATH` |
+| `host <scratch>` | The `jit-hipkittens-backend` checks, in a scratch directory it empties first; needs a device but runs no kernel |
+| `gpu` | The `jit-hipkittens-gemm` checks on gfx950; requires `HIPBLASLT_JIT_LIBRARY_PATH`, which it empties first |
 | `library` | Prints the headers it uses, publishes one solution, runs it, and prints `INDEX <n>`; requires `HIPBLASLT_JIT_LIBRARY_PATH` |
 | `heuristic` | Runs M=1024 N=512 K=768 through `hipblasLtMatmul` without an algorithm, then the first result of `GemmInstance::algoGetHeuristic`, which must be the HipKittens kernel, and checks both against the CPU reference; needs `HIPBLASLT_JIT` and `HIPBLASLT_JIT_BACKENDS` naming `hipkittens` first |
 
-`test_hipkittens_bench.py <test> <hipblaslt-bench> <fresh-output>` runs the
+`test_hipkittens_bench.py <test> <hipblaslt-bench> <output>` runs the
 `jit-hipkittens-bench` test,
-`test_hipkittens_heuristic.py <test> <hipblaslt-bench> <fresh-output>` the
+`test_hipkittens_heuristic.py <test> <hipblaslt-bench> <output>` the
 `jit-hipkittens-heuristic` test, and
-`test_hipkittens_install.py <build> <test> <fresh-output>` the
-`jit-hipkittens-install` test.
+`test_hipkittens_install.py <build> <test> <output>` the
+`jit-hipkittens-install` test; each empties `<output>` first.
 
 ## What each test checks
 

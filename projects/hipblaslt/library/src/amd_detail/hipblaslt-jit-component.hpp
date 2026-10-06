@@ -20,9 +20,6 @@ namespace TensileLite
 // Compiled-in stages of JIT solution generation. This is not a plugin ABI.
 namespace hipblaslt_jit
 {
-    using OperationRequest = hipblaslt_ext::experimental::jit::detail::OperationRequest;
-    using KernelBundle     = hipblaslt_ext::experimental::jit::detail::KernelBundle;
-
     enum class Stage
     {
         Configure,
@@ -35,9 +32,6 @@ namespace hipblaslt_jit
         Publish,
     };
 
-    // "configure", "predict", ... as reports and debug lines name stages.
-    const char* toString(Stage stage) noexcept;
-
     struct Status
     {
         enum class Code
@@ -48,7 +42,7 @@ namespace hipblaslt_jit
             Failed,
         };
         Code        code  = Code::Success;
-        Stage       stage = Stage::Configure; // assigned by Jit
+        Stage       stage = Stage::Configure;
         std::string message; // one line
         std::string logPath; // kept for diagnosis, or empty
         bool        ok() const noexcept
@@ -56,25 +50,6 @@ namespace hipblaslt_jit
             return code == Code::Success;
         }
     };
-
-    struct DeviceTarget
-    {
-        int             device = -1;
-        hipDeviceProp_t properties{};
-        std::string     targetId; // gcnArchName, e.g. "gfx950:sramecc+:xnack-"
-        std::string     isa; // targetId up to the first ':'
-        std::string     libraryArch; // GEMM library subtree, e.g. "gfx1250v0"
-        int             wavefrontSize = 0;
-        int             cuCount       = 0;
-        std::shared_ptr<TensileLite::Hardware> hardware;
-
-        static Status make(int device, DeviceTarget& target);
-    };
-
-    // Defined in hipblaslt-jit-prediction.hpp.
-    struct Prediction;
-    class TuningKnowledge;
-    class Predictor;
 
     // A header a HIP unit includes by name.
     struct IncludeFile
@@ -116,6 +91,62 @@ namespace hipblaslt_jit
 
     constexpr int jitCodeObjectVersion = 4;
 
+    struct BuildRequest
+    {
+        std::string           targetId; // gcnArchName, e.g. "gfx950:sramecc+:xnack-"
+        int                   codeObjectVersion = jitCodeObjectVersion;
+        std::filesystem::path scratch; // receives comgr.log after a failure, or empty
+    };
+
+    struct CodeObject
+    {
+        std::vector<uint8_t> bytes;
+    };
+
+    struct BuiltSolution
+    {
+        GeneratedSolution       generated;
+        CodeObject              object;
+        std::vector<CodeObject> helpers; // loaded next to the main object
+    };
+
+    class CodeObjectBuilder
+    {
+    public:
+        virtual ~CodeObjectBuilder() = default;
+        virtual Status
+            build(const GeneratedSolution&, const BuildRequest&, BuiltSolution&) const = 0;
+    };
+
+    // Builds every unit of a solution with comgr and links them into one code
+    // object for BuildRequest::targetId.
+    std::shared_ptr<const CodeObjectBuilder> makeComgrBuilder();
+
+    using OperationRequest = hipblaslt_ext::experimental::jit::detail::OperationRequest;
+    using KernelBundle     = hipblaslt_ext::experimental::jit::detail::KernelBundle;
+
+    // "configure", "predict", ... as reports and debug lines name stages.
+    const char* toString(Stage stage) noexcept;
+
+    struct DeviceTarget
+    {
+        int             device = -1;
+        hipDeviceProp_t properties{};
+        std::string     targetId; // gcnArchName, e.g. "gfx950:sramecc+:xnack-"
+        std::string     isa; // targetId up to the first ':'
+        std::string     libraryArch; // GEMM library subtree, e.g. "gfx1250v0"
+        int             wavefrontSize = 0;
+        int             cuCount       = 0;
+        std::shared_ptr<TensileLite::Hardware> hardware;
+
+        static Status make(int device, DeviceTarget& target);
+    };
+
+    // Defined in hipblaslt-jit-prediction.hpp.
+    struct Prediction;
+    class TuningKnowledge;
+    class Predictor;
+
     struct GenerationRequest
     {
         const OperationRequest&  request;
@@ -152,30 +183,6 @@ namespace hipblaslt_jit
             return {};
         }
     };
-
-    struct CodeObject
-    {
-        std::vector<uint8_t> bytes;
-    };
-
-    struct BuiltSolution
-    {
-        GeneratedSolution       generated;
-        CodeObject              object;
-        std::vector<CodeObject> helpers; // loaded next to the main object
-    };
-
-    class CodeObjectBuilder
-    {
-    public:
-        virtual ~CodeObjectBuilder() = default;
-        virtual Status
-            build(const GeneratedSolution&, const GenerationRequest&, BuiltSolution&) const = 0;
-    };
-
-    // Builds every unit of a solution with comgr and links them into one code
-    // object for GenerationRequest::target.
-    std::shared_ptr<const CodeObjectBuilder> makeComgrBuilder();
 
     class SolutionLoader
     {
@@ -236,8 +243,8 @@ namespace hipblaslt_jit
 
         struct Outcome
         {
-            std::vector<int32_t>                             indices; // published
-            std::vector<std::shared_ptr<const KernelBundle>> unpublished; // process-local
+            std::vector<int32_t>                             indices; // published, best first
+            std::vector<std::shared_ptr<const KernelBundle>> bundles; // loaded, best first
             std::vector<Status>                              failures; // in the order they happened
             std::string                                      summary; // the backend's success note
         };
@@ -248,7 +255,8 @@ namespace hipblaslt_jit
 
         // Predict, generate, build and check support, then publish, or load when
         // there is no store or publishing failed. Returns at most count
-        // solutions that support the request. Thread-safe.
+        // solutions that support the request. Thread-safe. Sets the stage of
+        // every failure it reports.
         Outcome generate(const OperationRequest&         request,
                          const DeviceTarget&             target,
                          size_t                          count,

@@ -598,10 +598,9 @@ namespace
             std::vector<hj::GeneratedSolution> solutions;
             auto status = generate(provider, request, target, solutions);
             require(status.ok() && solutions.size() == 1, c.name() + ": " + status.message);
-            hj::GenerationRequest generation{*abi::RequestAccess::get(request), target};
-            hj::BuiltSolution     built;
+            hj::BuiltSolution built;
             status = abi::BackendAccess::get(provider)->components().builder->build(
-                solutions[0], generation, built);
+                solutions[0], {target.targetId}, built);
             require(status.ok(), "Build: " + status.message);
             const auto metadata
                 = co::readMetadata(built.object.bytes.data(), built.object.bytes.size());
@@ -999,12 +998,15 @@ namespace
         return c;
     }
 
-    // Publishes into HIPBLASLT_JIT_LIBRARY_PATH, then a second process runs the
-    // index with JIT off. Prints the index for the install check.
-    void publish(const char* self)
+    // Publishes into HIPBLASLT_JIT_LIBRARY_PATH, emptied first when fresh, then a
+    // second process runs the index with JIT off. Prints the index for the
+    // install check.
+    void publish(const char* self, bool fresh)
     {
         const char* root = std::getenv("HIPBLASLT_JIT_LIBRARY_PATH");
         require(root && *root, "Set HIPBLASLT_JIT_LIBRARY_PATH to a scratch directory");
+        if(fresh)
+            fs::remove_all(fs::u8path(root));
         const auto provider = backend();
         Gemm       g(libraryShape());
         const auto index = libraryAlgos(g, provider)[0];
@@ -1115,6 +1117,7 @@ int main(int argc, char** argv)
         if(mode == "host" && argc == 3)
         {
             const auto scratch = fs::absolute(fs::u8path(argv[2]));
+            fs::remove_all(scratch);
             fs::create_directories(scratch);
             headers(scratch);
             domain();
@@ -1129,14 +1132,14 @@ int main(int argc, char** argv)
             gemms(provider);
             sweep(provider);
             alignment(provider);
-            publish(argv[0]);
+            publish(argv[0], true);
             std::cout << "ALL HIPKITTENS GPU CHECKS PASSED\n";
         }
         else if(mode == "library" && argc == 2)
         {
             require(onGfx950(), "The HipKittens kernels need a gfx950 device");
             std::cout << "headers: " << installedHeaders().u8string() << '\n';
-            publish(argv[0]);
+            publish(argv[0], false);
         }
         else if(mode == "library-reader" && argc == 3)
             readIndex(std::stoi(argv[2]));

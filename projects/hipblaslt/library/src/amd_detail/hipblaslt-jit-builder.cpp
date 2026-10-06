@@ -85,11 +85,11 @@ namespace hipblaslt_jit
         {
         public:
             Status build(const GeneratedSolution& solution,
-                         const GenerationRequest& request,
+                         const BuildRequest&      request,
                          BuiltSolution&           built) const override
             {
                 built             = {};
-                const auto target = co::Target::fromTargetId(request.target.targetId);
+                const auto target = co::Target::fromTargetId(request.targetId);
                 co::Options options;
                 options.codeObjectVersion = request.codeObjectVersion;
                 options.retargetAssembly  = true;
@@ -232,10 +232,10 @@ namespace hipblaslt_jit
 
         private:
             // Appends the comgr log to <scratch>/comgr.log and names it in the message.
-            static Status failure(const GenerationRequest&  request,
-                                  const GeneratedSolution&  solution,
-                                  std::string               message,
-                                  const std::string&        log)
+            static Status failure(const BuildRequest&      request,
+                                  const GeneratedSolution& solution,
+                                  std::string              message,
+                                  const std::string&       log)
             {
                 Status status{Status::Code::Failed, Stage::Build, std::move(message)};
                 const auto error = firstError(log);

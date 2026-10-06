@@ -3,7 +3,6 @@
     "HIP_MLOPS_ENGINE": [
       {
         "cases": [
-          "small_fp32_nchw",
           "tiny_fp32_nchw"
         ],
         "support": {
@@ -38,7 +37,6 @@
     "MIOPEN_ENGINE": [
       {
         "cases": [
-          "small_fp32_nchw",
           "tiny_fp32_nchw"
         ],
         "support": {

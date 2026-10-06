@@ -3,9 +3,11 @@
     "HIP_MLOPS_ENGINE": [
       {
         "cases": [
+          "nchw_fp32_n1_c3_h14_w14",
           "small_bfp16_nchw",
           "small_fp16_nchw",
-          "small_fp32_ncdhw"
+          "small_fp32_ncdhw",
+          "small_fp32_nchw"
         ],
         "support": {
           "gfx1100": [
@@ -39,9 +41,11 @@
     "MIOPEN_ENGINE": [
       {
         "cases": [
+          "nchw_fp32_n1_c3_h14_w14",
           "small_bfp16_nchw",
           "small_fp16_nchw",
-          "small_fp32_ncdhw"
+          "small_fp32_ncdhw",
+          "small_fp32_nchw"
         ],
         "support": {
           "gfx1030": [

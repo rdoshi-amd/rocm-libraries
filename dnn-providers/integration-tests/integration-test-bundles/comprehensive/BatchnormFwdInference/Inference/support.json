@@ -5,8 +5,7 @@
         "cases": [
           "large_fp32_nchw",
           "nchw_bfp16_n1_c3_h14_w14",
-          "nchw_fp16_n1_c3_h14_w14",
-          "nchw_fp32_n1_c3_h14_w14"
+          "nchw_fp16_n1_c3_h14_w14"
         ],
         "support": {
           "gfx1100": [
@@ -42,8 +41,7 @@
         "cases": [
           "large_fp32_nchw",
           "nchw_bfp16_n1_c3_h14_w14",
-          "nchw_fp16_n1_c3_h14_w14",
-          "nchw_fp32_n1_c3_h14_w14"
+          "nchw_fp16_n1_c3_h14_w14"
         ],
         "support": {
           "gfx1030": [

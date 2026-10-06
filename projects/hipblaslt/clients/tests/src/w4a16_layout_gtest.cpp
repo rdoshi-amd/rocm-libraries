@@ -231,9 +231,6 @@ namespace
                                  HIPBLASLT_INT4_ENCODING_UNSIGNED_BIAS8_EXT})
                 for(bool zp : {false, true})
                 {
-                    if((dtype == HIP_R_16F && encoding == HIPBLASLT_INT4_ENCODING_SIGNED_EXT && zp)
-                       || (dtype == HIP_R_16BF && encoding == HIPBLASLT_INT4_ENCODING_UNSIGNED_BIAS8_EXT && !zp))
-                        continue;
                     for(int group = 0; group < 3; ++group)
                         for(int64_t n : {1, 16})
                             result.emplace_back(dtype, encoding,

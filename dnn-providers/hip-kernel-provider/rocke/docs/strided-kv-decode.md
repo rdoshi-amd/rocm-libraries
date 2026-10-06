@@ -68,10 +68,35 @@ independent K/V batch/head strides as i64 byte offsets and token strides/span
 as i32 bytes. Separate C builder entry points preserve installed paged spec
 structs; strided symbols carry `_stridedkv`.
 
+## Streams and workspace ownership
+
+The shared 3D runtime resolves `stream=0` to Torch's current stream on Q's
+device. Scratch allocation, initialization, and segment/reduce launches all
+use that effective stream. Callers must make input production visible to it
+and wait before consuming outputs on another stream.
+
+Compiled kernels are cached. Each eager invocation allocates independent
+scratch, so overlapping calls cannot overwrite each other's partial results.
+The asynchronous `no_fence()` path retains launch arguments until a runtime
+completion drain such as `synchronize_and_release()`; callers must drain it
+periodically. This adds eager allocator work; no performance claim is made.
+
+Internal graph capture allocates scratch from Torch's graph-private pool;
+cached replay performs no new scratch allocation. External captures use the
+same ownership rule and may replay on a different stream. Warm up compilation
+before capture. If callers explicitly share graph memory pools, they must
+follow Torch's ordering and non-concurrency requirements. Replays of the same
+graph and writes to caller-owned input/output buffers still require ordering.
+
+## Test coverage
+
 The [numeric tests](../library/tests/test_strided_kv_decode_numeric.py) compare
 the direct runtime and registered binding against an independent CPU FP32
 reference after input quantization. They include batched BHSD/BSHD, different
 K/V strides, padding, unpadded capacity tails, changing valid lengths, empty
-sequences, windows, paged regressions, and graph replay. Set
+sequences, windows, paged regressions, and graph replay. Concurrency tests cover
+eager calls, internal graphs, and separate external graphs captured on one
+stream and replayed on different streams. They check scratch isolation and
+replay after temporary launch references are drained. Set
 `ROCKE_REQUIRE_DECODE_GPU=gfx942` or `gfx950` to require the target GPU rather
 than skip. No performance claim follows from this correctness coverage.

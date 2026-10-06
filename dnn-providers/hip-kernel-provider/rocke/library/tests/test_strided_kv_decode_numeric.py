@@ -283,3 +283,176 @@ def test_strided_decode_tile_policy(gpu, monkeypatch, dtype, block_size, window)
         "strided",
         block_size=block_size,
     )
+
+
+@pytest.fixture
+def concurrent_decode(gpu, monkeypatch):
+    """Own streams and drain asynchronous references without serializing calls."""
+    torch, arch = gpu
+    from kernels.common import attention_unified as au
+    from rocke.runtime.launcher import synchronize_and_release
+
+    for target in ("GFX942", "GFX950", "GFX1250"):
+        monkeypatch.setenv(f"HIPDNN_{target}_3D_GRAPH", "0")
+    # Isolate graph lifetimes between tests, not between concurrent invocations.
+    monkeypatch.setattr(au, "_3D_GRAPHS", {})
+    monkeypatch.setattr(au, "_3D_GRAPH_REFS", {})
+    streams = [torch.cuda.Stream(), torch.cuda.Stream()]
+    try:
+        yield torch, arch, streams
+    finally:
+        synchronize_and_release()
+
+
+@pytest.mark.parametrize("mode", ["eager", "internal", "external"])
+@pytest.mark.parametrize("kv_layout", ["paged", "strided"])
+@pytest.mark.parametrize("dtype", ["fp16", "bf16"])
+def test_decode_concurrent_workspace(
+    concurrent_decode, monkeypatch, mode, kv_layout, dtype
+):
+    torch, arch, streams = concurrent_decode
+    if arch == "gfx1250" and (kv_layout != "paged" or dtype != "bf16"):
+        pytest.skip("gfx1250 coverage is paged BF16 D64 GQA-8 decode")
+    from kernels.common import attention_unified as au
+    from rocke.runtime.launcher import no_fence, synchronize_and_release
+
+    batch, q_heads, kv_heads, capacity, dim = 3, 16, 2, 257, 64
+    tdtype = torch.float16 if dtype == "fp16" else torch.bfloat16
+    problem = au.UnifiedAttentionProblem(
+        total_q=batch,
+        num_seqs=batch,
+        num_query_heads=q_heads,
+        num_kv_heads=kv_heads,
+        head_size=dim,
+        block_size=16,
+        max_seqlen_q=1,
+        max_seqlen_k=capacity,
+        dtype=dtype,
+        clamp_arch=arch,
+        target_ctas=8,
+    )
+    requests, expected = [], []
+    for index in range(2):
+        rng = torch.Generator().manual_seed(1701 + index)
+        q = torch.randn(batch, q_heads, dim, generator=rng).to(tdtype)
+        k = torch.randn(batch, kv_heads, capacity, dim, generator=rng).to(tdtype)
+        v = (torch.randn(batch, kv_heads, capacity, dim, generator=rng) + index * 4).to(
+            tdtype
+        )
+        lengths = [capacity, capacity - 7, 0]
+        expected.append(_reference(torch, q, k, v, lengths, 0))
+        if kv_layout == "paged":
+            kd, table = _paged_cache(torch, k, 16)
+            vd, _ = _paged_cache(torch, v, 16)
+        else:
+            kd, vd, table = _cache(torch, k, "bshd"), _cache(torch, v, "bhsd"), None
+        requests.append(
+            {
+                "problem": problem,
+                "q": q.cuda(),
+                "k": kd,
+                "v": vd,
+                "out": torch.empty_like(q, device="cuda"),
+                "cu_seqlens_q": torch.arange(batch + 1, dtype=torch.int32).cuda(),
+                "seqused_k": torch.tensor(lengths, dtype=torch.int32).cuda(),
+                "softmax_scale": 1 / math.sqrt(dim),
+                "block_table": table,
+                "softcap": 0.0,
+                "backend": "3d",
+                "kv_layout": kv_layout,
+            }
+        )
+    torch.cuda.synchronize()
+    poison = torch.full((batch, q_heads, dim), float("nan"), dtype=tdtype).pin_memory()
+
+    # Record addresses without retaining tensors: later churn checks graph-pool
+    # ownership after the runtime's temporary launch references have drained.
+    allocations = []
+    launch = au._launch_3d_pipeline
+
+    def observe(prepared, segment, reduce, stream, *, capturing):
+        allocations.append(
+            (
+                capturing,
+                tuple(
+                    segment[name].data_ptr()
+                    for name in ("segm_output_ptr", "segm_max_ptr", "segm_expsum_ptr")
+                ),
+            )
+        )
+        return launch(prepared, segment, reduce, stream, capturing=capturing)
+
+    monkeypatch.setattr(au, "_launch_3d_pipeline", observe)
+    for request, stream in zip(requests, streams):
+        au.run_unified_attention_torch(**request, stream=stream.cuda_stream)
+    synchronize_and_release()
+    allocations.clear()
+
+    graphs = []
+    if mode == "internal":
+        monkeypatch.setenv(f"HIPDNN_{arch.upper()}_3D_GRAPH", "1")
+        for request, stream in zip(requests, streams):
+            with torch.cuda.stream(stream):
+                # Zero means the current stream, also in the graph-cache key.
+                au.run_unified_attention_torch(**request, stream=0)
+        graphs = list(au._3D_GRAPHS.values())
+        assert len(graphs) == 2
+    elif mode == "external":
+        capture_stream = torch.cuda.Stream()
+        eager_request = dict(requests[0], out=torch.empty_like(requests[0]["out"]))
+        # Both captures use the SAME stream but independent default graph pools.
+        # Replay later uses two other streams: per-capture-stream scratch fails.
+        for request in requests:
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, stream=capture_stream):
+                au.run_unified_attention_torch(**request, stream=0)
+            graphs.append(graph)
+    if graphs:
+        captured = [addresses for capturing, addresses in allocations if capturing]
+        assert len(captured) == 2
+        assert set(captured[0]).isdisjoint(captured[1])
+        synchronize_and_release()
+        allocations.clear()
+        # Release cached free blocks and pressure the ordinary allocator before
+        # replay; graph-private scratch must survive without Python tensor refs.
+        torch.cuda.empty_cache()
+        churn = [torch.full((batch, q_heads, 8, dim), 91.0).cuda() for _ in range(8)]
+        torch.cuda.synchronize()
+
+    with no_fence():
+        for _ in range(8):
+            for index, (request, stream) in enumerate(zip(requests, streams)):
+                with torch.cuda.stream(stream):
+                    request["out"].copy_(poison, non_blocking=True)
+                    if mode == "external":
+                        graphs[index].replay()
+                    else:
+                        au.run_unified_attention_torch(
+                            **request, stream=stream.cuda_stream
+                        )
+            if mode == "external":
+                au.run_unified_attention_torch(
+                    **eager_request, stream=capture_stream.cuda_stream
+                )
+    synchronize_and_release()
+    if mode == "eager":
+        # Retained in-flight tensors must be distinct regardless of whether the
+        # GPU scheduler actually overlaps kernels during this particular run.
+        addresses = [address for _, workspace in allocations for address in workspace]
+        assert len(addresses) == len(set(addresses))
+    elif mode == "internal":
+        assert list(au._3D_GRAPHS.values()) == graphs  # 0 and explicit handle agree
+        assert not allocations  # cache hits replay without new scratch allocations
+    atol, rtol = (0.01, 0.02) if dtype == "bf16" else (0.003, 0.005)
+    for request, reference in zip(requests, expected):
+        torch.testing.assert_close(
+            request["out"].cpu().float(), reference, atol=atol, rtol=rtol
+        )
+    if mode == "external":
+        for _, workspace in allocations:
+            assert set(workspace).isdisjoint(captured[0] + captured[1])
+        torch.testing.assert_close(
+            eager_request["out"].cpu().float(), expected[0], atol=atol, rtol=rtol
+        )
+    if graphs:
+        assert len(churn) == 8

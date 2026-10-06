@@ -1204,6 +1204,7 @@ int main(int argc, char** argv)
         std::fprintf(stderr, "%s\n", e.what());
         return 2;
     }
+    fs::remove_all(cfg.out);
     fs::create_directories(cfg.out);
     std::ofstream summary(cfg.out / "summary.tsv");
     summary << "test\tresult\tdetail\n";

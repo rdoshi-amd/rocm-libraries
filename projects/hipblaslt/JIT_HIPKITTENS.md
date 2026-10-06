@@ -23,8 +23,8 @@ backend with `createBackend` and use it through `getJitAlgo` and
 
 `cmake/hipblaslt-jit-hipkittens.cmake` adds this backend to a build with
 `HIPBLASLT_ENABLE_JIT=ON`. Its option `HIPBLASLT_JIT_ENABLE_HIPKITTENS` is `OFF`
-by default; the `jit` preset and the gfx950 job of the JIT CI workflow turn it
-on, and a build with it off installs nothing for HipKittens. When no
+by default; the gfx950 lane of the JIT CI workflow turns it on, and a build
+with it off installs nothing for HipKittens. When no
 `GPU_TARGETS` entry has a HipKittens kernel, configuration prints a warning and
 builds without the backend. The build runs `make_entries.py` with TensileLite
 Python and the build's rocisa extension.

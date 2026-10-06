@@ -20,6 +20,7 @@
 #include <hipdnn_test_sdk/utilities/TestUtilities.hpp>
 
 #include <hipdnn-gpu-ref/GpuFpReferenceSdpaRagged.hpp>
+#include <hipdnn-gpu-ref/ShallowGpuTensor.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -28,6 +29,7 @@
 #include <numeric>
 #include <optional>
 #include <random>
+#include <string>
 #include <type_traits>
 #include <vector>
 
@@ -228,6 +230,15 @@ TEST(TestGpuSdpaRaggedFwdFp32, RaggedSlidingWindow)
 {
     SKIP_IF_NO_DEVICES();
     checkRagged<float>({8, 6}, {8, 6}, 2, 2, 2, 16, 16, 2, 2, true);
+}
+
+// --- Explicit attention scale ---
+
+// 0.125 instead of the default 1/sqrt(16) = 0.25, checked against the CPU mirror.
+TEST(TestGpuSdpaRaggedFwdFp32, RaggedExplicitAttnScale)
+{
+    SKIP_IF_NO_DEVICES();
+    checkRagged<float>({4, 6}, {3, 6}, 2, 2, 2, 16, 16, -1, -1, true, /*scale=*/0.125f);
 }
 
 // --- GQA / MQA ---
@@ -845,10 +856,12 @@ TEST(TestGpuSdpaRaggedFwdFp32, ThrowsOnSequenceLengthMismatch)
 namespace
 {
 
-// fp32 fpropRagged with B=2, H=1, D=16, S_max=2 and K/V lengths {2, 2}. Q and O use the raw
-// boundaries qTokens. lseSq > 0 adds a dense LSE [2, 1, lseSq, 1]. Returns true only if it threw
-// std::invalid_argument.
-bool throwsOnQTokens(const std::vector<int64_t>& qTokens, int64_t lseSq = 0)
+// fp32 fpropRagged with B=2, H=1, D=16, S_max=2 and K/V lengths {2, 2}. Q and O use the offsets
+// qTokens * offsetUnit (offsetUnit 1 writes raw element offsets). lseSq > 0 adds a dense LSE
+// [2, lseSq, 1, 1]. Returns true only if it threw std::invalid_argument.
+bool throwsOnQTokens(const std::vector<int64_t>& qTokens,
+                     int64_t lseSq = 0,
+                     int64_t offsetUnit = 16)
 {
     const int64_t headDim = 16;
     const std::vector<int64_t> dims = raggedDims(2, 2, 1, headDim);
@@ -860,7 +873,7 @@ bool throwsOnQTokens(const std::vector<int64_t>& qTokens, int64_t lseSq = 0)
     q.fillWithValue(0.0f);
     k.fillWithValue(0.0f);
     v.fillWithValue(1.0f);
-    auto offQ = makeRaggedOffset(qTokens, headDim);
+    auto offQ = makeRaggedOffset(qTokens, offsetUnit);
     auto offKv = makeRaggedOffset({0, 2, 4}, headDim);
     try
     {
@@ -893,6 +906,9 @@ TEST(TestGpuSdpaRaggedFwdFp32, ThrowsOnBadOffsetTable)
     SKIP_IF_NO_DEVICES();
     EXPECT_TRUE(throwsOnQTokens({1, 2, 4})) << "ragged_offset[0] != 0 accepted";
     EXPECT_TRUE(throwsOnQTokens({0, 3, 4})) << "batch longer than S_max accepted";
+    EXPECT_TRUE(throwsOnQTokens({0, 2, 1})) << "decreasing offsets accepted";
+    EXPECT_TRUE(throwsOnQTokens({0, 17, 32}, /*lseSq=*/0, /*offsetUnit=*/1))
+        << "offset that is not a whole token accepted";
     EXPECT_FALSE(throwsOnQTokens({0, 2, 3}));
 }
 
@@ -922,6 +938,88 @@ TEST(TestGpuSdpaRaggedFwdFp32, ThrowsOnHeadsBeforeSequenceLayout)
     EXPECT_THROW((GpuFpReferenceSdpaRagged::fpropRagged<float, float, float, float, float>(
                      q, k, v, o, off, off, off, off)),
                  std::invalid_argument);
+}
+
+namespace
+{
+
+// Runs fp32 fpropRagged on views with the given dims (contiguous strides) and all-zero offset
+// tables. Every batch is empty, so no tensor element is read and valid shapes launch nothing.
+// The views are ShallowGpuTensors, as on the plan path: unlike Tensor they accept a zero dim,
+// so the reference's own checks are what reject it. offsetRows overrides the tables' B + 1.
+// Returns the std::invalid_argument message, or "" if nothing was thrown.
+std::string shapeError(const std::vector<int64_t>& qDims,
+                       const std::vector<int64_t>& kDims,
+                       const std::vector<int64_t>& vDims,
+                       const std::vector<int64_t>& oDims,
+                       int64_t offsetRows = -1,
+                       bool lseOffsetWithoutLse = false)
+{
+    const auto contiguous = [](const std::vector<int64_t>& dims) {
+        std::vector<int64_t> strides(dims.size(), 1);
+        for(size_t i = dims.size() - 1; i > 0; --i)
+        {
+            strides[i - 1] = strides[i] * dims[i];
+        }
+        return strides;
+    };
+    Tensor<float> backing({1});
+    void* mem = backing.memory().deviceData();
+    hipdnn_gpu_ref::ShallowGpuTensor<float> q(mem, qDims, contiguous(qDims));
+    hipdnn_gpu_ref::ShallowGpuTensor<float> k(mem, kDims, contiguous(kDims));
+    hipdnn_gpu_ref::ShallowGpuTensor<float> v(mem, vDims, contiguous(vDims));
+    hipdnn_gpu_ref::ShallowGpuTensor<float> o(mem, oDims, contiguous(oDims));
+    Tensor<int32_t> off({offsetRows >= 0 ? offsetRows : qDims[0] + 1, 1, 1, 1});
+    off.fillWithValue(0);
+    try
+    {
+        GpuFpReferenceSdpaRagged::fpropRagged<float>(q,
+                                                     k,
+                                                     v,
+                                                     o,
+                                                     off,
+                                                     off,
+                                                     off,
+                                                     off,
+                                                     std::nullopt,
+                                                     -1,
+                                                     -1,
+                                                     true,
+                                                     nullptr,
+                                                     lseOffsetWithoutLse ? &off : nullptr);
+    }
+    catch(const std::invalid_argument& e)
+    {
+        return e.what();
+    }
+    return "";
+}
+
+} // namespace
+
+// Each shape the GPU reference must reject, one field wrong at a time, with the check that has to
+// catch it. The all-valid shape runs without error.
+TEST(TestGpuSdpaRaggedFwdFp32, ThrowsOnBadShapes)
+{
+    SKIP_IF_NO_DEVICES();
+    const auto d = raggedDims(2, 4, 4, 16);
+    const auto expectError = [](const std::string& error, const char* expected) {
+        EXPECT_NE(error.find(expected), std::string::npos)
+            << "expected \"" << expected << "\", got \"" << error << "\"";
+    };
+
+    EXPECT_EQ(shapeError(d, d, d, d), "");
+    expectError(shapeError({2, 4, 64}, d, d, d), "rank-4 [B, S, H, D]");
+    expectError(shapeError(d, d, d, d, /*offsetRows=*/2), "[B+1, 1, 1, 1]");
+    expectError(shapeError(raggedDims(2, 4, 4, 0), raggedDims(2, 4, 4, 0), d, d),
+                "all dimensions must be positive");
+    expectError(shapeError(d, raggedDims(1, 4, 4, 16), d, d), "batch dimension mismatch");
+    expectError(shapeError(d, d, raggedDims(2, 3, 4, 16), d), "S_max");
+    expectError(shapeError(d, raggedDims(2, 4, 4, 8), d, d), "Q head_dim != K head_dim");
+    expectError(shapeError(d, raggedDims(2, 4, 3, 16), d, d), "must be divisible");
+    expectError(shapeError(d, d, d, raggedDims(2, 4, 2, 16)), "output shape");
+    expectError(shapeError(d, d, d, d, -1, /*lseOffsetWithoutLse=*/true),
+                "raggedOffsetLse given without an lse tensor");
 }
 
 // --- Token offsets with ragged_offset_multiplier (AITER's cu_seqlens form) ---

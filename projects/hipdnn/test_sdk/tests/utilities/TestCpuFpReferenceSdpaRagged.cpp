@@ -853,9 +853,10 @@ void setTokenOffsets(ITensor& aux, const std::vector<int64_t>& tokens, int64_t s
     }
 }
 
-// Builds valid B = 2, S_max = 2 ragged inputs, then rewrites Q's and O's offsets to qTokens.
-// Returns whether forward() threw std::invalid_argument.
-bool throwsOnEditedQTokens(const std::vector<int64_t>& qTokens)
+// Builds valid B = 2, S_max = 2, H * D = 16 ragged inputs, then rewrites Q's and O's offsets to
+// qTokens * offsetUnit (offsetUnit 1 writes raw element offsets). Returns whether forward() threw
+// std::invalid_argument.
+bool throwsOnEditedQTokens(const std::vector<int64_t>& qTokens, int64_t offsetUnit = 16)
 {
     const std::vector<int64_t> dims = raggedDims(2, 2, 1, 16);
     const std::vector<int64_t> valid = {0, 2, 4};
@@ -869,8 +870,8 @@ bool throwsOnEditedQTokens(const std::vector<int64_t>& qTokens)
     auto k = wrapRagged(kB.data(), dims, 16, valid);
     auto v = wrapRagged(vB.data(), dims, 16, valid);
     ShallowRaggedTensor<float> o(oB.data(), dims, raggedStrides(dims), BSHD_SEQ_AXIS, oAux);
-    setTokenOffsets(*qAux, qTokens, 16);
-    setTokenOffsets(*oAux, qTokens, 16);
+    setTokenOffsets(*qAux, qTokens, offsetUnit);
+    setTokenOffsets(*oAux, qTokens, offsetUnit);
     try
     {
         CpuFpReferenceSdpaRagged::forward<float, float, float, float, float>(q, k, v, o);
@@ -888,6 +889,9 @@ TEST(TestCpuFpReferenceSdpaRaggedFp32, ThrowsOnBadOffsetTable)
 {
     EXPECT_TRUE(throwsOnEditedQTokens({1, 2, 4})) << "ragged_offset[0] != 0 accepted";
     EXPECT_TRUE(throwsOnEditedQTokens({0, 3, 4})) << "batch longer than S_max accepted";
+    EXPECT_TRUE(throwsOnEditedQTokens({0, 2, 1})) << "decreasing offsets accepted";
+    EXPECT_TRUE(throwsOnEditedQTokens({0, 17, 32}, /*offsetUnit=*/1))
+        << "offset that is not a whole token accepted";
     EXPECT_FALSE(throwsOnEditedQTokens({0, 2, 3}));
 }
 

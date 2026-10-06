@@ -68,6 +68,9 @@ from torch.nn.attention import SDPBackend, sdpa_kernel
 #         offset tensor and K/V share another (uids 10/11 only); each ragged
 #         primary emits ragged_offset_multiplier = strides[1] (H*D) to scale
 #         tokens to elements
+#         mma_core_mode is "unset" (was "float"); it is the MMA operand
+#         precision, and a float request on bf16/fp16/fp8 inputs is a mismatch
+#         that ASM_SDPA_ENGINE declines (see #12844)
 GENERATOR_VERSION = "1.4.0"
 
 DTYPE_MAP = {
@@ -456,7 +459,7 @@ def build_graph_json(
                     "right_bound": right_bound,
                     "max_seq_len_kv": None,
                     "diagonal_alignment": diagonal_alignment,
-                    "mma_core_mode": "float",
+                    "mma_core_mode": "unset",
                     "implementation": "AUTO",
                 },
             }

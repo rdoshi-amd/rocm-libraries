@@ -184,19 +184,19 @@ if [[ "${GENERATE_RAGGED:-0}" == "1" ]]; then
     # Ragged (packed RFC-0014 BSHD), uniform S_max blocks, no seq-lens
     OUTDIR="$GOLDEN_ROOT/quick/SdpaFwd/bshd/bf16/hd128_nomask_ragged"
     generate_bundle "$OUTDIR" "Small" --ragged-offsets --layout bshd \
-        --q-dims 3 2 256 128 --v-dims 3 2 256 128 --seed 42
+        --q-dims 3 2 256 128 --v-dims 3 2 256 128 --seed 42 --attn-scale "$SCALE_D128"
     OUTDIR="$GOLDEN_ROOT/quick/SdpaFwd/bshd/bf16/hd128_causal_ragged"
     generate_bundle "$OUTDIR" "Small" --causal bottom_right --ragged-offsets --layout bshd \
-        --q-dims 3 2 256 128 --v-dims 3 2 256 128 --seed 42
+        --q-dims 3 2 256 128 --v-dims 3 2 256 128 --seed 42 --attn-scale "$SCALE_D128"
 
     # hd192x128 ragged: Q and O share offset uid 10 with different
     # ragged_offset_multipliers (H*192 vs H*128).
     OUTDIR="$GOLDEN_ROOT/quick/SdpaFwd/bshd/bf16/hd192_nomask_ragged"
     generate_bundle "$OUTDIR" "Small" --ragged-offsets --layout bshd \
-        --q-dims 3 2 256 192 --v-dims 3 2 256 128 --seed 42
+        --q-dims 3 2 256 192 --v-dims 3 2 256 128 --seed 42 --attn-scale "$SCALE_D192"
     OUTDIR="$GOLDEN_ROOT/quick/SdpaFwd/bshd/bf16/hd192_causal_ragged"
     generate_bundle "$OUTDIR" "Small" --causal bottom_right --ragged-offsets --layout bshd \
-        --q-dims 3 2 256 192 --v-dims 3 2 256 128 --seed 42
+        --q-dims 3 2 256 192 --v-dims 3 2 256 128 --seed 42 --attn-scale "$SCALE_D192"
 
     echo ""
 fi

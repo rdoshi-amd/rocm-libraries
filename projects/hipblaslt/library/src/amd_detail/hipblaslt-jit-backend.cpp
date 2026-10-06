@@ -94,6 +94,24 @@ namespace hipblaslt_ext::experimental
                     return HIPBLAS_STATUS_INTERNAL_ERROR;
                 }
             }
+
+            // support() plus the workspace bound supportJit applies to a stored algorithm.
+            hipblasStatus_t acceptBundle(const KernelBundle&     bundle,
+                                         const OperationRequest& request,
+                                         size_t                  workspaceLimit,
+                                         size_t&                 workspaceBytes,
+                                         Diagnostics&            diagnostics)
+            {
+                workspaceBytes = 0;
+                size_t     required = 0;
+                const auto status = bundle.support(request, workspaceLimit, required, diagnostics);
+                if(status != HIPBLAS_STATUS_SUCCESS)
+                    return status;
+                if(required > workspaceLimit)
+                    return HIPBLAS_STATUS_INVALID_VALUE;
+                workspaceBytes = required;
+                return HIPBLAS_STATUS_SUCCESS;
+            }
         }
 
         uint64_t registerBundle(std::shared_ptr<const CompiledSolution> bundle)
@@ -190,6 +208,33 @@ namespace hipblaslt_ext::experimental
             }
         }
 
+        hipblasStatus_t
+            compiledFromBundle(std::shared_ptr<const hipblaslt_jit::Jit> jit,
+                               std::shared_ptr<const OperationRequest>   request,
+                               hipblaslt_jit::DeviceTarget               target,
+                               std::shared_ptr<const KernelBundle>       bundle,
+                               size_t                                    workspaceLimit,
+                               std::shared_ptr<const CompiledSolution>&  compiled,
+                               Diagnostics&                              diagnostics)
+        {
+            compiled = nullptr;
+            size_t     workspace = 0;
+            const auto status
+                = acceptBundle(*bundle, *request, workspaceLimit, workspace, diagnostics);
+            if(status != HIPBLAS_STATUS_SUCCESS)
+                return status;
+            auto solution            = std::make_shared<CompiledSolution>();
+            solution->target         = std::move(target);
+            solution->request        = std::move(request);
+            solution->jit            = std::move(jit);
+            solution->bundle         = std::move(bundle);
+            solution->process        = processId();
+            solution->workspaceLimit = workspaceLimit;
+            solution->workspaceBytes = workspace;
+            compiled                 = std::move(solution);
+            return HIPBLAS_STATUS_SUCCESS;
+        }
+
         rocblaslt_status supportJit(rocblaslt_handle             handle,
                                     const rocblaslt_matmul_algo& algo,
                                     const GemmRequest&           request,
@@ -199,16 +244,8 @@ namespace hipblaslt_ext::experimental
             return invoke([&] {
                 auto        entry = resolveJitAlgo(algo, handle->device);
                 Diagnostics diagnostics;
-                size_t      required = 0;
-                auto        status   = entry->bundle->support(
-                    request, algo.max_workspace_bytes, required, diagnostics);
-                if(status == HIPBLAS_STATUS_SUCCESS)
-                {
-                    if(required > algo.max_workspace_bytes)
-                        return HIPBLAS_STATUS_INVALID_VALUE;
-                    workspaceBytes = required;
-                }
-                return status;
+                return acceptBundle(
+                    *entry->bundle, request, algo.max_workspace_bytes, workspaceBytes, diagnostics);
             });
         }
     }
@@ -323,22 +360,17 @@ namespace hipblaslt_ext::experimental
                     diagnostics.message = "Bundle does not implement the requested operation";
                     return HIPBLAS_STATUS_NOT_SUPPORTED;
                 }
-                size_t     required = 0;
-                const auto supported
-                    = bundle->support(*operation, workspaceLimit, required, diagnostics);
+                std::shared_ptr<const detail::CompiledSolution> compiled;
+                const auto supported = detail::compiledFromBundle(std::move(jit),
+                                                                  std::move(operation),
+                                                                  std::move(target),
+                                                                  std::move(bundle),
+                                                                  workspaceLimit,
+                                                                  compiled,
+                                                                  diagnostics);
                 if(supported != HIPBLAS_STATUS_SUCCESS)
                     return supported;
-                if(required > workspaceLimit)
-                    return HIPBLAS_STATUS_INVALID_VALUE;
-                auto compiled            = std::make_shared<detail::CompiledSolution>();
-                compiled->target         = std::move(target);
-                compiled->request        = std::move(operation);
-                compiled->jit            = std::move(jit);
-                compiled->bundle         = std::move(bundle);
-                compiled->process        = detail::processId();
-                compiled->workspaceLimit = workspaceLimit;
-                compiled->workspaceBytes = required;
-                solution                 = detail::SolutionAccess::make(std::move(compiled));
+                solution = detail::SolutionAccess::make(std::move(compiled));
                 return HIPBLAS_STATUS_SUCCESS;
             }
             catch(const std::bad_alloc&)
@@ -482,18 +514,16 @@ namespace hipblaslt_jit
             bool                                         complete = false;
         };
 
-        bool named(const std::vector<std::string>& names, const std::string& kernel)
+        // True when one compiled solution's kernel is name. An empty name matches nothing.
+        bool hasKernel(const std::vector<std::shared_ptr<const Compiled>>& solutions,
+                       const std::string&                                  name)
         {
-            return std::find(names.begin(), names.end(), kernel) != names.end();
-        }
-
-        uint64_t processId()
-        {
-#ifdef _WIN32
-            return _getpid();
-#else
-            return getpid();
-#endif
+            return !name.empty()
+                   && std::any_of(solutions.begin(),
+                                  solutions.end(),
+                                  [&](const std::shared_ptr<const Compiled>& solution) {
+                                      return solution->bundle->kernelNames() == name;
+                                  });
         }
 
         // The process-wide Jit: replay backend, comgr builder, TensileLite loader.
@@ -513,18 +543,17 @@ namespace hipblaslt_jit
                     options.replay.push_back(std::move(path));
                 if(options.replay.empty())
                     return;
-                try
-                {
-                    jit = std::make_shared<const Jit>(Jit::Components{
-                        hipblaslt_ext::experimental::jit::replay::makeBackend(options),
-                        makeComgrBuilder(),
-                        makeTensileLoader()});
-                }
-                catch(const std::exception& error)
+                hipblaslt_ext::experimental::jit::Backend     backend;
+                hipblaslt_ext::experimental::jit::Diagnostics diagnostics;
+                const auto status = hipblaslt_ext::experimental::jit::replay::createBackend(
+                    options, backend, diagnostics);
+                if(status != HIPBLAS_STATUS_SUCCESS)
                 {
                     std::cerr << "hipblaslt warning: HIPBLASLT_JIT_TEST_REPLAY could not be read: "
-                              << error.what() << std::endl;
+                              << diagnostics.message << std::endl;
+                    return;
                 }
+                jit = hipblaslt_ext::experimental::jit::detail::BackendAccess::get(backend);
             });
             return jit;
         }
@@ -580,18 +609,10 @@ namespace hipblaslt_jit
             std::lock_guard<std::mutex>     lock(guard);
             auto&                           entry = (*cache)[key];
             std::vector<std::shared_ptr<const Compiled>> chosen;
-            auto kernelChosen = [&](const std::string& name) {
-                return !name.empty()
-                       && std::any_of(chosen.begin(),
-                                      chosen.end(),
-                                      [&](const std::shared_ptr<const Compiled>& solution) {
-                                          return solution->bundle->kernelNames() == name;
-                                      });
-            };
             for(const auto& solution : entry.solutions)
             {
                 const auto name = solution->bundle->kernelNames();
-                if(named(excludeKernels, name) || kernelChosen(name))
+                if(excludedKernel(excludeKernels, name) || hasKernel(chosen, name))
                     continue;
                 chosen.push_back(solution);
                 if(static_cast<int>(chosen.size()) == room)
@@ -602,50 +623,38 @@ namespace hipblaslt_jit
                 bool callerExcludesOnlyCached = true;
                 for(const auto& name : excludeKernels)
                 {
-                    const bool cached = std::any_of(
-                        entry.solutions.begin(),
-                        entry.solutions.end(),
-                        [&](const std::shared_ptr<const Compiled>& solution) {
-                            return solution->bundle->kernelNames() == name;
-                        });
-                    if(!cached)
+                    if(!hasKernel(entry.solutions, name))
                         callerExcludesOnlyCached = false;
                 }
                 std::vector<std::string> exclude = excludeKernels;
                 for(const auto& solution : entry.solutions)
                 {
                     auto name = solution->bundle->kernelNames();
-                    if(!name.empty() && !named(exclude, name))
+                    if(!name.empty() && !excludedKernel(exclude, name))
                         exclude.push_back(std::move(name));
                 }
                 const auto need    = static_cast<size_t>(room) - chosen.size();
                 auto       outcome = jit->generate(*owned, target, need, workspaceLimit, exclude);
+                namespace detail = hipblaslt_ext::experimental::jit::detail;
                 for(auto& bundle : outcome.bundles)
                 {
+                    const auto name = bundle->kernelNames();
+                    if(excludedKernel(excludeKernels, name) || hasKernel(chosen, name)
+                       || hasKernel(entry.solutions, name))
+                        continue;
                     hipblaslt_ext::experimental::jit::Diagnostics diagnostics;
-                    size_t                                        required = 0;
-                    if(bundle->support(*owned, workspaceLimit, required, diagnostics)
+                    std::shared_ptr<const Compiled>               compiled;
+                    if(detail::compiledFromBundle(jit,
+                                                  owned,
+                                                  target,
+                                                  std::move(bundle),
+                                                  workspaceLimit,
+                                                  compiled,
+                                                  diagnostics)
                        != HIPBLAS_STATUS_SUCCESS)
                         continue;
-                    const auto name = bundle->kernelNames();
-                    if(named(excludeKernels, name) || kernelChosen(name)
-                       || std::any_of(entry.solutions.begin(),
-                                      entry.solutions.end(),
-                                      [&](const std::shared_ptr<const Compiled>& solution) {
-                                          return solution->bundle->kernelNames() == name;
-                                      }))
-                        continue;
-                    auto compiled            = std::make_shared<Compiled>();
-                    compiled->target         = target;
-                    compiled->request        = owned;
-                    compiled->jit            = jit;
-                    compiled->bundle         = std::move(bundle);
-                    compiled->process        = processId();
-                    compiled->workspaceLimit = workspaceLimit;
-                    compiled->workspaceBytes = required;
                     entry.solutions.push_back(compiled);
-                    if(!named(excludeKernels, compiled->bundle->kernelNames())
-                       && static_cast<int>(chosen.size()) < room)
+                    if(static_cast<int>(chosen.size()) < room)
                         chosen.push_back(compiled);
                 }
                 if(outcome.bundles.size() < need && callerExcludesOnlyCached)

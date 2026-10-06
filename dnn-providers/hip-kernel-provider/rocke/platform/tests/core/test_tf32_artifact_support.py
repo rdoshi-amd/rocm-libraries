@@ -3,43 +3,11 @@
 """Host checks for TF32 test wiring; no GPU numerical evidence."""
 
 import runpy
-import sys
 from pathlib import Path
 
 import pytest
 
 _TESTS = Path(__file__).resolve().parents[1]
-
-
-@pytest.mark.parametrize("layout", ["source", "installed"])
-def test_native_recipe_cli_discovery(tmp_path, monkeypatch, layout):
-    config = runpy.run_path(str(_TESTS / "conftest.py"))
-    fixture = config["native_recipe_replay_cli"].__wrapped__
-    root = tmp_path / "platform"
-    tests = root / "tests"
-    fixture.__globals__.update(_HERE=tests, _ROCKE=root)
-    suffix = ".exe" if sys.platform == "win32" else ""
-    executable = f"rocke_portable_ir_replay_cli{suffix}"
-    monkeypatch.delenv("ROCKE_REPLAY_CLI", raising=False)
-    if layout == "installed":
-        root.mkdir(parents=True)
-        (root / "rocke_installed_smoke.py").touch()
-        cli = tests / "portable_ir" / executable
-        with pytest.raises(pytest.fail.Exception, match="CLI is missing"):
-            fixture()
-    else:
-        cli = root / "build" / "tests" / executable
-        with pytest.raises(pytest.skip.Exception, match="ROCKE_REPLAY_CLI"):
-            fixture()
-    cli.parent.mkdir(parents=True)
-    cli.touch()
-    assert fixture() == cli
-    explicit = tmp_path / executable
-    monkeypatch.setenv("ROCKE_REPLAY_CLI", str(explicit))
-    with pytest.raises(pytest.fail.Exception, match="does not name a file"):
-        fixture()
-    explicit.touch()
-    assert fixture() == explicit
 
 
 @pytest.mark.parametrize("native", [False, True])

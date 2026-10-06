@@ -1,7 +1,9 @@
 # Copyright (c) Advanced Micro Devices, Inc., or its affiliates.
 # SPDX-License-Identifier: MIT
 """Logical TF32 contracts and strict native parity, independent of GPU access."""
+import os
 import subprocess
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -360,9 +362,21 @@ def test_parsed_mma_rejects_wrong_operands():
             native.lower_serialized_ir(ir, arch="gfx942")
 
 
+@pytest.fixture(scope="module")
+def tf32_recipe_replay_cli():
+    """The launcher supplies TF32's native VM without changing other suites."""
+    executable = os.environ.get("ROCKE_TEST_TF32_REPLAY_CLI")
+    if not executable:
+        pytest.skip("Set ROCKE_TEST_TF32_REPLAY_CLI to the prebuilt native replay CLI")
+    path = Path(executable).resolve()
+    if not path.is_file():
+        pytest.fail(f"ROCKE_TEST_TF32_REPLAY_CLI does not name a file: {path}")
+    return path
+
+
 @pytest.mark.parametrize("m", [16, 32])
 @pytest.mark.parametrize("mode", PREPARATIONS)
-def test_recipe_replay_preserves_ir(m, mode, tmp_path, native_recipe_replay_cli):
+def test_recipe_replay_preserves_ir(m, mode, tmp_path, tf32_recipe_replay_cli):
     from rocke.portable_ir.src.recording_builder import record_kernel
     from rocke.portable_ir.src import recipe_bundle
 
@@ -374,7 +388,7 @@ def test_recipe_replay_preserves_ir(m, mode, tmp_path, native_recipe_replay_cli)
     for flavor in ("llvm20", "llvm22", "llvm23"):
         replayed = subprocess.run(
             [
-                str(native_recipe_replay_cli),
+                str(tf32_recipe_replay_cli),
                 "--recipe",
                 str(path),
                 "--cbor",

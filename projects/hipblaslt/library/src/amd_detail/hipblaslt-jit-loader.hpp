@@ -32,4 +32,27 @@ namespace hipblaslt_jit
     // Loads the built code objects into a new adapter and resolves the main
     // kernel. Throws on failure.
     void loadTensileBundle(TensileBundle& bundle, const BuiltSolution& built);
+
+    // A Tensile bundle as the GEMM API runs it.
+    struct TensileGemmBundle final : KernelBundle
+    {
+        using Diagnostics = hipblaslt_ext::experimental::jit::Diagnostics;
+
+        std::shared_ptr<const TensileBundle> tensile;
+
+        std::string_view operationKind() const noexcept override;
+        std::string      name() const override
+        {
+            return tensile->library->solutions.at(0)->solutionName;
+        }
+        std::string kernelNames() const override
+        {
+            return tensile->kernel;
+        }
+        hipblasStatus_t
+            support(const OperationRequest&, size_t, size_t&, Diagnostics&) const override;
+    };
+
+    // Loads CustomKernel entries from any backend into TensileGemmBundles.
+    std::shared_ptr<const SolutionLoader> makeTensileLoader();
 }

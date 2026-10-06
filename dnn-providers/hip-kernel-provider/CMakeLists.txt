@@ -51,7 +51,6 @@ option(HIPKERNELPROVIDER_ENABLE_ROCKE "Build rocKE engine and smoke tests" OFF)
 # Gates the generic kernel ingestor. The ingestor engine compiles its kernel
 # through the HIP kernel engine's compiler, so it only builds alongside that engine.
 option(HIPDNN_ENABLE_KERNEL_INGESTOR "Enable the generic kernel ingestor" OFF)
-option(HIPKERNELPROVIDER_ROCKE_DESCRIPTORS_FROM_DVC "Source rocKE descriptors from the DVC 'ingestor' remote" OFF)
 option(ENABLE_ASM_SDPA_ENGINE "Build the ASM SDPA engine" ON)
 option(ENABLE_HIP_MLOPS_ENGINE "Build the HIP kernel engine" ON)
 
@@ -335,24 +334,33 @@ if(HIPDNN_ENABLE_KERNEL_INGESTOR)
     set(HIPKERNELPROVIDER_PRODUCTION_DESCRIPTOR_SOURCE_ROOT
         "${CMAKE_CURRENT_SOURCE_DIR}/src/engines/kernel_ingestor_engine/descriptors")
 
-    # Flag ON sources the shipped rocKE descriptors from DVC (descriptors_dvc/, pulled from
-    # the 'ingestor' remote) instead of the git-tracked descriptors/. A pointer whose
-    # file was not pulled is a configure error. Flag OFF changes nothing.
-    if(HIPKERNELPROVIDER_ROCKE_DESCRIPTORS_FROM_DVC)
-        set(_dvc_root "${CMAKE_CURRENT_SOURCE_DIR}/src/engines/kernel_ingestor_engine/descriptors_dvc")
-        file(GLOB_RECURSE _dvc_pointers "${_dvc_root}/*.dvc")
-        if(NOT _dvc_pointers)
-            message(FATAL_ERROR "hip-kernel-provider: no .dvc pointers under ${_dvc_root}.")
+    # With HIPKERNELPROVIDER_ENABLE_ROCKE ON, the shipped rocKE bundles are not in git:
+    # each is a DVC-tracked folder (<bundle>.dvc beside it, remote 'ingestor'). Fail
+    # configure when a bundle folder is missing or holds fewer files than its pointer
+    # records, so a missing descriptor never reaches the packer. With the option OFF,
+    # rocKE descriptors are not consumed and DVC is not needed.
+    # Only the root this build packs from is checked: a build that overrides
+    # HIPKERNELPROVIDER_PRODUCTION_SOURCE_ROOT does not need the shipped bundles.
+    if(HIPKERNELPROVIDER_ENABLE_ROCKE)
+        if(HIPKERNELPROVIDER_PRODUCTION_SOURCE_ROOT)
+            set(_rocke_root "${HIPKERNELPROVIDER_PRODUCTION_SOURCE_ROOT}")
+        else()
+            set(_rocke_root "${HIPKERNELPROVIDER_PRODUCTION_DESCRIPTOR_SOURCE_ROOT}")
         endif()
-        foreach(_pointer IN LISTS _dvc_pointers)
-            string(REGEX REPLACE "\\.dvc$" "" _descriptor "${_pointer}")
-            if(NOT EXISTS "${_descriptor}")
+        file(GLOB_RECURSE _rocke_pointers "${_rocke_root}/rocKE/*.dvc")
+        foreach(_pointer IN LISTS _rocke_pointers)
+            string(REGEX REPLACE "\\.dvc$" "" _bundle "${_pointer}")
+            file(STRINGS "${_pointer}" _nfiles_line REGEX "^  nfiles: [0-9]+$")
+            string(REGEX REPLACE "[^0-9]" "" _expected "${_nfiles_line}")
+            file(GLOB_RECURSE _present "${_bundle}/*")
+            list(LENGTH _present _count)
+            if(NOT _expected OR _count LESS _expected)
                 message(FATAL_ERROR
-                    "hip-kernel-provider: rocKE descriptor missing: ${_descriptor}\n"
+                    "hip-kernel-provider: rocKE descriptor bundle ${_bundle} is "
+                    "missing or incomplete (${_count} of ${_expected} files).\n"
                     "Run: dvc pull -r ingestor ${_pointer}")
             endif()
         endforeach()
-        set(HIPKERNELPROVIDER_PRODUCTION_DESCRIPTOR_SOURCE_ROOT "${_dvc_root}")
     endif()
 
     # The name of each authored set, which is also the name it stages under. Named here

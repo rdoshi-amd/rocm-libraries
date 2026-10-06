@@ -3,7 +3,7 @@
 This root holds the descriptors the provider **ships**. Its sibling `test_descriptors/`
 stages into the build tree for the unit and integration binaries and is installed only
 under `HIPKERNELPROVIDER_ENABLE_TESTS`. It holds one bundle,
-`rocKE/gfx950_attention_dense/`, whose KDP declares gfx950 only, so production packaging
+`rocKE/gfx950_attention_dense/` (stored in DVC, see "rocKE bundles live in DVC" below), whose KDP declares gfx950 only, so production packaging
 runs for a build whose GPU targets include gfx950 and is dormant for every other build
 unless the cache variable below is pointed elsewhere.
 
@@ -55,12 +55,42 @@ a native pack registers the symbols their UKDs name. The Linux superbuild CI lan
 overrides `HIPKERNELPROVIDER_PRODUCTION_SOURCE_ROOT` to that fixture tree, so that lane
 packs the fixtures and never this root.
 
-## DVC-sourced rocKE descriptors
+## rocKE bundles live in DVC
 
-`descriptors_dvc/rocKE/` mirrors `descriptors/rocKE/` as DVC pointers (`*.dvc`, each
-pinned to the `ingestor` remote in `.dvc/config`); the blobs are not in git. With
-`-DHIPKERNELPROVIDER_ROCKE_DESCRIPTORS_FROM_DVC=ON` the default production root becomes
-`descriptors_dvc/`, and configure fails if any pointer's file is absent. Fetch with
-`dvc pull -r ingestor --recursive dnn-providers/hip-kernel-provider/src/engines/kernel_ingestor_engine/descriptors_dvc`.
-With the flag OFF (default) the git-tracked `descriptors/` is used unchanged. Keep the two
-copies identical until the flag default flips.
+Bundles under `rocKE/` are not stored in git. Each bundle folder is one DVC output:
+
+```
+rocKE/<bundle>.dvc      tracked in git: md5 of the folder, file count, remote: ingestor
+rocKE/<bundle>/         not in git (ignored): the uncompressed descriptor files
+```
+
+The blobs live in the `ingestor` remote (`s3://therock-dvc/rocm-libraries/hipdnn/ingestor`,
+anonymous read, declared in `.dvc/config`). Each file is stored as-is under its md5.
+
+**Fetch.** TheRock's `build_tools/fetch_sources.py` pulls every `*.dvc` pointer in
+`rocm-libraries`, so a source fetch populates the bundle folder. By hand:
+
+```
+dvc pull -r ingestor dnn-providers/hip-kernel-provider/src/engines/kernel_ingestor_engine/descriptors/rocKE/<bundle>.dvc
+```
+
+**Build behavior.** Keyed on the existing `HIPKERNELPROVIDER_ENABLE_ROCKE`:
+
+- `ON`: configure fails if a bundle folder is missing or holds fewer files than its
+  pointer's `nfiles`. The error names the `dvc pull` command. Only the root the build
+  packs from is checked, so a build that sets `HIPKERNELPROVIDER_PRODUCTION_SOURCE_ROOT`
+  elsewhere does not need these bundles.
+- `OFF`: rocKE descriptors are not consumed and DVC is not needed.
+
+**Add or change a bundle.** Author the folder, then:
+
+```
+cd .../descriptors/rocKE
+dvc add <bundle>
+printf '  remote: ingestor\n' >> <bundle>.dvc   # add under the single outs entry
+dvc push -r ingestor                            # needs S3 write access
+git add <bundle>.dvc .gitignore
+```
+
+Commit the `.dvc` file in the same change as the push. A changed file changes the folder
+md5, so the pointer must be updated whenever the folder content changes.

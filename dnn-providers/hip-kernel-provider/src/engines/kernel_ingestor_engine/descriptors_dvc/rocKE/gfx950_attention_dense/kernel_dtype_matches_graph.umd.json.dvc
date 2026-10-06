@@ -1,6 +1,0 @@
-outs:
-- md5: ee8fff2c77f231875daaf7066a837d6b
-  size: 211
-  hash: md5
-  path: kernel_dtype_matches_graph.umd.json
-  remote: ingestor

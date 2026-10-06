@@ -1,0 +1,7 @@
+outs:
+- md5: 5b2d3a2e2aefc0da9e2eee176af1200f.dir
+  size: 1223175
+  nfiles: 6
+  hash: md5
+  path: gfx950_attention_dense
+  remote: ingestor

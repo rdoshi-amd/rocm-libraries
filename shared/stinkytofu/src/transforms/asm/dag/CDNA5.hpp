@@ -551,6 +551,17 @@ class CDNA5ReadyQueue : public ReadyQueue {
         const int cfg = getPassContext().getPassFeatureConfig().dagFeatures.wmmaBatchSize;
         return std::max(1, cfg > 0 ? cfg : config_.wmmaBatchSize);  // auto: nominal 1
     }
+    // WMMA queue model (see PassFeatureConfig::DagFeatures::wmmaQueueDepth).
+    int wmmaQueueDepth() const {
+        return std::max(0, getPassContext().getPassFeatureConfig().dagFeatures.wmmaQueueDepth);
+    }
+    bool queueMode() const {
+        return wmmaQueueDepth() > 0;
+    }
+    int wmmaQueueTarget() const {
+        const int t = getPassContext().getPassFeatureConfig().dagFeatures.wmmaQueueTarget;
+        return std::clamp(t > 0 ? t : 1, 1, std::max(1, wmmaQueueDepth()));
+    }
     // wmmaBatchSize = -1: each batch is sized from the pending ds_loads, and the ds cap
     // period follows the batch window (see autoWmmaBatchSize). Placeholder: -1 selects
     // auto with an initial sizing formula, expected to be refined; requires Periodic.
@@ -615,7 +626,7 @@ class CDNA5ReadyQueue : public ReadyQueue {
     // WMMAs in the open window (1 outside a batch), the unit per-window capacities
     // (fill quota, co-issue slots, global reads) scale by.
     int activeBatchWmmas() const {
-        return std::max<int>(1, activeWmmaBatch_.size());
+        return queueMode() ? 1 : std::max<int>(1, activeWmmaBatch_.size());
     }
     int dsReadThrottleWait() const {
         return dsReadInflight_.throttleWait();
@@ -638,6 +649,9 @@ class CDNA5ReadyQueue : public ReadyQueue {
     std::vector<DAGNode*> activeWmmaBatch_;
     // True while the last pick was a WMMA, so another may still join its batch.
     bool wmmaBatchOpen_ = false;
+    // Queue mode: end (window coordinates) of each outstanding WMMA, parallel to
+    // activeWmmaBatch_ (oldest first). A WMMA retires once the window position passes it.
+    std::vector<int> queuedEnds_;
     // Max WMMAs in the open batch: wmmaBatchSize(), or per batch in auto mode.
     int batchLimit_ = 1;
     // Auto batch: remainder of cap * window not yet turned into a whole ds_load,
@@ -1030,6 +1044,7 @@ class CDNA5ReadyQueue : public ReadyQueue {
     void anchorAutoDsPeriod();
     DAGNode* findBatchableWMMA();
     void resetActiveWindow();
+    void pruneWmmaQueue();
     int freeCoIssueSpace() const;
     DAGNode* popNonWmma(DAGNode* node, int pickKind);
 
@@ -1104,7 +1119,17 @@ void CDNA5ReadyQueue::appendWindowSegment(const StinkyInstruction& wmma) {
     activeWmmaLatency_ = static_cast<int>(activeWindowSlots_.size());
 }
 
+// Retire the queued WMMAs the pipe has finished: they no longer read their sources, so
+// the WAR gate stops covering them, and their results are ready.
+void CDNA5ReadyQueue::pruneWmmaQueue() {
+    while (!queuedEnds_.empty() && queuedEnds_.front() <= coIssueCyclePos_) {
+        queuedEnds_.erase(queuedEnds_.begin());
+        if (!activeWmmaBatch_.empty()) activeWmmaBatch_.erase(activeWmmaBatch_.begin());
+    }
+}
+
 void CDNA5ReadyQueue::resetActiveWindow() {
+    queuedEnds_.clear();
     activeWindowSlots_.clear();
     coIssueCyclePos_ = 0;
     activeWmmaLatency_ = 0;
@@ -1587,7 +1612,27 @@ DAGNode* CDNA5ReadyQueue::pickOneFromWMMA(DAGNode* pick) {
         wmmaQueue.pop();
     }
 
-    if (canJoinWmmaBatch(node)) {
+    if (queueMode()) {
+        // Queue: the WMMA appends to the pipe timeline whenever there is room, never waiting
+        // for the window to end; with the queue full the wave waits for the oldest to finish.
+        pruneWmmaQueue();
+        if (coIssueCyclePos_ >= activeWmmaLatency_) {
+            resetActiveWindow();  // pipe idle: a new window opens at this WMMA
+        } else {
+            while (static_cast<int>(queuedEnds_.size()) >= wmmaQueueDepth()) {
+                advanceTime(std::max(1, queuedEnds_.front() - coIssueCyclePos_));
+                pruneWmmaQueue();
+            }
+        }
+        appendWindowSegment(*node->inst);
+        activeWmmaNode_ = node;
+        activeWmmaBatch_.push_back(node);
+        queuedEnds_.push_back(activeWmmaLatency_);
+        // Each WMMA is its own window for the fill quota, ds budget and global-read allowance.
+        nonWmmaFillsSinceActiveWmma_ = 0;
+        fillsThisWindow_ = 0;
+        dsSchedulingBudgetUsed_ = 0;
+    } else if (canJoinWmmaBatch(node)) {
         // Batch: extend the open window by this WMMA's full latency (it queues in
         // the matrix pipe behind the previous one), keeping the timeline position.
         appendWindowSegment(*node->inst);
@@ -1648,7 +1693,7 @@ DAGNode* CDNA5ReadyQueue::pickOneFromWMMA(DAGNode* pick) {
     // WMMA completes at the end of its own segment, i.e. the window end.
     // (B) elapse: record the timeline touch for all its operands.
     stampDataReady(*node->inst);
-    if (activeWmmaBatch_.size() > 1) {
+    if (activeWmmaBatch_.size() > 1 || queueMode()) {
         const int ready = activeWmmaLatency_ - coIssueCyclePos_;
         for (const StinkyRegister& dst : node->inst->getDestRegs()) {
             if (!dst.isRegister() || isPseudoReg(dst)) continue;
@@ -2447,6 +2492,7 @@ DAGNode* CDNA5ReadyQueue::pickOne() {
     // must fire now; the non-promoted phases below gate themselves off via
     // isPromote(), and the promoted node issues through its own phase — one entry
     // point, no side effects here.
+    if (queueMode()) pruneWmmaQueue();
     decidePromote();
 
     // Pre-compute the best DS read by dsReadPriority once for all phases.
@@ -2474,7 +2520,7 @@ DAGNode* CDNA5ReadyQueue::pickOne() {
     // Phase B0 — WMMA batch: while the last pick was a WMMA and the batch has
     // room, issue the next data-ready independent WMMA back-to-back. Skips the
     // Phase B interleave gates; the fills go into the longer window afterwards.
-    if (isPromote(PromotePhase::Wmma) && wmmaBatchOpen_) {
+    if (isPromote(PromotePhase::Wmma) && wmmaBatchOpen_ && !queueMode()) {
         if (DAGNode* next = findBatchableWMMA()) {
             DAGNode* node = pickOneFromWMMA(next);
             PASS_DEBUG(std::cerr << "[CDNA5 pickOne] Phase B0 batched WMMA dagId=" << node->id
@@ -2514,19 +2560,24 @@ DAGNode* CDNA5ReadyQueue::pickOne() {
              (isCriticalFiller(smallestPickable) && criticalMayIssue()) || memWorkFitsWindow_);
         const bool quotaClosedWindow =
             activeWmmaNode_ != nullptr && fillQuotaMet() && !nonFillerPickable;
-        const bool blockWmmaForActiveWindow = !quotaClosedWindow &&
-                                              (coIssueCyclePos_ < activeWmmaLatency_) &&
-                                              (smallestPickable != nullptr);
+        // Queue mode: with at least the target number of WMMAs queued a fill is preferred; below
+        // it the next WMMA goes first so the pipe never starves behind a stalled fill.
+        const bool qm = queueMode();
+        const bool queueHealthy = qm && static_cast<int>(queuedEnds_.size()) >= wmmaQueueTarget();
+        const bool blockWmmaForActiveWindow =
+            qm ? (queueHealthy && !quotaClosedWindow && smallestPickable != nullptr)
+               : (!quotaClosedWindow && (coIssueCyclePos_ < activeWmmaLatency_) &&
+                  (smallestPickable != nullptr));
 
         bool blockWmmaForAtLeastOneNonWmmaInterleaving = false;
-        if (lastPickedNode_ != nullptr) {
+        if (!qm && lastPickedNode_ != nullptr) {
             blockWmmaForAtLeastOneNonWmmaInterleaving =
                 hasPickableNonWmma && isMatrixInstruction(*lastPickedNode_->inst);
         }
         // Hold a dependent bestWMMA while non-WMMA work remains; else emit
         // shortfall as v_nops.
         bool blockWmmaForCoexecSpacing = false;
-        if (activeWmmaNode_ != nullptr && hasPickableNonWmma &&
+        if (!qm && activeWmmaNode_ != nullptr && hasPickableNonWmma &&
             wmmaToWmmaCoexecOverlap(*activeWmmaNode_->inst, *bestWMMA->inst)) {
             const int slotsPlusOne = popcount16(activeWmmaNode_->inst->coIssueWindow) + 1;
             blockWmmaForCoexecSpacing = nonWmmaFillsSinceActiveWmma_ < slotsPlusOne;
@@ -2538,7 +2589,7 @@ DAGNode* CDNA5ReadyQueue::pickOne() {
         // surplus fillers; otherwise the count applies as before.
         const bool nonWmmaOwed = !quotaClosedWindow && nonWmmaIssuedThisRegion_ < hideBudget;
         const bool blockWmmaForHideBudget =
-            hasPickableNonWmma &&
+            hasPickableNonWmma && (!qm || queueHealthy) &&
             (nonWmmaOwed || (!profileActive() && dsLoadIssuedThisRegion_ < dsLoadBudget));
         // The next batch waits for the open batch's ds quota while a ds_load is ready.
         const bool blockWmmaForProfile =
@@ -2987,6 +3038,7 @@ void CDNA5ReadyQueue::onInitRegion(IRList::iterator regionStart, IRList::iterato
     activeWmmaNode_ = nullptr;
     activeWmmaBatch_.clear();
     wmmaBatchOpen_ = false;
+    queuedEnds_.clear();
     nonWmmaFillsSinceActiveWmma_ = 0;
     fillsThisWindow_ = 0;
     fillQuotaPerWindow_ = 0;

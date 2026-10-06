@@ -1936,6 +1936,48 @@ TEST_F(DAGSchedulerPassTest, WmmaBatchProfile_CarryCatchesUpLateDs) {
     }
 }
 
+// WMMA queue model. Registers stay below v256 (one VGPR MSB bank).
+namespace {
+void queueFeatures(PassFeatureConfig& p, int depth, int target) {
+    p.dagFeatures.wmmaQueueDepth = depth;
+    p.dagFeatures.wmmaQueueTarget = target;
+    p.dagFeatures.dsReadQueueDepth = 16;
+    p.dagFeatures.dsReadThrottleLatency = 1;
+    p.dagFeatures.dsReadPerCap = 100;
+}
+}  // namespace
+
+// Depth 1 / target 1 is the single-window model: same schedule as queue mode off.
+TEST_F(DAGSchedulerPassTest, WmmaQueue_DepthOneEqualsTheWindowModel) {
+    std::vector<std::string> seqs[2];
+    for (int on = 0; on < 2; ++on) {
+        SetUp();
+        for (int i = 0; i < 6; i++) createMovableDsLoad(200 + i * 4, 80, i + 1);
+        for (int i = 0; i < 4; i++)
+            createVAddInBlock(bb, arch, 150 + 3 * i, 151 + 3 * i, 152 + 3 * i);
+        for (int i = 0; i < 6; i++) createWmmaF32_16x16x16_bf16(8 * i, 100 + 8 * i);
+        runWithDsCapMode(PassFeatureConfig::DsIssueCapMode::Sliding, [&](PassFeatureConfig& p) {
+            p.dagFeatures.dsReadQueueDepth = 16;
+            p.dagFeatures.dsReadThrottleLatency = 1;
+            p.dagFeatures.dsReadPerCap = 100;
+            if (on) queueFeatures(p, 1, 1);
+        });
+        seqs[on] = mnemonicSequence(*bb);
+    }
+    EXPECT_EQ(seqs[0], seqs[1]);
+}
+
+// Depth 4, target 2: two WMMAs are queued first, ds_loads fill while at least two are
+// outstanding, and a WMMA goes in as soon as the oldest finishes (8 cycles later); the
+// remaining WMMAs all queue behind it once the ds_loads run out.
+TEST_F(DAGSchedulerPassTest, WmmaQueue_KeepsTheQueueFed) {
+    for (int i = 0; i < 8; i++) createMovableDsLoad(200 + i * 4, 80, i + 1);
+    for (int i = 0; i < 8; i++) createWmmaF32_16x16x16_bf16(8 * i, 100 + 8 * i);
+    runWithDsCapMode(PassFeatureConfig::DsIssueCapMode::Sliding,
+                     [](PassFeatureConfig& p) { queueFeatures(p, 4, 2); });
+    EXPECT_EQ(wdShape(mnemonicSequence(*bb)), "WWddddddWddWWWWW");
+}
+
 TEST_F(DAGSchedulerPassTest, WmmaBatchProfile_RejectsMalformedEntries) {
     createMovableDsLoad(0, 80, 1);
     createWmmaF32_16x16x16_bf16(200, 300);

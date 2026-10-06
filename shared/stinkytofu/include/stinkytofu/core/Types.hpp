@@ -151,6 +151,16 @@ struct PassFeatureConfig {
         /// (ds_loads that were not ready yet), so the profile is a cumulative budget
         /// that catches up; 0 = each batch's quota is a hard per-batch limit.
         int wmmaBatchProfileCarry = 0;
+        /// WMMA issue queue model. Measured (SQTT) with SCHED_MODE DISABLE_XDL_ARB_STALL set:
+        /// the wave issues up to ~8 WMMAs ahead of the matrix pipe and blocks only when that
+        /// queue is full. > 0 = on: a WMMA appends to the pipe timeline whenever fewer than
+        /// this many are outstanding, instead of waiting for the open window to end; the
+        /// batch size / profile / auto knobs are then ignored. 0 = off (single-window model).
+        int wmmaQueueDepth = 0;
+        /// With wmmaQueueDepth > 0: fills (ds_load, VALU, ...) are placed only while at least
+        /// this many WMMAs are queued (clamped to [1, depth]); below it the next WMMA preempts
+        /// the fill. A fill stall of up to target * L cycles then never starves the pipe.
+        int wmmaQueueTarget = 1;
         /// Max cycle-distance between two adjacent barrier groups for
         /// StinkyMergeBarrierPass to merge them into a single multi-token
         /// barrier group. 0 = use the CDNA5 default (kCdna5MergeBarrierThreshold).

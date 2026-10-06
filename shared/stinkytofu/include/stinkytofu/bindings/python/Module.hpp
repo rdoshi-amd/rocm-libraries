@@ -111,6 +111,8 @@
     X(WmmaBatchProfile, std::string)              \
     X(WmmaBatchProfilePhase, int)                 \
     X(WmmaBatchProfileCarry, int)                 \
+    X(WmmaQueueDepth, int)                        \
+    X(WmmaQueueTarget, int)                       \
     X(GlobalReadQueueDepth, int)                  \
     X(GlobalReadDrainLatency, int)                \
     X(DsReadOrder, int)                           \

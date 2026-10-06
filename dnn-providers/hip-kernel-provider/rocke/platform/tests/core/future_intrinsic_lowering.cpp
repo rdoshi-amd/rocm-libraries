@@ -658,6 +658,47 @@ void case_flag_ops_hip()
     EXPECT_IR(hip, "while (__hip_atomic_load(");
 }
 
+/* Raw op with a bad scope/ordering, as serialized IR could carry past the
+ * builder's checks: the HIP lowerer must reject it, not pick a default. */
+void expect_flag_attr_rejected(rocke_opcode_t kind, const char* key, const char* value)
+{
+    rocke_ir_builder_t b;
+    rocke_ir_builder_init(&b, "flag_bad_attr_hip");
+    rocke_value_t* operands[3];
+    int n = 0;
+    if(kind != ROCKE_OP_MEMREF_FENCE)
+    {
+        operands[n++] = global_ptr_param(&b, "flags", rocke_i32());
+        operands[n++] = rocke_b_const_i32(&b, 0);
+        operands[n++] = rocke_b_const_i32(&b, 1);
+    }
+    rocke_attr_map_t attrs;
+    rocke_attr_map_init(&attrs);
+    rocke_attr_set_str(&b, &attrs, key, value);
+    rocke_b_op(&b, kind, operands, n, nullptr, 0, &attrs, nullptr, 0, nullptr, nullptr);
+    rocke_b_ret(&b);
+
+    rocke_strbuf_t out;
+    rocke_strbuf_init(&out, 256);
+    rocke_lower_hip_opts_t opts{};
+    opts.arch = "gfx950";
+    const rocke_status_t st
+        = rocke_lower_kernel_to_hip(&b, rocke_ir_builder_kernel(&b), &opts, &out);
+    if(st != ROCKE_ERR_VALUE)
+        fail("HIP lowering must reject an unknown flag/fence scope or ordering", __LINE__);
+    rocke_strbuf_free(&out);
+    rocke_ir_builder_free(&b);
+}
+
+void case_flag_ops_hip_reject_bad_attrs()
+{
+    expect_flag_attr_rejected(ROCKE_OP_MEMREF_FENCE, "ordering", "bogus");
+    expect_flag_attr_rejected(ROCKE_OP_MEMREF_FENCE, "scope", "bogus");
+    expect_flag_attr_rejected(ROCKE_OP_MEMREF_GLOBAL_FLAG_STORE, "ordering", "bogus");
+    expect_flag_attr_rejected(ROCKE_OP_MEMREF_GLOBAL_FLAG_STORE, "scope", "bogus");
+    expect_flag_attr_rejected(ROCKE_OP_MEMREF_GLOBAL_FLAG_WAIT_EQ, "scope", "bogus");
+}
+
 /* ---- av.load / av.store (agent-scope 128-bit vector mem) ---- */
 void case_av_load_b128()
 {
@@ -1073,6 +1114,7 @@ const TestCase k_cases[] = {
     {"flag_ops", case_flag_ops},
     {"fence_system_scope", case_fence_system_scope},
     {"flag_ops_hip", case_flag_ops_hip},
+    {"flag_ops_hip_reject_bad_attrs", case_flag_ops_hip_reject_bad_attrs},
     {"opcode_names_are_aligned", case_opcode_names_are_aligned},
 };
 

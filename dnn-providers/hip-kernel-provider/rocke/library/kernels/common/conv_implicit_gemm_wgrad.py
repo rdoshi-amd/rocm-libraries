@@ -594,8 +594,9 @@ class WgradConvSpec:
     # The CTA pool the stream-K remainder is spread over (CK max_active_wgs).
     # -1 = auto, resolved by the builder via wgrad_streamk_default_ctas: sized
     # to the occupancy target for the reductions that never wait, one per CU
-    # for linear/tree. Those two wait on later CTAs, so with them an explicit
-    # value must not exceed what the device can hold at once.
+    # for linear/tree. Any explicit value > 0 is safe: those two wait only on
+    # later CTAs, which ascending dispatch always starts (see
+    # wgrad_streamk_default_ctas).
     streamk_ctas: int = -1
 
     @property
@@ -1202,10 +1203,13 @@ def wgrad_streamk_default_ctas(spec: "WgradConvSpec", arch: str) -> int:
     there requires the pool to be resident at once, so a CTA that does not fit
     only runs later.
 
-    ``linear`` and ``tree`` wait on later CTAs, so every CTA in the pool must be
-    resident at once or a waiting CTA can block the one it waits on. One CTA
-    per CU is always resident, and those fixups get slower, not faster, with
-    more contributors per tile (the owner folds every partial).
+    ``linear`` and ``tree`` get one CTA per CU: those fixups get slower, not
+    faster, with more contributors per tile (the owner folds every partial).
+    Their pool need not be resident at once. A CTA waits only on higher-index
+    CTAs and publishes its own partial before it waits, so with workgroups
+    dispatched in ascending order only the CTAs of the tile straddling the
+    dispatch front can wait on one that has not started, and they hold a
+    bounded number of slots (one for linear, about one per round for tree).
     """
     from rocke.helpers.split_k import _ARCH_NUM_CUS, _DEFAULT_NUM_CUS
 
@@ -1238,11 +1242,55 @@ def wgrad_streamk_launch(spec: "WgradConvSpec", *, arch: str = "gfx950"):
     )
 
 
+def _wgrad_streamk_launch_problem(spec: WgradConvSpec, problem=None) -> ConvProblem:
+    """The launch shape, checked against what the kernel baked in.
+
+    One stream-K binary serves any shape that keeps its build-time modes:
+    grouping, 2-D/3-D (the kernarg list), pointwise addressing, and channel
+    runs at least as wide as the built load/store vectors. Anything else would
+    launch the wrong code, so it is rejected rather than silently mis-run.
+    """
+    built = spec.problem
+    if problem is None:
+        return built
+
+    def _vec(chan: int, dtype: str, cap: int | None) -> int:
+        widths = (8, 4, 2, 1) if dtype != "fp32" else (4, 2, 1)
+        auto = next(v for v in widths if chan % v == 0)
+        return auto if cap is None else min(auto, cap)
+
+    checks = (
+        ("grouping (groups > 1)", built.groups > 1, problem.groups > 1),
+        ("is_3d", built.is_3d, problem.is_3d),
+        ("is_pointwise", built.is_pointwise, problem.is_pointwise),
+    )
+    for what, want, got in checks:
+        if want != got:
+            raise ValueError(
+                f"launch problem is incompatible with the built kernel: {what} "
+                f"differs (built {want}, launch {got}); build a kernel for this shape"
+            )
+    chans = (
+        ("kpg", built.kpg, problem.kpg, spec.data.dtype_a, spec.vector_size_a),
+        ("cpg", built.cpg, problem.cpg, spec.data.dtype_b, spec.vector_size_b),
+        ("cpg", built.cpg, problem.cpg, spec.data.dtype_d, spec.vector_size_c),
+    )
+    for what, want, got, dtype, cap in chans:
+        width = _vec(want, dtype, cap)
+        if got % width:
+            raise ValueError(
+                f"launch problem is incompatible with the built kernel: {what}="
+                f"{got} is not a multiple of the built {width}-wide vector "
+                f"({what}={want}); build a kernel for this shape"
+            )
+    return problem
+
+
 def _wgrad_streamk_args(spec: "WgradConvSpec", problem=None):
     from kernels.common.conv_args import ConvArgs
 
     return ConvArgs.from_problem(
-        problem if problem is not None else spec.problem,
+        _wgrad_streamk_launch_problem(spec, problem),
         direction="wgrad",
         tile_m=spec.tile_m,
         tile_n=spec.tile_n,
@@ -1304,7 +1352,7 @@ def wgrad_streamk_workspace_nbytes(
     if spec.streamk == "off" or spec.streamk_reduction == "atomic":
         return 0
     if spec.streamk_reduction == "workspace":
-        p = problem if problem is not None else spec.problem
+        p = _wgrad_streamk_launch_problem(spec, problem)
         return p.groups * spec.ws_replicas * _wg_M(p) * _wg_N(p) * 4
     flags_bytes, partials_bytes = wgrad_streamk_workspace_layout(
         spec, arch=arch, problem=problem

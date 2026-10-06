@@ -315,10 +315,13 @@ exact for any `wg_M`, avoiding CK's `GemmM % MPerBlock` caveat.
   CTA per CU leaves a single stream per CU with nothing to hide memory latency
   behind, which is what made a CU-sized pool lose to split-K on most shapes;
   past four the CTAs mostly contend for the same caches.
-* `linear` / `tree` stay at one CTA per CU. A CTA there waits on CTAs with
-  higher indices, so the whole pool must be resident at once; and these fixups
-  get slower with a larger pool anyway, because the tile owner folds every
-  additional contributor.
+* `linear` / `tree` stay at one CTA per CU, because these fixups get slower
+  with a larger pool: the tile owner folds every additional contributor. The
+  pool does not have to be resident at once. A CTA waits only on CTAs with
+  higher indices and publishes its own partial before it waits, so with
+  workgroups dispatched in ascending order only the CTAs of the one tile that
+  straddles the dispatch front (its owner for `linear`, about one per round
+  for `tree`) can wait on a CTA that has not started yet.
 
 Reachable from dispatch: `ConvGroupedRequest.streamk` defaults to `"auto"`,
 which selects stream-K (with the `workspace` reduction) for few output tiles on

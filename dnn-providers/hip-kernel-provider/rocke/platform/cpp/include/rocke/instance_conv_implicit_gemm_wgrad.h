@@ -183,13 +183,19 @@ typedef struct rocke_implicit_gemm_conv_wgrad_spec
      *   streamk           "off" | "dp_sk" | "persistent"
      *   streamk_reduction "linear" | "tree" | "atomic" | "workspace"
      *   streamk_ctas      CTA pool the stream-K remainder is spread over;
-     *                     -1 (auto) is rejected by the builder, like split_k=-1.
+     *                     a launch parameter, not part of the kernel, so the
+     *                     builder accepts -1 (auto) (unlike split_k=-1); the
+     *                     host helpers need it resolved to > 0.
      * "off" keeps every existing config byte-identical.  Stream-K folds the
      * conv groups into GEMM-M, so it is the one path on which this port
      * accepts groups > 1. */
     const char* streamk; /* default "off" */
     const char* streamk_reduction; /* default "linear" */
     int streamk_ctas; /* default -1 */
+
+    /* WgradConvSpec.group_merge.  Only 1 is ported: stream-K folds the
+     * groups into GEMM-M itself, and the grid-per-group path is Python-only. */
+    int group_merge; /* default 1 */
 } rocke_implicit_gemm_conv_wgrad_spec_t;
 
 /* Default-constructed spec (every field == Python dataclass default). */

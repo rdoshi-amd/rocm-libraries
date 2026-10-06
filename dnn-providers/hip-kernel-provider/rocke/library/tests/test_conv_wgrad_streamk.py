@@ -217,6 +217,14 @@ class TestStreamKValidator(unittest.TestCase):
                 eng.conv_wgrad_lower_llvm(_spec_dict(spec), "gfx950")
             self.assertIn(why, str(cm.exception))
 
+    def test_cpp_rejects_group_merge_with_the_same_reason(self):
+        eng = _engine()
+        spec = _spec(_DW, group_merge=2)
+        _ok, why = is_valid_wgrad_spec(spec, "gfx950")
+        with self.assertRaises(RuntimeError) as cm:
+            eng.conv_wgrad_lower_llvm(_spec_dict(spec), "gfx950")
+        self.assertIn(why, str(cm.exception))
+
 
 class TestStreamKAdmitsImpliesBuilds(unittest.TestCase):
     def test_matrix(self):
@@ -421,6 +429,26 @@ class TestStreamKLaunchAbi(unittest.TestCase):
         self.assertNotEqual(
             wgrad_streamk_partition(spec, problem=other), wgrad_streamk_partition(spec)
         )
+
+    def test_launch_shape_must_keep_the_built_modes(self):
+        # The kernel bakes grouping, 2-D/3-D, pointwise addressing and its
+        # channel vector widths; a launch shape that changes any is rejected.
+        base = {"N": 2, "Hi": 12, "Wi": 12, "Y": 3, "X": 3, "pH": 1, "pW": 1}
+        spec = _spec()  # _DENSE: groups=1, 2-D, 3x3, kpg=96, cpg=32
+        for needle, other in (
+            ("grouping", ConvProblem(C=32, K=96, groups=2, **base)),
+            ("is_3d", ConvProblem(C=32, K=96, Di=4, Z=1, sD=1, pD=0, dD=1, **base)),
+            ("is_pointwise", ConvProblem(N=2, Hi=12, Wi=12, C=32, K=96, Y=1, X=1)),
+            ("kpg=36", ConvProblem(C=32, K=36, **base)),
+            ("cpg=20", ConvProblem(C=20, K=96, **base)),
+        ):
+            with self.subTest(needle=needle):
+                for helper in (wgrad_streamk_partition, wgrad_streamk_workspace_nbytes):
+                    with self.assertRaises(ValueError) as cm:
+                        helper(spec, problem=other)
+                    self.assertIn(needle, str(cm.exception))
+        # Wider channel runs than the build keep the same code path.
+        wgrad_streamk_partition(spec, problem=ConvProblem(C=64, K=192, **base))
 
 
 class TestStreamKDualEngine(unittest.TestCase):

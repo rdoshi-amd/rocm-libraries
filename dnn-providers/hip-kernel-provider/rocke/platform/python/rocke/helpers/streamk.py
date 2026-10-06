@@ -267,9 +267,10 @@ class StreamKIterPartition:
     ``m_tiles`` / ``n_tiles`` count output tiles (a caller folding a batch
     dimension into M passes the folded count). ``iters_per_tile`` is the
     number of ``tile_k`` MAC iterations per output tile. ``max_active_wgs``
-    is the CTA pool the stream-K remainder is spread over; every stream-K
-    CTA must be co-resident with the CTAs it waits on, so it must not exceed
-    the number of workgroups the device can hold at once.
+    is the CTA pool the stream-K remainder is spread over. It need not fit on
+    the device at once: a CTA only waits on higher-index CTAs and publishes
+    its own partial before it waits, so with workgroups dispatched in
+    ascending order the waiting CTAs cannot starve their producers.
     """
 
     m_tiles: int

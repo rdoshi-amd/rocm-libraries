@@ -77,6 +77,7 @@ rocke_implicit_gemm_conv_wgrad_spec_t rocke_implicit_gemm_conv_wgrad_spec_defaul
     s.streamk = "off";
     s.streamk_reduction = "linear";
     s.streamk_ctas = -1;
+    s.group_merge = 1;
     return s;
 }
 
@@ -473,6 +474,9 @@ static bool wgrad_streamk_gates(const rocke_implicit_gemm_conv_wgrad_spec_t* s,
     if(s->chiplet_swizzle)
         SK_REJECT("chiplet_swizzle remaps the 2-D tile grid; stream-K decodes its tiles "
                   "from a linear CTA index instead");
+    if(s->group_merge > 1)
+        SK_REJECT("streamk folds conv groups into GEMM-M; use group_merge=1 (got %d)",
+                  s->group_merge);
     const char* dd = s->dtype_d ? s->dtype_d : "fp16";
     if(strcmp(red, "atomic") == 0 && strcmp(dd, "fp32") != 0)
         SK_REJECT("streamk_reduction='atomic' needs dtype_d='fp32' (got '%s'); use "
@@ -517,6 +521,15 @@ bool rocke_implicit_gemm_conv_wgrad_is_valid_spec(const rocke_implicit_gemm_conv
     }
     if(!wgrad_streamk_gates(s, arch, reason, reason_cap))
         return false;
+    if(s->group_merge != 1 && !sk_on)
+    {
+        if(reason && reason_cap)
+            snprintf(reason,
+                     reason_cap,
+                     "group_merge=%d is not supported for wgrad in the C port",
+                     s->group_merge);
+        return false;
+    }
     if(s->problem.groups > 1 && rocke_conv_problem_is_pointwise(&s->problem))
     {
         if(reason && reason_cap)

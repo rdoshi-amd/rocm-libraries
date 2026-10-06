@@ -8,7 +8,6 @@
 #include <hipdnn_data_sdk/utilities/Tensor.hpp>
 #include <hipdnn_test_sdk/utilities/detail/RaggedTokenBoundaries.hpp>
 
-#include <cmath>
 #include <cstdint>
 #include <optional>
 #include <stdexcept>
@@ -143,9 +142,8 @@ public:
             who);
         const int64_t totalQ = qTokens.back();
 
-        const float scale = attnScaleValue.has_value()
-                                ? attnScaleValue.value()
-                                : (1.0F / std::sqrt(static_cast<float>(headDim)));
+        // An absent scale is 1.0 (no scaling), as in cuDNN and the dense reference.
+        const float scale = attnScaleValue.value_or(1.0F);
 
         auto defines
             = detail::buildSdpaDefines<QDataType, KDataType, VDataType, ODataType, ComputeDataType>(

@@ -234,11 +234,39 @@ TEST(TestGpuSdpaRaggedFwdFp32, RaggedSlidingWindow)
 
 // --- Explicit attention scale ---
 
-// 0.125 instead of the default 1/sqrt(16) = 0.25, checked against the CPU mirror.
+// 0.125 instead of the default 1.0, checked against the CPU mirror.
 TEST(TestGpuSdpaRaggedFwdFp32, RaggedExplicitAttnScale)
 {
     SKIP_IF_NO_DEVICES();
     checkRagged<float>({4, 6}, {3, 6}, 2, 2, 2, 16, 16, -1, -1, true, /*scale=*/0.125f);
+}
+
+// An absent scale means 1.0, as in cuDNN and GpuFpReferenceSdpa: the output must equal an
+// explicit 1.0 bit for bit, and differ from the old 1/sqrt(D) default.
+TEST(TestGpuSdpaRaggedFwdFp32, AbsentAttnScaleIsOne)
+{
+    SKIP_IF_NO_DEVICES();
+    const auto dims = raggedDims(2, 5, 2, 16);
+    const int64_t tokenWidth = 2 * 16;
+    const auto cum = cumTokens({3, 5});
+    Tensor<float> q(dims, raggedStrides(dims));
+    Tensor<float> k(dims, raggedStrides(dims));
+    Tensor<float> v(dims, raggedStrides(dims));
+    fillPackedRandom(q, cum.back() * tokenWidth, -1.0f, 1.0f, SEED_Q);
+    fillPackedRandom(k, cum.back() * tokenWidth, -1.0f, 1.0f, SEED_K);
+    fillPackedRandom(v, cum.back() * tokenWidth, -1.0f, 1.0f, SEED_V);
+    auto off = makeRaggedOffset(cum, tokenWidth);
+
+    const auto run = [&](std::optional<float> scale) {
+        Tensor<float> o(dims, raggedStrides(dims));
+        o.fillWithValue(0.0f);
+        GpuFpReferenceSdpaRagged::fpropRagged<float>(q, k, v, o, off, off, off, off, scale);
+        const auto* p = o.memory().hostData();
+        return std::vector<float>(p, p + cum.back() * tokenWidth);
+    };
+    const auto absent = run(std::nullopt);
+    EXPECT_EQ(absent, run(1.0f));
+    EXPECT_NE(absent, run(0.25f));
 }
 
 // --- GQA / MQA ---

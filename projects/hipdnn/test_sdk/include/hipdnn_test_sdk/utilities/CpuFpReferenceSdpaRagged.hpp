@@ -78,10 +78,8 @@ public:
         const auto headsPerHeadK = numHeads / numHeadsK;
         const auto headsPerHeadV = numHeads / numHeadsV;
 
-        const auto scale = attnScaleValue.has_value()
-                               ? static_cast<ComputeDataType>(attnScaleValue.value())
-                               : (static_cast<ComputeDataType>(1.0)
-                                  / std::sqrt(static_cast<ComputeDataType>(headDim)));
+        // An absent scale is 1.0 (no scaling), as in cuDNN and the dense reference.
+        const auto scale = static_cast<ComputeDataType>(attnScaleValue.value_or(1.0F));
 
         // Every ragged tensor must use the RFC-0014 layout, and tensors that share a packing must
         // agree on every batch's length.

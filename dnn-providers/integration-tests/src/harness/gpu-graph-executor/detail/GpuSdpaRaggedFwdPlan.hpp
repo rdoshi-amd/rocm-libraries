@@ -103,7 +103,7 @@ struct GpuSdpaRaggedFwdParams
     hipdnn_flatbuffers_sdk::data_objects::TensorAttributesT raggedOffsetVTensor;
     hipdnn_flatbuffers_sdk::data_objects::TensorAttributesT raggedOffsetOTensor;
     // Folded scale operand (scale tensor, else baked attn_scale_value), resolved at execute time.
-    // Absent means the reference default 1/sqrt(D).
+    // Absent means 1.0 (no scaling), as in cuDNN.
     std::optional<hipdnn_flatbuffers_sdk::data_objects::TensorAttributesT> scaleTensor;
     int64_t leftBound;
     int64_t rightBound;

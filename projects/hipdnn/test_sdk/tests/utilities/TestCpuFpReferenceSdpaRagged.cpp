@@ -388,8 +388,38 @@ TEST(TestCpuFpReferenceSdpaRaggedFp32, RaggedAsymmetricHeadDim)
 
 TEST(TestCpuFpReferenceSdpaRaggedFp32, RaggedExplicitAttnScale)
 {
-    // Explicit attnScale instead of 1/sqrt(headDim). Both references get the same value.
+    // Explicit attnScale instead of the default 1.0. Both references get the same value.
     checkRaggedVsDense({4, 6}, {4, 6}, 2, 2, 16, 16, -1, -1, true, /*attnScale=*/0.125f);
+}
+
+// An absent scale means 1.0, as in cuDNN and CpuFpReferenceSdpa: the output must equal an
+// explicit 1.0 bit for bit, and differ from the old 1/sqrt(D) default.
+TEST(TestCpuFpReferenceSdpaRaggedFp32, AbsentAttnScaleIsOne)
+{
+    const std::vector<int64_t> seqLens = {3, 5};
+    const auto dims = raggedDims(2, 5, 2, 16);
+    const int64_t tokenWidth = 2 * 16;
+    const auto cum = cumTokens(seqLens);
+    const auto count = static_cast<size_t>(cum.back() * tokenWidth);
+    std::vector<float> qB(count);
+    std::vector<float> kB(count);
+    std::vector<float> vB(count);
+    fillPacked(qB, 11);
+    fillPacked(kB, 22);
+    fillPacked(vB, 33);
+    auto q = wrapRagged(qB.data(), dims, tokenWidth, cum);
+    auto k = wrapRagged(kB.data(), dims, tokenWidth, cum);
+    auto v = wrapRagged(vB.data(), dims, tokenWidth, cum);
+
+    const auto run = [&](std::optional<float> scale) {
+        std::vector<float> oB(count, 0.0f);
+        auto o = wrapRagged(oB.data(), dims, tokenWidth, cum);
+        CpuFpReferenceSdpaRagged::forward<float, float, float, float, float>(q, k, v, o, scale);
+        return oB;
+    };
+    const auto absent = run(std::nullopt);
+    EXPECT_EQ(absent, run(1.0f));
+    EXPECT_NE(absent, run(0.25f));
 }
 
 // Pins the RFC-0014 layout with literals rather than the raggedDims helpers: dims [B, S, H, D],
@@ -1061,8 +1091,7 @@ TEST(TestCpuFpReferenceSdpaRaggedFp32, SlidingWindowLeftOnlyBottomRight)
 }
 
 // GpuFpReferenceSdpaRagged rejects a zero head_dim ("all dimensions must be positive"). The CPU
-// mirror must too: with D = 0 its default scale is 1/sqrt(0) = inf, every score is 0 * inf = NaN,
-// and it silently writes an all-zero output instead of failing.
+// mirror must too, instead of running attention over empty Q and K rows.
 TEST(TestCpuFpReferenceSdpaRaggedFp32, ThrowsOnZeroHeadDim)
 {
     // [1, 4, 2, 0] has a zero H x D block, so give it a 2-element token stride to be constructible.

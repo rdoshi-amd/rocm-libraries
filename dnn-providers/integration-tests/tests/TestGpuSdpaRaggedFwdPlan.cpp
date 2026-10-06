@@ -514,7 +514,7 @@ TEST(TestGpuSdpaRaggedFwdPlan, ExecuteMatchesDirectFpropRaggedBf16)
 
 // All-bf16 graphs round P to bf16 (RTNE) before P@V, as AITER does. Large V values make that
 // rounding visible: the FLOAT and BFLOAT16_RTNE outputs differ, and the plan must match RTNE
-// exactly. One query token against four keys, H = D = 1, so the default scale is 1.
+// exactly. One query token against four keys, H = D = 1, and the default scale of 1.
 TEST(TestGpuSdpaRaggedFwdPlan, ExecuteUsesBfloat16ProbabilityMode)
 {
     SKIP_IF_NO_DEVICES();

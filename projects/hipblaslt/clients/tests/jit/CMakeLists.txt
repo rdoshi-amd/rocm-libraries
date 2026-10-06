@@ -144,13 +144,22 @@ if(HIPBLASLT_JIT_TESTING)
     add_executable(hipblaslt-jit-api-test jit_api_test.cpp)
     target_include_directories(hipblaslt-jit-api-test PRIVATE "${hipblaslt_jit_source}")
     target_link_libraries(hipblaslt-jit-api-test PRIVATE roc::hipblaslt hip::device)
-    foreach(case "streamk;streamk;--k;4096;--workspace-fallback;1"
+    foreach(case "splitk;splitk;--k;512"
+                 "streamk;streamk;--k;4096;--workspace-fallback;1"
                  "amax;amax;--amax;1"
                  "alpha-zero;amax;--amax;1;--alpha-zero;1")
         list(POP_FRONT case name bundle)
         hipblaslt_jit_test(jit-api-${name} jit-gpu hipblaslt-jit-api-test
-            --replay "${CMAKE_CURRENT_SOURCE_DIR}/data/gfx950/${bundle}" ${case})
+            --replay "${hipblaslt_jit_data}/gfx950/${bundle}" ${case})
     endforeach()
     set_tests_properties(jit-api-streamk PROPERTIES ENVIRONMENT
         "TENSILE_PERSISTENT_FIXED_GRID=16;TENSILE_PERSISTENT_DYNAMIC_GRID=0")
+
+    # Algorithm ownership and the replay faults, on the split-K bundle.
+    add_executable(hipblaslt-jit-replay-backend-test replay_backend_test.cpp)
+    target_include_directories(hipblaslt-jit-replay-backend-test PRIVATE
+        "${hipblaslt_jit_source}" "${hipblaslt_jit_source}/rocblaslt/include")
+    target_link_libraries(hipblaslt-jit-replay-backend-test PRIVATE roc::hipblaslt hip::device)
+    hipblaslt_jit_test(jit-replay-backend jit-gpu hipblaslt-jit-replay-backend-test
+        "${hipblaslt_jit_splitk}")
 endif()

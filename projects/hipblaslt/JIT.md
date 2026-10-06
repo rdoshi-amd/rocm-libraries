@@ -115,8 +115,10 @@ The implementations are:
   skipping excluded kernels; the comgr builder still builds them. Tests reach
   it through `jit::replay::createBackend` in `hipblaslt-jit-replay.hpp`, whose
   `Options::fault` makes generation fail and leave `replay.log` in the scratch
-  directory, or makes the main kernel's source fail to assemble. Only builds
-  with `HIPBLASLT_JIT_TESTING=ON` compile it; it is not a production backend.
+  directory, makes the main kernel's source fail to assemble, makes generation
+  append its request to the `Options::record` file and fail, or makes any
+  generation abort the process. Only builds with `HIPBLASLT_JIT_TESTING=ON`
+  compile it; it is not a production backend.
 
 ### Build
 

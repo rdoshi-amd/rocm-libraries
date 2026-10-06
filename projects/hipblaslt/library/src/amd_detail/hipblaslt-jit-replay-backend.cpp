@@ -8,6 +8,7 @@
 #include "hipblaslt-jit-replay.hpp"
 #include <Tensile/Tensile.hpp>
 #include <algorithm>
+#include <cstdlib>
 #include <fstream>
 #include <stdexcept>
 #include <string_view>
@@ -49,10 +50,13 @@ namespace hipblaslt_ext::experimental::jit::replay
         public:
             explicit ReplayBackend(const Options& options)
                 : m_fault(options.fault)
+                , m_record(options.record)
                 , m_info{"replay", "replay", ""}
             {
                 if(options.replay.empty())
                     throw std::invalid_argument("The replay backend has no bundle to replay");
+                if(m_fault == Options::Fault::Record && m_record.empty())
+                    throw std::invalid_argument("The replay record fault has no file to record to");
                 const auto text = [](const std::vector<uint8_t>& bytes) {
                     return std::string_view(reinterpret_cast<const char*>(bytes.data()),
                                             bytes.size());
@@ -90,11 +94,23 @@ namespace hipblaslt_ext::experimental::jit::replay
                             std::vector<hipblaslt_jit::GeneratedSolution>& solutions) const override
             {
                 solutions.clear();
+                if(m_fault == Options::Fault::Trap)
+                    std::abort();
                 const auto* gemm = dynamic_cast<const detail::GemmRequest*>(&request.request);
                 if(!gemm)
                     return {Status::Code::NotSupported,
                             Stage::Generate,
                             "The replay backend replays a GEMM solution"};
+                if(m_fault == Options::Fault::Record)
+                {
+                    std::ofstream file(fs::u8path(m_record), std::ios::app);
+                    file << describe(request, *gemm) << '\n';
+                    return {Status::Code::Failed,
+                            Stage::Generate,
+                            (file ? "Replay generation recorded its request in "
+                                  : "Replay generation could not record its request in ")
+                                + m_record};
+                }
                 if(m_fault == Options::Fault::Generate)
                 {
                     Status failure{
@@ -155,6 +171,7 @@ namespace hipblaslt_ext::experimental::jit::replay
 
         private:
             Options::Fault             m_fault;
+            std::string                m_record;
             hipblaslt_jit::BackendInfo m_info;
             std::vector<Replayed>      m_replayed;
         };

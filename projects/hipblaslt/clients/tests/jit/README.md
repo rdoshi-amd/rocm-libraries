@@ -35,8 +35,8 @@ The CTest tests are:
   library entries; TensileLite queries the current device when it reads one.
   When `GPU_TARGETS` include gfx950 it also has `jit-loader`, and in a build
   with `HIPBLASLT_JIT_TESTING=ON` also `jit-end-to-end`,
-  `jit-end-to-end-splitk`, `jit-failure`, `jit-api-streamk`, `jit-api-amax`
-  and `jit-api-alpha-zero`.
+  `jit-end-to-end-splitk`, `jit-failure`, `jit-api-splitk`, `jit-api-streamk`,
+  `jit-api-amax`, `jit-api-alpha-zero` and `jit-replay-backend`.
 
 A build with `HIPBLASLT_ENABLE_YAML=ON` has no `jit-bundle-freshness`,
 `jit-loader` or test that replays a bundle, because the committed library
@@ -55,8 +55,9 @@ entries are MsgPack.
 | `jit-loader` | The committed bundle built with comgr for device 0 and loaded through the Tensile loader; its library selects its solution for the FP16 GEMM it was generated for and nothing for a transposed A. Launches no kernel |
 | `jit-end-to-end`, `jit-end-to-end-splitk` | The `plain` or `splitk` bundle replayed, built with comgr and loaded, then run through `hipblasLtMatmul` and `hipblaslt_ext::Gemm` with D checked against a host reference; a problem the bundle does not solve is not supported |
 | `jit-failure` | The replay backend, comgr builder and TensileLite loader through `Jit`: count, order and excluded kernels, a workspace limit failing support, generation and build faults that keep their log, a code object for another XNACK setting failing to load, damaged bundles rejected with their message, and a split-K solution without its helper kernels rejected before `hipblasLtMatmul` or `Gemm::initialize` writes D or the workspace |
-| `jit-api-streamk`, `jit-api-amax` | The bundle of that name replayed and run through `hipblasLtMatmul` and `hipblaslt_ext::Gemm`: copied algorithms, forged tokens and indices rejected, the workspace rules, repeated runs with changed inputs, a second solution beside the first, and a rejected reinitialization that keeps the prepared solution; D, and the amax output, checked against a host reference |
+| `jit-api-splitk`, `jit-api-streamk`, `jit-api-amax` | The bundle of that name replayed and run through `hipblasLtMatmul` and `hipblaslt_ext::Gemm`: copied algorithms, forged tokens and indices rejected, the workspace rules, repeated runs with changed inputs, a second solution beside the first, and a rejected reinitialization that keeps the prepared solution; D, and the amax output, checked against a host reference |
 | `jit-api-alpha-zero` | Alpha=0 with null A and B and a nonzero K still computes beta*C and the amax output through both APIs |
+| `jit-replay-backend` | The `splitk` bundle replayed through Jit and run through `hipblasLtMatmul` and `hipblaslt_ext::Gemm`: the request owns its scalars, copied algorithms and changed pointers and scalars reuse the solution, too little workspace, a forged token and a nonzero index are rejected before submission, a wrong device is rejected before generation, non-GEMM and mismatched requests are not supported, the record fault records each request, and a loaded bundle stays alive while an algorithm refers to it |
 | `jit-disabled` | The JIT headers are absent from the public include tree, `hipblaslt-ext.hpp` compiles without them, and the extension API links against the disabled library |
 
 The `GemmPointerCheck` tests in `hipblaslt-test` check that `Gemm::setProblem`
@@ -87,6 +88,12 @@ a run with too little workspace to succeed, as Stream-K's does, and
 `--second-replay` names the bundle of the second solution. CTest runs the
 Stream-K case with `TENSILE_PERSISTENT_FIXED_GRID=16` and
 `TENSILE_PERSISTENT_DYNAMIC_GRID=0`.
+
+`hipblaslt-jit-replay-backend-test` takes the `splitk` bundle. It also selects
+two more replay faults: the record fault, which appends each generation
+request to the file that `replay::Options::record` names and fails the
+generation, and the trap fault, which aborts the process when a generation
+starts, so a wrong device must be rejected before generation.
 
 ## Code-object tests
 

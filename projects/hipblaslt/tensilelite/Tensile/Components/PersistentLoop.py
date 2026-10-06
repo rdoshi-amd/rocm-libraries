@@ -24,7 +24,7 @@ from math import ceil, log2
 
 from rocisa.code import Module, Label
 from rocisa.container import vgpr, sgpr
-from rocisa.instruction import VMovB32, SBarrier, SBranch, SCBranchSCC0, SCmpEQU32, SCmpGeU32, SLShiftRightB32, VReadfirstlaneB32, SLongBranchNegative
+from rocisa.instruction import VMovB32, SBarrier, SBranch, SCBranchSCC0, SCmpEQU32, SCmpGeU32, SLShiftRightB32, VReadfirstlaneB32, SLongBranchNegative, SWaitCnt
 from ..Component import Component
 import abc
 
@@ -150,13 +150,17 @@ class PersistentLoopOn(PersistentLoop):
         module = Module("PersistentLoop On closePersistentLoop")
         skCloseLoopLabel = Label("SK_CloseLoop", "")
         module.add(skCloseLoopLabel)
+        # The next tile can overwrite matrix LDS while another wave is still
+        # reading this tile's epilogue bias/scale data. Retire the local reads
+        # and join all waves before either static or dynamic persistent re-entry.
+        module.add(SWaitCnt(dscnt=0, comment="Retire epilogue LDS reads before persistent re-entry"))
+        module.add(SBarrier(comment="Sync before persistent LDS reuse"))
         if kernel.get("DebugPersistentKernelLoopForever", False):
             # StreamK 3 has no other exit, so this makes the kernel loop infinitely.
             with writer.allocTmpSgpr(3, tag="PersistentLoopOn_closePersistentLoop_tmpSgprInfo") as tmpSgprInfo:
                 module.add(SLongBranchNegative(Label("PersistentLoopStart", ""), tmpSgprInfo))
         elif kernel["StreamK"] == 4:
             # module.add(SCmpGeU32(src0=sgpr("StreamKTileIdx"), src1=sgpr("SKTiles"), comment="Check if done all StreamK tiles"))
-            module.add(SBarrier(comment="Sync before SK4 persistent re-entry"))
             with writer.allocTmpSgpr(3, tag="PersistentLoopOn_closePersistentLoop_tmpSgprInfo2") as tmpSgprInfo:
                 module.add(SLongBranchNegative(Label("PersistentLoopStart", ""), tmpSgprInfo))
         elif kernel["StreamK"] == 5:
@@ -180,7 +184,6 @@ class PersistentLoopOn(PersistentLoop):
                                comment="SK5: skip dynamic close"))
             # SK4 (dynamic) close path
             module.add(sk5DynamicCloseLabel)
-            module.add(SBarrier(comment="SK5/SK4 path: sync before persistent re-entry"))
             with writer.allocTmpSgpr(3) as tmpSgprInfo:
                 module.add(SLongBranchNegative(Label("PersistentLoopStart", ""), tmpSgprInfo))
             module.add(sk5CloseDoneLabel)

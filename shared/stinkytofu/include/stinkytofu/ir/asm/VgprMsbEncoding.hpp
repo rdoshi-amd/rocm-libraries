@@ -120,17 +120,30 @@ inline void collectVgprMsbSlots(const StinkyInstruction* inst, int msbSrc[3], in
     }
 }
 
+/// False for the classes that never read VGPRs through the MSB bank (SALU, SMEM, branch,
+/// call, barrier, wait, side effect). Only these may sit between a deferred
+/// s_set_vgpr_msb and the instruction that needs it.
+inline bool isMsbComputableClass(const StinkyInstruction& inst) {
+    return !(inst.is(InstFlag::IF_SALU) || inst.is(InstFlag::IF_SMemLoad) ||
+             inst.is(InstFlag::IF_SMemStore) || inst.is(InstFlag::IF_SMemAtomic) ||
+             inst.is(InstFlag::IF_Branch) || inst.is(InstFlag::IF_Call) ||
+             inst.is(InstFlag::IF_Barrier) || inst.is(InstFlag::IF_WaitCnt) ||
+             inst.is(InstFlag::IF_HasSideEffect));
+}
+
+/// InsertVgprMsbPass places the s_set_vgpr_msb an instruction needs right after the latest
+/// instruction of these classes when only non-computable instructions (see
+/// isMsbComputableClass) lie between the two, instead of directly in front of it.
+inline bool preferInsertAfter(const StinkyInstruction& inst) {
+    return isVectorALU(inst) || (isScalarALU(inst) && !isBarrier(inst)) ||
+           isMatrixInstruction(inst);
+}
+
 /// The s_set_vgpr_msb immediate \p inst needs for its VGPR operands; (setVal, hasVgpr)
 /// with hasVgpr false / setVal -1 for ops that carry no VGPR MSB. Shared by the scheduler
 /// (MSB-affinity tiebreak) and InsertVgprMsbPass (materialization) so they cannot drift.
 inline std::pair<int, bool> computeRequiredMsb(const StinkyInstruction* inst) {
-    if (inst->is(InstFlag::IF_SALU) || inst->is(InstFlag::IF_SMemLoad) ||
-        inst->is(InstFlag::IF_SMemStore) || inst->is(InstFlag::IF_SMemAtomic) ||
-        inst->is(InstFlag::IF_Branch) || inst->is(InstFlag::IF_Call) ||
-        inst->is(InstFlag::IF_Barrier) || inst->is(InstFlag::IF_WaitCnt) ||
-        inst->is(InstFlag::IF_HasSideEffect)) {
-        return {-1, false};
-    }
+    if (!isMsbComputableClass(*inst)) return {-1, false};
 
     int msbSrc[3] = {0, 0, 0};
     int msbDst = 0;

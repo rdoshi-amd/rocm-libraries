@@ -10,7 +10,9 @@
 #include "stinkytofu/pipeline/CloneSpec.hpp"
 
 namespace stinkytofu {
+class Function;
 class Pass;
+struct StinkyInstruction;
 
 /// Generic region-clone pass.
 ///
@@ -32,5 +34,11 @@ class Pass;
 ///
 /// Empty cloneList -> no-op.
 STINKYTOFU_EXPORT std::unique_ptr<Pass> createRegionClonePass(std::vector<CloneSpec> cloneList);
+
+/// For each region RegionClonePass would clone in \p func, the instruction it splits
+/// the boundary BB after (the region's last chain head). A pass that reorders
+/// instructions before RegionClonePass runs must not move one across these points.
+STINKYTOFU_EXPORT std::vector<StinkyInstruction*> findRegionCloneSplits(
+    Function& func, const std::vector<CloneSpec>& cloneList);
 
 }  // namespace stinkytofu

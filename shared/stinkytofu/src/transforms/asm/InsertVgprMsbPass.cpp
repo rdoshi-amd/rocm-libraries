@@ -42,14 +42,6 @@ enum VgprMsbState : int {
     LABEL_BEGIN = -2,
 };
 
-bool isMsbComputableClass(const StinkyInstruction& inst) {
-    return !(inst.is(InstFlag::IF_SALU) || inst.is(InstFlag::IF_SMemLoad) ||
-             inst.is(InstFlag::IF_SMemStore) || inst.is(InstFlag::IF_SMemAtomic) ||
-             inst.is(InstFlag::IF_Branch) || inst.is(InstFlag::IF_Call) ||
-             inst.is(InstFlag::IF_Barrier) || inst.is(InstFlag::IF_WaitCnt) ||
-             inst.is(InstFlag::IF_HasSideEffect));
-}
-
 // Set offset = -msb*256 on each VGPR operand so the emitter prints byte form
 // (`v[idx + offset]` evaluates to idx ≤ 255).
 void encodeVgprOperands(StinkyInstruction* inst) {
@@ -97,11 +89,6 @@ bool emitVgprMsbIfNeeded(int requiredSetVal, bool hasVgpr, int& currentMsb, AsmI
     msbInst->addModifier<CommentData>(CommentData{msbComment});
     currentMsb = requiredSetVal;
     return true;
-}
-
-bool preferInsertAfter(const StinkyInstruction& inst) {
-    return isVectorALU(inst) || (isScalarALU(inst) && !isBarrier(inst)) ||
-           isMatrixInstruction(inst);
 }
 
 class InsertVgprMsbPassImpl : public Pass {

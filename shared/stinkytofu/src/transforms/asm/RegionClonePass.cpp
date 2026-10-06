@@ -649,4 +649,13 @@ namespace stinkytofu {
 std::unique_ptr<Pass> createRegionClonePass(std::vector<CloneSpec> cloneList) {
     return std::make_unique<RegionClonePass>(std::move(cloneList));
 }
+
+std::vector<StinkyInstruction*> findRegionCloneSplits(Function& func,
+                                                      const std::vector<CloneSpec>& cloneList) {
+    std::vector<StinkyInstruction*> splits;
+    for (const CloneSpec& spec : cloneList)
+        for (const RegionRange& region : findRegions(func, spec.startLabel))
+            splits.push_back(region.endInst);
+    return splits;
+}
 }  // namespace stinkytofu

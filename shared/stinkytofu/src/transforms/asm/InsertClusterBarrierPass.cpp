@@ -330,7 +330,8 @@ void insertBareClusterBarrierSignalBefore(IRBase* anchor, AsmIRBuilder& irBuilde
     signalInst->addModifier<CommentData>(CommentData{"cluster_barrier signal"});
 }
 
-void insertWorkgroupBarrierSyncBefore(IRBase* anchor, AsmIRBuilder& irBuilder, GfxArchID archId) {
+std::pair<StinkyInstruction*, StinkyInstruction*> insertWorkgroupBarrierSyncBefore(
+    IRBase* anchor, AsmIRBuilder& irBuilder, GfxArchID archId) {
     const HwInstDesc* signalDesc = getMCIDByUOp(GFX::s_barrier_signal, archId);
     const HwInstDesc* waitDesc = getMCIDByUOp(GFX::s_barrier_wait, archId);
     assert(signalDesc && waitDesc &&
@@ -342,6 +343,7 @@ void insertWorkgroupBarrierSyncBefore(IRBase* anchor, AsmIRBuilder& irBuilder, G
     StinkyInstruction* waitInst = irBuilder.create(waitDesc, anchor);
     waitInst->addSrcReg(StinkyRegister(kWorkgroupBarrierId));
     waitInst->addModifier<CommentData>(CommentData{"sync workgroup before cluster signal"});
+    return {signalInst, waitInst};
 }
 
 void insertRule1ClusterBarrierSignalBefore(IRBase* anchor, AsmIRBuilder& irBuilder,
@@ -980,7 +982,7 @@ bool isAnyCounterDrain(const StinkyInstruction& inst) {
 ///
 /// Wait-cnt instructions never write SCC, so hoisting past them cannot move a
 /// cluster wait into or out of a live SCC range.
-IRBase* hoistAboveLeadingWaitCnts(StinkyInstruction* anchor) {
+IRBase* hoistAboveLeadingWaitCnts(StinkyInstruction* anchor, bool sameSegmentOnly = false) {
     BasicBlock* parent = anchor->getParent();
     if (parent == nullptr) return anchor;
     IRBase* hoisted = anchor;
@@ -989,6 +991,7 @@ IRBase* hoistAboveLeadingWaitCnts(StinkyInstruction* anchor) {
         --it;
         auto* prev = dyn_cast<StinkyInstruction>(it.getNodePtr());
         if (prev == nullptr) continue;
+        if (sameSegmentOnly && isSegmentBoundary(*prev)) break;
         if (isPseudoInst(prev)) continue;
         if (!isAnyCounterDrain(*prev)) break;
         hoisted = prev;
@@ -1012,6 +1015,128 @@ bool isImmediatelyPrecededByClusterBarrierWait(StinkyInstruction* anchor) {
         return isClusterBarrierWait(*prev);
     }
     return false;
+}
+
+/// The run-up wait may already have a complete local rendezvous before its
+/// first load. Recognize only the straight-line wait/drain/barrier sequence:
+/// a wait on another CFG path, or a barrier inside a wave-election guard, does
+/// not establish an all-wave handoff on the first-load path.
+struct RunUpClusterWait {
+    StinkyInstruction* wait = nullptr;
+    bool hasWorkgroupJoin = false;
+};
+
+RunUpClusterWait findRunUpClusterWait(StinkyInstruction* firstLoad) {
+    BasicBlock* parent = firstLoad->getParent();
+    if (parent == nullptr) return {};
+    bool pendingWorkgroupWait = false;
+    bool sawWorkgroupJoin = false;
+    bool incompleteWorkgroupJoin = false;
+    auto it = BasicBlock::iterator(firstLoad);
+    while (it != parent->begin()) {
+        --it;
+        auto* inst = dyn_cast<StinkyInstruction>(it.getNodePtr());
+        if (inst == nullptr) continue;
+        // Labels are pseudo instructions too; test boundaries before skipping
+        // pseudo instructions so a different predecessor cannot supply the join.
+        if (isSegmentBoundary(*inst)) return {};
+        if (isPseudoInst(inst) || isAnyCounterDrain(*inst)) continue;
+        if (isClusterBarrierWait(*inst)) {
+            if (pendingWorkgroupWait || incompleteWorkgroupJoin)
+                STINKY_UNREACHABLE("Rule 2: incomplete workgroup rendezvous after cluster wait");
+            return {inst, sawWorkgroupJoin};
+        }
+        // MemTokenData annotates memory dependencies, not participation in
+        // the physical -1 rendezvous; token-annotated WG pairs count too.
+        if (isWorkgroupBarrierWait(*inst)) {
+            incompleteWorkgroupJoin |= pendingWorkgroupWait;
+            pendingWorkgroupWait = true;
+            continue;
+        }
+        if (isWorkgroupBarrierSignal(*inst)) {
+            incompleteWorkgroupJoin |= !pendingWorkgroupWait;
+            pendingWorkgroupWait = false;
+            sawWorkgroupJoin = true;
+            continue;
+        }
+        return {};
+    }
+    return {};
+}
+
+/// Can the entry pair be omitted because existing local joins already order
+/// the next cluster phase? Walk the final flat control flow, cutting each path
+/// at a complete local signal/wait pair. Every local signal in that cut is
+/// after the entry cluster wait, so no wave can pass its local wait until all
+/// local waves have finished the entry wait. Different uniform branches may
+/// provide different static pairs; they use the same physical workgroup ID.
+///
+/// A textual later barrier is insufficient: follow both branch successors and
+/// reject any path reaching another cluster signal/wait without a local join.
+/// Calls, unresolved transfers, and uncovered exits conservatively keep the
+/// entry pair. A cycle with no join cannot publish a new cluster phase either;
+/// visiting each instruction once suffices for this reachability question.
+/// Only the pair just added by Rule 2 is considered for removal.
+bool hasLaterWorkgroupHandoff(StinkyInstruction* entryLocalWait) {
+    BasicBlock* parent = entryLocalWait->getParent();
+    if (parent == nullptr) return false;
+
+    std::unordered_map<std::string, StinkyInstruction*> labels;
+    for (IRBase& ir : *parent) {
+        auto* inst = dyn_cast<StinkyInstruction>(&ir);
+        if (inst == nullptr || !isLabel(*inst)) continue;
+        if (const auto* label = inst->getModifier<LabelData>()) {
+            if (!labels.emplace(label->label, inst).second) return false;
+        }
+    }
+
+    std::vector<BasicBlock::iterator> paths{
+        std::next(BasicBlock::iterator(entryLocalWait))};
+    std::unordered_set<const IRBase*> visited;
+    bool foundJoin = false;
+    while (!paths.empty()) {
+        auto it = paths.back();
+        paths.pop_back();
+        for (; it != parent->end(); ++it) {
+            if (!visited.insert(it.getNodePtr()).second) break;
+            auto* inst = dyn_cast<StinkyInstruction>(it.getNodePtr());
+            if (inst == nullptr) continue;
+            if (isClusterBarrierSignal(*inst) || isClusterBarrierWait(*inst) ||
+                isCall(*inst) || isEndOfFunction(*inst))
+                return false;
+
+            if (isWorkgroupBarrierSignal(*inst)) {
+                // Accept complete straight-line pairs, including memory-token
+                // annotations and intervening drains. A wait whose signal was
+                // before the entry cluster wait cannot prove this handoff.
+                bool complete = false;
+                for (auto next = std::next(it); next != parent->end(); ++next) {
+                    auto* nextInst = dyn_cast<StinkyInstruction>(next.getNodePtr());
+                    if (nextInst == nullptr) continue;
+                    if (isSegmentBoundary(*nextInst)) break;
+                    if (isPseudoInst(nextInst) || isAnyCounterDrain(*nextInst)) continue;
+                    complete = isWorkgroupBarrierWait(*nextInst);
+                    break;
+                }
+                if (complete) {
+                    foundJoin = true;
+                    break;
+                }
+            }
+
+            if (!isBranch(*inst)) continue;
+            const auto targets = getBranchTargets(*inst);
+            if (targets.empty()) return false;
+            for (const std::string& target : targets) {
+                auto found = labels.find(target);
+                if (found == labels.end()) return false;
+                paths.push_back(BasicBlock::iterator(found->second));
+            }
+            if (isUnconditionalBranch(*inst)) break;
+        }
+        if (it == parent->end()) return false;
+    }
+    return foundJoin;
 }
 
 struct PreLoopSignalAnchor {
@@ -1571,16 +1696,31 @@ class InsertClusterBarrierPassImpl : public Pass {
             }
         }
 
-        // Rule 2: one cluster wait immediately before the run-up's first tensor
-        // load, pairing Rule 1's prologue arrive. Only skip when that load is
-        // already directly preceded by a cluster wait; a wait on a different CFG
-        // path above (e.g. StreamK zero-iter skip) does not count.
+        // Rule 2: pair Rule 1's arrival with the run-up's first-load wait,
+        // then gather all local waves before any may signal the next phase.
+        // Rule 3 may hoist the first iteration's signal above its head WG join;
+        // RegionClonePass subsequently copies that placement into the init-C
+        // iteration. Establish the entry handoff here, before cloning, without
+        // shortening the steady-state signal lead. No SCC value is clobbered.
+        // Writer contract: every local wave executes the run-up's first tensor
+        // load under uniform tile/K/alpha guards. A textually first load in
+        // arbitrary divergent IR would not be a safe all-wave insertion point.
+        std::pair<StinkyInstruction*, StinkyInstruction*> entryJoin{nullptr, nullptr};
         StinkyInstruction* firstTL = findFirstTensorLoadInFunc(func);
-        if (firstTL != nullptr && !isImmediatelyPrecededByClusterBarrierWait(firstTL)) {
+        if (firstTL != nullptr) {
             BasicBlock* parent = firstTL->getParent();
             AsmIRBuilder irBuilder(*parent, archId);
-            insertClusterBarrierWaitBefore(hoistAboveLeadingWaitCnts(firstTL),
-                                           "cluster_barrier wait", irBuilder, archId);
+            const RunUpClusterWait existing = findRunUpClusterWait(firstTL);
+            if (existing.wait == nullptr) {
+                IRBase* anchor = hoistAboveLeadingWaitCnts(firstTL, /*sameSegmentOnly=*/true);
+                insertClusterBarrierWaitBefore(anchor, "cluster_barrier wait", irBuilder, archId);
+                entryJoin = insertWorkgroupBarrierSyncBefore(anchor, irBuilder, archId);
+            } else if (!existing.hasWorkgroupJoin) {
+                // Also repair the wait already emitted by the Python generator.
+                // Insert directly after it, preserving leading counter drains.
+                IRBase* anchor = std::next(BasicBlock::iterator(existing.wait)).getNodePtr();
+                entryJoin = insertWorkgroupBarrierSyncBefore(anchor, irBuilder, archId);
+            }
         }
 
         for (BasicBlock& bb : func) {
@@ -1802,6 +1942,17 @@ class InsertClusterBarrierPassImpl : public Pass {
                 insertClusterBarrierWaitBefore(hoistAboveLeadingWaitCnts(tailTL),
                                                "cluster barrier wait", irBuilder, archId);
             }
+        }
+
+        // Rule 2 establishes a safe handoff before signal placement. Once all
+        // signals are fixed, reuse any later all-path workgroup joins instead
+        // of paying for a second rendezvous. In particular, O0 can retain the
+        // Python prefetch-prologue barrier that O3's LDS-token rebuild removes.
+        // Do not move an existing join or shorten the chosen loop signal lead.
+        if (entryJoin.second != nullptr && hasLaterWorkgroupHandoff(entryJoin.second)) {
+            BasicBlock* parent = entryJoin.first->getParent();
+            parent->eraseIR(BasicBlock::iterator(entryJoin.first));
+            parent->eraseIR(BasicBlock::iterator(entryJoin.second));
         }
 
         // The gates above carry placeholder indices (see makeSymbolicSgpr).

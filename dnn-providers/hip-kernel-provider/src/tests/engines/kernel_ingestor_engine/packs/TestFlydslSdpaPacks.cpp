@@ -69,7 +69,7 @@ TEST(TestFlydslSdpaPacks, ShipsEverySpecializedAndGenericVariantOnce)
     // kernel needs is a runtime argument. A missing class would decline silently -- the graph
     // would simply plan on another engine -- and a duplicate would make the choice
     // between two objects for one class an accident of descriptor ids.
-    std::set<std::tuple<std::string, int64_t, int64_t, int64_t, int64_t>> classes;
+    std::set<std::tuple<std::string, int64_t, int64_t, int64_t, int64_t, int64_t>> classes;
     size_t kernels = 0;
     for(const auto& pack : set.packs)
     {
@@ -89,8 +89,11 @@ TEST(TestFlydslSdpaPacks, ShipsEverySpecializedAndGenericVariantOnce)
             const auto* headDimMax
                 = tryGetMetadataField<int64_t>(kernel.metadata, FLYDSL_SDPA_HEAD_DIM_MAX_FIELD);
             ASSERT_NE(hasBias, nullptr) << kernel.name;
+            const auto* decode
+                = tryGetMetadataField<int64_t>(kernel.metadata, FLYDSL_SDPA_DECODE_FIELD);
             ASSERT_NE(headDimMax, nullptr) << kernel.name;
-            classes.emplace(*dtype, *headDim, *causal, *hasBias, *headDimMax);
+            ASSERT_NE(decode, nullptr) << kernel.name;
+            classes.emplace(*dtype, *headDim, *causal, *hasBias, *headDimMax, *decode);
             ++kernels;
 
             // Only ever kpack: pre-built flyDSL code objects with no source to fall back to.
@@ -110,7 +113,7 @@ TEST(TestFlydslSdpaPacks, ShipsEverySpecializedAndGenericVariantOnce)
             {
                 for(const int64_t hasBias : {0, 1})
                 {
-                    EXPECT_EQ(classes.count({dtype, headDim, causal, hasBias, headDim}), 1U)
+                    EXPECT_EQ(classes.count({dtype, headDim, causal, hasBias, headDim, 0}), 1U)
                         << dtype << " head_dim=" << headDim << " causal=" << causal
                         << " has_bias=" << hasBias;
                 }
@@ -121,14 +124,35 @@ TEST(TestFlydslSdpaPacks, ShipsEverySpecializedAndGenericVariantOnce)
         {
             for(const int64_t causal : {0, 1})
             {
-                EXPECT_EQ(classes.count({dtype, 0, causal, 0, headDimMax}), 1U)
+                EXPECT_EQ(classes.count({dtype, 0, causal, 0, headDimMax, 0}), 1U)
                     << dtype << " generic head_dim up to " << headDimMax << " causal=" << causal;
+            }
+        }
+        // The decode family: the specialized head dims, with and without a bias.
+        for(const int64_t headDim : {64, 96, 128, 256})
+        {
+            for(const int64_t causal : {0, 1})
+            {
+                for(const int64_t hasBias : {0, 1})
+                {
+                    EXPECT_EQ(classes.count({dtype, headDim, causal, hasBias, headDim, 1}), 1U)
+                        << dtype << " decode head_dim=" << headDim << " causal=" << causal
+                        << " has_bias=" << hasBias;
+                }
             }
         }
     }
 }
 
-TEST(TestFlydslSdpaPacks, EveryKernelDeclaresTheThirtySixSlotSignature)
+/// Whether @p kernel is one of the decode family's objects.
+template <typename Kernel>
+bool isDecodeKernel(const Kernel& kernel)
+{
+    const auto* decode = tryGetMetadataField<int64_t>(kernel.metadata, FLYDSL_SDPA_DECODE_FIELD);
+    return decode != nullptr && *decode == 1;
+}
+
+TEST(TestFlydslSdpaPacks, EveryPrefillKernelDeclaresTheThirtySixSlotSignature)
 {
     const auto& set = loadedSet(FLYDSL_SDPA.engineName);
 
@@ -136,15 +160,21 @@ TEST(TestFlydslSdpaPacks, EveryKernelDeclaresTheThirtySixSlotSignature)
     // right_bound, left_bound, align_bottom_right, lse_on); the f32 scale; fifteen i64
     // strides from offset 80; then the bias pointer at 200 and its four i64 strides from
     // 208, then the runtime head_dim (i32) at 240 and the query heads per V head (i32) at
-    // 244 -- each appended so every earlier slot kept its offset. Most slots share a size with a neighbour, so a permutation
-    // is invisible to the loader's kind-and-size check -- the semantic names in the
-    // manifest are the only record of which is which, and this table is what a
-    // regenerated layout has to agree with.
+    // 244 -- each appended so every earlier slot kept its offset. Most slots share a size
+    // with a neighbour, so a permutation is invisible to the loader's kind-and-size check --
+    // the semantic names in the manifest are the only record of which is which, and this
+    // table is what a regenerated layout has to agree with.
     constexpr size_t SLOTS = 36;
+    size_t checked = 0;
     for(const auto& pack : set.packs)
     {
         for(const auto& kernel : pack.kernels)
         {
+            if(isDecodeKernel(kernel))
+            {
+                continue;
+            }
+            ++checked;
             ASSERT_EQ(kernel.source.signature.size(), SLOTS) << kernel.name;
             for(size_t slot = 0; slot < SLOTS; ++slot)
             {
@@ -186,6 +216,58 @@ TEST(TestFlydslSdpaPacks, EveryKernelDeclaresTheThirtySixSlotSignature)
             }
         }
     }
+    EXPECT_GT(checked, 0U);
+}
+
+TEST(TestFlydslSdpaPacks, EveryDecodeKernelDeclaresTheThirtySevenSlotSignature)
+{
+    const auto& set = loadedSet(FLYDSL_SDPA.engineName);
+
+    // Q, K, V, O, LSE and the split workspace's O and LSE pointers; nine i32 (seq_len_q,
+    // seq_len_kv, num_heads, kv_group, right_bound, left_bound, align_bottom_right, lse_on,
+    // num_splits) and the f32 scale from offset 56; fifteen i64 strides from 96; the bias
+    // pointer at 216 and its four i64 strides. The merge kernel in the same object is
+    // launched by name and checked by the generator.
+    constexpr size_t SLOTS = 37;
+    size_t checked = 0;
+    for(const auto& pack : set.packs)
+    {
+        for(const auto& kernel : pack.kernels)
+        {
+            if(!isDecodeKernel(kernel))
+            {
+                continue;
+            }
+            ++checked;
+            ASSERT_EQ(kernel.source.signature.size(), SLOTS) << kernel.name;
+            for(size_t slot = 0; slot < SLOTS; ++slot)
+            {
+                const auto& argument = kernel.source.signature[slot];
+                std::string kind = "by_value";
+                uint32_t size = 8;
+                uint32_t offset = 0;
+                if(slot < 7)
+                {
+                    kind = "global_buffer";
+                    offset = static_cast<uint32_t>(8 * slot);
+                }
+                else if(slot < 17)
+                {
+                    size = 4;
+                    offset = static_cast<uint32_t>(56 + 4 * (slot - 7));
+                }
+                else
+                {
+                    kind = slot == 32 ? "global_buffer" : "by_value";
+                    offset = static_cast<uint32_t>(96 + 8 * (slot - 17));
+                }
+                EXPECT_EQ(argument.kind, kind) << kernel.name << " slot " << slot;
+                EXPECT_EQ(argument.size, size) << kernel.name << " slot " << slot;
+                EXPECT_EQ(argument.offset, offset) << kernel.name << " slot " << slot;
+            }
+        }
+    }
+    EXPECT_GT(checked, 0U);
 }
 
 } // namespace

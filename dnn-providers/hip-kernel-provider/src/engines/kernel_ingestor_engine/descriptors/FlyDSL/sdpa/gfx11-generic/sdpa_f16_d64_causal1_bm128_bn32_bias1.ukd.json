@@ -25,7 +25,9 @@
     "block_n": 32,
     "dv_split": 1,
     "has_bias": 1,
-    "head_dim_max": 64
+    "head_dim_max": 64,
+    "decode": 0,
+    "merge_symbol": ""
   },
   "priority": 100,
   "provenance": {
@@ -44,7 +46,9 @@
             "block_n",
             "dv_split",
             "has_bias",
-            "head_dim_max"
+            "head_dim_max",
+            "decode",
+            "merge_symbol"
           ],
           "bindings": {},
           "vocabulary": {}

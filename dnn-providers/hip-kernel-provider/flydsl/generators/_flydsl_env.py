@@ -8,8 +8,8 @@ pinned FlyDSL wheel, the vendored kernel sources under ``kernels_src/``, and a
 recorded ROCm version. All three go into the per-arch ``SOURCE.md``, because a
 checked-in code object regenerated against a different toolchain is a change
 that reviews as a no-op diff. The FlyDSL release notes and this tree's Flash2
-precedent both record ~1.4x swings from the ROCm version alone on identical
-source.
+precedent both record large performance swings from the ROCm version alone on
+identical source.
 
 The environment is deliberately process-wide and single-arch. FlyDSL reads
 ``ARCH`` from ``os.environ`` at each compile (``flydsl/utils/env.py``:

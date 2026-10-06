@@ -139,6 +139,12 @@ def normalize(command: list[str], source: str, label: str, line_length: int) -> 
     return result.stdout
 
 
+def _not_vendored(path: Path) -> bool:
+    """A module written for this provider says so in its header; it has no upstream."""
+    lines = path.read_text(encoding="utf-8").splitlines()[:_HEADER_LINES]
+    return any(line.lstrip("#").strip().startswith("Not vendored") for line in lines)
+
+
 def vendored_files() -> list[Path]:
     """Every vendored Python module, as paths relative to ``kernels_src/``."""
     if not KERNELS_SRC_DIR.is_dir():
@@ -146,7 +152,7 @@ def vendored_files() -> list[Path]:
     return sorted(
         path.relative_to(KERNELS_SRC_DIR)
         for path in KERNELS_SRC_DIR.rglob("*.py")
-        if "__pycache__" not in path.parts
+        if "__pycache__" not in path.parts and not _not_vendored(path)
     )
 
 

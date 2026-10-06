@@ -34,6 +34,14 @@
     {
       "name": "head_dim_max",
       "type": "int"
+    },
+    {
+      "name": "decode",
+      "type": "int"
+    },
+    {
+      "name": "merge_symbol",
+      "type": "string"
     }
   ]
 }

@@ -93,6 +93,27 @@ constexpr std::string_view HAS_BIAS_FIELD = "has_bias";
 /// a generic one (head_dim 0, read at runtime) it bounds the heads it takes.
 constexpr std::string_view HEAD_DIM_MAX_FIELD = "head_dim_max";
 
+/// 1 for the decode family's objects (flash_attn_decode_gfx11.py), 0 for the prefill ones.
+constexpr std::string_view DECODE_FIELD = "decode";
+/// The decode object's second kernel, which combines its KV splits. Same code object, so
+/// it is loaded from the same archive entry by this symbol.
+constexpr std::string_view MERGE_SYMBOL_FIELD = "merge_symbol";
+
+/// The decode kernel packs the GQA group's query heads and the query positions into one
+/// 16-row tile, so it serves a graph only while (Hq / Hk) * Sq fits it.
+constexpr int64_t DECODE_ROWS = 16;
+/// Waves per decode workgroup, keys per wave per step, and threads per merge workgroup:
+/// the geometry the decode kernel and its merge were built with.
+constexpr int64_t DECODE_WAVES = 4;
+constexpr int64_t DECODE_TILE = 32;
+constexpr int64_t DECODE_MERGE_THREADS = 64;
+/// Split-count bounds: a split should give each wave at least this many tiles, the splits
+/// together should roughly fill the device, and never more than this many.
+constexpr int64_t DECODE_MIN_TILES_PER_WAVE = 8;
+constexpr int64_t DECODE_MAX_SPLITS = 64;
+/// Compute units assumed when the device does not report its count.
+constexpr int64_t DECODE_FALLBACK_COMPUTE_UNITS = 32;
+
 /// A generic object's head_dim: it reads the real one at runtime.
 constexpr int64_t GENERIC_HEAD_DIM = 0;
 
@@ -835,6 +856,58 @@ std::optional<int64_t> candidateGrid(const SdpaProblem& problem, const SdpaTile&
     return grid;
 }
 
+/// How many KV splits a decode launch uses: enough workgroups to roughly fill the device's
+/// compute units, but no split so short that its waves have little to stream, and at most
+/// DECODE_MAX_SPLITS. Deterministic in the problem and the device, so workspaceBytes and
+/// prepare agree.
+int64_t decodeSplits(const SdpaProblem& problem, int computeUnits)
+{
+    const int64_t units = computeUnits > 0 ? computeUnits : DECODE_FALLBACK_COMPUTE_UNITS;
+    const int64_t groups = std::max<int64_t>(1, problem.batch * problem.numKvHeads);
+    const int64_t tiles = (problem.seqLenKv + DECODE_TILE - 1) / DECODE_TILE;
+    const int64_t byWork = std::max<int64_t>(1, tiles / (DECODE_WAVES * DECODE_MIN_TILES_PER_WAVE));
+    const int64_t byDevice = std::max<int64_t>(1, units / groups);
+    return std::min({byWork, byDevice, DECODE_MAX_SPLITS});
+}
+
+/// The split workspace: a normalized f32 partial O and its LSE per (batch, query head,
+/// query position, split), or nothing when one split writes O directly.
+std::optional<size_t> decodeWorkspaceBytes(const SdpaProblem& problem, int64_t splits)
+{
+    if(splits <= 1)
+    {
+        return size_t{0};
+    }
+    const auto elements = checkedProduct(
+        {problem.batch, problem.numHeads, problem.seqLenQ, splits, problem.headDim + 1});
+    if(!elements.has_value())
+    {
+        return std::nullopt;
+    }
+    return static_cast<size_t>(*elements) * sizeof(float);
+}
+
+/// Whether a decode object's 32-bit bias offsets reach every row of its tile: they span the
+/// GQA group's heads as well as the query positions and keys of one (batch, head) slice.
+bool decodeBiasFits(const SdpaProblem& problem, const BiasStrides& strides)
+{
+    const auto lastHead = checkedProduct({problem.numHeads / problem.numKvHeads - 1, strides[1]});
+    const auto lastQuery = checkedProduct({problem.seqLenQ - 1, strides[2]});
+    const auto lastKey = checkedProduct({problem.seqLenKv - 1 + KV_TILE_OVERREAD, strides[3]});
+    return lastHead.has_value() && lastQuery.has_value() && lastKey.has_value()
+           && *lastHead <= BIAS_SLICE_ELEMENT_LIMIT - *lastKey
+           && *lastQuery <= BIAS_SLICE_ELEMENT_LIMIT - *lastKey - *lastHead;
+}
+
+/// Whether a decode object can serve the graph: the GQA group times the query positions
+/// fits its 16-row tile, and one V head goes with each K head (the rows of a tile share
+/// one KV head).
+bool decodeServes(const SdpaProblem& problem)
+{
+    return problem.numKvHeads == problem.numVHeads
+           && (problem.numHeads / problem.numKvHeads) * problem.seqLenQ <= DECODE_ROWS;
+}
+
 /**
  * @brief Kernel-scoped applicability: does THIS candidate's baked metadata fit the graph?
  *
@@ -857,10 +930,30 @@ bool flydslSdpaKernelMatches(const MatchContext& context,
     {
         return false;
     }
-    const auto problem = problemFor(*q, *k);
+    const auto* v = findTensor(context, attributesPtr->v_tensor_uid());
+    if(v == nullptr)
+    {
+        return false;
+    }
+    auto problem = problemFor(*q, *k);
+    problem.numVHeads = v->dims()->Get(HEAD_AXIS);
 
     const auto tile = candidateTile(kernel);
     if(!tile.has_value())
+    {
+        return false;
+    }
+
+    // A decode object serves only the graphs its packed tile fits, and only with its own
+    // head_dim; it carries the merge kernel it launches by name.
+    const auto decode = integerMetadata(kernel, DECODE_FIELD);
+    if(!decode.has_value() || (*decode != 0 && *decode != 1))
+    {
+        return false;
+    }
+    if(*decode == 1
+       && (!decodeServes(problem) || integerMetadata(kernel, HEAD_DIM_FIELD) != problem.headDim
+           || stringMetadata(kernel, MERGE_SYMBOL_FIELD).value_or("").empty()))
     {
         return false;
     }
@@ -900,6 +993,20 @@ bool flydslSdpaKernelMatches(const MatchContext& context,
     if(!bias.has_value() || integerMetadata(kernel, HAS_BIAS_FIELD) != (*bias == NO_BIAS ? 0 : 1))
     {
         return false;
+    }
+    if(*decode == 1 && *bias != NO_BIAS)
+    {
+        const auto* biasTensor = findTensor(context, *bias);
+        const auto strides = biasTensor == nullptr ? std::nullopt
+                                                   : servableBiasStrides(*biasTensor,
+                                                                         problem.batch,
+                                                                         problem.numHeads,
+                                                                         problem.seqLenQ,
+                                                                         problem.seqLenKv);
+        if(!strides.has_value() || !decodeBiasFits(problem, *strides))
+        {
+            return false;
+        }
     }
 
     const auto causal = tryGetBoundInt(bound, CAUSAL_TOKEN);
@@ -954,6 +1061,60 @@ const std::vector<KernelArgument>& flydslSdpaKernelSignature()
     return s_signature;
 }
 
+/**
+ * @brief The decode object's main kernel's argument list (flash_attn_decode_gfx11.py).
+ *
+ * Q, K, V, O, LSE and the split workspace's O and LSE (pointers); seq_len_q, seq_len_kv,
+ * num_heads, kv_group, right_bound, left_bound, align_bottom_right, lse_on, num_splits
+ * (i32); scale (f32); the (batch, sequence, head) strides of Q, K, V, O and LSE (i64);
+ * the bias (pointer) and its (batch, head, query, key) strides (i64), read only by a
+ * has_bias object.
+ */
+const std::vector<KernelArgument>& flydslSdpaDecodeSignature()
+{
+    static const KernelArgument s_pointer{
+        "global_buffer", static_cast<uint32_t>(sizeof(void*)), 0, ""};
+    static const KernelArgument s_i32{"by_value", static_cast<uint32_t>(sizeof(int32_t)), 0, ""};
+    static const KernelArgument s_f32{"by_value", static_cast<uint32_t>(sizeof(float)), 0, ""};
+    static const KernelArgument s_i64{"by_value", static_cast<uint32_t>(sizeof(int64_t)), 0, ""};
+    static const std::vector<KernelArgument> s_signature{
+        s_pointer, s_pointer, s_pointer, s_pointer, s_pointer, s_pointer, s_pointer, s_i32,
+        s_i32,     s_i32,     s_i32,     s_i32,     s_i32,     s_i32,     s_i32,     s_i32,
+        s_f32,     s_i64,     s_i64,     s_i64,     s_i64,     s_i64,     s_i64,     s_i64,
+        s_i64,     s_i64,     s_i64,     s_i64,     s_i64,     s_i64,     s_i64,     s_i64,
+        s_pointer, s_i64,     s_i64,     s_i64,     s_i64};
+    return s_signature;
+}
+
+/**
+ * @brief The decode object's merge kernel's argument list.
+ *
+ * O, LSE and the split workspace's O and LSE (pointers); seq_len_q, num_heads, lse_on,
+ * num_splits (i32); the (batch, sequence, head) strides of O and LSE (i64).
+ */
+const std::vector<KernelArgument>& flydslSdpaMergeSignature()
+{
+    static const KernelArgument s_pointer{
+        "global_buffer", static_cast<uint32_t>(sizeof(void*)), 0, ""};
+    static const KernelArgument s_i32{"by_value", static_cast<uint32_t>(sizeof(int32_t)), 0, ""};
+    static const KernelArgument s_i64{"by_value", static_cast<uint32_t>(sizeof(int64_t)), 0, ""};
+    static const std::vector<KernelArgument> s_signature{s_pointer,
+                                                         s_pointer,
+                                                         s_pointer,
+                                                         s_pointer,
+                                                         s_i32,
+                                                         s_i32,
+                                                         s_i32,
+                                                         s_i32,
+                                                         s_i64,
+                                                         s_i64,
+                                                         s_i64,
+                                                         s_i64,
+                                                         s_i64,
+                                                         s_i64};
+    return s_signature;
+}
+
 /// One operand's (batch, sequence, head) element strides, in the kernel's argument order.
 struct OperandStrides
 {
@@ -991,14 +1152,35 @@ public:
                        SdpaProblem problem,
                        std::optional<hipdnn_plugin_sdk::ScalarOperand> scaleOperand,
                        std::array<OperandStrides, 5> strides,
-                       BiasStrides biasStrides)
+                       BiasStrides biasStrides,
+                       std::optional<IngestorKernelCode> mergeCode = std::nullopt,
+                       int64_t splits = 1)
         : _code(std::move(code))
         , _binding(binding)
         , _problem(problem)
         , _scaleOperand(scaleOperand)
         , _strides(strides)
         , _biasStrides(biasStrides)
+        , _mergeCode(std::move(mergeCode))
+        , _splits(splits)
     {
+    }
+
+    /// A decode object's merge kernel; empty for a prefill object.
+    bool isDecode() const
+    {
+        return _mergeCode.has_value();
+    }
+
+    compilation::IRunnableKernel& mergeForStream(hipStream_t stream) const
+    {
+        return _mergeCode->kernelForStream(stream);
+    }
+
+    /// The decode launch's KV splits; 1 writes O directly and skips the merge.
+    int64_t splits() const
+    {
+        return _splits;
     }
 
     compilation::IRunnableKernel& kernelForStream(hipStream_t stream) const
@@ -1040,6 +1222,8 @@ private:
     std::optional<hipdnn_plugin_sdk::ScalarOperand> _scaleOperand;
     std::array<OperandStrides, 5> _strides;
     BiasStrides _biasStrides;
+    std::optional<IngestorKernelCode> _mergeCode;
+    int64_t _splits = 1;
 };
 
 /**
@@ -1061,12 +1245,27 @@ public:
     {
     }
 
-    /// The kernel's only scratch is LDS and registers.
-    size_t workspaceBytes(const MatchContext& /*context*/,
-                          const BoundTokens& /*bound*/,
-                          const KernelDefinition& /*kernel*/) const override
+    /// A prefill object's only scratch is LDS and registers. A decode object launched with
+    /// more than one KV split needs a partial O and LSE per split.
+    size_t workspaceBytes(const MatchContext& context,
+                          const BoundTokens& bound,
+                          const KernelDefinition& kernel) const override
     {
-        return 0;
+        if(integerMetadata(kernel, DECODE_FIELD) != 1)
+        {
+            return 0;
+        }
+        const auto binding = flydslSdpaBinding(bound);
+        auto problem
+            = problemFor(requireTensor(context, binding.q), requireTensor(context, binding.k));
+        const auto bytes = decodeWorkspaceBytes(
+            problem, decodeSplits(problem, context.deviceProperties.multiProcessorCount));
+        if(!bytes.has_value())
+        {
+            throw hipdnn_plugin_sdk::HipdnnPluginException(
+                HIPDNN_PLUGIN_STATUS_BAD_PARAM, "flydsl_sdpa: decode workspace overflows");
+        }
+        return *bytes;
     }
 
     std::unique_ptr<PreparedDispatch> prepare(const MatchContext& context,
@@ -1100,21 +1299,69 @@ public:
         // layouts are.
         const compilation::KernelCompileOptions options(context.deviceProperties.gcnArchName);
 
-        auto code = buildIngestorKernelCode(
-            _kernelCompiler, _kpackLoader, context, kernel, options, flydslSdpaKernelSignature());
+        const bool decode = integerMetadata(kernel, DECODE_FIELD) == 1;
+        auto code = buildIngestorKernelCode(_kernelCompiler,
+                                            _kpackLoader,
+                                            context,
+                                            kernel,
+                                            options,
+                                            decode ? flydslSdpaDecodeSignature()
+                                                   : flydslSdpaKernelSignature());
 
-        // `batch_x_qtiles_x_heads_x_dv_split`: one workgroup per (batch, query tile, head,
-        // output-column tile), each block_m / 16 waves of 32. kernel_match bounded it.
-        const auto gridX = candidateGrid(problem, *tile);
-        if(!gridX.has_value())
+        std::optional<IngestorKernelCode> mergeCode;
+        int64_t splits = 1;
+        if(decode)
         {
-            throw hipdnn_plugin_sdk::HipdnnPluginException(
-                HIPDNN_PLUGIN_STATUS_BAD_PARAM,
-                "flydsl_sdpa: launch grid exceeds int32 for kernel '" + toString(kernel.kernelId)
-                    + "'");
+            // `batch_x_kvheads_x_splits_x_dv_split`: one workgroup of DECODE_WAVES waves per
+            // (batch, KV head, split, output-column tile); the merge, one workgroup per
+            // (batch, query head, position).
+            splits = decodeSplits(problem, context.deviceProperties.multiProcessorCount);
+            const auto mergeSymbol = stringMetadata(kernel, MERGE_SYMBOL_FIELD);
+            const auto mainGrid
+                = checkedProduct({problem.batch, problem.numKvHeads, splits, tile->dvSplit});
+            const auto mergeGrid
+                = checkedProduct({problem.batch, problem.numHeads, problem.seqLenQ});
+            if(!mergeSymbol.has_value() || mergeSymbol->empty() || !mainGrid.has_value()
+               || *mainGrid > INT32_LIMIT || !mergeGrid.has_value() || *mergeGrid > INT32_LIMIT)
+            {
+                throw hipdnn_plugin_sdk::HipdnnPluginException(
+                    HIPDNN_PLUGIN_STATUS_BAD_PARAM,
+                    "flydsl_sdpa: decode kernel '" + toString(kernel.kernelId)
+                        + "' names no merge kernel, or its launch overflows");
+            }
+            // The merge kernel is the same code object under another symbol, so the same
+            // archive entry with that symbol and its own argument list.
+            KernelDefinition mergeKernel = kernel;
+            mergeKernel.source.symbol = *mergeSymbol;
+            mergeKernel.source.signature = flydslSdpaMergeSignature();
+            mergeCode.emplace(buildIngestorKernelCode(_kernelCompiler,
+                                                      _kpackLoader,
+                                                      context,
+                                                      mergeKernel,
+                                                      options,
+                                                      flydslSdpaMergeSignature()));
+            code.setBlockSize(static_cast<unsigned int>(DECODE_WAVES * WAVE_SIZE), 1, 1);
+            code.setGridSize(static_cast<unsigned int>(*mainGrid), 1, 1);
+            mergeCode->setBlockSize(static_cast<unsigned int>(DECODE_MERGE_THREADS), 1, 1);
+            mergeCode->setGridSize(static_cast<unsigned int>(*mergeGrid), 1, 1);
         }
-        code.setBlockSize(static_cast<unsigned int>(tile->blockM / WAVE_ROWS * WAVE_SIZE), 1, 1);
-        code.setGridSize(static_cast<unsigned int>(*gridX), 1, 1);
+        else
+        {
+            // `batch_x_qtiles_x_heads_x_dv_split`: one workgroup per (batch, query tile,
+            // head, output-column tile), each block_m / 16 waves of 32. kernel_match
+            // bounded it.
+            const auto gridX = candidateGrid(problem, *tile);
+            if(!gridX.has_value())
+            {
+                throw hipdnn_plugin_sdk::HipdnnPluginException(
+                    HIPDNN_PLUGIN_STATUS_BAD_PARAM,
+                    "flydsl_sdpa: launch grid exceeds int32 for kernel '"
+                        + toString(kernel.kernelId) + "'");
+            }
+            code.setBlockSize(
+                static_cast<unsigned int>(tile->blockM / WAVE_ROWS * WAVE_SIZE), 1, 1);
+            code.setGridSize(static_cast<unsigned int>(*gridX), 1, 1);
+        }
 
         std::optional<hipdnn_plugin_sdk::ScalarOperand> scaleOperand;
         if(binding.scaleSource == ScaleSource::TENSOR)
@@ -1152,14 +1399,16 @@ public:
                                           binding.stats == NO_STATS
                                               ? OperandStrides{}
                                               : stridesOf(requireTensor(context, binding.stats))},
-            biasStrides);
+            biasStrides,
+            std::move(mergeCode),
+            splits);
     }
 
     void launch(const Handle& handle,
                 const PreparedDispatch& prepared,
                 const hipdnnPluginDeviceBuffer_t* deviceBuffers,
                 uint32_t numDeviceBuffers,
-                void* /*workspace*/) const override
+                void* workspace) const override
     {
         const auto& preparedSdpa = dynamic_cast<const PreparedFlydslSdpa&>(prepared);
         const auto& binding = preparedSdpa.binding();
@@ -1202,6 +1451,84 @@ public:
 
         const auto& s = preparedSdpa.strides();
         const auto& b = preparedSdpa.biasStrides();
+
+        if(preparedSdpa.isDecode())
+        {
+            const auto splits = preparedSdpa.splits();
+            // The workspace is the partial O (f32, head_dim per row and split) followed by
+            // the partial LSEs; unused with one split.
+            void* wsO = splits > 1 ? workspace : nullptr;
+            void* wsLse
+                = splits > 1
+                      ? static_cast<void*>(static_cast<char*>(workspace)
+                                           + static_cast<size_t>(problem.batch * problem.numHeads
+                                                                 * problem.seqLenQ * splits
+                                                                 * problem.headDim)
+                                                 * sizeof(float))
+                      : nullptr;
+            const auto lseOn = static_cast<int32_t>(binding.stats == NO_STATS ? 0 : 1);
+            // Changing these argument lists means changing flydslSdpaDecodeSignature() and
+            // flydslSdpaMergeSignature() with them.
+            preparedSdpa.kernelForStream(handle.getStream())
+                .launch(handle.getStream(),
+                        q.ptr,
+                        k.ptr,
+                        v.ptr,
+                        o.ptr,
+                        stats,
+                        wsO,
+                        wsLse,
+                        static_cast<int32_t>(problem.seqLenQ),
+                        static_cast<int32_t>(problem.seqLenKv),
+                        static_cast<int32_t>(problem.numHeads),
+                        static_cast<int32_t>(problem.numHeads / problem.numKvHeads),
+                        static_cast<int32_t>(binding.rightBound),
+                        static_cast<int32_t>(binding.leftBound),
+                        static_cast<int32_t>(binding.alignBottomRight),
+                        lseOn,
+                        static_cast<int32_t>(splits),
+                        scale,
+                        s[0].batch,
+                        s[0].sequence,
+                        s[0].head,
+                        s[1].batch,
+                        s[1].sequence,
+                        s[1].head,
+                        s[2].batch,
+                        s[2].sequence,
+                        s[2].head,
+                        s[3].batch,
+                        s[3].sequence,
+                        s[3].head,
+                        s[4].batch,
+                        s[4].sequence,
+                        s[4].head,
+                        bias,
+                        b[0],
+                        b[1],
+                        b[2],
+                        b[3]);
+            if(splits > 1)
+            {
+                preparedSdpa.mergeForStream(handle.getStream())
+                    .launch(handle.getStream(),
+                            o.ptr,
+                            stats,
+                            wsO,
+                            wsLse,
+                            static_cast<int32_t>(problem.seqLenQ),
+                            static_cast<int32_t>(problem.numHeads),
+                            lseOn,
+                            static_cast<int32_t>(splits),
+                            s[3].batch,
+                            s[3].sequence,
+                            s[3].head,
+                            s[4].batch,
+                            s[4].sequence,
+                            s[4].head);
+            }
+            return;
+        }
 
         // Changing this argument list means changing flydslSdpaKernelSignature() with it.
         preparedSdpa.kernelForStream(handle.getStream())

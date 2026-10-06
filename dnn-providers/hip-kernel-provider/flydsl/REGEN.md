@@ -137,8 +137,8 @@ for op in rmsnorm sdpa; do
 done
 ```
 
-Expected, and the state of the tree as committed: **52/52 byte-identical** (12
-RMSNorm, 40 SDPA), all four diffs empty.
+Expected, and the state of the tree as committed: **84/84 byte-identical** (12
+RMSNorm, 72 SDPA), all four diffs empty.
 
 `manifest.json` agreeing is the stronger of the two checks — it carries the
 `toolchain` block, so an identical manifest means the *recorded* toolchain and

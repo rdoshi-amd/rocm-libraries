@@ -86,6 +86,7 @@ _ABBREV = {
     "dv_split": "dv",
     "has_bias": "bias",
     "head_dim_max": "dmax",
+    "decode": "decode",
 }
 
 # Knobs omitted from an instance's name when they add nothing to it; see
@@ -94,6 +95,9 @@ _NAME_OMITTED_WHEN = {
     "dv_split": lambda knobs: knobs["dv_split"] == 1,
     "has_bias": lambda knobs: knobs["has_bias"] == 0,
     "head_dim_max": lambda knobs: knobs["head_dim_max"] == knobs["head_dim"],
+    "decode": lambda knobs: knobs["decode"] == 0,
+    # A symbol, not a choice: the object's name already says it is a decode one.
+    "merge_symbol": lambda knobs: True,
 }
 
 
@@ -195,6 +199,19 @@ def sdpa_dv_split(head_dim: int) -> int:
 SDPA_GENERIC_HEAD_DIM_MAX = {128: 1, 256: 4}
 PRIORITY_SDPA_GENERIC = {128: 20, 256: PRIORITY_GENERIC}
 
+# The decode family (flash_attn_decode_gfx11.py): split-KV with the GQA group packed
+# into one 16-row tile, for graphs with g * Sq <= 16. Its own kernel and its own launch
+# geometry, so a separate set of objects; above the prefill ones in priority, so a
+# graph both serve runs here. Each object also carries the merge kernel that combines
+# its splits, named by `merge_symbol`. The specialized head dims, with and without a
+# bias (a baked axis here too: a runtime bias failed the gate, §6), one V head per K
+# head; anything else takes the prefill objects. d256 splits its output columns across
+# two workgroups, as the prefill object does, to fit the register file.
+SDPA_DECODE_HEAD_DIMS = (64, 96, 128, 256)
+SDPA_DECODE_MERGE_SYMBOL = "flash_attn_decode_merge_gfx11_kernel_1"
+PRIORITY_SDPA_DECODE = 150
+SDPA_DECODE_ROWS = 16
+
 
 # Two variants of one kernel rather than a runtime flag: causal changes the KV
 # loop bound and skips fully-masked tiles, and the non-causal variant carries a
@@ -235,6 +252,8 @@ def sdpa_instances() -> list[Instance]:
                                 "dv_split": sdpa_dv_split(head_dim),
                                 "has_bias": has_bias,
                                 "head_dim_max": head_dim,
+                                "decode": 0,
+                                "merge_symbol": "",
                             },
                         )
                     )
@@ -255,9 +274,32 @@ def sdpa_instances() -> list[Instance]:
                             "dv_split": dv_split,
                             "has_bias": 0,
                             "head_dim_max": head_dim_max,
+                            "decode": 0,
+                            "merge_symbol": "",
                         },
                     )
                 )
+        for head_dim in SDPA_DECODE_HEAD_DIMS:
+            for causal in SDPA_CAUSAL:
+                for has_bias in SDPA_HAS_BIAS:
+                    instances.append(
+                        Instance(
+                            op="sdpa",
+                            dtype=dtype,
+                            priority=PRIORITY_SDPA_DECODE,
+                            knobs={
+                                "head_dim": head_dim,
+                                "causal": causal,
+                                "block_m": SDPA_DECODE_ROWS,
+                                "block_n": SDPA_BLOCK_N,
+                                "dv_split": sdpa_dv_split(head_dim),
+                                "has_bias": has_bias,
+                                "head_dim_max": head_dim,
+                                "decode": 1,
+                                "merge_symbol": SDPA_DECODE_MERGE_SYMBOL,
+                            },
+                        )
+                    )
     _assert_unique(instances)
     return instances
 

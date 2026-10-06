@@ -42,8 +42,12 @@ def hkp_pack_module():
     return module
 
 
-def describe(blob: bytes, where: str) -> dict:
-    """The AMDGPU metadata facts we verify and record, for one code object."""
+def describe(blob: bytes, where: str, symbol: str | None = None) -> dict:
+    """The AMDGPU metadata facts we verify and record, for one code object.
+
+    An object holds one kernel unless @p symbol names which of several to describe:
+    the decode objects carry their merge kernel beside the main one.
+    """
     hkp = hkp_pack_module()
     # `_metadata_document` is private to hkp_pack, but `kernel_signature()` -- its
     # public entry point -- returns only the argument list, and we also need the
@@ -51,6 +55,12 @@ def describe(blob: bytes, where: str) -> dict:
     document = hkp._metadata_document(hkp.amdgcn_object(blob, where), where)
 
     kernels = document.get("amdhsa.kernels") or []
+    if symbol is not None:
+        named = [k for k in kernels if k.get(".name") == symbol]
+        if len(named) != 1:
+            names = ", ".join(str(k.get(".name")) for k in kernels)
+            raise GeneratorError(f"{where}: no single kernel {symbol!r} in [{names}]")
+        kernels = named
     if len(kernels) != 1:
         names = ", ".join(str(k.get(".name")) for k in kernels)
         raise GeneratorError(
@@ -89,6 +99,13 @@ _TARGET_ARCH = re.compile(r"(gfx[0-9a-z]+(?:-[0-9]+)*-generic|gfx[0-9a-f]+)$")
 _E_FLAGS_OFFSET = 48
 _EF_AMDGPU_MACH = 0x0FF
 _EF_AMDGPU_GENERIC_VERSION_SHIFT = 24
+
+
+def kernel_names(blob: bytes, where: str) -> list[str]:
+    """Every kernel symbol the object defines."""
+    hkp = hkp_pack_module()
+    document = hkp._metadata_document(hkp.amdgcn_object(blob, where), where)
+    return [str(k.get(".name")) for k in document.get("amdhsa.kernels") or []]
 
 
 def target_arch(targets, where: str) -> str:

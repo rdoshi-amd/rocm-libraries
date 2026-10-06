@@ -37,6 +37,7 @@ from ._codeobject import (
     GeneratorError,
     arg_records,
     describe,
+    kernel_names,
     verify_arch,
     verify_generic,
 )
@@ -98,6 +99,68 @@ _EXPECTED_SIGNATURE = (
     ("by_value", 4, 244),
 )
 
+# The decode family's two kernels (flash_attn_decode_gfx11.py), in one object. The
+# main kernel: Q, K, V, O, LSE, the split workspace's O and LSE (pointers); the
+# problem's i32 scalars and the split count; the scale; the (batch, sequence, head)
+# strides of Q, K, V, O and LSE; the bias pointer and its (batch, head, query, key)
+# strides, appended, so every decode object has the same list. The merge kernel: O, LSE and the two workspace
+# pointers; seq_len_q, num_heads, lse_on, num_splits; O's and LSE's strides.
+_DECODE_ARG_NAMES = (
+    "Q",
+    "K",
+    "V",
+    "O",
+    "LSE",
+    "WS_O",
+    "WS_LSE",
+    "seq_len_q",
+    "seq_len_kv",
+    "num_heads",
+    "kv_group",
+    "right_bound",
+    "left_bound",
+    "align_bottom_right",
+    "lse_on",
+    "num_splits",
+    "scale",
+    *(f"{t}_stride_{a}" for t in ("q", "k", "v", "o", "lse") for a in ("b", "s", "h")),
+    "BIAS",
+    "bias_stride_b",
+    "bias_stride_h",
+    "bias_stride_q",
+    "bias_stride_k",
+)
+_DECODE_SIGNATURE = (
+    *(("global_buffer", 8, 8 * i) for i in range(7)),
+    *(("by_value", 4, 56 + 4 * i) for i in range(10)),
+    *(("by_value", 8, 96 + 8 * i) for i in range(15)),
+    ("global_buffer", 8, 216),
+    *(("by_value", 8, 224 + 8 * i) for i in range(4)),
+)
+_DECODE_KERNARG_SEGMENT_SIZE = 256
+_MERGE_ARG_NAMES = (
+    "O",
+    "LSE",
+    "WS_O",
+    "WS_LSE",
+    "seq_len_q",
+    "num_heads",
+    "lse_on",
+    "num_splits",
+    *(f"{t}_stride_{a}" for t in ("o", "lse") for a in ("b", "s", "h")),
+)
+_MERGE_SIGNATURE = (
+    *(("global_buffer", 8, 8 * i) for i in range(4)),
+    *(("by_value", 4, 32 + 4 * i) for i in range(4)),
+    *(("by_value", 8, 48 + 8 * i) for i in range(6)),
+)
+_MERGE_KERNARG_SEGMENT_SIZE = 96
+# One workgroup per (batch, kv head, split, output-column tile of head_dim /
+# dv_split) of DECODE_WAVES waves; the merge, one workgroup of DECODE_MERGE_THREADS
+# per (batch, query head, query position).
+_DECODE_GRID_RULE = "batch_x_kvheads_x_splits_x_dv_split"
+_DECODE_WAVES = 4
+
 # Launch geometry the native dispatch handler reproduces: one workgroup per
 # (batch, query tile of block_m rows, query head, output-column tile of
 # head_dim / dv_split), `block_m / 16` waves of 32.
@@ -142,6 +205,62 @@ def _verify(described: dict, instance: Instance, arch: str, where: str) -> None:
             f"{where}: {described['vgpr_spill_count']} VGPRs spilled; the tile "
             "does not fit this arch's register file at these knobs"
         )
+
+
+def _verify_layout(described, expected, segment, where, what) -> None:
+    if described["signature"] != expected:
+        raise GeneratorError(
+            f"{where}: {what} kernarg layout is\n  {described['signature']}\nbut is "
+            f"declared as\n  {expected}\nUpdate the layout, the semantic names and the "
+            "native dispatch together."
+        )
+    if described["kernarg_segment_size"] != segment:
+        raise GeneratorError(
+            f"{where}: {what} kernarg segment is "
+            f"{described['kernarg_segment_size']} bytes, expected {segment}"
+        )
+    if described.get("vgpr_spill_count"):
+        raise GeneratorError(
+            f"{where}: {what} spills {described['vgpr_spill_count']} VGPRs"
+        )
+
+
+def _build_decode(
+    kernel_module, instance: Instance, dump_dir: Path, llvm_options: dict
+) -> tuple[bytes, dict]:
+    """Compile one decode instance (main and merge kernels); return its object."""
+    import flydsl.compiler as flyc  # noqa: PLC0415  (after prepare())
+    import flydsl.expr as fx  # noqa: PLC0415
+    from flydsl.compiler.kernel_function import CompilationContext  # noqa: PLC0415
+
+    knobs = instance.knobs
+    env.set_dump_dir(dump_dir)
+    launch = kernel_module.build_flash_attn_decode_module(
+        knobs["head_dim"],
+        causal=bool(knobs["causal"]),
+        dtype_str=instance.dtype,
+        num_waves=_DECODE_WAVES,
+        dv_split=knobs["dv_split"],
+        has_bias=bool(knobs["has_bias"]),
+    )
+    if launch.dv_split != knobs["dv_split"]:
+        raise GeneratorError(
+            f"{instance.name}: kernel built with dv_split {launch.dv_split}, "
+            f"instance declares {knobs['dv_split']}"
+        )
+    null = flyc.from_c_void_p(fx.Uint8, 0)
+    # Q, K, V, O, LSE, WS_O, WS_LSE; batch, seq_len_q, seq_len_kv, num_heads,
+    # kv_group, right_bound, left_bound, align_bottom_right, lse_on, num_splits;
+    # the scale; fifteen strides; the bias pointer and its four strides.
+    args = [null] * 7 + [1, 1, 1, 1, 1, 0, -1, 0, 0, 1, 1.0] + [1] * 15
+    args += [null] + [1] * 4
+    args.append(fx.Stream(None))
+    effective = dict(getattr(launch, "compile_hints", {}).get("llvm_options") or {})
+    effective.update(llvm_options)
+    with CompilationContext.compile_hints({"llvm_options": effective}):
+        flyc.compile(launch, *args)
+    blob, _ = hsaco_from_dump(dump_dir)
+    return blob, effective
 
 
 def _build_one(
@@ -198,6 +317,7 @@ def generate(arch: str, out_root: Path, keep_ir: Path | None = None) -> Path:
     env.assert_flydsl_version()
     env.prepare(arch)
 
+    from kernels.attention import flash_attn_decode_gfx11  # noqa: PLC0415
     from kernels.attention import flash_attn_func_gfx1151  # noqa: PLC0415
 
     op_dir = out_root / OP / arch
@@ -211,23 +331,67 @@ def generate(arch: str, out_root: Path, keep_ir: Path | None = None) -> Path:
         print(f"[{index}/{len(instances)}] {instance.name}", flush=True)
         with tempfile.TemporaryDirectory(prefix=f"flydsl-{instance.name}-") as tmp:
             dump_dir = Path(keep_ir) / instance.name if keep_ir else Path(tmp)
+            decode = bool(instance.knobs["decode"])
             try:
-                blob, effective_options = _build_one(
-                    flash_attn_func_gfx1151, instance, dump_dir, llvm_options
-                )
+                if decode:
+                    blob, effective_options = _build_decode(
+                        flash_attn_decode_gfx11, instance, dump_dir, llvm_options
+                    )
+                else:
+                    blob, effective_options = _build_one(
+                        flash_attn_func_gfx1151, instance, dump_dir, llvm_options
+                    )
             except Exception as exc:
                 raise GeneratorError(f"{instance.name}: {exc}") from exc
 
         filename = f"{instance.name}.hsaco"
         where = f"{arch}/{OP}/{filename}"
-        described = describe(blob, where)
-        _verify(described, instance, arch, where)
+        record = instance.to_record()
+        if decode:
+            merge_symbol = instance.knobs["merge_symbol"]
+            names = kernel_names(blob, where)
+            if len(names) != 2 or merge_symbol not in names:
+                raise GeneratorError(
+                    f"{where}: expected a main kernel and {merge_symbol!r}, found {names}"
+                )
+            main_symbol = next(n for n in names if n != merge_symbol)
+            described = describe(blob, where, main_symbol)
+            merge = describe(blob, where, merge_symbol)
+            verify_arch(described, arch, where)
+            _verify_layout(
+                described,
+                _DECODE_SIGNATURE,
+                _DECODE_KERNARG_SEGMENT_SIZE,
+                where,
+                "decode",
+            )
+            _verify_layout(
+                merge, _MERGE_SIGNATURE, _MERGE_KERNARG_SEGMENT_SIZE, where, "merge"
+            )
+            record.update(
+                {
+                    "block": [_DECODE_WAVES * _WAVE_SIZE, 1, 1],
+                    "grid_rule": _DECODE_GRID_RULE,
+                    "args": arg_records(_DECODE_ARG_NAMES, described["signature"]),
+                    "merge_args": arg_records(_MERGE_ARG_NAMES, merge["signature"]),
+                    "merge_vgprs": merge["vgpr_count"],
+                }
+            )
+        else:
+            described = describe(blob, where)
+            _verify(described, instance, arch, where)
+            block_m = instance.knobs["block_m"]
+            record.update(
+                {
+                    "block": [block_m // _WAVE_ROWS * _WAVE_SIZE, 1, 1],
+                    "grid_rule": _GRID_RULE,
+                    "args": arg_records(_SEMANTIC_ARG_NAMES, described["signature"]),
+                }
+            )
         verify_generic(blob, arch, where)
 
         (op_dir / filename).write_bytes(blob)
 
-        block_m = instance.knobs["block_m"]
-        record = instance.to_record()
         record.update(
             {
                 "file": filename,
@@ -235,13 +399,10 @@ def generate(arch: str, out_root: Path, keep_ir: Path | None = None) -> Path:
                 "bytes": len(blob),
                 "sha256": sha256(blob),
                 "kernarg_segment_size": described["kernarg_segment_size"],
-                "block": [block_m // _WAVE_ROWS * _WAVE_SIZE, 1, 1],
-                "grid_rule": _GRID_RULE,
                 "lds_bytes": described["group_segment_fixed_size"],
                 "vgprs": described["vgpr_count"],
                 "llvm_options": effective_options,
                 "named_args": described["named_args"],
-                "args": arg_records(_SEMANTIC_ARG_NAMES, described["signature"]),
             }
         )
         records.append(record)

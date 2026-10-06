@@ -763,10 +763,9 @@ TEST(TestGpuFlydslRmsNormDispatch, TheGenericKernelAgreesWithTheBakedOneAtABaked
 // that ordering without ever checking that it buys anything. This is the missing half:
 // one graph, run through both tiers, timed.
 //
-// It reports rather than ranks. On gfx1151 the baked tier wins at both shapes below --
-// by roughly 2x at the small one and 1.4x at the large one -- but which tier wins is a
-// property of the device, and pinning that ordering here would make the suite fail on the
-// first arch where it does not hold. What IS asserted is the sanity bound: both tiers
+// It reports rather than ranks. On gfx1151 the baked tier wins at both shapes below, but
+// which tier wins is a property of the device, and pinning that ordering here would make
+// the suite fail on the first arch where it does not hold. What IS asserted is the sanity bound: both tiers
 // complete, and neither is an order of magnitude off the other. A generic tier that had
 // quietly lost its vectorized path would show up against that bound; a 40% difference
 // would not, and belongs in a benchmark rather than a unit test.

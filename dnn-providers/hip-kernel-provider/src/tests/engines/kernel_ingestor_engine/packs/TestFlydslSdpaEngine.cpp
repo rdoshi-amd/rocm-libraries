@@ -91,7 +91,8 @@ KernelDefinition makeFlydslSdpaKernel(const std::string& dtype,
                                       int64_t blockN = 32,
                                       int64_t dvSplit = 1,
                                       int64_t hasBias = 0,
-                                      std::optional<int64_t> headDimMax = std::nullopt)
+                                      std::optional<int64_t> headDimMax = std::nullopt,
+                                      int64_t decode = 0)
 {
     KernelDefinition kernel;
     kernel.name = "sdpa_" + dtype + "_d" + std::to_string(headDim);
@@ -102,7 +103,10 @@ KernelDefinition makeFlydslSdpaKernel(const std::string& dtype,
                        {FLYDSL_SDPA_BLOCK_N_FIELD, blockN},
                        {FLYDSL_SDPA_DV_SPLIT_FIELD, dvSplit},
                        {FLYDSL_SDPA_HAS_BIAS_FIELD, hasBias},
-                       {FLYDSL_SDPA_HEAD_DIM_MAX_FIELD, headDimMax.value_or(headDim)}};
+                       {FLYDSL_SDPA_HEAD_DIM_MAX_FIELD, headDimMax.value_or(headDim)},
+                       {FLYDSL_SDPA_DECODE_FIELD, decode},
+                       {FLYDSL_SDPA_MERGE_SYMBOL_FIELD,
+                        std::string(decode != 0 ? "flash_attn_decode_merge_gfx11_kernel_1" : "")}};
     kernel.priority = 100;
     return kernel;
 }
@@ -498,6 +502,75 @@ TEST(TestFlydslSdpaKernelMatch, ASpecializedObjectServesOnlyItsOwnHead)
                                bindingsFor(spec)));
 }
 
+TEST(TestFlydslSdpaKernelMatch, ADecodeObjectServesAGroupThatFitsItsSixteenRows)
+{
+    const auto decode = makeFlydslSdpaKernel("bf16", 128, 1, 16, 32, 1, 0, 128, 1);
+    const auto matches = [&decode](int64_t heads, int64_t kvHeads, int64_t seqLenQ) {
+        SdpaGraphSpec spec;
+        spec.headDim = 128;
+        spec.mask = SdpaMask::BOTTOM_RIGHT_CAUSAL;
+        spec.heads = heads;
+        spec.kvHeads = kvHeads;
+        spec.seqLenQ = seqLenQ;
+        spec.seqLenKv = 300;
+        const GraphFixture fixture(buildFlydslSdpaGraph(spec));
+        return matchesKernel(FLYDSL_SDPA, fixture.context(), decode, bindingsFor(spec));
+    };
+
+    EXPECT_TRUE(matches(32, 8, 1)) << "group of 4, one position";
+    EXPECT_TRUE(matches(16, 1, 1)) << "MQA, group of 16";
+    EXPECT_TRUE(matches(8, 2, 4)) << "group of 4, four positions";
+    EXPECT_FALSE(matches(32, 1, 1)) << "group of 32 does not fit";
+    EXPECT_FALSE(matches(8, 2, 5)) << "20 rows do not fit";
+}
+
+TEST(TestFlydslSdpaKernelMatch, ADecodeObjectDeclinesWhatItsTileCannotHold)
+{
+    const auto decode = makeFlydslSdpaKernel("bf16", 128, 1, 16, 32, 1, 0, 128, 1);
+    SdpaGraphSpec spec;
+    spec.headDim = 128;
+    spec.mask = SdpaMask::BOTTOM_RIGHT_CAUSAL;
+    spec.heads = 8;
+    spec.kvHeads = 2;
+    spec.valueHeads = 4;
+    spec.seqLenQ = 1;
+    spec.seqLenKv = 300;
+    const GraphFixture fixture(buildFlydslSdpaGraph(spec));
+    EXPECT_FALSE(matchesKernel(FLYDSL_SDPA, fixture.context(), decode, bindingsFor(spec)))
+        << "a tile shares one KV head, so K and V must group alike";
+
+    auto unnamed = decode;
+    unnamed.metadata[FLYDSL_SDPA_MERGE_SYMBOL_FIELD] = std::string();
+    spec.valueHeads.reset();
+    const GraphFixture plain(buildFlydslSdpaGraph(spec));
+    EXPECT_FALSE(matchesKernel(FLYDSL_SDPA, plain.context(), unnamed, bindingsFor(spec)))
+        << "a decode object must name its merge kernel";
+}
+
+TEST(TestFlydslSdpaKernelMatch, ADecodeBiasObjectServesABiasItsOffsetsReach)
+{
+    const auto plain = makeFlydslSdpaKernel("bf16", 128, 1, 16, 32, 1, 0, 128, 1);
+    const auto bias = makeFlydslSdpaKernel("bf16", 128, 1, 16, 32, 1, 1, 128, 1);
+    SdpaGraphSpec spec;
+    spec.headDim = 128;
+    spec.mask = SdpaMask::BOTTOM_RIGHT_CAUSAL;
+    spec.heads = 8;
+    spec.kvHeads = 2;
+    spec.seqLenQ = 1;
+    spec.seqLenKv = 300;
+    spec.withBias = true;
+    const GraphFixture biased(buildFlydslSdpaGraph(spec));
+    EXPECT_TRUE(matchesKernel(FLYDSL_SDPA, biased.context(), bias, bindingsFor(spec)));
+    EXPECT_FALSE(matchesKernel(FLYDSL_SDPA, biased.context(), plain, bindingsFor(spec)));
+
+    // One tile spans the four heads of a group; a head stride that puts the last of them
+    // past the 32-bit offsets declines, though each (batch, head) slice alone fits.
+    spec.biasDims = {1, spec.heads, 1, spec.seqLenKv};
+    spec.biasStrides = {spec.heads * (int64_t{1} << 29), int64_t{1} << 29, spec.seqLenKv, 1};
+    const GraphFixture farHeads(buildFlydslSdpaGraph(spec));
+    EXPECT_FALSE(matchesKernel(FLYDSL_SDPA, farHeads.context(), bias, bindingsFor(spec)));
+}
+
 TEST(TestFlydslSdpaKernelMatch, PairsTheBiasVariantWithAGraphThatHasABias)
 {
     SdpaGraphSpec biased;
@@ -595,8 +668,8 @@ DeviceProperties packedArchDeviceProperties()
 
 /// The staged candidate for (@p dtype, @p headDim, @p causal, @p hasBias), if this build
 /// packed one: the object built for that head_dim, else the narrowest generic one serving it.
-std::optional<KernelDefinition>
-    findStagedKernel(const std::string& dtype, int64_t headDim, int64_t causal, int64_t hasBias)
+std::optional<KernelDefinition> findStagedKernel(
+    const std::string& dtype, int64_t headDim, int64_t causal, int64_t hasBias, int64_t decode = 0)
 {
     const auto& set = loadedSet(FLYDSL_SDPA.engineName);
     std::optional<KernelDefinition> best;
@@ -615,8 +688,11 @@ std::optional<KernelDefinition>
                 = tryGetMetadataField<int64_t>(kernel.metadata, FLYDSL_SDPA_HAS_BIAS_FIELD);
             const auto* dimMax
                 = tryGetMetadataField<int64_t>(kernel.metadata, FLYDSL_SDPA_HEAD_DIM_MAX_FIELD);
+            const auto* isDecode
+                = tryGetMetadataField<int64_t>(kernel.metadata, FLYDSL_SDPA_DECODE_FIELD);
             if(name == nullptr || dim == nullptr || isCausal == nullptr || bias == nullptr
-               || dimMax == nullptr || *name != dtype || *isCausal != causal || *bias != hasBias)
+               || dimMax == nullptr || isDecode == nullptr || *name != dtype || *isCausal != causal
+               || *bias != hasBias || *isDecode != decode)
             {
                 continue;
             }
@@ -730,7 +806,9 @@ private:
 /// Skips when the staged set holds no kernel for the spec's class: on an arch this build
 /// packed nothing for, there is no kernel to be wrong about.
 template <typename T>
-void expectSdpaMatchesReference(const SdpaGraphSpec& spec, double absoluteTolerance)
+void expectSdpaMatchesReference(const SdpaGraphSpec& spec,
+                                double absoluteTolerance,
+                                bool decode = false)
 {
     // The bounds the graph builder writes for this spec, in CpuFpReferenceSdpa's terms.
     int64_t left = -1;
@@ -755,8 +833,8 @@ void expectSdpaMatchesReference(const SdpaGraphSpec& spec, double absoluteTolera
 
     const std::string dtype = spec.dataType == DataType::BFLOAT16 ? "bf16" : "f16";
     const bool causal = right >= 0;
-    const auto kernel
-        = findStagedKernel(dtype, spec.headDim, causal ? 1 : 0, spec.withBias ? 1 : 0);
+    const auto kernel = findStagedKernel(
+        dtype, spec.headDim, causal ? 1 : 0, spec.withBias ? 1 : 0, decode ? 1 : 0);
     if(!kernel.has_value())
     {
         GTEST_SKIP() << "nothing packed for dtype=" << dtype << " head_dim=" << spec.headDim
@@ -863,10 +941,18 @@ void expectSdpaMatchesReference(const SdpaGraphSpec& spec, double absoluteTolera
         buffers.push_back({FLYDSL_SDPA_SCALE_UID, &runtimeScale});
     }
 
+    // A decode launch with more than one KV split writes its partials to workspace.
+    const auto workspaceBytes = handler.workspaceBytes(fixture.context(), *bound, *kernel);
+    void* workspace = nullptr;
+    if(workspaceBytes > 0)
+    {
+        ASSERT_EQ(hipSuccess, hipMalloc(&workspace, workspaceBytes));
+    }
     const Handle handle;
     handler.launch(
-        handle, *prepared, buffers.data(), static_cast<uint32_t>(buffers.size()), nullptr);
+        handle, *prepared, buffers.data(), static_cast<uint32_t>(buffers.size()), workspace);
     ASSERT_EQ(hipSuccess, hipDeviceSynchronize());
+    static_cast<void>(hipFree(workspace));
     o.readBack();
     stats.readBack();
 
@@ -1276,6 +1362,91 @@ TEST(TestGpuFlydslSdpaDispatch, ComputesPackedQkvViews)
     spec.seqLenQ = 150;
     spec.seqLenKv = 150;
     expectSdpaMatchesReference<hipdnn_data_sdk::types::half>(spec, F16_TOLERANCE);
+}
+
+// The decode objects: the GQA group packed into one 16-row tile, KV split across
+// workgroups and merged. One KV head across a long cache splits several ways; short ones
+// write O directly. Windows, several query positions and LSE run through both paths.
+TEST(TestGpuFlydslSdpaDispatch, DecodesOneTokenAcrossSplits)
+{
+    SKIP_IF_NO_DEVICES();
+    SdpaGraphSpec spec;
+    spec.headDim = 128;
+    spec.mask = SdpaMask::BOTTOM_RIGHT_CAUSAL;
+    spec.batch = 1;
+    spec.heads = 8;
+    spec.kvHeads = 2;
+    spec.seqLenQ = 1;
+    spec.seqLenKv = 2100;
+    spec.stats = SdpaStats::LSE;
+    expectSdpaMatchesReference<hipdnn_data_sdk::types::bfloat16>(spec, BF16_TOLERANCE, true);
+}
+
+TEST(TestGpuFlydslSdpaDispatch, DecodesSeveralPositionsInOneSplit)
+{
+    SKIP_IF_NO_DEVICES();
+    SdpaGraphSpec spec;
+    spec.dataType = DataType::HALF;
+    spec.headDim = 64;
+    spec.mask = SdpaMask::BOTTOM_RIGHT_CAUSAL;
+    spec.heads = 8;
+    spec.kvHeads = 2;
+    spec.seqLenQ = 4;
+    spec.seqLenKv = 300;
+    spec.stats = SdpaStats::LSE;
+    expectSdpaMatchesReference<hipdnn_data_sdk::types::half>(spec, F16_TOLERANCE, true);
+}
+
+TEST(TestGpuFlydslSdpaDispatch, DecodesWithinASlidingWindow)
+{
+    SKIP_IF_NO_DEVICES();
+    SdpaGraphSpec spec;
+    spec.headDim = 96;
+    spec.mask = SdpaMask::BOTTOM_RIGHT_CAUSAL;
+    spec.leftBound = 127;
+    spec.batch = 1;
+    spec.heads = 16;
+    spec.kvHeads = 1;
+    spec.seqLenQ = 1;
+    spec.seqLenKv = 3000;
+    expectSdpaMatchesReference<hipdnn_data_sdk::types::bfloat16>(spec, BF16_TOLERANCE, true);
+}
+
+// A bias on the decode path: each lane reads its own (head, position) row of the GQA
+// group's slice, broadcast over the batch here, across splits and with LSE.
+TEST(TestGpuFlydslSdpaDispatch, DecodesWithABiasAcrossSplits)
+{
+    SKIP_IF_NO_DEVICES();
+    SdpaGraphSpec spec;
+    spec.headDim = 128;
+    spec.mask = SdpaMask::BOTTOM_RIGHT_CAUSAL;
+    spec.batch = 2;
+    spec.heads = 8;
+    spec.kvHeads = 2;
+    spec.seqLenQ = 2;
+    spec.seqLenKv = 2100;
+    spec.stats = SdpaStats::LSE;
+    spec.withBias = true;
+    spec.biasDims = {1, spec.heads, spec.seqLenQ, spec.seqLenKv};
+    expectSdpaMatchesReference<hipdnn_data_sdk::types::bfloat16>(spec, BF16_TOLERANCE, true);
+}
+
+// d256 splits its output columns across two workgroups per KV split; LSE is written by
+// one of them, and the merge combines the partials across the full head.
+TEST(TestGpuFlydslSdpaDispatch, DecodesHeadDim256AcrossSplitsAndColumnTiles)
+{
+    SKIP_IF_NO_DEVICES();
+    SdpaGraphSpec spec;
+    spec.dataType = DataType::HALF;
+    spec.headDim = 256;
+    spec.mask = SdpaMask::BOTTOM_RIGHT_CAUSAL;
+    spec.batch = 1;
+    spec.heads = 8;
+    spec.kvHeads = 2;
+    spec.seqLenQ = 2;
+    spec.seqLenKv = 2500;
+    spec.stats = SdpaStats::LSE;
+    expectSdpaMatchesReference<hipdnn_data_sdk::types::half>(spec, F16_TOLERANCE, true);
 }
 
 TEST(TestGpuFlydslSdpaDispatch, AppliesTheDefaultScaleWhenTheGraphGivesNone)

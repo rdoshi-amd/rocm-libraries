@@ -104,7 +104,7 @@ SHAPE_KNOBS = {"N", "head_dim"}
 # Per op: `N` is RMSNorm's row width; `head_dim` and `causal` are what an SDPA
 # graph asks for. The remaining knobs -- block_threads, block_m, block_n -- are
 # launch geometry the tuner may legitimately vary.
-GRAPH_DETERMINED_FIELDS = {"N", "dtype", "head_dim", "causal"}
+GRAPH_DETERMINED_FIELDS = {"N", "dtype", "head_dim", "causal", "merge_symbol"}
 
 # uuid5 from a name, so ids are stable across regenerations and adding a
 # thirteenth instance cannot disturb the twelve already shipped. The namespace
@@ -178,7 +178,7 @@ def collect(content_dir: Path, arch: str) -> list[KernelEntry]:
             # The directory is the claim the descriptors turn into `arch`; the
             # object's own target is the fact. The packer compares neither.
             where = str(path)
-            verify_arch(describe(data, where), arch, where)
+            verify_arch(describe(data, where, record["symbol"]), arch, where)
             verify_generic(data, arch, where)
             entries.append(KernelEntry(op, path, data, record))
     return entries

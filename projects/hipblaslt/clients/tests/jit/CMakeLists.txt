@@ -5,6 +5,7 @@
 # no GPU, or jit-gpu. Each test empties its own scratch directory.
 enable_testing()
 find_package(Threads REQUIRED)
+find_package(ZLIB REQUIRED)
 
 set(hipblaslt_jit_source "${PROJECT_SOURCE_DIR}/library/src/amd_detail")
 set(hipblaslt_jit_scratch "${CMAKE_CURRENT_BINARY_DIR}/scratch")

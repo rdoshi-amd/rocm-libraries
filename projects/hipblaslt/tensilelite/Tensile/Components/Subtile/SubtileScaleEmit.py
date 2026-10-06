@@ -222,11 +222,7 @@ def emitScaleGRPtrUpdate(ti, writer, kernel):
       module.add(emitScaleTdmStepBytes(ti, kernel, sgpr(inc), sgpr(sizeName), "scale step"))
       module.add(SAddU32(dst=sgpr("Address%s+0" % tc), src0=sgpr("Address%s+0" % tc), src1=sgpr(inc)))
       module.add(SAddCU32(dst=sgpr("Address%s+1" % tc), src0=sgpr("Address%s+1" % tc), src1=0))
-    group0 = "tdm%sGroup0" % tc
-    module.add(SMovB64(dst=sgpr("%s+2" % group0, 2), src=sgpr("Address%s" % tc, 2),
-                       comment="sync descriptor global addr"))
-    module.add(SOrB32(dst=sgpr("%s+3" % group0), src0=sgpr("%s+3" % group0), src1=hex(2 << 30),
-                      comment="restore type field"))
+    # refreshTDMDescriptorSubtile copies Address{tc} into the descriptor before every load.
     return module
 
   inc = int(ti.lrSubtileSize * ti.lrGlobalSubtileGrid[1])

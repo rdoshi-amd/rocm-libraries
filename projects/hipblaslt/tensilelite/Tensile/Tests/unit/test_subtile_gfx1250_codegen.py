@@ -306,7 +306,8 @@ class TestGfx1250SubtileCodegen:
         module = globalReadLDSBufferSwap(tc, writer, kernel)
         asm = str(module)
         assert "s_xor_b32" in asm
-        assert "sync descriptor LDS addr" in asm
+        # The per-load descriptor refresh copies the LDS address.
+        assert "tdm%sGroup0" % tc not in asm
 
     # -- globalReadPtrUpdates TDM path --
 
@@ -322,7 +323,8 @@ class TestGfx1250SubtileCodegen:
         module = globalReadPtrUpdates(tc, writer, kernel)
         asm = str(module)
         assert "s_add_u64" in asm
-        assert "sync descriptor global addr" in asm
+        # The per-load descriptor refresh copies the global address.
+        assert "tdm%sGroup0" % tc not in asm
 
     # -- emitSingleBufferLoad TDM path --
 
@@ -490,7 +492,8 @@ class TestGfx1250MxSubtileTdm:
         sizeName = "SizeI" if tc == 'MXSA' else "SizeJ"
         assert "s[sgpr%s]" % sizeName in asm
         assert "s_addc_u32 s[sgprAddress%s+1]" % tc in asm
-        assert "sync descriptor global addr" in asm
+        # The per-load descriptor refresh copies the global address.
+        assert "tdm%sGroup0" % tc not in asm
         assert "Srd%s" % tc not in asm
 
     @pytest.mark.parametrize("tc", ['MXSA', 'MXSB'])
@@ -501,7 +504,8 @@ class TestGfx1250MxSubtileTdm:
         _setup_sgprs_mx(writer)
         asm = str(globalReadLDSBufferSwap(tc, writer, kernel))
         assert "s_xor_b32" in asm
-        assert "sync descriptor LDS addr" in asm
+        # The per-load descriptor refresh copies the LDS address.
+        assert "tdm%sGroup0" % tc not in asm
         assert "LocalWriteBaseAddr%s" % tc not in asm
 
     @pytest.mark.parametrize("tc,mt", [('MXSA', 128), ('MXSB', 64)])

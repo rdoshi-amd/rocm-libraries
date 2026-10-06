@@ -132,6 +132,51 @@ TDM data supply: 68 KiB per workgroup per iteration (A and B 32 KiB each, scales
 is about 16.5 TB/s over 256 CUs at 1.08 us per iteration. Removing the overheads above only
 pays off once that limit moves.
 
+**Re-measured after the scale fix (2026-10-06, `logs/*-inj-g2_*`, 8 alternating rounds, GPU 3).**
+The scale fix moved that limit, and the loop is now partly latency-bound. Base time is 232.3 us.
+
+| Delay point | +128 cycles | +256 | +512 | +1024 |
+| --- | --- | --- | --- | --- |
+| After the first barrier (descriptor window) | +5.0 us | | | |
+| Before `s_wait_tensorcnt` | +0.9 us | | | |
+| After the second barrier (swaps) | +5.1 us | | | |
+| Middle of phase 1 | +4.6 us | +11.3 us | +28.1 us | +72.5 us |
+| Middle of phase 2 | +5.0 us | | | |
+
+Only the delay between the last TDM load and `s_wait_tensorcnt` is absorbed. The loads of
+iteration i are waited on in iteration i + 1, so the period is about the TDM latency plus
+everything from that wait to the next iteration's loads. That is the second barrier, the swaps,
+both phases, the first barrier and the descriptor rebuild. Every cycle there now costs about a
+third of a fully exposed cycle at +128, rising to about two thirds at +1024. The descriptor
+rebuild sits on that path: about 120 SALU and 4 `v_readfirstlane` between the first barrier and
+the last `tensor_load_to_lds`. Two fixes:
+
+- Issue the loads right after the first barrier with incremental descriptors (the swap and
+  address update already leave them ready) and un-alias the MXS descriptor SGPRs.
+- Deepen the prefetch so the TDM latency is hidden. This is harder. LDS mode 2 pads each buffer
+  to two 64 KiB segments, 256 KiB of the 320 KiB, so a third buffer does not fit in that layout.
+  The unpadded footprint is about 70 KiB per buffer (A and B 32 KiB each plus padding, scales
+  4 KiB), so three buffers fit only with a different segment layout.
+
+The floor with no TDM loads at all was 159.8 us.
+
+**Descriptor rebuild trimmed (2026-10-06, `logs/*-gen-v4`).** Separate scale descriptors would
+need 122 SGPRs (limit 106), so the aliasing stays and the per-load rebuild is cheaper:
+
+- The per-wave bounds (A/B tile1 clamp, scale dim1 rows) are computed once per tile into
+  `tdmClamp{A,B,MXSA,MXSB}` (`initTDMClampSubtile`). This brings the kernel to 102 SGPRs and
+  removes the 4 `v_readfirstlane` per iteration.
+- The address update and LDS swap no longer copy into the descriptor; the refresh does it.
+- The data dim words are packed in 6 SALU instead of 11.
+
+The window from the first barrier to the last TDM load went from about 120 SALU and 4 VALU to
+62 SALU. Time went from 232.3 us to 230.2 us (9.47 to 9.56 PF, 10 alternating rounds, faster in
+10/10), with the same validation results, jitter included.
+
+The A/B tile1 clamp is Size - wId * MT / numWaves, without the workgroup's tile offset, so it
+is only right for workgroup 0 along that dimension. Edge workgroups read past Size. This is unchanged from before and is a candidate for the
+edge-tile failures above.
+
 ## TDM supply: 256-byte scale rows cost 17% (fixed in the generator 2026-10-06)
 
 The scale TDM loads read 2 rows of 256 B per wave (tile0 256 x 1 B, tile1 2, row stride

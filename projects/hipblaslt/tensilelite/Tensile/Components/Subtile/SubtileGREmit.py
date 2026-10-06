@@ -527,13 +527,11 @@ def _emitGRPtrUpdate_TLU0(tag, tile, ti, writer, kernel):
   tc = ti.tc
   # TDM path: advance Address{tc} and sync the TDM descriptor instead of SRD.
   if kernel.get("enableTDM%s" % tc, False):
+    # refreshTDMDescriptorSubtile copies Address{tc} into the descriptor before every load.
     module = Module(f"TDM GR Ptr Update ({tc})")
     inc = int(ti.depthUBytes)
     module.addComment0("TDM addr update: %s += %u" % (tc, inc))
     module.add(SAddU64(dst=sgpr("Address%s" % tc, 2), src0=sgpr("Address%s" % tc, 2), src1=inc))
-    group0 = "tdm%sGroup0" % tc
-    module.add(SMovB64(dst=sgpr("%s+2" % group0, 2), src=sgpr("Address%s" % tc, 2), comment="sync descriptor global addr"))
-    module.add(SOrB32(dst=sgpr("%s+3" % group0), src0=sgpr("%s+3" % group0), src1=hex(2 << 30), comment="restore type field"))
     return module
 
   module = Module(f"GR Ptr Update ({tc})")
@@ -1006,9 +1004,8 @@ def _tdmSwapLdsBuffer(tc):
   module.addComment0("TDM: swap %s LDS buffer (XOR with per-tensor swap mask)" % tc)
   ldsAddrSgpr = "tdmLdsAddr%s" % tc
   swapSgpr = "tdmLdsSwapMask%s" % tc
+  # refreshTDMDescriptorSubtile copies tdmLdsAddr{tc} into the descriptor before every load.
   module.add(SXorB32(dst=sgpr(ldsAddrSgpr), src0=sgpr(ldsAddrSgpr), src1=sgpr(swapSgpr), comment=""))
-  group0 = "tdm%sGroup0" % tc
-  module.add(SMovB32(dst=sgpr("%s+1" % group0), src=sgpr(ldsAddrSgpr), comment="sync descriptor LDS addr"))
   return module
 
 
@@ -1403,13 +1400,21 @@ def initTDMDescriptorSubtile(writer, kernel, tP, refresh=False):
         ldsConstOffset, padIntervalBytes, padAmountBytes))
     mod.add(comp.setLdsAddr(descSgprName(0), sgpr(ldsTrackSgpr)))
   sizeShifter = 1 if dtype.isFloat4() else 0
-  sizeShifterDim = sizeShifter
-
-  mod.add(comp.setTensorDim0(descSgprName(1), sizeRefName(3), writer, sizeShifterDim, overwrite=True))
-  mod.add(comp.setTensorDim1(descSgprName(1), sizeRefName(ti), writer, overwrite=True))
-
   sizeShifterTile = sizeShifter
-  mod.add(comp.setTensorTile0(descSgprName(1), sizeTile0, writer, sizeShifterTile, overwrite=True))
+
+  # Group1 +1[31:16] dim0 lo, +2[15:0] dim0 hi, +2[31:16] dim1 lo, +3[15:0] dim1 hi,
+  # +3[31:16] tile0. dim0 = SizeL >> sizeShifter: the shift into +1 drops SizeL's low
+  # bit into bit 15, which is zero because an fp4 SizeL is even.
+  g1 = descSgprName(1)
+  with writer.allocTmpSgpr(1) as tmpSgprRes:
+    tmp = sgpr(tmpSgprRes.idx)
+    mod.add(SLShiftLeftB32(sgpr(f"{g1}+1"), 16 - sizeShifter, sgpr(sizeRefName(3)), "dim0 lo"))
+    mod.add(SLShiftRightB32(tmp, 16 + sizeShifter, sgpr(sizeRefName(3)), "dim0 hi"))
+    mod.add(SLShiftLeftB32(sgpr(f"{g1}+2"), 16, sgpr(sizeRefName(ti)), "dim1 lo"))
+    mod.add(SOrB32(sgpr(f"{g1}+2"), sgpr(f"{g1}+2"), tmp, "| dim0 hi"))
+  mod.add(SLShiftRightB32(sgpr(f"{g1}+3"), 16, sgpr(sizeRefName(ti)), "dim1 hi"))
+  mod.add(SOrB32(sgpr(f"{g1}+3"), sgpr(f"{g1}+3"), hex(((sizeTile0 >> sizeShifterTile) & 0xFFFF) << 16),
+                 f"tile0 = {sizeTile0 >> sizeShifterTile}"))
 
   if isSubtileIter:
     # Iterate mode: one row per iteration.
@@ -1422,22 +1427,8 @@ def initTDMDescriptorSubtile(writer, kernel, tP, refresh=False):
     # field (+4[15:0]) with a runtime clamp. No-op when the tile fits.
     perWaveRows = sizeTile1 // numWaves
     if numWaves > 1:
-      with writer.allocTmpSgpr(2) as tileClampRes:
-        validRows = tileClampRes.idx
-        waveRowStart = tileClampRes.idx + 1
-        mod.add(VReadfirstlaneB32(sgpr(waveRowStart), vgpr("Serial"), "first tId"))
-        mod.add(SLShiftRightB32(sgpr(waveRowStart), ceil(log2(wavelen)), sgpr(waveRowStart),
-                "wId = fTid // wavelen"))
-        mod.add(SMulI32(sgpr(waveRowStart), sgpr(waveRowStart), perWaveRows,
-                f"waveGlobalRowStart = wId * {perWaveRows}"))
-        mod.add(SSubI32(dst=sgpr(validRows), src0=sgpr(sizeRefName(ti)), src1=sgpr(waveRowStart),
-                comment="Size_free - waveGlobalRowStart"))
-        mod.add(SMaxI32(dst=sgpr(validRows), src0=sgpr(validRows), src1=0,
-                comment="saturate negative remainder to 0"))
-        mod.add(SMinU32(dst=sgpr(validRows), src0=sgpr(validRows), src1=perWaveRows,
-                comment=f"clamp to per-wave rows ({perWaveRows})"))
-        mod.add(SMovB32(sgpr(f"{descSgprName(1)}+4"), sgpr(validRows),
-                comment="set tile1 = clamped validRows"))
+      mod.add(SMovB32(sgpr(f"{descSgprName(1)}+4"), sgpr(f"tdmClamp{tc}"),
+              comment="set tile1 = clamped validRows (initTDMClampSubtile)"))
     else:
       mod.add(comp.setTensorTile1(descSgprName(1), perWaveRows, writer, overwrite=True))
   mod.add(comp.setTensorStride0(descSgprName(1), strideRefName(), sizeShifterTile, zeroHigh=False))
@@ -1490,34 +1481,9 @@ def _initTDMDescriptorSubtileMX(writer, kernel, tP, refresh=False):
     mod.add(_emitSubtileMxLdsTracking(writer, kernel, tc, ldsConstOffset))
   mod.add(comp.setLdsAddr(descSgprName(0), sgpr(ldsTrackSgpr)))
 
-  # dim1 = rows of this wave's span inside the tensor, so an edge tile zero-fills
-  # whole chunks past Size. A partial last chunk still reads up to chunk - mxUnit
-  # bytes past Size (into the next K group row, or past the end for the last one);
-  # those scales only reach out-of-range rows of D.
-  with writer.allocTmpSgpr(2) as tmpSgprRes:
-    remain = tmpSgprRes.idx
-    span = tmpSgprRes.idx + 1
-    mod.add(SMulI32(sgpr(remain), shape.mt, sgpr(wgName), f"MT({shape.mt}) * wgId"))
-    mod.add(SSubI32(sgpr(remain), sgpr(sizeName), sgpr(remain),
-            f"remaining M/N = {sizeName} - MT*wgId"))
-    mod.add(SMulI32(sgpr(remain), sgpr(remain), shape.kGroupRowBytes,
-            f"remaining bytes (* {shape.kGroupRowBytes})"))
-    if shape.spansPerKGroup > 1:
-      mod.add(VReadfirstlaneB32(sgpr(span), vgpr("Serial"), "first tId"))
-      mod.add(SLShiftRightB32(sgpr(span), ceil(log2(kernel["WavefrontSize"])), sgpr(span),
-              "wId = fTid // wavelen"))
-      mod.add(SAndB32(sgpr(span), sgpr(span), shape.spansPerKGroup - 1,
-              f"scale span = wId % {shape.spansPerKGroup}"))
-      mod.add(SMulI32(sgpr(span), sgpr(span), shape.spanBytes, f"span * {shape.spanBytes}"))
-      mod.add(SSubI32(sgpr(remain), sgpr(remain), sgpr(span), "- span start"))
-    mod.add(SMaxI32(sgpr(remain), sgpr(remain), 0, "saturate negative remainder to 0"))
-    mod.add(SMinU32(sgpr(remain), sgpr(remain), shape.spanBytes,
-            f"clamp to span bytes ({shape.spanBytes})"))
-    mod.add(SAddU32(sgpr(remain), sgpr(remain), chunk - 1, "round up to whole chunks"))
-    mod.add(SLShiftRightB32(sgpr(remain), int(log2(chunk)), sgpr(remain),
-            f"rows = ceil(bytes / {chunk})"))
-    mod.add(SMovB32(sgpr(f"{descSgprName(1)}+1"), hex(chunk << 16), f"dim0 = {chunk}"))
-    mod.add(SLShiftLeftB32(sgpr(f"{descSgprName(1)}+2"), 16, sgpr(remain), "dim1 = rows"))
+  mod.add(SMovB32(sgpr(f"{descSgprName(1)}+1"), hex(chunk << 16), f"dim0 = {chunk}"))
+  mod.add(SMovB32(sgpr(f"{descSgprName(1)}+2"), sgpr(f"tdmClamp{tc}"),
+          "dim1 = clamped rows (initTDMClampSubtile)"))
   mod.add(SMovB32(sgpr(f"{descSgprName(1)}+3"), hex(chunk << 16), f"tile0 = {chunk}"))
   mod.add(SMovB32(sgpr(f"{descSgprName(1)}+4"), shape.rowsPerSpan, f"tile1 = {shape.rowsPerSpan}"))
   mod.add(SMovB32(sgpr(f"{descSgprName(1)}+5"), chunk, f"row stride = {chunk}"))
@@ -1525,8 +1491,53 @@ def _initTDMDescriptorSubtileMX(writer, kernel, tP, refresh=False):
   return mod
 
 
+def initTDMClampSubtile(writer, kernel, tc):
+  """Once per tile: tdmClamp{tc} = this wave's runtime descriptor bound.
+
+  A/B: tile1 = clamp(Size - wId * mt/numWaves, 0, mt/numWaves). Scales: the
+  Group1+2 word, dim1 = rows of this wave's span inside the tensor << 16, so an
+  edge tile zero-fills whole chunks past Size. A partial last chunk still reads
+  up to chunk - mxUnit bytes past Size (into the next K group row, or past the
+  end for the last one); those scales only reach out-of-range rows of D.
+  """
+  mod = Module(f"TDM descriptor clamp {tc}")
+  clamp = sgpr(f"tdmClamp{tc}")
+  wavelen = kernel["WavefrontSize"]
+  idx = 0 if tc.endswith("A") else 1
+  sizeName = f"Size{INDEX_CHARS[idx]}"
+  with writer.allocTmpSgpr(1) as tmpSgprRes:
+    tmp = sgpr(tmpSgprRes.idx)
+    mod.add(VReadfirstlaneB32(tmp, vgpr("Serial"), "first tId"))
+    mod.add(SLShiftRightB32(tmp, ceil(log2(wavelen)), tmp, "wId = fTid // wavelen"))
+    if not tc.startswith("MX"):
+      perWaveRows = kernel[f"MacroTile{idx}"] // prod(kernel["MIWaveGroup"])
+      mod.add(SMulI32(tmp, tmp, perWaveRows, f"waveGlobalRowStart = wId * {perWaveRows}"))
+      mod.add(SSubI32(clamp, sgpr(sizeName), tmp, "Size_free - waveGlobalRowStart"))
+      mod.add(SMaxI32(clamp, clamp, 0, "saturate negative remainder to 0"))
+      mod.add(SMinU32(clamp, clamp, perWaveRows, f"clamp to per-wave rows ({perWaveRows})"))
+      return mod
+    shape = _MxScaleTdmShape(writer, kernel, tc)
+    chunk = shape.chunk
+    mod.add(SAndB32(tmp, tmp, shape.spansPerKGroup - 1, f"scale span = wId % {shape.spansPerKGroup}"))
+    mod.add(SMulI32(tmp, tmp, shape.spanBytes, f"span * {shape.spanBytes}"))
+    mod.add(SMulI32(clamp, shape.mt, sgpr(f"WorkGroup{idx}"), f"MT({shape.mt}) * wgId"))
+    mod.add(SSubI32(clamp, sgpr(sizeName), clamp, f"remaining M/N = {sizeName} - MT*wgId"))
+    mod.add(SMulI32(clamp, clamp, shape.kGroupRowBytes, f"remaining bytes (* {shape.kGroupRowBytes})"))
+    mod.add(SSubI32(clamp, clamp, tmp, "- span start"))
+    mod.add(SMaxI32(clamp, clamp, 0, "saturate negative remainder to 0"))
+    mod.add(SMinU32(clamp, clamp, shape.spanBytes, f"clamp to span bytes ({shape.spanBytes})"))
+    mod.add(SAddU32(clamp, clamp, chunk - 1, "round up to whole chunks"))
+    mod.add(SLShiftRightB32(clamp, int(log2(chunk)), clamp, f"rows = ceil(bytes / {chunk})"))
+    mod.add(SLShiftLeftB32(clamp, 16, clamp, "dim1 = rows (Group1+2 high half)"))
+  return mod
+
+
 def refreshTDMDescriptorSubtile(writer, kernel, tc):
-  """Rebuild an aliased subtile descriptor immediately before its load."""
+  """Rebuild an aliased subtile descriptor immediately before its load.
+
+  Uses only constants, Size/Stride SGPRs, Address{tc}, the tracked LDS address
+  and tdmClamp{tc} (initTDMClampSubtile), so it has no VALU dependency.
+  """
   ti = _subtileTileInfo(writer, tc)
   idx = 0 if tc.endswith("A") else 1
   tP = {

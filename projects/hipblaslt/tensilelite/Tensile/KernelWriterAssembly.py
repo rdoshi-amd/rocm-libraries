@@ -1180,7 +1180,8 @@ class KernelWriterAssembly(KernelWriter):
         mxsaOwner = setOwner("MXSA")
         if kernel["UseSubtileImpl"]:
           # Subtile issues data and scale loads at disjoint schedule points.
-          # Rebuild the descriptor before each issue and reuse A's 12 SGPRs.
+          # Rebuild the descriptor before each issue and reuse A's 12 SGPRs
+          # (separate sets do not fit in the SGPR budget).
           module.add(RegSet("s", "sgprtdmMXSAGroup0", "sgprtdmAGroup0"))
           module.add(RegSet("s", "sgprtdmMXSAGroup1", "sgprtdmAGroup1"))
         elif mxsaOwner == "A":
@@ -1232,6 +1233,14 @@ class KernelWriterAssembly(KernelWriter):
           else:
             module.add(RegSet("s", "sgprtdm%sGroup0" % mxs, "sgprtdm%sGroup0" % owner))
             module.add(RegSet("s", "sgprtdm%sGroup1" % mxs, "sgprtdm%sGroup1" % owner))
+
+    if kernel["UseSubtileImpl"]:
+      # Per-wave edge clamp of each subtile descriptor (A/B tile1, scale dim1),
+      # computed once per tile so the per-load rebuild has no VALU dependency.
+      for tc in ("A", "B", "MXSA", "MXSB"):
+        if kernel["enableTDM%s" % tc[-1]] and (not tc.startswith("MX")
+                                             or kernel["ProblemType"]["MXBlock%s" % tc[-1]]):
+          module.add(self.defineSgpr("tdmClamp%s" % tc, 1))
 
     # The four-operand load reads Group2/3 for every member of an iterating set.
     if self.isTdmWaveSeparated(kernel) and (kernel.get("_TDMIterateModeA", False)

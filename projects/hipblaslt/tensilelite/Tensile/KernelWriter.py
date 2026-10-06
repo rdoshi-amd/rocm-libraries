@@ -5496,6 +5496,12 @@ class KernelWriter(metaclass=abc.ABCMeta):
       if kernel["ProblemType"]["MXBlockB"] and "MX" in tensorParametersB:
         module.add(tdmApplyStreamKOffsetSubtile(self, kernel, tensorParametersB["MX"]))
 
+    if hasTDM:
+      for tc in ("A", "B", "MXSA", "MXSB"):
+        if tc.startswith("MX") and not kernel["ProblemType"]["MXBlock%s" % tc[-1]]:
+          continue
+        module.add(initTDMClampSubtile(self, kernel, tc))
+
     # Claim the scale tiles' bank-0 registers before D takes the low range.
     self.reserveMxScaleVgprs([mxsatileInfo, mxsbtileInfo])
 

@@ -1803,6 +1803,16 @@ Compatibility is gated the same way in both paths: a descriptor whose schema ver
 architecture, or toolchain does not match the runtime is refused with a clear error rather than
 risking silent misexecution.
 
+**kpack archive lifetime.** An opened kpack archive is shared by every load that names it and stays
+open while any hipDNN handle on the provider exists; destroying the last handle closes it. With no
+handle alive, a load opens the archive, reads its entry and closes it. An archive that fails to
+yield an intact entry (its entry fails to decompress, or its bytes miss the descriptor's sha256) is
+closed, so the next load reopens it; a missing entry or architecture leaves it open. An archive
+replaced on disk while open is not re-read, which is the inventory change
+[Section 8.6](#86-the-base-path-invariant) already admits as a cause of a failed plan build; the
+sha256 check refuses its changed bytes. Loaded modules stay resident for the life of the process
+either way.
+
 **Trust boundary.** Prebuilt code objects, whether packed in a bundle or installed into the
 provider's tree, inherit the trust of that install tree: an actor who can write them there can
 already replace hipDNN's own installed libraries, so this is not a new attack surface. Runtime JIT

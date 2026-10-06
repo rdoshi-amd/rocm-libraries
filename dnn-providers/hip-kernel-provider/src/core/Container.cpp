@@ -33,6 +33,7 @@
 #include <hipdnn_plugin_sdk/PluginApi.h>
 #include <hipdnn_plugin_sdk/ingestor/MakeEngine.hpp>
 
+#include "compilation/KpackModuleCache.hpp"
 #include "engines/kernel_ingestor_engine/KernelIngestorEngine.hpp"
 #endif
 
@@ -211,6 +212,8 @@ Container::Container()
     HIPDNN_PLUGIN_LOG_INFO("Creating Container");
 
 #ifdef HIPDNN_ENABLE_KERNEL_INGESTOR
+    _kpackArchiveLease = compilation::SharedKpackArchives::lease();
+
     // Must run before any descriptor-backed engine below can resolve its UMD/UHD/UDD
     // symbols. Safe on every Container construction: registers exactly once per process
     // (see SharedContainerManager).

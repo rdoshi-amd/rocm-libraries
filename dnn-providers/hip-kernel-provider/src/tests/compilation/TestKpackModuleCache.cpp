@@ -3,13 +3,18 @@
 
 #ifdef HIPDNN_ENABLE_KERNEL_INGESTOR
 
+#include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <memory>
 #include <optional>
 #include <string>
 #include <system_error>
+#include <thread>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -20,6 +25,8 @@
 #include "PackedKernelSource.hpp"
 #include "TestDescriptorRoot.hpp"
 #include "compilation/KpackModuleCache.hpp"
+#include "core/Container.hpp"
+#include "engines/kernel_ingestor_engine/IngestorPacks.hpp"
 
 namespace hip_kernel_provider::compilation
 {
@@ -41,6 +48,9 @@ using hipdnn_test_sdk::utilities::ScopedDirectory;
 constexpr const char* ARCHIVE_ARCH = "gfx1100";
 constexpr const char* ARCHIVE_TOC_KEY = "lib/libhip.so#0";
 
+/// An arch rocm-kpack's test archive does not hold.
+constexpr const char* ABSENT_ARCH = "gfx90a";
+
 /// A declared digest, shaped like a real one so these cases exercise what a descriptor
 /// actually carries. The load cases below fail earlier and never reach the comparison,
 /// as their stage() assertions prove.
@@ -51,33 +61,53 @@ constexpr const char* DIGEST = "0123456789abcdef0123456789abcdef0123456789abcdef
 /// the test kpack archive's placeholder payloads deliberately are not.
 constexpr const char* PACKED_UKD_DESCRIPTOR = "conv_fwd_f16_block64.ukd.json";
 
-/// Closes every shared archive when a case ends. kpack keeps an archive's file open and
-/// Windows will not delete an open file, so declare this after the case's scratch directory.
-class ReleaseSharedArchives
+/// A toc_key no archive here holds. Looking it up is answered from the TOC kpack_open read
+/// into memory, so it reaches codeObject() on the handle without touching the payload.
+constexpr const char* ABSENT_TOC_KEY = "lib/no-such-entry.so#0";
+
+/// Holds a SharedKpackArchives lease for a case, as a plugin Container does. Declare it
+/// after the case's scratch directory, so the archives it keeps open close before the
+/// directory is removed: Windows will not delete an open file.
+class ScopedArchiveLease
 {
 public:
-    ReleaseSharedArchives() = default;
-    ReleaseSharedArchives(const ReleaseSharedArchives&) = delete;
-    ReleaseSharedArchives& operator=(const ReleaseSharedArchives&) = delete;
-    ~ReleaseSharedArchives()
+    void release()
     {
-        SharedKpackArchives::resetForTesting();
+        _lease.reset();
     }
+
+private:
+    std::shared_ptr<void> _lease = SharedKpackArchives::lease();
 };
 
-/// How load() fails for an arch @p archive lacks: at ARCH_LOOKUP once the archive opens,
-/// before any HIP call, or at OPEN_ARCHIVE when it does not. Empty if it did not fail.
-std::optional<KpackModuleLoadFailure> loadForAnAbsentArch(const std::filesystem::path& archive)
+/// Whether SharedKpackArchives keeps @p archive open once this call drops its own handle.
+[[nodiscard]] bool retainedAfterOpen(const std::filesystem::path& archive)
+{
+    const std::weak_ptr<const OpenKpackArchive> probe = SharedKpackArchives::open(archive.string());
+    return !probe.expired();
+}
+
+/// How load() fails for @p tocKey at @p arch in @p archive. Empty if it did not fail.
+std::optional<KpackModuleLoadFailure> loadFailure(const std::filesystem::path& archive,
+                                                  const std::string& tocKey,
+                                                  const std::string& arch)
 {
     try
     {
-        KpackModuleCache::load(archive.string(), ARCHIVE_TOC_KEY, "gfx90a", 0, DIGEST);
+        KpackModuleCache::load(archive.string(), tocKey, arch, 0, DIGEST);
     }
     catch(const KpackModuleLoadFailure& failure)
     {
         return failure;
     }
     return std::nullopt;
+}
+
+/// How load() fails for an arch @p archive lacks: at ARCH_LOOKUP once the archive opens,
+/// before any HIP call, or at OPEN_ARCHIVE when it does not. Empty if it did not fail.
+std::optional<KpackModuleLoadFailure> loadForAnAbsentArch(const std::filesystem::path& archive)
+{
+    return loadFailure(archive, ARCHIVE_TOC_KEY, ABSENT_ARCH);
 }
 
 constexpr std::uintmax_t CORRUPTION_BYTE_COUNT = 64;
@@ -118,6 +148,20 @@ constexpr std::uintmax_t CORRUPTION_BYTE_COUNT = 64;
     out << bytes;
     out.close();
     return !out.fail();
+}
+
+/// Device 0's bare arch and the packed conv entry this build produced for it. Leaves
+/// `packed.archive` empty when nothing was packaged for the device. Call through
+/// ASSERT_NO_FATAL_FAILURE.
+void findPackedConvEntry(std::string& arch, PackedKernelSource& packed)
+{
+    hipDeviceProp_t properties{};
+    std::filesystem::path packaged;
+    ASSERT_NO_FATAL_FAILURE(findPackedArchDirectory(properties, arch, packaged));
+    if(!packaged.empty())
+    {
+        ASSERT_NO_FATAL_FAILURE(readPackedKernelSource(packaged, PACKED_UKD_DESCRIPTOR, packed));
+    }
 }
 
 TEST(TestKpackModuleCacheKey, MakeKeyFormatsCorrectly)
@@ -216,7 +260,8 @@ TEST(TestKpackModuleCacheLoad, ReportsAnArchTheArchiveDoesNotHold)
 
     try
     {
-        KpackModuleCache::load(testKpackArchive().string(), ARCHIVE_TOC_KEY, "gfx90a", 0, DIGEST);
+        KpackModuleCache::load(
+            testKpackArchive().string(), ARCHIVE_TOC_KEY, ABSENT_ARCH, 0, DIGEST);
         FAIL() << "expected an arch the archive does not hold to be rejected";
     }
     catch(const KpackModuleLoadFailure& failure)
@@ -226,7 +271,7 @@ TEST(TestKpackModuleCacheLoad, ReportsAnArchTheArchiveDoesNotHold)
         EXPECT_EQ(failure.stage(), KpackLoadStage::ARCH_LOOKUP) << failure.what();
 
         const std::string message = failure.what();
-        EXPECT_NE(message.find("gfx90a"), std::string::npos)
+        EXPECT_NE(message.find(ABSENT_ARCH), std::string::npos)
             << "the message must name the arch that was asked for: " << message;
         EXPECT_NE(message.find(ARCHIVE_ARCH), std::string::npos)
             << "the message must name the arches the archive provides: " << message;
@@ -236,12 +281,12 @@ TEST(TestKpackModuleCacheLoad, ReportsAnArchTheArchiveDoesNotHold)
 TEST(TestKpackModuleCacheLoad, ReportsAnArchiveThatDeclaresNoArchitectures)
 {
     const ScopedDirectory scratch = claimScratchDirectory("kpackmodulecache");
-    const ReleaseSharedArchives release;
+    const ScopedArchiveLease lease;
     const std::filesystem::path archive = scratch.path() / "no-arches.kpack";
     ASSERT_TRUE(copyWithoutArchitectures(archive)) << "could not write " << archive;
 
-    // Twice: a second load must refuse the same way rather than answer from a handle the
-    // first left open and report the archive as built for some other GPU.
+    // Twice, under a lease: a second load must refuse the same way rather than answer from
+    // a handle the first retained and report the archive as built for some other GPU.
     for(int attempt = 0; attempt < 2; ++attempt)
     {
         const auto failure = loadForAnAbsentArch(archive);
@@ -252,32 +297,36 @@ TEST(TestKpackModuleCacheLoad, ReportsAnArchiveThatDeclaresNoArchitectures)
     }
 }
 
-TEST(TestKpackModuleCacheLoad, ALaterLoadReusesTheArchiveAnEarlierOneOpened)
+TEST(TestKpackModuleCacheLoad, ALaterLoadReadsEntriesThroughTheArchiveAnEarlierOneOpened)
 {
     ASSERT_TRUE(std::filesystem::exists(testKpackArchive()))
         << "the test kpack archive, resolved relative to this binary, is missing: "
         << testKpackArchive();
     const ScopedDirectory scratch = claimScratchDirectory("kpackmodulecache");
-    const ReleaseSharedArchives release;
+    const ScopedArchiveLease lease;
     const std::filesystem::path archive = scratch.path() / "shared.kpack";
     std::filesystem::copy_file(testKpackArchive(), archive);
+    const std::size_t before = SharedKpackArchives::opensForTesting();
 
-    const auto first = loadForAnAbsentArch(archive);
-    ASSERT_TRUE(first.has_value());
-    EXPECT_EQ(first->stage(), KpackLoadStage::ARCH_LOOKUP) << first->what();
+    // An absent toc_key at an arch the archive holds: past the arch check and into
+    // codeObject(), without a stage that would evict the handle.
+    for(int attempt = 0; attempt < 2; ++attempt)
+    {
+        const auto failure = loadFailure(archive, ABSENT_TOC_KEY, ARCHIVE_ARCH);
+        ASSERT_TRUE(failure.has_value()) << "attempt " << attempt;
+        EXPECT_EQ(failure->stage(), KpackLoadStage::ENTRY_LOOKUP)
+            << "attempt " << attempt << ": " << failure->what();
+    }
 
-    // Reopening would now fail at OPEN_ARCHIVE; reaching ARCH_LOOKUP again means the
-    // second load was answered by the handle the first left open.
-    ASSERT_TRUE(corruptInPlace(archive)) << "could not rewrite " << archive << " in place";
-    const auto second = loadForAnAbsentArch(archive);
-    ASSERT_TRUE(second.has_value());
-    EXPECT_EQ(second->stage(), KpackLoadStage::ARCH_LOOKUP) << second->what();
+    // One open between them: the second load read its arch list and entry through the
+    // handle the first opened.
+    EXPECT_EQ(SharedKpackArchives::opensForTesting() - before, 1U);
 }
 
 TEST(TestKpackModuleCacheLoad, AFailedOpenIsRetriedRatherThanRemembered)
 {
     const ScopedDirectory scratch = claimScratchDirectory("kpackmodulecache");
-    const ReleaseSharedArchives release;
+    const ScopedArchiveLease lease;
     const std::filesystem::path archive = scratch.path() / "arrives-later.kpack";
 
     const auto absent = loadForAnAbsentArch(archive);
@@ -293,20 +342,203 @@ TEST(TestKpackModuleCacheLoad, AFailedOpenIsRetriedRatherThanRemembered)
     EXPECT_EQ(present->stage(), KpackLoadStage::ARCH_LOOKUP) << present->what();
 }
 
-TEST(TestKpackModuleCacheLoad, AResetMakesTheNextLoadReadAnArchiveCorruptedInPlace)
+TEST(TestKpackModuleCacheLoad, ADecodeFailureEvictsTheHandleButAMissingEntryOrArchDoesNot)
 {
     const ScopedDirectory scratch = claimScratchDirectory("kpackmodulecache");
-    const ReleaseSharedArchives release;
-    const std::filesystem::path archive = scratch.path() / "corrupted.kpack";
+    const ScopedArchiveLease lease;
+    const std::filesystem::path archive = scratch.path() / "evicted.kpack";
     std::filesystem::copy_file(testKpackArchive(), archive);
+    const std::weak_ptr<const OpenKpackArchive> probe = SharedKpackArchives::open(archive.string());
+    ASSERT_FALSE(probe.expired()) << "a lease is held, so the archive should be retained";
+
+    // Intact in both: it lacks what was asked for. Not evicting rests on memoized discovery;
+    // see KpackModuleCache::load.
+    const auto absentArch = loadForAnAbsentArch(archive);
+    ASSERT_TRUE(absentArch.has_value());
+    ASSERT_EQ(absentArch->stage(), KpackLoadStage::ARCH_LOOKUP) << absentArch->what();
+    EXPECT_FALSE(probe.expired()) << "a missing arch must not evict the handle";
+
+    const auto absentEntry = loadFailure(archive, ABSENT_TOC_KEY, ARCHIVE_ARCH);
+    ASSERT_TRUE(absentEntry.has_value());
+    ASSERT_EQ(absentEntry->stage(), KpackLoadStage::ENTRY_LOOKUP) << absentEntry->what();
+    EXPECT_FALSE(probe.expired()) << "a missing entry must not evict the handle";
+
+    // An entry the TOC lists that does not decode is damage, so the handle goes.
+    const auto undecodable = loadFailure(archive, ARCHIVE_TOC_KEY, ARCHIVE_ARCH);
+    ASSERT_TRUE(undecodable.has_value());
+    ASSERT_EQ(undecodable->stage(), KpackLoadStage::DECOMPRESS) << undecodable->what();
+    EXPECT_TRUE(probe.expired()) << "a decode failure must evict the handle";
+}
+
+TEST(TestKpackModuleCacheLoad, AnArchiveReplacedAfterADecodeFailureIsReadWithoutAReset)
+{
+    const ScopedDirectory scratch = claimScratchDirectory("kpackmodulecache");
+    const ScopedArchiveLease lease;
+    const std::filesystem::path archive = scratch.path() / "replaced.kpack";
+    std::filesystem::copy_file(testKpackArchive(), archive);
+
+    const auto undecodable = loadFailure(archive, ARCHIVE_TOC_KEY, ARCHIVE_ARCH);
+    ASSERT_TRUE(undecodable.has_value());
+    ASSERT_EQ(undecodable->stage(), KpackLoadStage::DECOMPRESS) << undecodable->what();
+
+    // The failure closed the archive, so replacing it does not race an open handle.
+    ASSERT_TRUE(copyWithoutArchitectures(archive)) << "could not rewrite " << archive;
+
+    // Still leased and never reset: only a reopen can see the replacement.
+    const auto replaced = loadFailure(archive, ARCHIVE_TOC_KEY, ARCHIVE_ARCH);
+    ASSERT_TRUE(replaced.has_value());
+    EXPECT_EQ(replaced->stage(), KpackLoadStage::ARCH_LOOKUP) << replaced->what();
+    EXPECT_NE(std::string(replaced->what()).find("declares no architectures"), std::string::npos)
+        << replaced->what();
+}
+
+TEST(TestKpackModuleCacheLoad, ADigestMismatchEvictsTheHandle)
+{
+    SKIP_IF_NO_DEVICES();
+
+    std::string arch;
+    PackedKernelSource packed;
+    ASSERT_NO_FATAL_FAILURE(findPackedConvEntry(arch, packed));
+    if(packed.archive.empty())
+    {
+        GTEST_SKIP() << "nothing was packaged for this device (" << arch << ") under "
+                     << unitKpackRoot();
+    }
+
+    const ScopedDirectory scratch = claimScratchDirectory("kpackmodulecache");
+    const ScopedArchiveLease lease;
+    const std::filesystem::path archive = scratch.path() / "mismatched.kpack";
+    std::filesystem::copy_file(packed.archive, archive);
+    const std::weak_ptr<const OpenKpackArchive> probe = SharedKpackArchives::open(archive.string());
+    ASSERT_FALSE(probe.expired()) << "a lease is held, so the archive should be retained";
+
+    // DIGEST never matches a real code object.
+    const auto mismatch = loadFailure(archive, packed.tocKey, arch);
+    ASSERT_TRUE(mismatch.has_value());
+    ASSERT_EQ(mismatch->stage(), KpackLoadStage::DIGEST_MISMATCH) << mismatch->what();
+    EXPECT_TRUE(probe.expired()) << "a digest mismatch must evict the handle";
+
+    // The archive reopens for the next load.
+    EXPECT_NE(KpackModuleCache::load(archive.string(), packed.tocKey, arch, 0, packed.sha256),
+              nullptr);
+}
+
+TEST(TestSharedKpackArchives, NothingIsRetainedWithoutALease)
+{
+    const ScopedDirectory scratch = claimScratchDirectory("kpackmodulecache");
+    const std::filesystem::path archive = scratch.path() / "unleased.kpack";
+    std::filesystem::copy_file(testKpackArchive(), archive);
+
+    EXPECT_FALSE(retainedAfterOpen(archive));
+
+    // The load closed the archive on return, so the next one reads the rewritten file.
     const auto opened = loadForAnAbsentArch(archive);
     ASSERT_TRUE(opened.has_value());
     ASSERT_EQ(opened->stage(), KpackLoadStage::ARCH_LOOKUP) << opened->what();
+    ASSERT_TRUE(corruptInPlace(archive)) << "could not rewrite " << archive;
+    const auto reread = loadForAnAbsentArch(archive);
+    ASSERT_TRUE(reread.has_value());
+    EXPECT_EQ(reread->stage(), KpackLoadStage::OPEN_ARCHIVE) << reread->what();
+}
 
-    // The integration suite's broken-archive order: corrupt the open archive, then reset.
-    ASSERT_TRUE(corruptInPlace(archive)) << "could not rewrite " << archive << " in place";
-    SharedKpackArchives::resetForTesting();
+TEST(TestSharedKpackArchives, ReleasingTheLastLeaseClosesEveryArchive)
+{
+    const ScopedDirectory scratch = claimScratchDirectory("kpackmodulecache");
+    ScopedArchiveLease first;
+    ScopedArchiveLease second;
+    const std::filesystem::path archive = scratch.path() / "released.kpack";
+    std::filesystem::copy_file(testKpackArchive(), archive);
+    const std::weak_ptr<const OpenKpackArchive> probe = SharedKpackArchives::open(archive.string());
+    ASSERT_FALSE(probe.expired()) << "a lease is held, so the archive should be retained";
 
+    first.release();
+    EXPECT_FALSE(probe.expired()) << "a lease is still held, so the archive must stay open";
+
+    second.release();
+    EXPECT_TRUE(probe.expired()) << "the last lease is gone, so the archive must be closed";
+}
+
+TEST(TestSharedKpackArchives, AContainerHoldsALeaseForItsLifetime)
+{
+    const ScopedDirectory scratch = claimScratchDirectory("kpackmodulecache");
+    const std::filesystem::path archive = scratch.path() / "container.kpack";
+    std::filesystem::copy_file(testKpackArchive(), archive);
+
+    std::weak_ptr<const OpenKpackArchive> probe;
+    {
+        const core::Container container;
+        probe = SharedKpackArchives::open(archive.string());
+        EXPECT_FALSE(probe.expired()) << "a live Container must keep archives open";
+    }
+    EXPECT_TRUE(probe.expired()) << "destroying the last Container must close its archives";
+}
+
+TEST(TestSharedKpackArchives, ConcurrentFirstOpensOfOneArchiveShareOneHandle)
+{
+    const ScopedDirectory scratch = claimScratchDirectory("kpackmodulecache");
+    const ScopedArchiveLease lease;
+    const std::filesystem::path archive = scratch.path() / "contended.kpack";
+    std::filesystem::copy_file(testKpackArchive(), archive);
+    const std::string path = archive.string();
+    const std::size_t before = SharedKpackArchives::opensForTesting();
+
+    constexpr std::size_t THREAD_COUNT = 8;
+    std::vector<std::shared_ptr<const OpenKpackArchive>> handles(THREAD_COUNT);
+    std::atomic<std::size_t> waiting{THREAD_COUNT};
+    std::vector<std::thread> threads;
+    threads.reserve(THREAD_COUNT);
+    for(std::size_t index = 0; index < THREAD_COUNT; ++index)
+    {
+        threads.emplace_back([&handles, &waiting, &path, index] {
+            // Released together, so every thread reaches open() before any handle exists.
+            --waiting;
+            while(waiting.load() != 0)
+            {
+                std::this_thread::yield();
+            }
+            try
+            {
+                handles[index] = SharedKpackArchives::open(path);
+            }
+            catch(const KpackModuleLoadFailure&)
+            {
+                handles[index] = nullptr;
+            }
+        });
+    }
+    for(auto& thread : threads)
+    {
+        thread.join();
+    }
+
+    ASSERT_NE(handles.front(), nullptr);
+    for(std::size_t index = 1; index < THREAD_COUNT; ++index)
+    {
+        EXPECT_EQ(handles[index], handles.front()) << "thread " << index;
+    }
+    EXPECT_EQ(SharedKpackArchives::opensForTesting() - before, 1U)
+        << "concurrent first opens of one archive must open it once";
+}
+
+TEST(TestSharedKpackArchives, TheIngestorResetHookClosesRetainedArchivesButKeepsTheLease)
+{
+    const ScopedDirectory scratch = claimScratchDirectory("kpackmodulecache");
+    const ScopedArchiveLease lease;
+    const std::filesystem::path archive = scratch.path() / "reset.kpack";
+    std::filesystem::copy_file(testKpackArchive(), archive);
+    const std::weak_ptr<const OpenKpackArchive> probe = SharedKpackArchives::open(archive.string());
+    ASSERT_FALSE(probe.expired()) << "a lease is held, so the archive should be retained";
+
+    // The hook the plugin exports to the integration suite, not the class's own reset.
+    kernel_ingestor_engine::resetIngestorModuleCachesForTesting();
+    EXPECT_TRUE(probe.expired()) << "the reset hook must close every retained archive";
+    EXPECT_TRUE(retainedAfterOpen(archive)) << "the reset must leave the lease in force";
+
+    // The integration suite corrupts and then resets, with nothing open at the rewrite.
+    // Resetting first gives the same here: nothing is left open to rewrite, and the next
+    // load reads the damage.
+    kernel_ingestor_engine::resetIngestorModuleCachesForTesting();
+    ASSERT_TRUE(corruptInPlace(archive)) << "could not rewrite " << archive;
     const auto reread = loadForAnAbsentArch(archive);
     ASSERT_TRUE(reread.has_value());
     EXPECT_EQ(reread->stage(), KpackLoadStage::OPEN_ARCHIVE) << reread->what();

@@ -74,6 +74,7 @@ namespace jit = hipblaslt_ext::experimental::jit::detail;
 #include <Tensile/hip/HipUtils.hpp>
 
 #include <algorithm>
+#include <cstring>
 #include <atomic>
 #include <cstring>
 #include <complex>

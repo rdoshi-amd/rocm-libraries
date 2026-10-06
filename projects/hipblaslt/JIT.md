@@ -30,30 +30,31 @@ without generating again. The only backend is a test backend that replays
 pre-generated source bundles. No generator backend is implemented yet.
 `hipblasLtMatmulAlgoGetHeuristic` and `Gemm::algoGetHeuristic` consult JIT
 when the library is built with JIT support and `HIPBLASLT_JIT` is `1` or `2`.
-`getIndexFromAlgo` returns -1 for those algorithms: they are process-local,
-not TensileLite library indices. `jit::getLibraryAlgos` returns persistent
-indices instead.
+Those queries, and `jit::getJitAlgo`, publish into the JIT solution library
+and reuse a hit, so a later process asking the same problem gets the same
+index and does not generate. The algorithms are library indices from 2^30.
+`getIndexFromAlgo` returns that index.
 
 ## Current behavior
 
 ### Entry points
 
 The internal entry points, in `library/src/amd_detail/hipblaslt-jit.hpp`,
-generate through `Jit`, keep generated algorithms in one process-local
-registry, and return an algorithm for the existing C and C++ GEMM execution
-APIs:
+generate through `Jit`, publish into the JIT solution library, and return an
+algorithm for the existing C and C++ GEMM execution APIs:
 
 - A backend factory, such as `jit::replay::createBackend`, returns a `Backend`
   handle that owns a `Jit` configured with that backend.
 - `jit::makeGemmRequest` captures existing GEMM descriptors and host scalars.
-- `jit::getJitAlgo` compiles on the selected device and returns an owned
-  `Solution`.
-- `jit::getGemmAlgo` adapts the solution to the algorithm that
+- `jit::getJitAlgo` looks the solution up in the JIT solution library, publishes
+  it when it is absent, and returns an owned `Solution` for the first index.
+  A hit does not generate.
+- `jit::getGemmAlgo` adapts the solution to the library index that
   `hipblasLtMatmul` and `Gemm` accept.
-- `jit::getLibraryAlgos` instead returns solution indices from the
-  [JIT solution library](#persistent-solution-library), generating and
-  publishing the solutions it lacks; `hipblaslt_ext::getAlgosFromIndex` turns
-  them into algorithms.
+- `jit::getLibraryAlgos` returns solution indices from the same lookup and
+  publish, described under
+  [persistent solution library](#persistent-solution-library).
+  `hipblaslt_ext::getAlgosFromIndex` turns them into algorithms.
 
 The header is internal, as are `hipblaslt-jit-replay.hpp` and
 `hipblaslt-jit-gemm-internal.hpp`: they are not installed and
@@ -92,13 +93,16 @@ once and leaves the mode off.
 `HIPBLASLT_JIT_TEST_REPLAY` is a whitespace-separated list of source-bundle
 directories, read once per process. When it names bundles, heuristic queries
 use the replay backend. A JIT build with no such source warns once: mode `1`
-leaves the query unchanged, and mode `2` returns no algorithms.
+leaves the query unchanged, and mode `2` returns no algorithms. The replay
+backend implements generation only. Every query publishes through the JIT
+solution library.
 
-Heuristic queries and `getJitAlgo` publish into the
-[persistent solution library](#persistent-solution-library) and look there
-first. A hit does not generate. The returned algorithms are library indices
-from 2^30, so `getIndexFromAlgo` returns that index and a later process runs
-the same index without generating. There is no process-local heuristic cache.
+The algorithms those queries return are JIT solution library indices, from
+2^30, and they run through the same path as a prebuilt index.
+`getIndexFromAlgo` returns the index. A second process that queries the same
+problem receives that index and does not generate. The library is the only
+cache: nothing is kept in a process-local map. A capturing stream may return a
+hit and does not start a build.
 
 Grouped GEMM is not filled from the JIT library. Mode `1` leaves that query on
 its existing path. Mode `2` returns success with no algorithms.
@@ -151,8 +155,10 @@ The implementations are:
 - Solution store: the JIT solution library, in `hipblaslt-jit-library.cpp`,
   with `hipblaslt-jit-msgpack.cpp` writing the library files and
   `hipblaslt-jit-fs.cpp` providing the directory checks, file lock and atomic
-  replacement. `getLibraryAlgos` sets it as the store of its `Jit`; see
-  [persistent solution library](#persistent-solution-library).
+  replacement. `getJitAlgo`, `getLibraryAlgos` and heuristic queries share one
+  lookup-then-publish helper that sets this store; see
+  [persistent solution library](#persistent-solution-library). A backend
+  implements `generate` only.
 - Replay backend: `hipblaslt-jit-replay-backend.cpp` replays a list of source
   bundles without a generator. A generation returns, in list order, the
   bundles with a solution whose predicates accept the device and problem, until
@@ -212,12 +218,15 @@ never benchmarks generated solutions. A failed build names the retained
 
 The JIT solution library keeps generated solutions on disk so that later
 processes run them without generating again. It is the only cache. Every
-backend publishes what it builds. `getJitAlgo`, heuristic queries and
-`jit::getLibraryAlgos` share one lookup: indices already published for the
-request, in the order they were first published, then solutions generated now
-and published. A hit does not generate. Any process then passes an index to
+backend publishes what it builds. `jit::getLibraryAlgos`, `jit::getJitAlgo`
+and the heuristic queries share one lookup-then-publish helper: for one
+request it returns up to the requested number of solution indices, first the
+published solutions that match the request, in the order they were first
+published, then solutions that `Jit` generates with the supplied backend and
+publishes. A hit skips generation. Any process then passes an index to
 `hipblaslt_ext::getAlgosFromIndex`, `hipblasLtMatmul` and `Gemm` as it would a
-prebuilt index. A second process gets the same index and does not generate.
+prebuilt index. Heuristic results are those indices. A second process gets
+the same index and does not generate.
 
 **Location and permissions.** The root is `HIPBLASLT_JIT_LIBRARY_PATH` or, when
 that is unset or empty, `/tmp/hipblaslt-jit-<uid>/` on Linux and

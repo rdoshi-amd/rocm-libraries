@@ -5,11 +5,10 @@
 
 #include <hipdnn-gpu-ref/detail/GpuRefHipError.hpp>
 #include <hipdnn-gpu-ref/detail/GpuRefKernelCompiler.hpp>
+#include <hipdnn-gpu-ref/detail/GpuRefLaunch.hpp>
 
 #include <cstdint>
 #include <hip/hip_runtime.h>
-#include <limits>
-#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -22,7 +21,7 @@ namespace
 // Argument structs shared with the HipRTC kernel.
 #include <GpuRefSdpaArgs.h> // NOLINT(misc-include-cleaner)
 
-// Copy of the dense launcher's helper, kept local so the two files stay independent.
+// Same helper as the dense launcher's.
 SdpaStrides toSdpaStrides(const std::vector<int64_t>& strides)
 {
     SdpaStrides result{};
@@ -31,39 +30,6 @@ SdpaStrides toSdpaStrides(const std::vector<int64_t>& strides)
         result.s[i] = static_cast<long long>(strides[i]);
     }
     return result;
-}
-
-void launchKernel(hipFunction_t function, int64_t totalElements, void* argsPtr, size_t argsSize)
-{
-    const int64_t blockSize = 256;
-    auto gridSize = (totalElements + blockSize - 1) / blockSize;
-
-    if(gridSize > static_cast<int64_t>(std::numeric_limits<unsigned int>::max()))
-    {
-        throw std::runtime_error("Grid size exceeds hipModuleLaunchKernel limit");
-    }
-
-    // NOLINTNEXTLINE(modernize-avoid-c-arrays)
-    void* config[] = {HIP_LAUNCH_PARAM_BUFFER_POINTER,
-                      argsPtr,
-                      HIP_LAUNCH_PARAM_BUFFER_SIZE,
-                      &argsSize,
-                      HIP_LAUNCH_PARAM_END};
-
-    detail::throwOnHipError(hipModuleLaunchKernel(function,
-                                                  static_cast<unsigned int>(gridSize),
-                                                  1,
-                                                  1,
-                                                  static_cast<unsigned int>(blockSize),
-                                                  1,
-                                                  1,
-                                                  0,
-                                                  nullptr,
-                                                  nullptr,
-                                                  config),
-                            "hipModuleLaunchKernel failed");
-
-    detail::throwOnHipError(hipDeviceSynchronize(), "hipDeviceSynchronize failed");
 }
 
 } // namespace
@@ -168,7 +134,7 @@ void GpuFpReferenceSdpaRagged::launchSdpaRaggedFwd(const void* qPtr,
     args.topLeftAlignment = topLeftAlignment ? 1 : 0;
 
     auto totalElements = totalQ * numHeads * headDimV;
-    launchKernel(kernel.function(), totalElements, &args, sizeof(args));
+    detail::launchKernelForElements(kernel.function(), totalElements, &args, sizeof(args));
 }
 
 } // namespace hipdnn_gpu_ref

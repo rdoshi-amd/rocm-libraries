@@ -14709,9 +14709,52 @@ class KernelWriterAssembly(KernelWriter):
         module.add(SOrB32(sgprLo, sgprLo, sgpr(stmpRes.idx)))
         module.add(SLShiftRightB32(sgprHi, 7, sgprHi))
     return module
- 
+
+  def _postLoopMbBranchless(self, kernel) -> bool:
+    """MultipleBuffer epilogue whose common case is strided, not the pointer-array batch.
+
+    Persistent kernels keep the AddressFlags SRD path. GSU==0 has no split to test.
+    """
+    return (
+      not isPersistent(kernel)
+      and kernel["GlobalSplitU"] != 0
+      and kernel["_GlobalAccumulation"] in ("MultipleBuffer", "MultipleBufferSingleKernel")
+    )
+
+  def _emitBranchlessPostLoopSrd(self, module, kernel, ch: str):
+    """Srd = 0 only for the general-batch case that reads a pointer array. No branches."""
+    # MultipleBufferSingleKernel keeps C as the user pointer array for every GSU.
+    # D, and both C and D for MultipleBuffer, are zero only when GSU==1 and ArgType==3.
+    # Every other case copies Address, which is the workspace pointer when GSU>1.
+    # s_cselect_b64 does not modify SCC. src0 is taken when SCC is set.
+    mbsKOnlyC = kernel["_GlobalAccumulation"] == "MultipleBufferSingleKernel" and ch == "C"
+    if kernel["ProblemType"]["SupportUserArgs"]:
+      if mbsKOnlyC:
+        self.cmpNamedArgTypeEq(module, 3, "ArgType == 3 for General Batched GEMM")
+        module.add(SCSelectB64(dst=sgpr("Srd%s+0"%ch, 2), src0=0, src1=sgpr("Address%s+0"%ch, 2),
+                               comment="Srd%s = 0 if general batch else Address"%ch))
+      else:
+        with self.allocTmpSgpr(1, tag="allocPostLoopSrd_pred") as pred:
+          module.add(SAndB32(dst=sgpr(pred.idx), src0=sgpr("GSU"), src1=self.gsuMaskHex(kernel), comment="Restore GSU"))
+          module.add(SCmpEQU32(src0=sgpr(pred.idx), src1=1, comment="GSU == 1 ?"))
+          module.add(SCSelectB32(dst=sgpr(pred.idx), src0=1, src1=0, comment="pred = (GSU == 1)"))
+          self.cmpNamedArgTypeEq(module, 3, "ArgType == 3 for General Batched GEMM")
+          module.add(SCSelectB32(dst=sgpr(pred.idx), src0=sgpr(pred.idx), src1=0, comment="pred = GSU==1 and general batch"))
+          module.add(SCmpEQU32(src0=sgpr(pred.idx), src1=1, comment="GSU==1 and general batch"))
+          module.add(SCSelectB64(dst=sgpr("Srd%s+0"%ch, 2), src0=0, src1=sgpr("Address%s+0"%ch, 2),
+                                 comment="Srd%s = 0 if GSU==1 general batch else Address"%ch))
+    else:
+      module.add(SMovB64(dst=sgpr("Srd%s+0"%ch, 2), src=sgpr("Address%s+0"%ch, 2), comment="init SRD base address"))
+    module.add(SMovB32(dst=sgpr("Srd%s+2"%ch), src="BufferOOB"))
+    module.add(SMovB32(dst=sgpr("Srd%s+3"%ch), src="Srd127_96", comment="Set bits 127_96 in post-loop SRD"))
+    module.add(self.shiftSrd(ch))
+    module.addSpaceLine()
+
   def allocPostLoopSrd(self, ch: str, kernel):   
     module = Module("allocPostLoopSrd")
+    if self._postLoopMbBranchless(kernel):
+      self._emitBranchlessPostLoopSrd(module, kernel, ch)
+      return module
     GeneralBatchedGemmSrdInitiation = Label(label="GeneralBatchedGemmSrdInitiation"+ch, comment="Handling General Batched GEMM SRD initialization")
     GeneralBatchedGemmSrdInitiation_End = Label(label="GeneralBatchedGemmSrdInitiation"+ch+"_End", comment="End of handling General Batched GEMM SRD initialization")
     ArgTypeCheckLabel = Label(label="ArgTypeCheck"+ch, comment="Check if ArgType is for General Batched GEMM for "+ch)

@@ -101,18 +101,23 @@ class GSU(Component):
     def computeStoreSrdStart(self, writer, kernel):
         pass
     
-    def computeStoreSrdStartCommon(self, writer, kernel):
+    def computeStoreSrdStartCommon(self, writer, kernel, assumeGsuGt1=False):
         module = Module("GSU Common computeStoreSrdStart")
         
         indices = list(range(0, kernel["ProblemType"]["NumIndicesC"]))
         numDim = len(indices)
 
         if kernel["_GlobalAccumulation"] == "MultipleBuffer" or kernel["_GlobalAccumulation"] == "MultipleBufferSingleKernel":
-            gsuLabel = Label(label=writer.labels.getNameInc("GSU"), comment="")
-            with writer.allocTmpSgpr(1, tag="computeStoreSrdStart_tmpSgprGSU") as tmpSgprGSU:
-                module.add(SAndB32(dst=sgpr(tmpSgprGSU.idx), src0=sgpr("GSU"), src1=writer.gsuMaskHex(kernel), comment="Restore GSU"))
-                module.add(SCmpEQU32(src0=sgpr(tmpSgprGSU.idx), src1=1, comment="GSU == 1 ?"))
-                module.add(SCBranchSCC1(labelName=gsuLabel.getLabelName(), comment="branch if GSU == 1"))
+            # When both store bodies exist, this offset is placed at the start of the
+            # GSU>1 body. GSU==1 never executes it (the partition offset is zero) and
+            # does not branch around it.
+            gsuLabel = None
+            if not assumeGsuGt1:
+                gsuLabel = Label(label=writer.labels.getNameInc("GSU"), comment="")
+                with writer.allocTmpSgpr(1, tag="computeStoreSrdStart_tmpSgprGSU") as tmpSgprGSU:
+                    module.add(SAndB32(dst=sgpr(tmpSgprGSU.idx), src0=sgpr("GSU"), src1=writer.gsuMaskHex(kernel), comment="Restore GSU"))
+                    module.add(SCmpEQU32(src0=sgpr(tmpSgprGSU.idx), src1=1, comment="GSU == 1 ?"))
+                    module.add(SCBranchSCC1(labelName=gsuLabel.getLabelName(), comment="branch if GSU == 1"))
             # GSU algorithm 2: adjust output buffer address to per GSU buffer
             with writer.allocTmpSgpr(4, alignment=1, tag="computeStoreSrdStart_tmpSgprInfo") as tmpSgprInfo:
                 if tmpSgprInfo.idx % 2 == 0:
@@ -138,7 +143,8 @@ class GSU(Component):
                 module.add(SLShiftLeftB64(dst=sgpr(tmpSgprX2,2), src=sgpr(tmpSgprX2,2), shiftHex=log2(writer.states.bpeCinternal), comment="scale by bpe"))
                 module.add(SAddU32(dst=sgpr("SrdD+0"), src0=sgpr("SrdD+0"), src1=sgpr(tmpSgprX2), comment="add lo GSU offset to SRD"))
                 module.add(SAddCU32(dst=sgpr("SrdD+1"), src0=sgpr("SrdD+1"), src1=sgpr(tmpSgpr1), comment="add hi GSU offset to SRD"))
-            module.add(gsuLabel)
+            if gsuLabel is not None:
+                module.add(gsuLabel)
 
         return module
 

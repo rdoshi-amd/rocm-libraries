@@ -14361,8 +14361,9 @@ class KernelWriterAssembly(KernelWriter):
       self._emitPendingGeneral(module, pendingGeneral)
       return module
 
-    gsuComponent = Component.GSU.find(self)
-    module.add(gsuComponent.computeStoreSrdStart(self, kernel))
+    if not self._deferGsuPartitionOffset(kernel, noMultipleBuffer):
+      gsuComponent = Component.GSU.find(self)
+      module.add(gsuComponent.computeStoreSrdStart(self, kernel))
 
     if isPersistent(kernel):
       processingComponent = Component.TileProcessingStrategy.find(self)
@@ -14707,6 +14708,14 @@ class KernelWriterAssembly(KernelWriter):
       not isPersistent(kernel)
       and kernel["GlobalSplitU"] != 0
       and kernel["_GlobalAccumulation"] in ("MultipleBuffer", "MultipleBufferSingleKernel")
+    )
+
+  def _deferGsuPartitionOffset(self, kernel, noMultipleBuffer=False) -> bool:
+    """Place the GSU>1 partition offset in that store body instead of branching over it."""
+    return (
+      self._postLoopMbBranchless(kernel)
+      and not noMultipleBuffer
+      and not self.debugConfig.splitGSU
     )
 
   def _emitBranchlessPostLoopSrd(self, module, kernel, ch: str):
@@ -16193,6 +16202,10 @@ class KernelWriterAssembly(KernelWriter):
       if gsuLimit > 1:
         betas = betasBackup
         if gsuLimitIdx == 0:
+          # GSU==1 branched over this body. The partition offset is zero for GSU==1,
+          # so it lives here and that path does not skip it with its own branch.
+          if self._deferGsuPartitionOffset(kernel):
+            module.add(Component.GSU.find(self).computeStoreSrdStartCommon(self, kernel, assumeGsuGt1=True))
           # useAtomicPkAddBF16 atomically accumulates into the real BF16 D, so
           # the GSU>1 store keeps the dest element size rather than the fp32 one.
           if not self.states.useAtomicPkAddBF16:

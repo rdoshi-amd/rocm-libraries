@@ -50,7 +50,7 @@
   "library": {
     "format": "msgpack",
     "logical_path": "library/TensileLibrary.dat",
-    "path": "library/TensileLibrary.dat.zlib"
+    "path": "library/TensileLibrary.dat"
   },
   "counts": {
     "solutions": 1,

@@ -22,6 +22,7 @@
 #include <hipdnn-gpu-ref/GpuFpReferenceSdpaRagged.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <memory>
 #include <numeric>
@@ -1071,4 +1072,211 @@ TEST(TestGpuSdpaRaggedFwdFp32, ThrowsOnZeroOffsetMultiplier)
                      nullptr,
                      mult)),
                  std::invalid_argument);
+}
+
+// --- Edge cases the batch lookup, per-batch mask alignment and strides must handle ---
+
+// The kernel finds each token's batch with a linear scan over the Q boundaries. Empty batches
+// at the front, at the back and back to back each share a boundary with a neighbour.
+TEST(TestGpuSdpaRaggedFwdFp32, LeadingEmptyQBatch)
+{
+    SKIP_IF_NO_DEVICES();
+    checkRagged<float>({0, 3, 2}, {2, 3, 1}, 2, 2, 2, 16, 16);
+}
+
+TEST(TestGpuSdpaRaggedFwdFp32, TrailingAndConsecutiveEmptyQBatches)
+{
+    SKIP_IF_NO_DEVICES();
+    checkRagged<float>({2, 0, 0, 3, 0}, {1, 2, 0, 3, 2}, 2, 2, 2, 16, 16);
+}
+
+// Bottom-right causal with more queries than keys in some batches: the first Sq - Skv rows of
+// those batches are fully masked, in the middle of the packed Q buffer.
+TEST(TestGpuSdpaRaggedFwdFp32, CausalBottomRightMoreQueriesThanKeys)
+{
+    SKIP_IF_NO_DEVICES();
+    checkRagged<float>({5, 2, 4}, {2, 5, 1}, 2, 2, 2, 16, 16, -1, 0, /*topLeftAlignment=*/false);
+}
+
+// A left-only window with bottom-right alignment uses the per-batch windowOffset in the left
+// bound, which no other case reaches.
+TEST(TestGpuSdpaRaggedFwdFp32, SlidingWindowLeftOnlyBottomRight)
+{
+    SKIP_IF_NO_DEVICES();
+    checkRagged<float>({6, 3, 4}, {4, 7, 4}, 2, 2, 2, 16, 16, 1, -1, /*topLeftAlignment=*/false);
+}
+
+// K and V head counts are independent (H = 8, Hk = 2, Hv = 4), with Dv != D.
+TEST(TestGpuSdpaRaggedFwdFp32, DistinctKAndVHeadCounts)
+{
+    SKIP_IF_NO_DEVICES();
+    checkRagged<float>({3, 5}, {4, 2}, 8, 2, 4, 16, 32);
+}
+
+namespace
+{
+
+// Token-major layouts other than contiguous [B, S, H, D]. Both pass the RFC-0014 layout check.
+enum class TokenLayout
+{
+    PADDED_TOKEN_STRIDE, // strides[1] = H * D + 8: gaps between tokens
+    DIM_MAJOR_TOKEN, // inside a token, D is the outer axis: strides {.., H * D, 1, H}
+};
+
+std::vector<int64_t> tokenLayoutStrides(const std::vector<int64_t>& dims, TokenLayout layout)
+{
+    const auto heads = dims[2];
+    const auto dim = dims[3];
+    if(layout == TokenLayout::PADDED_TOKEN_STRIDE)
+    {
+        const auto tokenStride = heads * dim + 8;
+        return {dims[1] * tokenStride, tokenStride, dim, 1};
+    }
+    return {dims[1] * heads * dim, heads * dim, 1, heads};
+}
+
+// fp32 self-shaped attention (Hk = Hv = H, Dv = D) on non-contiguous token-major tensors.
+// Offsets are cum * strides[1]. Only valid tokens are compared, through the strides.
+void checkRaggedTokenLayout(const std::vector<int64_t>& seqQ,
+                            const std::vector<int64_t>& seqKv,
+                            int64_t numHeads,
+                            int64_t headDim,
+                            TokenLayout layout)
+{
+    const auto batch = static_cast<int64_t>(seqQ.size());
+    const auto cumQ = cumTokens(seqQ);
+    const auto cumKv = cumTokens(seqKv);
+    const auto qDims = raggedDims(batch, maxOf(seqQ), numHeads, headDim);
+    const auto kvDims = raggedDims(batch, maxOf(seqKv), numHeads, headDim);
+    const auto qStrides = tokenLayoutStrides(qDims, layout);
+    const auto kvStrides = tokenLayoutStrides(kvDims, layout);
+
+    Tensor<float> q(qDims, qStrides);
+    Tensor<float> k(kvDims, kvStrides);
+    Tensor<float> v(kvDims, kvStrides);
+    Tensor<float> oGpu(qDims, qStrides);
+    q.fillWithRandomValues(-1.0f, 1.0f, SEED_Q);
+    k.fillWithRandomValues(-1.0f, 1.0f, SEED_K);
+    v.fillWithRandomValues(-1.0f, 1.0f, SEED_V);
+
+    std::vector<float> oCpuBack(static_cast<size_t>(cumQ.back() * qStrides[1]), 0.0f);
+    {
+        const auto wrap = [](float* buf,
+                             const std::vector<int64_t>& dims,
+                             const std::vector<int64_t>& strides,
+                             const std::vector<int64_t>& cum) {
+            return ShallowRaggedTensor<float>(
+                buf, dims, strides, BSHD_SEQ_AXIS, makeRaggedOffsetAux(cum, strides[1]));
+        };
+        auto qR = wrap(q.memory().hostData(), qDims, qStrides, cumQ);
+        auto kR = wrap(k.memory().hostData(), kvDims, kvStrides, cumKv);
+        auto vR = wrap(v.memory().hostData(), kvDims, kvStrides, cumKv);
+        auto oR = wrap(oCpuBack.data(), qDims, qStrides, cumQ);
+        CpuFpReferenceSdpaRagged::forward<float, float, float, float, float>(qR, kR, vR, oR);
+    }
+
+    auto offQ = makeRaggedOffset(cumQ, qStrides[1]);
+    auto offKv = makeRaggedOffset(cumKv, kvStrides[1]);
+    GpuFpReferenceSdpaRagged::fpropRagged<float, float, float, float, float>(
+        q, k, v, oGpu, offQ, offKv, offKv, offQ);
+
+    const auto* g = oGpu.memory().hostData();
+    const float tolerance = gpuRefFwdTolerance<float>();
+    for(int64_t token = 0; token < cumQ.back(); ++token)
+    {
+        for(int64_t h = 0; h < numHeads; ++h)
+        {
+            for(int64_t d = 0; d < headDim; ++d)
+            {
+                const auto i
+                    = static_cast<size_t>(token * qStrides[1] + h * qStrides[2] + d * qStrides[3]);
+                EXPECT_NEAR(g[i], oCpuBack[i], tolerance)
+                    << "output mismatch at token " << token << " head " << h << " dim " << d;
+            }
+        }
+    }
+}
+
+} // namespace
+
+TEST(TestGpuSdpaRaggedFwdFp32, PaddedTokenStride)
+{
+    SKIP_IF_NO_DEVICES();
+    checkRaggedTokenLayout({3, 0, 5}, {4, 2, 3}, 2, 16, TokenLayout::PADDED_TOKEN_STRIDE);
+}
+
+TEST(TestGpuSdpaRaggedFwdFp32, DimMajorTokenLayout)
+{
+    SKIP_IF_NO_DEVICES();
+    checkRaggedTokenLayout({3, 0, 5}, {4, 2, 3}, 2, 16, TokenLayout::DIM_MAJOR_TOKEN);
+}
+
+// Fully masked rows (Sq > Skv under bottom-right causal, and an empty KV batch) must write a zero
+// output and LSE = -inf at their own packed row, and the rows next to them must stay correct.
+// EXPECT_NEAR cannot compare -inf, so -inf rows are compared exactly.
+TEST(TestGpuSdpaRaggedFwdFp32, PackedLseOfFullyMaskedRows)
+{
+    SKIP_IF_NO_DEVICES();
+
+    const std::vector<int64_t> seqQ = {4, 3, 2};
+    const std::vector<int64_t> seqKv = {2, 0, 3};
+    const int64_t numHeads = 2;
+    const int64_t headDim = 16;
+    const auto batch = static_cast<int64_t>(seqQ.size());
+    const auto totalQ = sum(seqQ);
+    const auto totalKv = sum(seqKv);
+    const auto cumQ = cumTokens(seqQ);
+    const auto cumKv = cumTokens(seqKv);
+    const auto qDims = raggedDims(batch, maxOf(seqQ), numHeads, headDim);
+    const auto kvDims = raggedDims(batch, maxOf(seqKv), numHeads, headDim);
+    const auto lseDims = raggedDims(batch, maxOf(seqQ), numHeads, 1);
+    const int64_t seqStride = numHeads * headDim;
+
+    Tensor<float> q(qDims, raggedStrides(qDims));
+    Tensor<float> k(kvDims, raggedStrides(kvDims));
+    Tensor<float> v(kvDims, raggedStrides(kvDims));
+    Tensor<float> oGpu(qDims, raggedStrides(qDims));
+    Tensor<float> lseGpu(lseDims, raggedStrides(lseDims));
+    fillPackedRandom(q, totalQ * seqStride, -1.0f, 1.0f, SEED_Q);
+    fillPackedRandom(k, totalKv * seqStride, -1.0f, 1.0f, SEED_K);
+    fillPackedRandom(v, totalKv * seqStride, -1.0f, 1.0f, SEED_V);
+    lseGpu.fillWithValue(LSE_SENTINEL);
+
+    std::vector<float> oCpuBack(static_cast<size_t>(totalQ * seqStride), 0.0f);
+    std::vector<float> lseCpuBack(static_cast<size_t>(totalQ * numHeads), LSE_SENTINEL);
+    {
+        auto qR = wrapRagged(q.memory().hostData(), qDims, seqStride, cumQ);
+        auto kR = wrapRagged(k.memory().hostData(), kvDims, seqStride, cumKv);
+        auto vR = wrapRagged(v.memory().hostData(), kvDims, seqStride, cumKv);
+        auto oR = wrapRagged(oCpuBack.data(), qDims, seqStride, cumQ);
+        auto lseR = wrapRagged(lseCpuBack.data(), lseDims, numHeads, cumQ);
+        CpuFpReferenceSdpaRagged::forward<float, float, float, float, float>(
+            qR, kR, vR, oR, std::nullopt, -1, 0, /*topLeftAlignment=*/false, &lseR);
+    }
+
+    auto offQ = makeRaggedOffset(cumQ, seqStride);
+    auto offKv = makeRaggedOffset(cumKv, seqStride);
+    auto offLse = makeRaggedOffset(cumQ, numHeads);
+    GpuFpReferenceSdpaRagged::fpropRagged<float, float, float, float, float>(
+        q, k, v, oGpu, offQ, offKv, offKv, offQ, std::nullopt, -1, 0, false, &lseGpu, &offLse);
+
+    const float tolerance = gpuRefFwdTolerance<float>();
+    compareRaggedPacked(oGpu, oCpuBack, tolerance);
+
+    // Batch 0 rows 0-1 (Sq - Skv = 2) and all of batch 1 (Skv = 0) are fully masked.
+    int64_t maskedRows = 0;
+    const auto* lg = lseGpu.memory().hostData();
+    for(size_t i = 0; i < lseCpuBack.size(); ++i)
+    {
+        if(std::isinf(lseCpuBack[i]))
+        {
+            ++maskedRows;
+            EXPECT_EQ(lg[i], lseCpuBack[i]) << "masked-row LSE mismatch at element " << i;
+        }
+        else
+        {
+            EXPECT_NEAR(lg[i], lseCpuBack[i], tolerance) << "LSE mismatch at element " << i;
+        }
+    }
+    EXPECT_EQ(maskedRows, (2 + 3) * numHeads);
 }

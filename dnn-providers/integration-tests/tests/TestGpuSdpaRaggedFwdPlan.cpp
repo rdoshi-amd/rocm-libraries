@@ -1084,3 +1084,147 @@ INSTANTIATE_TEST_SUITE_P(ScaleSources,
                                            ScaleSource::BAKED_TENSOR,
                                            ScaleSource::RUNTIME_PASS_BY_VALUE),
                          scaleSourceName);
+
+// --- Mask attributes through the plan ---
+
+namespace
+{
+
+// Runs the fp32 plan on a graph with the given mask attributes and checks it against the CPU
+// ragged reference with the bounds and alignment the attributes should resolve to. The lengths
+// include Sq > Skv and Sq < Skv batches, so top-left and bottom-right give different outputs.
+void checkPlanMaskAgainstCpu(const SdpaAttributesT& attrs,
+                             int64_t expectedLeftBound,
+                             int64_t expectedRightBound,
+                             bool expectedTopLeft)
+{
+    const std::vector<int64_t> seqQ = {5, 2, 4};
+    const std::vector<int64_t> seqKv = {2, 5, 4};
+    const int64_t batch = 3;
+    const int64_t numHeads = 2;
+    const int64_t headDim = 16;
+    const int64_t seqStride = numHeads * headDim;
+    const int64_t totalQ = 11;
+    const auto qDims = raggedDims(batch, 5, numHeads, headDim);
+    const auto kvDims = raggedDims(batch, 5, numHeads, headDim);
+
+    RaggedSdpaFwdGraphOptions options;
+    options.attrs = attrs;
+    auto graphBuilder = createRaggedSdpaFwdGraph(Q_UID,
+                                                 K_UID,
+                                                 V_UID,
+                                                 O_UID,
+                                                 RAGGED_OFFSET_Q_UID,
+                                                 RAGGED_OFFSET_KV_UID,
+                                                 batch,
+                                                 qDims,
+                                                 kvDims,
+                                                 kvDims,
+                                                 qDims,
+                                                 DataType::FLOAT,
+                                                 options);
+    auto graphWrap = hipdnn_flatbuffers_sdk::flatbuffer_utilities::GraphWrapper(
+        graphBuilder.GetBufferPointer(), graphBuilder.GetSize());
+    const Fp32Builder fp32Builder;
+    ASSERT_TRUE(fp32Builder.isApplicable(graphWrap.getNode(0), graphWrap.getTensorMap()));
+    auto plan = fp32Builder.buildNodePlan(graphWrap, graphWrap.getNode(0));
+
+    Tensor<float> q(qDims, raggedStrides(qDims));
+    Tensor<float> k(kvDims, raggedStrides(kvDims));
+    Tensor<float> v(kvDims, raggedStrides(kvDims));
+    q.fillWithRandomValues(-1.0f, 1.0f, /*seed=*/11);
+    k.fillWithRandomValues(-1.0f, 1.0f, /*seed=*/22);
+    v.fillWithRandomValues(-1.0f, 1.0f, /*seed=*/33);
+    auto offQ = makeRaggedOffset(seqQ, seqStride);
+    auto offKv = makeRaggedOffset(seqKv, seqStride);
+    Tensor<float> oPlan(qDims, raggedStrides(qDims));
+    Tensor<float> oCpu(qDims, raggedStrides(qDims));
+
+    plan->execute({
+        {Q_UID, q.memory().deviceData()},
+        {K_UID, k.memory().deviceData()},
+        {V_UID, v.memory().deviceData()},
+        {O_UID, oPlan.memory().deviceData()},
+        {RAGGED_OFFSET_Q_UID, offQ.memory().deviceData()},
+        {RAGGED_OFFSET_KV_UID, offKv.memory().deviceData()},
+    });
+    oPlan.markDeviceModified();
+
+    {
+        auto qR = wrapRagged(q.memory().hostData(), qDims, seqStride, seqQ);
+        auto kR = wrapRagged(k.memory().hostData(), kvDims, seqStride, seqKv);
+        auto vR = wrapRagged(v.memory().hostData(), kvDims, seqStride, seqKv);
+        auto oR = wrapRagged(oCpu.memory().hostData(), qDims, seqStride, seqQ);
+        CpuFpReferenceSdpaRagged::forward<float, float, float, float, float>(
+            qR, kR, vR, oR, std::nullopt, expectedLeftBound, expectedRightBound, expectedTopLeft);
+    }
+
+    const auto* oPlanHost = oPlan.memory().hostData();
+    const auto* oCpuHost = oCpu.memory().hostData();
+    for(int64_t i = 0; i < totalQ * seqStride; ++i)
+    {
+        EXPECT_NEAR(oPlanHost[i], oCpuHost[i], 1e-4f) << "output mismatch at element " << i;
+    }
+}
+
+} // namespace
+
+// Deprecated causal_mask_bottom_right resolves to left = -1, right = 0, bottom-right alignment.
+TEST(TestGpuSdpaRaggedFwdPlan, ExecuteCausalBottomRightFlagMatchesCpu)
+{
+    SKIP_IF_NO_DEVICES();
+    SdpaAttributesT attrs;
+    attrs.causal_mask_bottom_right = true;
+    checkPlanMaskAgainstCpu(attrs, -1, 0, /*expectedTopLeft=*/false);
+}
+
+// Deprecated causal_mask resolves to top-left causal.
+TEST(TestGpuSdpaRaggedFwdPlan, ExecuteCausalTopLeftFlagMatchesCpu)
+{
+    SKIP_IF_NO_DEVICES();
+    SdpaAttributesT attrs;
+    attrs.causal_mask = true;
+    checkPlanMaskAgainstCpu(attrs, -1, 0, /*expectedTopLeft=*/true);
+}
+
+// Explicit bounds with bottom-right diagonal_alignment reach the kernel unchanged.
+TEST(TestGpuSdpaRaggedFwdPlan, ExecuteBottomRightBandMatchesCpu)
+{
+    SKIP_IF_NO_DEVICES();
+    SdpaAttributesT attrs;
+    attrs.diagonal_alignment = DiagonalAlignment::BOTTOM_RIGHT;
+    attrs.left_bound = 1;
+    attrs.right_bound = 0;
+    checkPlanMaskAgainstCpu(attrs, 1, 0, /*expectedTopLeft=*/false);
+}
+
+// Both deprecated causal flags, or a bound below -1, are rejected when the plan is built.
+TEST(TestGpuSdpaRaggedFwdPlanBuilder, BuildRejectsInvalidMaskAttributes)
+{
+    const Bf16Builder bf16Builder;
+
+    SdpaAttributesT bothCausal;
+    bothCausal.causal_mask = true;
+    bothCausal.causal_mask_bottom_right = true;
+    auto bothCausalGraph = makeRaggedGraph(bothCausal);
+    auto bothCausalWrap = hipdnn_flatbuffers_sdk::flatbuffer_utilities::GraphWrapper(
+        bothCausalGraph.GetBufferPointer(), bothCausalGraph.GetSize());
+    EXPECT_THROW(bf16Builder.buildNodePlan(bothCausalWrap, bothCausalWrap.getNode(0)),
+                 std::invalid_argument);
+
+    SdpaAttributesT badBound;
+    badBound.left_bound = -2;
+    auto badBoundGraph = makeRaggedGraph(badBound);
+    auto badBoundWrap = hipdnn_flatbuffers_sdk::flatbuffer_utilities::GraphWrapper(
+        badBoundGraph.GetBufferPointer(), badBoundGraph.GetSize());
+    EXPECT_THROW(bf16Builder.buildNodePlan(badBoundWrap, badBoundWrap.getNode(0)),
+                 std::invalid_argument);
+
+    SdpaAttributesT badRightBound;
+    badRightBound.right_bound = -2;
+    auto badRightGraph = makeRaggedGraph(badRightBound);
+    auto badRightWrap = hipdnn_flatbuffers_sdk::flatbuffer_utilities::GraphWrapper(
+        badRightGraph.GetBufferPointer(), badRightGraph.GetSize());
+    EXPECT_THROW(bf16Builder.buildNodePlan(badRightWrap, badRightWrap.getNode(0)),
+                 std::invalid_argument);
+}

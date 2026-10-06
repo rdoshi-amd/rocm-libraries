@@ -236,8 +236,19 @@ void checkRaggedVsDense(const std::vector<int64_t>& seqQ,
         {
             for(int64_t h = 0; h < numHeads; ++h)
             {
-                EXPECT_NEAR(lse.getHostValue(raggedIndex(b, s, h, 0)), lseDense(0, h, s, 0), 1e-4f)
-                    << "LSE mismatch batch " << b << " token " << s << " head " << h;
+                // A fully masked row has LSE = -inf, which EXPECT_NEAR cannot compare.
+                const float lseRagged = lse.getHostValue(raggedIndex(b, s, h, 0));
+                const float lseExpected = lseDense(0, h, s, 0);
+                if(std::isinf(lseExpected))
+                {
+                    EXPECT_EQ(lseRagged, lseExpected)
+                        << "LSE mismatch batch " << b << " token " << s << " head " << h;
+                }
+                else
+                {
+                    EXPECT_NEAR(lseRagged, lseExpected, 1e-4f)
+                        << "LSE mismatch batch " << b << " token " << s << " head " << h;
+                }
                 for(int64_t dv = 0; dv < headDimV; ++dv)
                 {
                     EXPECT_NEAR(
@@ -1022,4 +1033,25 @@ TEST(TestCpuFpReferenceSdpaRaggedFp32, TokenOffsetsMatchElementOffsets)
 
     EXPECT_EQ(oTok, oElem);
     EXPECT_EQ(lseTok, lseElem);
+}
+
+// --- Edge cases checked against the dense reference ---
+
+// Empty Q batches at the front, at the back and back to back.
+TEST(TestCpuFpReferenceSdpaRaggedFp32, LeadingTrailingAndConsecutiveEmptyQBatches)
+{
+    checkRaggedVsDense({0, 3, 0, 0, 2, 0}, {2, 3, 1, 4, 2, 3}, 2, 2, 16, 16);
+}
+
+// Bottom-right causal with Sq > Skv: the first Sq - Skv rows of a batch are fully masked
+// (zero output, LSE = -inf).
+TEST(TestCpuFpReferenceSdpaRaggedFp32, CausalBottomRightMoreQueriesThanKeys)
+{
+    checkRaggedVsDense({5, 2, 4}, {2, 5, 1}, 2, 2, 16, 16, -1, 0, /*topLeftAlignment=*/false);
+}
+
+// A left-only window with bottom-right alignment uses windowOffset in the left bound.
+TEST(TestCpuFpReferenceSdpaRaggedFp32, SlidingWindowLeftOnlyBottomRight)
+{
+    checkRaggedVsDense({6, 3, 4}, {4, 7, 4}, 2, 2, 16, 16, 1, -1, /*topLeftAlignment=*/false);
 }

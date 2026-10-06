@@ -1040,6 +1040,11 @@ rocke_unified_attention_3d_tiled_spec_t t3d_build(const py::dict& d, Store& st)
     s.use_alibi = a_bool(d, "use_alibi", s.use_alibi);
     s.use_qq_bias = a_bool(d, "use_qq_bias", s.use_qq_bias);
     s.use_decode_grid = a_bool(d, "use_decode_grid", s.use_decode_grid);
+    if(d.contains("tile_size_override") && !d["tile_size_override"].is_none())
+    {
+        s.has_tile_size_override = true;
+        s.tile_size_override = d["tile_size_override"].cast<int>();
+    }
     std::string v;
     if(a_str(d, "dtype", v))
         s.dtype = st.keep(v);

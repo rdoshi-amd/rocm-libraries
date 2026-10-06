@@ -367,7 +367,32 @@ exit has drain wait + skip path.
 
 ---
 
-## Entry handoff regression tests
+## Final handoff verification
+
+`ClusterBarrierHandoffVerifier` runs at the end of the gfx1250 main-function
+pipeline whenever cluster barriers are enabled, including O0. It runs after
+region cloning, hazard handling, callee flattening, instruction prefetch and
+requested instruction removal. It is read-only and adds no GPU instructions.
+
+The verifier tracks whether a cluster wait still needs a local signal/wait pair
+before another cluster signal can execute. It checks loop backedges and cloned
+paths using final branch targets and inline labels rather than potentially stale
+basic-block edges. A local signal before the latest cluster wait cannot satisfy
+the handoff. A path may exit without another signal; it needs no extra rendezvous.
+
+Scalar equality/inequality guards preserve facts such as a zero loop counter
+across unrelated SCC writes. A later comparison of the unchanged counter can
+then prove that a zero-iteration wait exits instead of entering the compute loop.
+Register writes invalidate the affected facts, calls invalidate all scalar facts,
+and control-flow merges keep only common facts. Unsupported predicates retain
+both edges; unresolved branches or calls with unproven barrier behavior report
+an error. The analysis converges over loops without dropping pending handoffs.
+
+Insertion and verification have separate responsibilities. Rule 2 supplies the
+handoff and reuses existing barriers when its conservative proof succeeds. The
+final verifier detects later transformations that break that ordering. Neither
+proves cluster arrival counts or workgroup-uniform participation; those remain
+writer contracts.
 
 `Tensile/Tests/unit/test_cluster_entry_handoff_codegen.py` loads the executable
 `common/gemm/gfx1250/cluster_entry_handoff.yaml` through the real Python and
@@ -379,7 +404,8 @@ one build. `run_timeout_seconds: 120` bounds each execution and kills its proces
 group on timeout, including the client. The shared GPU lock is acquired before
 the execution deadline starts. Both combined and split build/run CI use this
 runner. The YAML is selected on gfx1250 and gfx1250-strict and skipped on other
-supported architectures.
+supported architectures. `ClusterBarrierHandoffVerifierTest` covers missing joins,
+clone bypasses, loop backedges, guarded exits and invalidated scalar facts.
 
 ---
 
@@ -387,3 +413,5 @@ supported architectures.
 
 - `src/transforms/asm/InsertClusterBarrierPass.cpp` -- implementation
 - `include/stinkytofu/transforms/asm/InsertClusterBarrierPass.hpp` -- public API
+- `src/analysis/asm/ClusterBarrierHandoffVerifier.cpp` -- final ordering check
+- `src/pipeline/backend/Gfx1250Backend.cpp` -- pipeline registration

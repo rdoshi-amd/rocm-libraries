@@ -334,14 +334,9 @@ if(HIPDNN_ENABLE_KERNEL_INGESTOR)
     set(HIPKERNELPROVIDER_PRODUCTION_DESCRIPTOR_SOURCE_ROOT
         "${CMAKE_CURRENT_SOURCE_DIR}/src/engines/kernel_ingestor_engine/descriptors")
 
-    # With HIPKERNELPROVIDER_ENABLE_ROCKE ON, the large rocKE bundle files (the KDPs, and
-    # any kernel object) are not in git: each is a DVC output with a <file>.dvc pointer
-    # beside it (remote 'ingestor'). Fail configure when such a file is missing or its
-    # size differs from the pointer, so a missing or truncated descriptor never reaches
-    # the packer. The small descriptors stay in git. With the option OFF, rocKE
-    # descriptors are not consumed and DVC is not needed.
-    # Only the root this build packs from is checked: a build that overrides
-    # HIPKERNELPROVIDER_PRODUCTION_SOURCE_ROOT does not need the shipped bundles.
+    # Large rocKE bundle files (KDPs, kernel objects) are DVC outputs, each with a
+    # <file>.dvc pointer beside it. With ENABLE_ROCKE ON, fail configure if one is missing
+    # or its size differs from its pointer. Only the root this build packs from is checked.
     if(HIPKERNELPROVIDER_ENABLE_ROCKE)
         if(HIPKERNELPROVIDER_PRODUCTION_SOURCE_ROOT)
             set(_rocke_root "${HIPKERNELPROVIDER_PRODUCTION_SOURCE_ROOT}")

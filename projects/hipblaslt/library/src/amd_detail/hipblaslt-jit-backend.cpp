@@ -3,8 +3,9 @@
 
 #include "hipblaslt-jit-component.hpp"
 #include "hipblaslt-jit-gemm-internal.hpp"
+#include "hipblaslt-jit-library.hpp"
 #include "hipblaslt-jit-loader.hpp"
-#include "hipblaslt-jit-hash.hpp"
+#include "hipblaslt-jit-problem-type.hpp"
 #include "hipblaslt-jit-heuristic.hpp"
 #include "hipblaslt-jit-mode.hpp"
 #include "hipblaslt_internal.hpp"
@@ -29,6 +30,28 @@
 #include <unistd.h>
 #endif
 
+namespace
+{
+    // A null stream and the legacy stream are not capturing. Querying the null
+    // stream while another stream is capturing is an error, so only this stream
+    // is checked.
+    bool streamIsCapturing(hipStream_t stream)
+    {
+        if(stream == nullptr || stream == hipStreamLegacy)
+            return false;
+        hipStreamCaptureStatus status = hipStreamCaptureStatusNone;
+        if(hipStreamIsCapturing(stream, &status) != hipSuccess)
+            return false;
+        return status != hipStreamCaptureStatusNone;
+    }
+
+    std::string captureSkipMessage(size_t m, size_t n, size_t k)
+    {
+        return "JIT generation skipped during stream capture for GEMM M=" + std::to_string(m)
+               + " N=" + std::to_string(n) + " K=" + std::to_string(k);
+    }
+}
+
 namespace hipblaslt_jit
 {
     Status DeviceTarget::make(int device, DeviceTarget& target)
@@ -48,6 +71,97 @@ namespace hipblaslt_jit
         target.cuCount       = target.properties.multiProcessorCount;
         target.hardware      = TensileLite::hip::GetDevice(target.properties, device);
         return {};
+    }
+
+    JitLibrary& JitLibrary::process()
+    {
+        static auto* library = new JitLibrary(defaultRoot(), [](int device, CacheKey& key) {
+            DeviceTarget target;
+            auto         status = DeviceTarget::make(device, target);
+            if(status.ok())
+                key = CacheKey::make(target, BackendInfo{}, jitCodeObjectVersion);
+            return status;
+        });
+        return *library;
+    }
+
+    namespace
+    {
+        class LibraryStore final : public SolutionStore
+        {
+        public:
+            LibraryStore(JitLibrary& library, BackendInfo backend, int codeObjectVersion)
+                : m_library(library)
+                , m_backend(std::move(backend))
+                , m_codeObjectVersion(codeObjectVersion)
+            {
+            }
+
+            Status lookup(const OperationRequest&         request,
+                          const DeviceTarget&             target,
+                          size_t                          count,
+                          size_t                          maxWorkspaceBytes,
+                          const std::vector<std::string>& excludeKernels,
+                          std::vector<int32_t>&           indices) const override
+            {
+                indices.clear();
+                const auto* gemm = gemmOf(request);
+                if(!gemm || !target.hardware)
+                    return unsupported(Stage::Lookup, target);
+                auto problem = lowerForJit(*gemm);
+                problem.setWorkspaceSize(maxWorkspaceBytes);
+                return m_library.lookup(CacheKey::make(target, m_backend, m_codeObjectVersion),
+                                        target.device,
+                                        problem,
+                                        *target.hardware,
+                                        count,
+                                        excludeKernels,
+                                        indices);
+            }
+
+            Status publish(const OperationRequest&   request,
+                           const DeviceTarget&       target,
+                           const SupportedSolutions& solutions,
+                           std::vector<int32_t>&     indices) const override
+            {
+                indices.clear();
+                const auto* gemm = gemmOf(request);
+                if(!gemm || !target.hardware)
+                    return unsupported(Stage::Publish, target);
+                return m_library.publish(CacheKey::make(target, m_backend, m_codeObjectVersion),
+                                         target.device,
+                                         lowerForJit(*gemm),
+                                         solutions,
+                                         indices);
+            }
+
+        private:
+            using GemmRequest = hipblaslt_ext::experimental::jit::detail::GemmRequest;
+
+            static const GemmRequest* gemmOf(const OperationRequest& request)
+            {
+                return request.kind() == GemmRequest::operation
+                           ? dynamic_cast<const GemmRequest*>(&request)
+                           : nullptr;
+            }
+            static Status unsupported(Stage stage, const DeviceTarget& target)
+            {
+                return {Status::Code::NotSupported,
+                        stage,
+                        target.hardware ? "The JIT solution library holds GEMM solutions"
+                                        : "The device has no TensileLite hardware description"};
+            }
+
+            JitLibrary& m_library;
+            BackendInfo m_backend;
+            int         m_codeObjectVersion;
+        };
+    }
+
+    std::shared_ptr<const SolutionStore>
+        makeLibraryStore(JitLibrary& library, const BackendInfo& backend, int codeObjectVersion)
+    {
+        return std::make_shared<const LibraryStore>(library, backend, codeObjectVersion);
     }
 }
 
@@ -208,30 +322,135 @@ namespace hipblaslt_ext::experimental
             }
         }
 
-        hipblasStatus_t
-            compiledFromBundle(std::shared_ptr<const hipblaslt_jit::Jit> jit,
-                               std::shared_ptr<const OperationRequest>   request,
-                               hipblaslt_jit::DeviceTarget               target,
-                               std::shared_ptr<const KernelBundle>       bundle,
-                               size_t                                    workspaceLimit,
-                               std::shared_ptr<const CompiledSolution>&  compiled,
-                               Diagnostics&                              diagnostics)
+        struct PreparedQuery
         {
-            compiled = nullptr;
-            size_t     workspace = 0;
-            const auto status
-                = acceptBundle(*bundle, *request, workspaceLimit, workspace, diagnostics);
-            if(status != HIPBLAS_STATUS_SUCCESS)
-                return status;
-            auto solution            = std::make_shared<CompiledSolution>();
-            solution->target         = std::move(target);
-            solution->request        = std::move(request);
-            solution->jit            = std::move(jit);
-            solution->bundle         = std::move(bundle);
-            solution->process        = processId();
-            solution->workspaceLimit = workspaceLimit;
-            solution->workspaceBytes = workspace;
-            compiled                 = std::move(solution);
+            std::shared_ptr<const hipblaslt_jit::Jit> jit;
+            std::shared_ptr<const OperationRequest>   operation;
+            hipblaslt_jit::DeviceTarget               target;
+        };
+
+        // The device and request prologue shared by getJitAlgo and getLibraryAlgos.
+        hipblasStatus_t prepareQuery(int                device,
+                                     const Request&     request,
+                                     const Backend&     backend,
+                                     PreparedQuery&     prepared,
+                                     Diagnostics&       diagnostics)
+        {
+            prepared.jit       = BackendAccess::get(backend);
+            prepared.operation = RequestAccess::get(request);
+            if(!prepared.operation || !prepared.jit)
+            {
+                diagnostics.message = "A valid request and backend are required";
+                return HIPBLAS_STATUS_INVALID_VALUE;
+            }
+            diagnostics.backend = prepared.jit->components().backend->info().name;
+            int current         = -1;
+            if(hipGetDevice(&current) != hipSuccess)
+                return HIPBLAS_STATUS_INTERNAL_ERROR;
+            if(current != device)
+            {
+                diagnostics.message = "Compile on the requested HIP device";
+                return HIPBLAS_STATUS_INVALID_VALUE;
+            }
+            auto status = hipblaslt_jit::DeviceTarget::make(device, prepared.target);
+            if(!status.ok())
+            {
+                diagnostics.message = std::move(status.message);
+                return toHipStatus(status.code);
+            }
+            return HIPBLAS_STATUS_SUCCESS;
+        }
+
+        size_t publishedWorkspace(const hipblaslt_jit::DeviceTarget& target,
+                                  const OperationRequest&            request,
+                                  int32_t                            index)
+        {
+            const auto* gemm = dynamic_cast<const GemmRequest*>(&request);
+            if(!gemm || !target.hardware || !hipblaslt_jit::isJitIndex(index))
+                return 0;
+            hipblaslt_jit::Status why;
+            auto                  solution = hipblaslt_jit::JitLibrary::process().solutionByIndex(
+                target.device, *target.hardware, index, why);
+            if(!solution)
+                return 0;
+            auto problem = hipblaslt_jit::lowerForJit(*gemm);
+            return solution->requiredWorkspaceSize(problem, *target.hardware);
+        }
+
+        // Look up the JIT solution library, then publish anything still missing.
+        // A capturing stream may return a hit and does not start a build.
+        hipblasStatus_t
+            lookupThenPublish(const std::shared_ptr<const hipblaslt_jit::Jit>& jit,
+                              const std::shared_ptr<const OperationRequest>&   operation,
+                              const hipblaslt_jit::DeviceTarget&               target,
+                              size_t                                           count,
+                              size_t                                           workspaceLimit,
+                              const std::vector<std::string>&                  excludeKernels,
+                              std::vector<int32_t>&                            indices,
+                              Diagnostics&                                     diagnostics)
+        {
+            indices.clear();
+            if(!jit || !operation)
+            {
+                diagnostics.message = "A valid request and backend are required";
+                return HIPBLAS_STATUS_INVALID_VALUE;
+            }
+            auto components = jit->components();
+            if(!components.store)
+                components.store = hipblaslt_jit::makeLibraryStore(
+                    hipblaslt_jit::JitLibrary::process(),
+                    components.backend->info(),
+                    hipblaslt_jit::jitCodeObjectVersion);
+            auto status = components.store->lookup(
+                *operation, target, count, workspaceLimit, excludeKernels, indices);
+            const auto  found = indices.size();
+            const auto* gemm  = dynamic_cast<const GemmRequest*>(operation.get());
+            const bool  capturing = gemm && streamIsCapturing(gemm->problem.stream);
+            if(status.ok() && found < count && capturing)
+            {
+                if(indices.empty())
+                {
+                    diagnostics.message = captureSkipMessage(
+                        gemm->problem.m, gemm->problem.n, gemm->problem.k);
+                    return HIPBLAS_STATUS_NOT_SUPPORTED;
+                }
+            }
+            else if(status.ok() && found < count)
+            {
+                std::vector<std::string> exclude = excludeKernels;
+                auto&                    library = hipblaslt_jit::JitLibrary::process();
+                for(auto index : indices)
+                {
+                    hipblaslt_jit::Status why;
+                    if(auto solution
+                       = library.solutionByIndex(target.device, *target.hardware, index, why))
+                        if(!hipblaslt_jit::excludedKernel(exclude, solution->kernelName))
+                            exclude.push_back(solution->kernelName);
+                }
+                const hipblaslt_jit::Jit generator(std::move(components));
+                auto outcome = generator.generate(
+                    *operation, target, count - found, workspaceLimit, exclude);
+                for(auto index : outcome.indices)
+                    if(std::find(indices.begin(), indices.end(), index) == indices.end())
+                        indices.push_back(index);
+                if(outcome.indices.empty())
+                    status = outcome.failures.empty()
+                                 ? hipblaslt_jit::Status{hipblaslt_jit::Status::Code::Failed,
+                                                         hipblaslt_jit::Stage::Publish,
+                                                         "Nothing was published"}
+                                 : std::move(outcome.failures.front());
+                else
+                    diagnostics.message = std::move(outcome.summary);
+            }
+            if(!status.ok())
+            {
+                diagnostics.message = std::move(status.message);
+                if(indices.empty())
+                    return toHipStatus(status.code);
+            }
+            else if(diagnostics.message.empty())
+                diagnostics.message = std::to_string(found) + " of " + std::to_string(indices.size())
+                                      + " solutions came from the JIT solution library";
             return HIPBLAS_STATUS_SUCCESS;
         }
 
@@ -321,57 +540,76 @@ namespace hipblaslt_ext::experimental
             diagnostics = {};
             try
             {
-                auto jit       = detail::BackendAccess::get(backend);
-                auto operation = detail::RequestAccess::get(request);
-                if(!operation || !jit)
-                {
-                    diagnostics.message = "A valid request and backend are required";
-                    return HIPBLAS_STATUS_INVALID_VALUE;
-                }
-                diagnostics.backend = jit->components().backend->info().name;
-                int current         = -1;
-                if(hipGetDevice(&current) != hipSuccess)
+                detail::PreparedQuery prepared;
+                auto                  status = detail::prepareQuery(
+                    device, request, backend, prepared, diagnostics);
+                if(status != HIPBLAS_STATUS_SUCCESS)
+                    return status;
+                std::vector<int32_t> indices;
+                status = detail::lookupThenPublish(prepared.jit,
+                                                   prepared.operation,
+                                                   prepared.target,
+                                                   1,
+                                                   workspaceLimit,
+                                                   {},
+                                                   indices,
+                                                   diagnostics);
+                if(status != HIPBLAS_STATUS_SUCCESS)
+                    return status;
+                if(indices.size() != 1 || !hipblaslt_jit::isJitIndex(indices.front()))
                     return HIPBLAS_STATUS_INTERNAL_ERROR;
-                if(current != device)
-                {
-                    diagnostics.message = "Compile on the requested HIP device";
-                    return HIPBLAS_STATUS_INVALID_VALUE;
-                }
-                hipblaslt_jit::DeviceTarget target;
-                hipblaslt_jit::Jit::Outcome outcome;
-                auto status = hipblaslt_jit::DeviceTarget::make(device, target);
-                if(status.ok())
-                    outcome = jit->generate(*operation, target, 1, workspaceLimit, {});
-                if(status.ok() && outcome.bundles.empty())
-                {
-                    if(outcome.failures.empty())
-                        return HIPBLAS_STATUS_INTERNAL_ERROR;
-                    status = std::move(outcome.failures.front());
-                }
-                if(!status.ok())
-                {
-                    diagnostics.message = std::move(status.message);
-                    return detail::toHipStatus(status.code);
-                }
-                auto bundle         = std::move(outcome.bundles.front());
-                diagnostics.message = std::move(outcome.summary);
-                if(bundle->operationKind() != operation->kind())
-                {
-                    diagnostics.message = "Bundle does not implement the requested operation";
-                    return HIPBLAS_STATUS_NOT_SUPPORTED;
-                }
-                std::shared_ptr<const detail::CompiledSolution> compiled;
-                const auto supported = detail::compiledFromBundle(std::move(jit),
-                                                                  std::move(operation),
-                                                                  std::move(target),
-                                                                  std::move(bundle),
-                                                                  workspaceLimit,
-                                                                  compiled,
-                                                                  diagnostics);
-                if(supported != HIPBLAS_STATUS_SUCCESS)
-                    return supported;
+                auto compiled            = std::make_shared<detail::CompiledSolution>();
+                compiled->target         = std::move(prepared.target);
+                compiled->request        = std::move(prepared.operation);
+                compiled->jit            = std::move(prepared.jit);
+                compiled->process        = detail::processId();
+                compiled->workspaceLimit = workspaceLimit;
+                compiled->libraryIndex   = indices.front();
+                compiled->workspaceBytes = detail::publishedWorkspace(
+                    compiled->target, *compiled->request, compiled->libraryIndex);
                 solution = detail::SolutionAccess::make(std::move(compiled));
                 return HIPBLAS_STATUS_SUCCESS;
+            }
+            catch(const std::bad_alloc&)
+            {
+                return HIPBLAS_STATUS_ALLOC_FAILED;
+            }
+            catch(const std::exception& e)
+            {
+                diagnostics.message = e.what();
+                return HIPBLAS_STATUS_INTERNAL_ERROR;
+            }
+            catch(...)
+            {
+                return HIPBLAS_STATUS_INTERNAL_ERROR;
+            }
+        }
+
+        hipblasStatus_t getLibraryAlgos(int                   device,
+                                        const Request&        request,
+                                        const Backend&        backend,
+                                        size_t                count,
+                                        size_t                workspaceLimit,
+                                        std::vector<int32_t>& indices,
+                                        Diagnostics&          diagnostics)
+        {
+            indices.clear();
+            diagnostics = {};
+            try
+            {
+                detail::PreparedQuery prepared;
+                auto                  status = detail::prepareQuery(
+                    device, request, backend, prepared, diagnostics);
+                if(status != HIPBLAS_STATUS_SUCCESS)
+                    return status;
+                return detail::lookupThenPublish(prepared.jit,
+                                                 prepared.operation,
+                                                 prepared.target,
+                                                 count,
+                                                 workspaceLimit,
+                                                 {},
+                                                 indices,
+                                                 diagnostics);
             }
             catch(const std::bad_alloc&)
             {
@@ -402,23 +640,16 @@ namespace hipblaslt_ext::experimental
             try
             {
                 auto compiled = detail::SolutionAccess::get(solution);
-                if(!compiled)
+                if(!compiled || !hipblaslt_jit::isJitIndex(compiled->libraryIndex))
                     return finish(HIPBLAS_STATUS_INVALID_VALUE);
                 diagnostics.backend = compiled->jit->components().backend->info().name;
                 int device          = -1;
                 if(compiled->process != detail::processId() || hipGetDevice(&device) != hipSuccess
                    || device != compiled->target.device)
                     return finish(HIPBLAS_STATUS_INVALID_VALUE);
-                if(compiled->bundle->operationKind() != detail::GemmRequest::operation)
-                    return finish(HIPBLAS_STATUS_NOT_SUPPORTED);
-                const auto            token = detail::registerBundle(compiled);
-                const int32_t         index = compiled->bundle->solutionIndex();
+                const int32_t         index = compiled->libraryIndex;
                 rocblaslt_matmul_algo algo{};
                 std::memcpy(algo.data, &index, sizeof(index));
-                std::memcpy(algo.data + sizeof(int32_t),
-                            &experimental::detail::jitAlgoTag,
-                            sizeof(experimental::detail::jitAlgoTag));
-                std::memcpy(algo.data_pad, &token, sizeof(algo.data_pad));
                 algo.max_workspace_bytes = compiled->workspaceLimit;
                 std::memcpy(&result.algo, &algo, sizeof(algo));
                 result.workspaceSize = compiled->workspaceBytes;
@@ -440,94 +671,9 @@ namespace hipblaslt_jit
 {
     namespace
     {
-        using GemmRequest = hipblaslt_ext::experimental::jit::detail::GemmRequest;
-        using Compiled    = hipblaslt_ext::experimental::jit::detail::CompiledSolution;
-
-        // Device, workspace limit and the GEMM problem the request already carries.
-        // Buffer addresses are not part of it: two queries of one problem share a build.
-        std::string requestKey(int device, size_t workspace, const GemmRequest& request)
-        {
-            const auto& problem = request.problem;
-            Fnv1a       hash;
-            auto        add = [&](auto value) { hash.add(std::to_string(value)); };
-            add(device);
-            add(workspace);
-            add(problem.m);
-            add(problem.n);
-            add(problem.k);
-            add(problem.batch_count);
-            add(static_cast<int>(problem.trans_a));
-            add(static_cast<int>(problem.trans_b));
-            add(static_cast<int>(problem.a_type));
-            add(static_cast<int>(problem.b_type));
-            add(static_cast<int>(problem.c_type));
-            add(static_cast<int>(problem.d_type));
-            add(static_cast<int>(problem.compute_type));
-            add(static_cast<int>(problem.scale_type));
-            add(static_cast<int>(problem.epilogue));
-            add(static_cast<int>(problem.bias_type));
-            add(static_cast<int>(problem.aux_type));
-            add(static_cast<int>(problem.scaleAType));
-            add(static_cast<int>(problem.scaleBType));
-            add(problem.row_stride_a);
-            add(problem.col_stride_a);
-            add(problem.batch_stride_a);
-            add(problem.row_stride_b);
-            add(problem.col_stride_b);
-            add(problem.batch_stride_b);
-            add(problem.row_stride_c);
-            add(problem.col_stride_c);
-            add(problem.batch_stride_c);
-            add(problem.row_stride_d);
-            add(problem.col_stride_d);
-            add(problem.batch_stride_d);
-            add(problem.strided_batch);
-            add(problem.grouped_gemm);
-            add(problem.gradient);
-            add(problem.swizzleA);
-            add(problem.swizzleB);
-            add(problem.act0);
-            add(problem.act1);
-            add(problem.streamk_tile_scheduling_ext);
-            add(problem.sm_count_target);
-            add(problem.uniform_summation_order);
-            add(problem.bias != nullptr);
-            add(problem.scaleA != nullptr);
-            add(problem.scaleB != nullptr);
-            add(problem.scaleC != nullptr);
-            add(problem.scaleD != nullptr);
-            add(problem.scaleE != nullptr);
-            add(problem.scaleAlphaVec != nullptr);
-            add(problem.amaxD != nullptr);
-            add(static_cast<int>(problem.batchMode));
-            add(problem.bias_stride);
-            hash.add(std::string_view(reinterpret_cast<const char*>(request.alpha.data()),
-                                      request.alpha.size()));
-            hash.add(std::string_view(reinterpret_cast<const char*>(request.beta.data()),
-                                      request.beta.size()));
-            return hash.hex();
-        }
-
-        struct CacheEntry
-        {
-            std::vector<std::shared_ptr<const Compiled>> solutions;
-            bool                                         complete = false;
-        };
-
-        // True when one compiled solution's kernel is name. An empty name matches nothing.
-        bool hasKernel(const std::vector<std::shared_ptr<const Compiled>>& solutions,
-                       const std::string&                                  name)
-        {
-            return !name.empty()
-                   && std::any_of(solutions.begin(),
-                                  solutions.end(),
-                                  [&](const std::shared_ptr<const Compiled>& solution) {
-                                      return solution->bundle->kernelNames() == name;
-                                  });
-        }
-
         // The process-wide Jit: replay backend, comgr builder, TensileLite loader.
-        // Null when HIPBLASLT_JIT_TEST_REPLAY names no bundle.
+        // Null when HIPBLASLT_JIT_TEST_REPLAY names no bundle. The store on that
+        // Jit publishes every solution the replay backend builds.
         std::shared_ptr<const Jit> replayProcess()
         {
             static std::once_flag                 once;
@@ -595,96 +741,47 @@ namespace hipblaslt_jit
         }
         try
         {
-            int current = -1;
-            if(hipGetDevice(&current) != hipSuccess || current != handle->device)
+            const bool capturing = streamIsCapturing(problem.stream);
+            int        current   = handle->device;
+            if(!capturing
+               && (hipGetDevice(&current) != hipSuccess || current != handle->device))
                 return 0;
-            std::shared_ptr<const GemmRequest> owned = std::make_shared<GemmRequest>(problem);
+            using GemmRequest = hipblaslt_ext::experimental::jit::detail::GemmRequest;
+            auto owned        = std::make_shared<const GemmRequest>(problem);
             DeviceTarget target;
             if(!DeviceTarget::make(handle->device, target).ok() || !target.hardware)
                 return 0;
 
-            static auto*                    cache = new std::map<std::string, CacheEntry>;
-            static std::mutex               guard;
-            const auto                      key = requestKey(handle->device, workspaceLimit, *owned);
-            std::lock_guard<std::mutex>     lock(guard);
-            auto&                           entry = (*cache)[key];
-            std::vector<std::shared_ptr<const Compiled>> chosen;
-            for(const auto& solution : entry.solutions)
+            namespace detail = hipblaslt_ext::experimental::jit::detail;
+            std::vector<int32_t> indices;
+            hipblaslt_ext::experimental::jit::Diagnostics diagnostics;
+            const auto           status = detail::lookupThenPublish(jit,
+                                                          owned,
+                                                          target,
+                                                          static_cast<size_t>(room),
+                                                          workspaceLimit,
+                                                          excludeKernels,
+                                                          indices,
+                                                          diagnostics);
+            if(status != HIPBLAS_STATUS_SUCCESS && indices.empty())
             {
-                const auto name = solution->bundle->kernelNames();
-                if(excludedKernel(excludeKernels, name) || hasKernel(chosen, name))
-                    continue;
-                chosen.push_back(solution);
-                if(static_cast<int>(chosen.size()) == room)
-                    break;
-            }
-            if(static_cast<int>(chosen.size()) < room && !entry.complete)
-            {
-                bool callerExcludesOnlyCached = true;
-                for(const auto& name : excludeKernels)
-                {
-                    if(!hasKernel(entry.solutions, name))
-                        callerExcludesOnlyCached = false;
-                }
-                std::vector<std::string> exclude = excludeKernels;
-                for(const auto& solution : entry.solutions)
-                {
-                    auto name = solution->bundle->kernelNames();
-                    if(!name.empty() && !excludedKernel(exclude, name))
-                        exclude.push_back(std::move(name));
-                }
-                const auto need    = static_cast<size_t>(room) - chosen.size();
-                auto       outcome = jit->generate(*owned, target, need, workspaceLimit, exclude);
-                namespace detail = hipblaslt_ext::experimental::jit::detail;
-                for(auto& bundle : outcome.bundles)
-                {
-                    const auto name = bundle->kernelNames();
-                    if(excludedKernel(excludeKernels, name) || hasKernel(chosen, name)
-                       || hasKernel(entry.solutions, name))
-                        continue;
-                    hipblaslt_ext::experimental::jit::Diagnostics diagnostics;
-                    std::shared_ptr<const Compiled>               compiled;
-                    if(detail::compiledFromBundle(jit,
-                                                  owned,
-                                                  target,
-                                                  std::move(bundle),
-                                                  workspaceLimit,
-                                                  compiled,
-                                                  diagnostics)
-                       != HIPBLAS_STATUS_SUCCESS)
-                        continue;
-                    entry.solutions.push_back(compiled);
-                    if(static_cast<int>(chosen.size()) < room)
-                        chosen.push_back(compiled);
-                }
-                if(outcome.bundles.size() < need && callerExcludesOnlyCached)
-                    entry.complete = true;
-                for(const auto& failure : outcome.failures)
-                {
-                    if(failure.code == Status::Code::NotSupported
-                       || failure.code == Status::Code::TargetMismatch)
-                        continue;
-                    std::cerr << "hipblaslt warning: JIT heuristic " << failure.message << std::endl;
-                    break;
-                }
+                if(!diagnostics.message.empty())
+                    std::cerr << (capturing ? "hipblaslt error: " : "hipblaslt warning: JIT heuristic ")
+                              << diagnostics.message << std::endl;
+                return 0;
             }
 
-            namespace detail = hipblaslt_ext::experimental::jit::detail;
-            namespace jitapi = hipblaslt_ext::experimental::jit;
             int written = 0;
-            for(const auto& compiled : chosen)
+            for(auto index : indices)
             {
-                jitapi::Solution  solution = detail::SolutionAccess::make(compiled);
-                jitapi::Diagnostics diagnostics;
-                hipblasLtMatmulHeuristicResult_t hipResult{};
-                if(jitapi::getGemmAlgo(solution, hipResult, diagnostics) != HIPBLAS_STATUS_SUCCESS)
-                    continue;
+                if(written == room || !isJitIndex(index))
+                    break;
                 auto& result = results[written];
                 std::memset(&result, 0, sizeof(result));
-                static_assert(sizeof(hipResult.algo) == sizeof(result.algo),
-                              "JIT heuristic results share the matmul algorithm layout");
-                std::memcpy(&result.algo, &hipResult.algo, sizeof(result.algo));
-                result.workspaceSize = hipResult.workspaceSize;
+                auto* stored = reinterpret_cast<int32_t*>(result.algo.data);
+                *stored      = index;
+                result.algo.max_workspace_bytes = workspaceLimit;
+                result.workspaceSize = detail::publishedWorkspace(target, *owned, index);
                 result.state         = rocblaslt_status_success;
                 result.wavesCount    = 1.0f;
                 ++written;

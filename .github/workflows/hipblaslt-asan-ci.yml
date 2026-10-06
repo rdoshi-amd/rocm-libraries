@@ -9,6 +9,7 @@ on:
     paths:
       - "projects/hipblaslt/**"
       - "test/therock/test_hipblaslt.py"
+      - "test/therock/test_hipblaslt_sanitizer_config.py"
       - "test/therock/lsan.supp"
       - ".github/workflows/hipblaslt-asan-ci.yml"
   workflow_dispatch:
@@ -36,9 +37,15 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          sparse-checkout: .github
+          sparse-checkout: |
+            .github
+            test/therock
+            projects/hipblaslt/cmake
           sparse-checkout-cone-mode: true
           fetch-depth: 1
+
+      - name: Test hipBLASLt sanitizer configuration
+        run: python3 test/therock/test_hipblaslt_sanitizer_config.py
 
       - name: Load CI environment
         id: ci-env
@@ -73,7 +80,7 @@ jobs:
       CCACHE_CONFIGPATH: ${{ github.workspace }}/.ccache/ccache.conf
       AMDGPU_FAMILIES: ${{ matrix.family }}
       TEATIME_FORCE_INTERACTIVE: 0
-      ARTIFACT_GROUP: ${{ matrix.family }}-asan
+      ARTIFACT_GROUP: ${{ matrix.family }}-host-asan
     steps:
       - name: "Check out rocm-libraries"
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -119,11 +126,11 @@ jobs:
         run: |
           ./TheRock/build_tools/fetch_sources.py --jobs 12 --no-include-rocm-libraries --no-include-ml-frameworks
 
-      - name: Configure gfx90a TheRock ASAN math-libs
+      - name: Configure gfx90a TheRock host-ASAN math-libs
         env:
           amdgpu_families: ${{ env.AMDGPU_FAMILIES }}
           package_version: ADHOCBUILD
-          # Mirrors TheRock's linux-release-asan preset while retaining
+          # Mirrors TheRock's linux-release-host-asan preset while retaining
           # this workflow's focused single-family build.
           extra_cmake_options: >-
             -DTHEROCK_ROCM_LIBRARIES_SOURCE_DIR=../
@@ -131,12 +138,12 @@ jobs:
             -DTHEROCK_ENABLE_ALL=OFF
             -DTHEROCK_ENABLE_BLAS=ON
             -DTHEROCK_ENABLE_SPARSE=ON
-            -DTHEROCK_SANITIZER=ASAN
+            -DTHEROCK_SANITIZER=HOST_ASAN
             -Damd-llvm_BUILD_TYPE=Release
             -Dtherock-host-blas_BUILD_TYPE=Release
             -Dtherock-SuiteSparse_BUILD_TYPE=Release
             -Damd-llvm_SANITIZER=OFF
-            -Damd-comgr_SANITIZER=ASAN
+            -Damd-comgr_SANITIZER=HOST_ASAN
             -Dhipcc_SANITIZER=OFF
             -Dhipify_SANITIZER=OFF
             -Daqlprofile_SANITIZER=OFF
@@ -148,7 +155,7 @@ jobs:
         run: |
           python3 TheRock/build_tools/github_actions/build_configure.py
 
-      - name: Build hipBLASLt through staged hipSPARSELt consumer (ASAN)
+      - name: Build hipBLASLt through staged hipSPARSELt consumer (HOST_ASAN)
         run: cmake --build TheRock/build --target hipSPARSELt -- -k 0
 
       - name: Report
@@ -220,7 +227,8 @@ jobs:
       THEROCK_BIN_DIR: "./build/bin"
       THEROCK_DIR: ${{ github.workspace }}
       AMDGPU_FAMILIES: ${{ matrix.family }}
-      ARTIFACT_GROUP: ${{ matrix.family }}-asan
+      ARTIFACT_GROUP: ${{ matrix.family }}-host-asan
+      HSA_XNACK: "0"
       TEST_COMPONENT: hipblaslt
     steps:
       - name: Checkout TheRock repository
@@ -276,7 +284,7 @@ jobs:
           {
             echo "ASAN_OPTIONS=quarantine_size_mb=600"
             echo "LSAN_OPTIONS=suppressions=${LSAN_SUPP}:print_suppressions=0"
-            echo "HSA_XNACK=1"
+            echo "HSA_XNACK=0"
             echo "ASAN_SYMBOLIZER_PATH=${OUT}/lib/llvm/bin/llvm-symbolizer"
             echo "LD_LIBRARY_PATH=${OUT}/lib:${ASAN_RT_DIR}:${LD_LIBRARY_PATH:-}"
           } >> "$GITHUB_ENV"

@@ -358,8 +358,9 @@ miopenStatus_t ForwardConvolution(miopenHandle_t handle,
         return RecordFailure(miopenStatusBadParm, "could not read the MIOpen descriptors");
 
     const miopenDataType_t dataType = problem.tensors[0].dataType;
+    // Matches the status MIOpen's own 2-D convolution returns.
     if(!ScalarEquals(alpha, dataType, 1.0) || !ScalarEquals(beta, dataType, 0.0))
-        return RecordFailure(miopenStatusUnsupportedOp,
+        return RecordFailure(miopenStatusNotImplemented,
                              "hipDNN convolution supports only alpha=1, beta=0");
 
     if(const char* reason = CheckSupported(problem.tensors, problem.conv))

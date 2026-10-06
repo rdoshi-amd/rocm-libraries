@@ -74,7 +74,7 @@ Why it is set up this way:
 - **Tier labels are `quick`, `standard`, `comprehensive` and `full`,** so the harness runs in
   every tier lane. Not `ffm-quick`/`ffm-full`: those run a fixed list of patterns on a tight
   time budget.
-- **In a discrete build, only `test_hipdnn_shim_conv` gets an entry.** Any other binary would
+- **In a discrete build, only the `test_hipdnn_shim_conv*` binaries get entries.** Any other binary would
   replay a filter that matches nothing, and the comparison rejects two empty runs.
 - **No build-tree entry without a GPU.** The shim tests are all `GPU_` tests.
 

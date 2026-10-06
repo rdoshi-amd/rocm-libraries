@@ -24,8 +24,10 @@ namespace hipdnn {
 
 // The forwarded convolution entry points. If hipDNN cannot express a problem,
 // the call fails instead of running through MIOpen, so a caller can tell that
-// forwarding did not happen. It returns miopenStatusUnsupportedOp, and
-// miopenGetErrorString gives the reason with a "[hipDNN-forwarded]" prefix.
+// forwarding did not happen. It returns miopenStatusNotImplemented where
+// MIOpen's own path does (non-default alpha or beta, an activation other than
+// ReLU) and miopenStatusUnsupportedOp otherwise. miopenGetErrorString gives the
+// reason with a "[hipDNN-forwarded]" prefix.
 // To take one entry point off the hipDNN path, use MIOPEN_DISABLE_HIPDNN_FOR.
 //
 // The plain entry points decline a null alpha or beta. MIOpen would dereference

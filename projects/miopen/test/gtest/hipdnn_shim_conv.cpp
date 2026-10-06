@@ -64,15 +64,19 @@ tensor<FusedType> MakeFusedBias(const FusedCase& config)
     return b;
 }
 
-// The fused path is convolution, then a per-output-channel bias, then ReLU. Composed here
-// from the same CPU convolution the unfused tests use, so a fused kernel that silently drops
-// either of the trailing two steps shows up.
-//
+struct FusedScales
+{
+    float alpha1 = 1.0f;
+    float alpha2 = 0.0f;
+};
+
 // The reference is built in the same layout as y so the two can be compared element by
 // element; the CPU convolution indexes logically, so it is layout-agnostic already.
 void CheckMatchesCpuBiasActivation(const FusedCase& config,
+                                   const FusedScales& scales,
                                    const tensor<FusedType>& x,
                                    const tensor<FusedType>& w,
+                                   const tensor<FusedType>& z,
                                    const tensor<FusedType>& bias,
                                    const tensor<FusedType>& y)
 {
@@ -81,9 +85,11 @@ void CheckMatchesCpuBiasActivation(const FusedCase& config,
     cpu_convolution_forward(config.pads.size(), x, w, ref_y, config.pads, unit, unit, group_count);
 
     ref_y.par_for_each([&](auto n, auto k, auto... spatial) {
-        auto& value            = ref_y(n, k, spatial...);
-        const FusedType biased = static_cast<FusedType>(value + bias.data[k]);
-        value                  = std::max(FusedType(0), biased);
+        auto& value        = ref_y(n, k, spatial...);
+        const float scaled = scales.alpha1 * static_cast<float>(value) +
+                             scales.alpha2 * static_cast<float>(z(n, k, spatial...));
+        const auto biased = static_cast<FusedType>(scaled + static_cast<float>(bias.data[k]));
+        value             = std::max(FusedType(0), biased);
     });
 
     CheckWithinTolerance(ref_y, y, "fused bias+activation result");
@@ -290,6 +296,7 @@ TEST_F(GPU_HipdnnShimConvFwdApi_FP32, FindAndForwardMatchCpuReference)
                                                     false),
               miopenStatusSuccess);
     ASSERT_GT(returned_algo_count, 0);
+    ResetAfterFind(y_dev, y);
 
     const float alpha = 1.0f;
     const float beta  = 0.0f;
@@ -397,6 +404,7 @@ TEST(GPU_HipdnnShimConvBwdDataApi_FP32, BackwardDataMatchesCpuReference)
                                                          false),
               miopenStatusSuccess);
     ASSERT_GT(returned_algo_count, 0);
+    ResetAfterFind(dx_dev, dx);
 
     const float alpha = 1.0f;
     const float beta  = 0.0f;
@@ -464,6 +472,7 @@ TEST(GPU_HipdnnShimConvBwdWeightsApi_FP32, BackwardWeightsMatchesCpuReference)
                                                             false),
               miopenStatusSuccess);
     ASSERT_GT(returned_algo_count, 0);
+    ResetAfterFind(dw_dev, dw);
 
     const float alpha = 1.0f;
     const float beta  = 0.0f;
@@ -626,7 +635,7 @@ TEST(GPU_HipdnnShimConvStreamSwitch_FP32, CallAfterStreamSwitchWaitsForOldStream
     CheckMatchesCpuReference(x2, w, y2, geometry);
 }
 
-void RunFusedCase(const FusedCase& config)
+void RunFusedCase(const FusedCase& config, const FusedScales& scales = {})
 {
     SCOPED_TRACE(config.name);
 
@@ -646,6 +655,8 @@ void RunFusedCase(const FusedCase& config)
     ASSERT_NO_FATAL_FAILURE(OutputLengths(conv.handle, x, w, out_lengths));
     tensor<FusedType> y{config.layout, out_lengths};
     tensor<FusedType> z{config.layout, out_lengths};
+    if(scales.alpha2 != 0.0f)
+        z.generate(FusedElementGenerator());
 
     OwnedActivationDescriptor activation;
     ASSERT_EQ(miopenCreateActivationDescriptor(&activation.handle), miopenStatusSuccess);
@@ -658,12 +669,9 @@ void RunFusedCase(const FusedCase& config)
     auto y_dev    = handle_deref.Write(y.data);
     auto z_dev    = handle_deref.Write(z.data);
 
-    // alpha2 is zero, so the zeroed z tensor contributes nothing; it is still passed because
-    // the entry point needs a valid descriptor and buffer there.
-    const float alpha1 = 1.0f;
-    const float alpha2 = 0.0f;
-    const auto status  = miopenConvolutionBiasActivationForward(handle,
-                                                               &alpha1,
+    // The entry point needs a valid z even when alpha2 is zero.
+    const auto status = miopenConvolutionBiasActivationForward(handle,
+                                                               &scales.alpha1,
                                                                &x.desc,
                                                                x_dev.get(),
                                                                &w.desc,
@@ -672,7 +680,7 @@ void RunFusedCase(const FusedCase& config)
                                                                miopenConvolutionFwdAlgoImplicitGEMM,
                                                                nullptr,
                                                                0ull,
-                                                               &alpha2,
+                                                               &scales.alpha2,
                                                                &z.desc,
                                                                z_dev.get(),
                                                                &bias.desc,
@@ -708,13 +716,24 @@ void RunFusedCase(const FusedCase& config)
 
     y.data = handle_deref.Read<FusedType>(y_dev, y.data.size());
 
-    CheckMatchesCpuBiasActivation(config, x, w, bias, y);
+    CheckMatchesCpuBiasActivation(config, scales, x, w, z, bias, y);
 }
 
 TEST(GPU_HipdnnShimConvBiasActivApi_FP16, FusedForwardMatchesCpuReference)
 {
     for(const auto& config : FusedCases())
         ASSERT_NO_FATAL_FAILURE(RunFusedCase(config));
+}
+
+// Forwarding declines these: its graph has no z and no scale on the convolution. Kept out of
+// FusedCases so these gaps get their own parity entry.
+TEST(GPU_HipdnnShimConvFusedAlpha_FP16, FusedForwardMatchesCpuReference)
+{
+    const auto ndhwc = [](const char* name) {
+        return FusedCase{name, miopenTensorNDHWC, {1, 4, 14, 11, 1}, {4, 4, 3, 3, 3}, {1, 1, 1}};
+    };
+    ASSERT_NO_FATAL_FAILURE(RunFusedCase(ndhwc("3d-ndhwc-plus-z"), {1.0f, 1.0f}));
+    ASSERT_NO_FATAL_FAILURE(RunFusedCase(ndhwc("3d-ndhwc-alpha1-2"), {2.0f, 0.0f}));
 }
 
 // fp16, so the forwarded graph is served only if its bias add computes in the bias type (in
@@ -727,12 +746,14 @@ TEST(GPU_HipdnnShimConvBiasActiv2d_FP16, FusedForwardMatchesCpuReference)
         FusedCase{"2d-nchw", miopenTensorNCHW, {1, 16, 8, 8}, {16, 16, 3, 3}, {1, 1}}));
 }
 
-// MIOpen accepts int8 input and weights with an int32 output, so the forwarded path must keep
-// each tensor's type instead of declining the mix. No hipDNN provider has an int8 convolution
-// engine yet, so with forwarding on this is declined, and the parity run lists it as a known
-// divergence. Once a provider supports it, the parity run asks for that line to be removed.
-TEST(GPU_HipdnnShimConvMixedTypeApi_I8, Int8InInt32OutMatchesCpuReference)
+// MIOpen accepts int8 input and weights with an int32 or float output, so the forwarded path must
+// keep each tensor's type instead of declining the mix. No hipDNN provider has an int8 convolution
+// engine yet, so with forwarding on it is declined, a known parity divergence.
+template <class Out>
+void RunInt8Case(const std::string& case_name)
 {
+    SCOPED_TRACE(case_name);
+
     auto& handle_deref    = get_handle();
     miopenHandle_t handle = &handle_deref;
 
@@ -744,7 +765,7 @@ TEST(GPU_HipdnnShimConvMixedTypeApi_I8, Int8InInt32OutMatchesCpuReference)
     ASSERT_NO_FATAL_FAILURE(InitConvDescriptor(conv));
     std::vector<std::size_t> out_lengths;
     ASSERT_NO_FATAL_FAILURE(OutputLengths(conv.handle, x, w, out_lengths));
-    tensor<int> y{out_lengths};
+    tensor<Out> y{out_lengths};
 
     auto x_dev = handle_deref.Write(x.data);
     auto w_dev = handle_deref.Write(w.data);
@@ -774,6 +795,7 @@ TEST(GPU_HipdnnShimConvMixedTypeApi_I8, Int8InInt32OutMatchesCpuReference)
                                                     false),
               miopenStatusSuccess);
     ASSERT_GT(returned_algo_count, 0);
+    ResetAfterFind(y_dev, y);
 
     const auto status = miopenConvolutionForward(handle,
                                                  &kOne,
@@ -791,7 +813,6 @@ TEST(GPU_HipdnnShimConvMixedTypeApi_I8, Int8InInt32OutMatchesCpuReference)
 
     // A decline passes rather than skips, as in the fused test. It must come from hipDNN's engine
     // search: a decline from the up-front checks means the mixed types were never translated.
-    const std::string case_name = "int8-in-int32-out";
     if(status == miopenStatusUnsupportedOp && ForwardingEnabled())
     {
         RecordServed(case_name, false);
@@ -808,8 +829,8 @@ TEST(GPU_HipdnnShimConvMixedTypeApi_I8, Int8InInt32OutMatchesCpuReference)
     ASSERT_EQ(status, miopenStatusSuccess);
     RecordServed(case_name, true);
 
-    y.data = handle_deref.Read<int>(y_dev, y.data.size());
-    tensor<int> ref_y{out_lengths};
+    y.data = handle_deref.Read<Out>(y_dev, y.data.size());
+    tensor<Out> ref_y{out_lengths};
     const ConvGeometry geometry;
     cpu_convolution_forward(geometry.pads.size(),
                             x,
@@ -820,21 +841,31 @@ TEST(GPU_HipdnnShimConvMixedTypeApi_I8, Int8InInt32OutMatchesCpuReference)
                             geometry.dilations,
                             group_count);
     ASSERT_FALSE(miopen::range_zero(ref_y)) << "CPU reference is all zeros";
-    // Integer arithmetic, so the results must match exactly.
+    // Exact, because every sum is a whole number small enough for a float to hold exactly.
     EXPECT_EQ(ref_y.data, y.data);
+}
+
+TEST(GPU_HipdnnShimConvMixedTypeApi_I8, Int8InputMatchesCpuReference)
+{
+    ASSERT_NO_FATAL_FAILURE(RunInt8Case<int>("int8-in-int32-out"));
+    ASSERT_NO_FATAL_FAILURE(RunInt8Case<float>("int8-in-float-out"));
 }
 
 // One call per check the forwarded path makes before building a graph. Forwarding only, since
 // natively several of these problems are malformed or crash. The reason is checked, not just
 // the status, because a hipDNN decline for lack of an engine would hide a missing check. The
 // data-type check has no case: no type the public API can describe reaches it.
+// hipdnn_shim_conv_gaps.cpp runs the alpha/beta, grouped, transposed and rank problems in both
+// modes.
 TEST_F(GPU_HipdnnShimConvDeclined_FP32, UnsupportedProblemsAreDeclinedWithReason)
 {
     if(!ForwardingEnabled())
         return;
 
-    auto expect_declined_because = [](miopenStatus_t status, const char* reason) {
-        EXPECT_EQ(status, miopenStatusUnsupportedOp) << reason;
+    auto expect_declined_because = [](miopenStatus_t status,
+                                      const char* reason,
+                                      miopenStatus_t expected_status = miopenStatusUnsupportedOp) {
+        EXPECT_EQ(status, expected_status) << reason;
         const std::string message = miopenGetErrorString(status);
         EXPECT_NE(message.find(reason), std::string::npos) << message;
     };
@@ -871,11 +902,14 @@ TEST_F(GPU_HipdnnShimConvDeclined_FP32, UnsupportedProblemsAreDeclinedWithReason
 
     const float two = 2.0f;
     expect_declined_because(forward(&two, &kZero, x, w, conv.handle, y),
-                            "supports only alpha=1, beta=0");
+                            "supports only alpha=1, beta=0",
+                            miopenStatusNotImplemented);
     expect_declined_because(forward(&kOne, &kOne, x, w, conv.handle, y),
-                            "supports only alpha=1, beta=0");
+                            "supports only alpha=1, beta=0",
+                            miopenStatusNotImplemented);
     expect_declined_because(forward(nullptr, &kZero, x, w, conv.handle, y),
-                            "supports only alpha=1, beta=0");
+                            "supports only alpha=1, beta=0",
+                            miopenStatusNotImplemented);
 
     {
         tensor<float> vectorized_x{miopenTensorNCHWc4, x.desc.GetLengths()};

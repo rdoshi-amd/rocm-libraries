@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <limits>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 namespace hipdnn_shim_test {
@@ -37,6 +38,7 @@ struct ConvGeometry
     std::vector<int> pads      = {1, 1};
     std::vector<int> strides   = {1, 1};
     std::vector<int> dilations = {1, 1};
+    int groups                 = 1;
 };
 
 // Small because the parity run executes every test twice, but large enough that a wrong
@@ -110,6 +112,9 @@ inline void InitConvDescriptor(OwnedConvDescriptor& conv,
                                                 geometry.dilations.data(),
                                                 mode),
               miopenStatusSuccess);
+    if(geometry.groups != 1)
+        ASSERT_EQ(miopenSetConvolutionGroupCount(conv.handle, geometry.groups),
+                  miopenStatusSuccess);
 }
 
 // Asks the library rather than computing the shape here, so the shape is part of what the two
@@ -132,6 +137,21 @@ void OutputLengths(miopenConvolutionDescriptor_t conv_desc,
     out_lengths.assign(out_dims.begin(), out_dims.end());
 }
 
+// Find writes its own result into the output buffer, and Find is never forwarded, so without
+// this a forwarded call that wrote nothing would pass on MIOpen's answer.
+template <class T>
+void ResetAfterFind(miopen::Allocator::ManageDataPtr& output_dev, const tensor<T>& output)
+{
+    output_dev = get_handle().Write(output.data);
+}
+
+// The tolerances ConvFwdSolverTestBase::ThresholdChecks() uses.
+template <class T>
+double Tolerance()
+{
+    return std::numeric_limits<T>::epsilon() * (std::is_same_v<T, bfloat16> ? 4 : 80);
+}
+
 // Internal MIOpen helpers are fine here: they only compare results, they do not produce them.
 template <class T>
 void CheckWithinTolerance(const tensor<T>& reference, const tensor<T>& got, const char* what)
@@ -144,10 +164,8 @@ void CheckWithinTolerance(const tensor<T>& reference, const tensor<T>& got, cons
     ASSERT_LT(miopen::find_idx(reference, miopen::not_finite), 0)
         << what << ": non-finite value in the CPU reference";
 
-    // The tolerance ConvFwdSolverTestBase::ThresholdChecks() uses for FP32.
-    const double tolerance = std::numeric_limits<T>::epsilon() * 80;
-    const double error     = miopen::rms_range(reference, got);
-    EXPECT_LT(error, tolerance) << what << " beyond cross-implementation tolerance";
+    const double error = miopen::rms_range(reference, got);
+    EXPECT_LT(error, Tolerance<T>()) << what << " beyond cross-implementation tolerance";
 }
 
 // Each reference takes the result's own descriptor, so a kernel that writes into the gaps of
@@ -166,7 +184,7 @@ void CheckMatchesCpuReference(const tensor<T>& x,
                             geometry.pads,
                             geometry.strides,
                             geometry.dilations,
-                            group_count);
+                            geometry.groups);
     CheckWithinTolerance(ref_y, y, "convolution result");
 }
 
@@ -184,7 +202,7 @@ void CheckMatchesCpuBackwardData(const tensor<T>& dx,
                                   geometry.pads,
                                   geometry.strides,
                                   geometry.dilations,
-                                  group_count);
+                                  geometry.groups);
     CheckWithinTolerance(ref_dx, dx, "backward-data result");
 }
 
@@ -202,7 +220,7 @@ void CheckMatchesCpuBackwardWeights(const tensor<T>& x,
                                     geometry.pads,
                                     geometry.strides,
                                     geometry.dilations,
-                                    group_count);
+                                    geometry.groups);
     CheckWithinTolerance(ref_dw, dw, "backward-weights result");
 }
 

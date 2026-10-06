@@ -80,6 +80,7 @@ if(NOT MIOPEN_ENABLE_HIPDNN_WRAPPER)
     list(APPEND SKIP_TESTS
         hipdnn_lru_cache.cpp
         hipdnn_shim_conv.cpp
+        hipdnn_shim_conv_gaps.cpp
         hipdnn_shim_conv_translation.cpp
         version_api.cpp
     )

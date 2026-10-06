@@ -26,6 +26,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 
 namespace miopen {
 namespace wrapper {
@@ -574,14 +575,40 @@ namespace hipdnn = miopen::wrapper::hipdnn;
 
 TEST(CPU_WrapperRoutingLastError_NONE, PrefixesTheForwardedFailure)
 {
+    testing::internal::CaptureStderr();
     hipdnn::RecordFailure(miopenStatusUnsupportedOp, "hipDNN's reason");
+    const std::string logged   = testing::internal::GetCapturedStderr();
     const char* const prefixed = hipdnn::PrefixedErrorString(miopenStatusUnsupportedOp, "native");
     hipdnn::ClearForwardedFailure();
 
-    ASSERT_NE(prefixed, nullptr);
-    const std::string text = prefixed;
-    EXPECT_EQ(text.rfind("[hipDNN-forwarded] native", 0), 0u) << text;
-    EXPECT_NE(text.find("hipDNN's reason"), std::string::npos) << text;
+    EXPECT_STREQ(prefixed, "[hipDNN-forwarded] native");
+    if(miopen::wrapper::ErrorLoggingEnabled())
+        EXPECT_NE(logged.find("hipDNN's reason"), std::string::npos) << logged;
+}
+
+// MIOpen's strings live for the whole process, so a caller may keep the pointer.
+TEST(CPU_WrapperRoutingLastError_NONE, KeptTextOutlivesLaterFailuresAndItsThread)
+{
+    testing::internal::CaptureStderr();
+    hipdnn::RecordFailure(miopenStatusUnsupportedOp, "first reason");
+    const char* const first = hipdnn::PrefixedErrorString(miopenStatusUnsupportedOp, "native");
+    hipdnn::RecordFailure(miopenStatusBadParm, "second reason");
+    const char* const second = hipdnn::PrefixedErrorString(miopenStatusBadParm, "other");
+    hipdnn::RecordFailure(miopenStatusUnsupportedOp, "third reason");
+    const char* const third = hipdnn::PrefixedErrorString(miopenStatusUnsupportedOp, "native");
+    hipdnn::ClearForwardedFailure();
+
+    const char* fromExitedThread = nullptr;
+    std::thread([&fromExitedThread] {
+        hipdnn::RecordFailure(miopenStatusNotImplemented, "reason");
+        fromExitedThread = hipdnn::PrefixedErrorString(miopenStatusNotImplemented, "thread");
+    }).join();
+    static_cast<void>(testing::internal::GetCapturedStderr());
+
+    EXPECT_STREQ(first, "[hipDNN-forwarded] native");
+    EXPECT_STREQ(second, "[hipDNN-forwarded] other");
+    EXPECT_EQ(third, first);
+    EXPECT_STREQ(fromExitedThread, "[hipDNN-forwarded] thread");
 }
 
 TEST(CPU_WrapperRoutingLastError_NONE, IgnoresADifferentStatus)
@@ -604,6 +631,7 @@ TEST(CPU_WrapperRoutingLastError_NONE, ClearedFailureIsNotPrefixed)
 TEST(CPU_WrapperRoutingLastError_NONE, RecordsAnException)
 {
     miopenStatus_t status = miopenStatusSuccess;
+    testing::internal::CaptureStderr();
     try
     {
         throw std::runtime_error("what went wrong");
@@ -612,13 +640,14 @@ TEST(CPU_WrapperRoutingLastError_NONE, RecordsAnException)
     {
         status = hipdnn::RecordCurrentException();
     }
+    const std::string logged   = testing::internal::GetCapturedStderr();
     const char* const prefixed = hipdnn::PrefixedErrorString(miopenStatusUnknownError, "native");
-    const std::string text     = prefixed != nullptr ? prefixed : "";
     hipdnn::ClearForwardedFailure();
 
     EXPECT_EQ(status, miopenStatusUnknownError);
-    ASSERT_NE(prefixed, nullptr);
-    EXPECT_NE(text.find("what went wrong"), std::string::npos) << text;
+    EXPECT_STREQ(prefixed, "[hipDNN-forwarded] native");
+    if(miopen::wrapper::ErrorLoggingEnabled())
+        EXPECT_NE(logged.find("what went wrong"), std::string::npos) << logged;
 }
 
 } // namespace

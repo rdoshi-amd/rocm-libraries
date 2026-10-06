@@ -13,9 +13,10 @@
 
 #include <miopen/miopen.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
-#include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -44,9 +45,10 @@ bool IsAvailable();
 void ReleaseHandle(miopenHandle_t handle) noexcept;
 
 // Replacement text for miopenGetErrorString when the last wrapped call on this
-// thread was forwarded and failed with `status`, or null otherwise. The result
-// has thread-local storage duration, matching what miopenGetErrorString promises
-// its callers.
+// thread was forwarded and failed with `status`, or null otherwise. The text is
+// fixed per status and lives for the whole process, like MIOpen's own strings,
+// so a caller may keep the pointer. The failure's reason, when recorded, goes to
+// stderr instead.
 //
 // This exists so a forwarded failure is distinguishable from the same status
 // raised by MIOpen itself, without adding a public symbol to do it.
@@ -82,9 +84,9 @@ struct PlanKey
     }
 };
 
-// Records a forwarded failure for miopenGetErrorString to report, and returns
-// `status`.
-miopenStatus_t RecordFailure(miopenStatus_t status, std::string message);
+// Records a forwarded failure for miopenGetErrorString to report, writes
+// `reason` to stderr unless MIOPEN_LOG_LEVEL hides errors, and returns `status`.
+miopenStatus_t RecordFailure(miopenStatus_t status, std::string_view reason);
 
 // Records the exception being handled as a forwarded miopenStatusUnknownError,
 // the status MIOpen returns for one, and returns it. Call only from a catch
@@ -95,12 +97,15 @@ using PopulateGraphFn = std::function<bool(hipdnn_frontend::graph::Graph&)>;
 using VariantPack     = std::unordered_map<int64_t, void*>;
 
 // Runs the graph for `key` on `handle`'s stream. On a cache miss, `populate`
-// fills in a new graph, which is then built and cached. Failures are recorded
-// with RecordFailure.
+// fills in a new graph, which is then built and cached. The caller's workspace
+// is used when it is big enough, and a buffer owned by the handle otherwise.
+// Failures are recorded with RecordFailure.
 miopenStatus_t RunCachedGraph(miopenHandle_t handle,
                               const PlanKey& key,
                               const PopulateGraphFn& populate,
-                              VariantPack& variantPack);
+                              VariantPack& variantPack,
+                              void* workspace,
+                              size_t workspaceSize);
 
 } // namespace hipdnn
 } // namespace wrapper

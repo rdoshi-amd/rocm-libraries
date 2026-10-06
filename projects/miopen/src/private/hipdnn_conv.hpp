@@ -26,9 +26,15 @@ namespace hipdnn {
 // the call fails instead of running through MIOpen, so a caller can tell that
 // forwarding did not happen. It returns miopenStatusNotImplemented where
 // MIOpen's own path does (non-default alpha or beta, an activation other than
-// ReLU) and miopenStatusUnsupportedOp otherwise. miopenGetErrorString gives the
-// reason with a "[hipDNN-forwarded]" prefix.
+// ReLU) and miopenStatusUnsupportedOp otherwise. miopenGetErrorString then
+// adds a "[hipDNN-forwarded]" prefix, and the reason goes to stderr unless
+// MIOPEN_LOG_LEVEL hides errors.
 // To take one entry point off the hipDNN path, use MIOPEN_DISABLE_HIPDNN_FOR.
+//
+// The algorithm argument is ignored, because hipDNN picks its own engine. The
+// caller's workspace is used when it is big enough for that engine. Otherwise a
+// buffer from hipMalloc is kept until miopenDestroy. That bypasses
+// miopenSetAllocator and breaks HIP stream capture.
 //
 // The plain entry points decline a null alpha or beta. MIOpen would dereference
 // it and crash, so there is no MIOpen behaviour to match.

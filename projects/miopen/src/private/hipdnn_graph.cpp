@@ -6,6 +6,7 @@
 
 #include "lru_cache.hpp"
 #include "miopen_impl.h"
+#include "routing.hpp"
 
 #include <hipdnn_frontend.hpp>
 
@@ -17,7 +18,9 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 namespace miopen {
@@ -93,16 +96,41 @@ std::unordered_map<miopenHandle_t, std::unique_ptr<HandleState>>& HandleMap()
     return handles;
 }
 
+class ScopedDevice
+{
+public:
+    ScopedDevice()                               = default;
+    ScopedDevice(const ScopedDevice&)            = delete;
+    ScopedDevice& operator=(const ScopedDevice&) = delete;
+
+    ~ScopedDevice()
+    {
+        if(previous_ >= 0)
+            static_cast<void>(hipSetDevice(previous_));
+    }
+
+    bool Set(int device)
+    {
+        int current = 0;
+        if(hipGetDevice(&current) != hipSuccess)
+            return false;
+        if(current == device)
+            return true;
+        if(hipSetDevice(device) != hipSuccess)
+            return false;
+        previous_ = current;
+        return true;
+    }
+
+private:
+    int previous_ = -1;
+};
+
 // Created on first forwarded call rather than in miopenCreate, so a process that
 // never forwards never pays for hipdnnCreate.
-std::pair<HandleState*, miopenStatus_t> AcquireHandleState(miopenHandle_t handle)
+std::pair<HandleState*, miopenStatus_t> AcquireHandleState(miopenHandle_t handle,
+                                                           hipStream_t stream)
 {
-    hipStream_t stream = nullptr;
-    if(miopenGetStream_impl(handle, &stream) != miopenStatusSuccess)
-        return {
-            nullptr,
-            RecordFailure(miopenStatusInternalError, "could not read the MIOpen handle's stream")};
-
     const std::lock_guard<std::mutex> lock(HandleMapMutex());
     auto& slot = HandleMap()[handle];
     if(slot == nullptr)
@@ -168,7 +196,6 @@ struct LastForwardedError
 {
     bool failed = false;
     miopenStatus_t status{};
-    std::string message;
 };
 
 // Per-thread so that one thread's forwarded failure cannot be attributed to
@@ -178,6 +205,14 @@ LastForwardedError& LastError()
     static thread_local LastForwardedError last;
     return last;
 }
+
+// Pointers into the set stay valid as it grows, because its elements are never
+// moved.
+struct InternedStrings
+{
+    std::mutex mutex;
+    std::unordered_set<std::string> strings;
+};
 
 miopenStatus_t RecordHipdnnFailure(const fe::Error& error)
 {
@@ -215,18 +250,28 @@ AcquireGraph(const PlanKey& key, const PopulateGraphFn& populate, hipdnnHandle_t
     return {graph, miopenStatusSuccess};
 }
 
-miopenStatus_t RunGraph(HandleState& state, const GraphPtr& graph, VariantPack& variantPack)
+miopenStatus_t RunGraph(HandleState& state,
+                        const GraphPtr& graph,
+                        VariantPack& variantPack,
+                        void* callerWorkspace,
+                        size_t callerWorkspaceSize)
 {
     const std::lock_guard<std::mutex> lock(state.mutex);
 
-    int64_t workspaceSize = 0;
-    if(const fe::Error error = graph->get_workspace_size(workspaceSize); !error.is_good())
+    int64_t needed = 0;
+    if(const fe::Error error = graph->get_workspace_size(needed); !error.is_good())
         return RecordHipdnnFailure(error);
 
-    if(!state.EnsureWorkspace(static_cast<size_t>(workspaceSize)))
-        return RecordFailure(miopenStatusAllocFailed, "hipDNN workspace allocation failed");
+    void* workspace = callerWorkspace;
+    if(needed > 0 &&
+       (callerWorkspace == nullptr || callerWorkspaceSize < static_cast<size_t>(needed)))
+    {
+        if(!state.EnsureWorkspace(static_cast<size_t>(needed)))
+            return RecordFailure(miopenStatusAllocFailed, "hipDNN workspace allocation failed");
+        workspace = state.workspace;
+    }
 
-    const fe::Error error = graph->execute(*state.hipdnnHandle, variantPack, state.workspace);
+    const fe::Error error = graph->execute(*state.hipdnnHandle, variantPack, workspace);
     // Recorded even when execute failed, because it may have queued work first.
     const bool recorded = hipEventRecord(state.lastWork, state.stream) == hipSuccess;
     if(!error.is_good())
@@ -241,9 +286,12 @@ miopenStatus_t RunGraph(HandleState& state, const GraphPtr& graph, VariantPack& 
 
 } // namespace
 
-miopenStatus_t RecordFailure(miopenStatus_t status, std::string message)
+miopenStatus_t RecordFailure(miopenStatus_t status, std::string_view reason)
 {
-    LastError() = LastForwardedError{true, status, std::move(message)};
+    LastError() = LastForwardedError{true, status};
+    if(ErrorLoggingEnabled())
+        std::cerr << "[MIOpen] [hipDNN-forwarded] " << miopenGetErrorString_impl(status) << ": "
+                  << reason << "\n";
     return status;
 }
 
@@ -267,8 +315,8 @@ miopenStatus_t RecordCurrentException() noexcept
     }
     catch(...)
     {
-        // Building the message ran out of memory, so record the status alone.
-        LastError() = LastForwardedError{true, miopenStatusUnknownError, {}};
+        // Building the reason ran out of memory, so record the status alone.
+        LastError() = LastForwardedError{true, miopenStatusUnknownError};
         return miopenStatusUnknownError;
     }
 }
@@ -278,9 +326,26 @@ void ClearForwardedFailure() noexcept { LastError().failed = false; }
 miopenStatus_t RunCachedGraph(miopenHandle_t handle,
                               const PlanKey& key,
                               const PopulateGraphFn& populate,
-                              VariantPack& variantPack)
+                              VariantPack& variantPack,
+                              void* workspace,
+                              size_t workspaceSize)
 {
-    auto [state, acquired] = AcquireHandleState(handle);
+    hipStream_t stream = nullptr;
+    if(miopenGetStream_impl(handle, &stream) != miopenStatusSuccess)
+        return RecordFailure(miopenStatusInternalError,
+                             "could not read the MIOpen handle's stream");
+
+    // MIOpen makes the handle's device current before each launch. Doing the same
+    // here puts the workspace, event and hipDNN handle on that device. A null
+    // stream reports the current device, so a handle on the null stream runs on
+    // whichever device the caller has current.
+    hipDevice_t device = 0;
+    ScopedDevice scopedDevice;
+    if(hipStreamGetDevice(stream, &device) != hipSuccess || !scopedDevice.Set(device))
+        return RecordFailure(miopenStatusInternalError,
+                             "could not make the MIOpen handle's device current");
+
+    auto [state, acquired] = AcquireHandleState(handle, stream);
     if(state == nullptr)
         return acquired;
 
@@ -288,7 +353,7 @@ miopenStatus_t RunCachedGraph(miopenHandle_t handle,
     if(graph == nullptr)
         return status;
 
-    return RunGraph(*state, graph, variantPack);
+    return RunGraph(*state, graph, variantPack, workspace, workspaceSize);
 }
 
 bool IsAvailable()
@@ -336,20 +401,19 @@ const char* PrefixedErrorString(miopenStatus_t status, const char* nativeMessage
     if(!last.failed || last.status != status || nativeMessage == nullptr)
         return nullptr;
 
-    // miopenGetErrorString returns a bare const char* the caller does not own,
-    // so the prefixed text has to outlive this call without being leaked.
-    static thread_local std::string prefixed;
     try
     {
-        prefixed = "[hipDNN-forwarded] " + std::string(nativeMessage);
-        if(!last.message.empty())
-            prefixed += ": " + last.message;
+        // Never freed, so a returned pointer stays valid for the whole process, as
+        // MIOpen's own strings do. It holds at most one string per status.
+        static auto* const prefixed = new InternedStrings;
+        const std::lock_guard<std::mutex> lock(prefixed->mutex);
+        return prefixed->strings.insert("[hipDNN-forwarded] " + std::string(nativeMessage))
+            .first->c_str();
     }
     catch(...)
     {
         return nullptr;
     }
-    return prefixed.c_str();
 }
 
 } // namespace hipdnn

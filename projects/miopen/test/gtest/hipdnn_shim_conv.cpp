@@ -12,6 +12,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <limits>
 #include <thread>
 
 using namespace hipdnn_shim_test;
@@ -44,12 +45,16 @@ struct FusedCase
     miopenTensorLayout_t layout;
     std::vector<std::size_t> x_lengths;
     std::vector<std::size_t> w_lengths;
-    std::vector<int> pads;
+    ConvGeometry geometry;
 };
 
 std::vector<FusedCase> FusedCases()
 {
-    return {{"3d-ndhwc", miopenTensorNDHWC, {1, 4, 14, 11, 1}, {4, 4, 3, 3, 3}, {1, 1, 1}}};
+    return {{"3d-ndhwc",
+             miopenTensorNDHWC,
+             {1, 4, 14, 11, 1},
+             {4, 4, 3, 3, 3},
+             {{1, 1, 1}, {1, 1, 1}, {1, 1, 1}}}};
 }
 
 // One value per output channel. Unit strides throughout: the bias is one value per channel,
@@ -80,9 +85,16 @@ void CheckMatchesCpuBiasActivation(const FusedCase& config,
                                    const tensor<FusedType>& bias,
                                    const tensor<FusedType>& y)
 {
-    const std::vector<int> unit(config.pads.size(), 1);
+    const ConvGeometry& geometry = config.geometry;
     tensor<FusedType> ref_y{y.desc};
-    cpu_convolution_forward(config.pads.size(), x, w, ref_y, config.pads, unit, unit, group_count);
+    cpu_convolution_forward(geometry.pads.size(),
+                            x,
+                            w,
+                            ref_y,
+                            geometry.pads,
+                            geometry.strides,
+                            geometry.dilations,
+                            geometry.groups);
 
     ref_y.par_for_each([&](auto n, auto k, auto... spatial) {
         auto& value        = ref_y(n, k, spatial...);
@@ -145,10 +157,7 @@ class GPU_HipdnnShimConvDeclined_FP32 : public HipdnnShimConvFwd
 protected:
     // Runs the fused entry point on the fixture's problem. z is always passed because the
     // entry point needs a valid descriptor, even when alpha2 = 0 drops it.
-    void RunFused(const float* alpha2,
-                  miopenActivationMode_t mode,
-                  miopenStatus_t& status,
-                  std::string* message = nullptr)
+    void RunFused(const float* alpha2, miopenActivationMode_t mode, CallResult& result)
     {
         tensor<float> bias{1, 4, 1, 1};
         tensor<float> z{y.desc.GetLengths()};
@@ -160,28 +169,26 @@ protected:
         ASSERT_EQ(miopenSetActivationDescriptor(activation.handle, mode, 0.0, 0.0, 0.0),
                   miopenStatusSuccess);
 
-        status = miopenConvolutionBiasActivationForward(handle,
-                                                        &kOne,
-                                                        &x.desc,
-                                                        x_dev.get(),
-                                                        &w.desc,
-                                                        w_dev.get(),
-                                                        conv.handle,
-                                                        miopenConvolutionFwdAlgoImplicitGEMM,
-                                                        nullptr,
-                                                        0ull,
-                                                        alpha2,
-                                                        &z.desc,
-                                                        z_dev.get(),
-                                                        &bias.desc,
-                                                        bias_dev.get(),
-                                                        activation.handle,
-                                                        &y.desc,
-                                                        y_dev.get());
-        // Read now: MIOpen serves the activation descriptor's release, which clears the
-        // forwarded failure.
-        if(message != nullptr)
-            *message = miopenGetErrorString(status);
+        result = CaptureCall([&] {
+            return miopenConvolutionBiasActivationForward(handle,
+                                                          &kOne,
+                                                          &x.desc,
+                                                          x_dev.get(),
+                                                          &w.desc,
+                                                          w_dev.get(),
+                                                          conv.handle,
+                                                          miopenConvolutionFwdAlgoImplicitGEMM,
+                                                          nullptr,
+                                                          0ull,
+                                                          alpha2,
+                                                          &z.desc,
+                                                          z_dev.get(),
+                                                          &bias.desc,
+                                                          bias_dev.get(),
+                                                          activation.handle,
+                                                          &y.desc,
+                                                          y_dev.get());
+        });
     }
 };
 
@@ -272,50 +279,9 @@ private:
 // still use.
 TEST_F(GPU_HipdnnShimConvFwdApi_FP32, FindAndForwardMatchCpuReference)
 {
-    std::size_t workspace_size = 0;
-    ASSERT_EQ(miopenConvolutionForwardGetWorkSpaceSize(
-                  handle, &w.desc, &x.desc, conv.handle, &y.desc, &workspace_size),
-              miopenStatusSuccess);
-    Workspace wspace{workspace_size};
-
-    int returned_algo_count = 0;
-    miopenConvAlgoPerf_t perf{};
-    ASSERT_EQ(miopenFindConvolutionForwardAlgorithm(handle,
-                                                    &x.desc,
-                                                    x_dev.get(),
-                                                    &w.desc,
-                                                    w_dev.get(),
-                                                    conv.handle,
-                                                    &y.desc,
-                                                    y_dev.get(),
-                                                    1,
-                                                    &returned_algo_count,
-                                                    &perf,
-                                                    wspace.ptr(),
-                                                    wspace.size(),
-                                                    false),
-              miopenStatusSuccess);
-    ASSERT_GT(returned_algo_count, 0);
-    ResetAfterFind(y_dev, y);
-
-    const float alpha = 1.0f;
-    const float beta  = 0.0f;
-    ASSERT_EQ(miopenConvolutionForward(handle,
-                                       &alpha,
-                                       &x.desc,
-                                       x_dev.get(),
-                                       &w.desc,
-                                       w_dev.get(),
-                                       conv.handle,
-                                       perf.fwd_algo,
-                                       &beta,
-                                       &y.desc,
-                                       y_dev.get(),
-                                       wspace.ptr(),
-                                       wspace.size()),
-              miopenStatusSuccess);
-
-    ReadBackAndCheck();
+    const auto result = FindAndRun(Direction::Forward, conv.handle, x, w, y);
+    ASSERT_NO_FATAL_FAILURE(AssertServed(result));
+    CheckMatchesCpuReference(x, w, y);
 }
 
 // The Problem/Solution path reaches the same convolution through different public entry
@@ -362,9 +328,6 @@ TEST_F(GPU_HipdnnShimConvSolutionApi_FP32, RunSolutionMatchesCpuReference)
 
 TEST(GPU_HipdnnShimConvBwdDataApi_FP32, BackwardDataMatchesCpuReference)
 {
-    auto& handle_deref    = get_handle();
-    miopenHandle_t handle = &handle_deref;
-
     auto x = MakeInput();
     auto w = MakeWeights();
     OwnedConvDescriptor conv;
@@ -376,63 +339,13 @@ TEST(GPU_HipdnnShimConvBwdDataApi_FP32, BackwardDataMatchesCpuReference)
     dy.generate(tensor_elem_gen_integer{17});
     tensor<float> dx{x.desc.GetLengths()};
 
-    auto dy_dev = handle_deref.Write(dy.data);
-    auto w_dev  = handle_deref.Write(w.data);
-    auto dx_dev = handle_deref.Write(dx.data);
-
-    std::size_t workspace_size = 0;
-    ASSERT_EQ(miopenConvolutionBackwardDataGetWorkSpaceSize(
-                  handle, &dy.desc, &w.desc, conv.handle, &dx.desc, &workspace_size),
-              miopenStatusSuccess);
-    Workspace wspace{workspace_size};
-
-    int returned_algo_count = 0;
-    miopenConvAlgoPerf_t perf{};
-    ASSERT_EQ(miopenFindConvolutionBackwardDataAlgorithm(handle,
-                                                         &dy.desc,
-                                                         dy_dev.get(),
-                                                         &w.desc,
-                                                         w_dev.get(),
-                                                         conv.handle,
-                                                         &dx.desc,
-                                                         dx_dev.get(),
-                                                         1,
-                                                         &returned_algo_count,
-                                                         &perf,
-                                                         wspace.ptr(),
-                                                         wspace.size(),
-                                                         false),
-              miopenStatusSuccess);
-    ASSERT_GT(returned_algo_count, 0);
-    ResetAfterFind(dx_dev, dx);
-
-    const float alpha = 1.0f;
-    const float beta  = 0.0f;
-    ASSERT_EQ(miopenConvolutionBackwardData(handle,
-                                            &alpha,
-                                            &dy.desc,
-                                            dy_dev.get(),
-                                            &w.desc,
-                                            w_dev.get(),
-                                            conv.handle,
-                                            perf.bwd_data_algo,
-                                            &beta,
-                                            &dx.desc,
-                                            dx_dev.get(),
-                                            wspace.ptr(),
-                                            wspace.size()),
-              miopenStatusSuccess);
-
-    dx.data = handle_deref.Read<float>(dx_dev, dx.data.size());
-
+    const auto result = FindAndRun(Direction::BackwardData, conv.handle, dx, w, dy);
+    ASSERT_NO_FATAL_FAILURE(AssertServed(result));
     CheckMatchesCpuBackwardData(dx, w, dy);
 }
 
 TEST(GPU_HipdnnShimConvBwdWeightsApi_FP32, BackwardWeightsMatchesCpuReference)
 {
-    auto& handle_deref    = get_handle();
-    miopenHandle_t handle = &handle_deref;
-
     auto x = MakeInput();
     auto w = MakeWeights();
     OwnedConvDescriptor conv;
@@ -444,60 +357,14 @@ TEST(GPU_HipdnnShimConvBwdWeightsApi_FP32, BackwardWeightsMatchesCpuReference)
     dy.generate(tensor_elem_gen_integer{17});
     tensor<float> dw{w.desc.GetLengths()};
 
-    auto dy_dev = handle_deref.Write(dy.data);
-    auto x_dev  = handle_deref.Write(x.data);
-    auto dw_dev = handle_deref.Write(dw.data);
-
-    std::size_t workspace_size = 0;
-    ASSERT_EQ(miopenConvolutionBackwardWeightsGetWorkSpaceSize(
-                  handle, &dy.desc, &x.desc, conv.handle, &dw.desc, &workspace_size),
-              miopenStatusSuccess);
-    Workspace wspace{workspace_size};
-
-    int returned_algo_count = 0;
-    miopenConvAlgoPerf_t perf{};
-    ASSERT_EQ(miopenFindConvolutionBackwardWeightsAlgorithm(handle,
-                                                            &dy.desc,
-                                                            dy_dev.get(),
-                                                            &x.desc,
-                                                            x_dev.get(),
-                                                            conv.handle,
-                                                            &dw.desc,
-                                                            dw_dev.get(),
-                                                            1,
-                                                            &returned_algo_count,
-                                                            &perf,
-                                                            wspace.ptr(),
-                                                            wspace.size(),
-                                                            false),
-              miopenStatusSuccess);
-    ASSERT_GT(returned_algo_count, 0);
-    ResetAfterFind(dw_dev, dw);
-
-    const float alpha = 1.0f;
-    const float beta  = 0.0f;
-    ASSERT_EQ(miopenConvolutionBackwardWeights(handle,
-                                               &alpha,
-                                               &dy.desc,
-                                               dy_dev.get(),
-                                               &x.desc,
-                                               x_dev.get(),
-                                               conv.handle,
-                                               perf.bwd_weights_algo,
-                                               &beta,
-                                               &dw.desc,
-                                               dw_dev.get(),
-                                               wspace.ptr(),
-                                               wspace.size()),
-              miopenStatusSuccess);
-
-    dw.data = handle_deref.Read<float>(dw_dev, dw.data.size());
-
+    const auto result = FindAndRun(Direction::BackwardWeights, conv.handle, x, dw, dy);
+    ASSERT_NO_FATAL_FAILURE(AssertServed(result));
     CheckMatchesCpuBackwardWeights(x, dw, dy);
 }
 
-// Forwarded calls on one handle share a workspace. The gate holds back the call on stream A, so
-// the call on stream B can finish first only if it does not wait for A.
+// Forwarded calls on one handle that pass no workspace share the handle's buffer. The gate holds
+// back the call on stream A, so the call on stream B can finish first only if it does not wait
+// for A.
 TEST(GPU_HipdnnShimConvStreamSwitch_FP32, CallAfterStreamSwitchWaitsForOldStream)
 {
     OwnedStream stream_a;
@@ -515,7 +382,6 @@ TEST(GPU_HipdnnShimConvStreamSwitch_FP32, CallAfterStreamSwitchWaitsForOldStream
     ASSERT_EQ(miopenCreateWithStream(&owned_handle.handle, stream_a.handle), miopenStatusSuccess);
     miopenHandle_t handle = owned_handle.handle;
 
-    // The MIOpen provider needs workspace for this problem, so both calls use the shared one.
     const ConvGeometry geometry{{1, 1, 1}, {1, 1, 1}, {1, 1, 1}};
     tensor<float> x1{1, 4, 6, 8, 8};
     x1.generate(tensor_elem_gen_integer{17});
@@ -563,6 +429,12 @@ TEST(GPU_HipdnnShimConvStreamSwitch_FP32, CallAfterStreamSwitchWaitsForOldStream
               miopenStatusSuccess);
     ASSERT_GT(returned_algo_count, 0);
 
+    // The MIOpen provider needs workspace for this problem, so forwarded calls given none use the
+    // shared buffer. MIOpen itself needs the caller's.
+    Workspace no_workspace;
+    Workspace& workspace_a = ForwardingEnabled() ? no_workspace : workspace1;
+    Workspace& workspace_b = ForwardingEnabled() ? no_workspace : workspace2;
+
     auto forward = [&](tensor<float>& x,
                        const miopen::Allocator::ManageDataPtr& x_dev,
                        tensor<float>& y,
@@ -585,9 +457,9 @@ TEST(GPU_HipdnnShimConvStreamSwitch_FP32, CallAfterStreamSwitchWaitsForOldStream
 
     // Warm up on each stream. Building the plan or growing the workspace during the gated part
     // would make the host wait, which hides the race.
-    ASSERT_EQ(forward(x1, x1_dev, y1, y1_dev, workspace1), miopenStatusSuccess);
+    ASSERT_EQ(forward(x1, x1_dev, y1, y1_dev, workspace_a), miopenStatusSuccess);
     ASSERT_EQ(miopenSetStream(handle, stream_b.handle), miopenStatusSuccess);
-    ASSERT_EQ(forward(x2, x2_dev, y2, y2_dev, workspace2), miopenStatusSuccess);
+    ASSERT_EQ(forward(x2, x2_dev, y2, y2_dev, workspace_b), miopenStatusSuccess);
     ASSERT_EQ(miopenSetStream(handle, stream_a.handle), miopenStatusSuccess);
     ASSERT_EQ(hipStreamSynchronize(stream_a.handle), hipSuccess);
     ASSERT_EQ(hipStreamSynchronize(stream_b.handle), hipSuccess);
@@ -608,10 +480,10 @@ TEST(GPU_HipdnnShimConvStreamSwitch_FP32, CallAfterStreamSwitchWaitsForOldStream
         gate.Open();
     });
 
-    const miopenStatus_t status1  = forward(x1, x1_dev, y1, y1_dev, workspace1);
+    const miopenStatus_t status1  = forward(x1, x1_dev, y1, y1_dev, workspace_a);
     const hipError_t record_a     = hipEventRecord(event_a.handle, stream_a.handle);
     const miopenStatus_t switched = miopenSetStream(handle, stream_b.handle);
-    const miopenStatus_t status2  = forward(x2, x2_dev, y2, y2_dev, workspace2);
+    const miopenStatus_t status2  = forward(x2, x2_dev, y2, y2_dev, workspace_b);
     const hipError_t record_b     = hipEventRecord(event_b.handle, stream_b.handle);
     const bool host_waited        = opened;
 
@@ -741,9 +613,8 @@ void RunFusedCase(const FusedCase& config, const FusedScales& scales = {})
     w.generate(FusedElementGenerator());
     auto bias = MakeFusedBias(config);
 
-    const std::vector<int> unit(config.pads.size(), 1);
     OwnedConvDescriptor conv;
-    ASSERT_NO_FATAL_FAILURE(InitConvDescriptor(conv, miopenConvolution, {config.pads, unit, unit}));
+    ASSERT_NO_FATAL_FAILURE(InitConvDescriptor(conv, miopenConvolution, config.geometry));
     std::vector<std::size_t> out_lengths;
     ASSERT_NO_FATAL_FAILURE(OutputLengths(conv.handle, x, w, out_lengths));
     tensor<FusedType> y{config.layout, out_lengths};
@@ -763,24 +634,26 @@ void RunFusedCase(const FusedCase& config, const FusedScales& scales = {})
     auto z_dev    = handle_deref.Write(z.data);
 
     // The entry point needs a valid z even when alpha2 is zero.
-    const auto status = miopenConvolutionBiasActivationForward(handle,
-                                                               &scales.alpha1,
-                                                               &x.desc,
-                                                               x_dev.get(),
-                                                               &w.desc,
-                                                               w_dev.get(),
-                                                               conv.handle,
-                                                               miopenConvolutionFwdAlgoImplicitGEMM,
-                                                               nullptr,
-                                                               0ull,
-                                                               &scales.alpha2,
-                                                               &z.desc,
-                                                               z_dev.get(),
-                                                               &bias.desc,
-                                                               bias_dev.get(),
-                                                               activation.handle,
-                                                               &y.desc,
-                                                               y_dev.get());
+    const auto result = CaptureCall([&] {
+        return miopenConvolutionBiasActivationForward(handle,
+                                                      &scales.alpha1,
+                                                      &x.desc,
+                                                      x_dev.get(),
+                                                      &w.desc,
+                                                      w_dev.get(),
+                                                      conv.handle,
+                                                      miopenConvolutionFwdAlgoImplicitGEMM,
+                                                      nullptr,
+                                                      0ull,
+                                                      &scales.alpha2,
+                                                      &z.desc,
+                                                      z_dev.get(),
+                                                      &bias.desc,
+                                                      bias_dev.get(),
+                                                      activation.handle,
+                                                      &y.desc,
+                                                      y_dev.get());
+    });
 
     // Fused conv+bias+activation is unimplemented on some devices -- the only MIOpen solver that
     // matches the plan this entry point builds needs a whitelisted device, and hipDNN has its own
@@ -790,21 +663,16 @@ void RunFusedCase(const FusedCase& config, const FusedScales& scales = {})
     // checkable, and with forwarding on it must carry the forwarded-error prefix, which rules out
     // a silent fall back to MIOpen. The recorded property is what keeps the decline visible to
     // the parity comparison, which a pass on its own would not be.
-    if(status == miopenStatusUnsupportedOp)
+    if(result.status == miopenStatusUnsupportedOp)
     {
         RecordServed(config.name, false);
-        std::string message = miopenGetErrorString(status);
-        if(ForwardingEnabled())
-        {
-            EXPECT_NE(message.find("[hipDNN-forwarded]"), std::string::npos)
-                << "decline did not come from hipDNN: " << message;
-        }
+        ExpectForwardedDecline(result);
         GTEST_LOG_(INFO) << "fused conv+bias+activation was declined here, so the result was not "
                             "checked against the CPU reference: "
-                         << message;
+                         << result.message;
         return;
     }
-    ASSERT_EQ(status, miopenStatusSuccess);
+    ASSERT_EQ(result.status, miopenStatusSuccess) << result.message << '\n' << result.logged;
     RecordServed(config.name, true);
 
     y.data = handle_deref.Read<FusedType>(y_dev, y.data.size());
@@ -823,7 +691,11 @@ TEST(GPU_HipdnnShimConvBiasActivApi_FP16, FusedForwardMatchesCpuReference)
 TEST(GPU_HipdnnShimConvFusedAlpha_FP16, FusedForwardMatchesCpuReference)
 {
     const auto ndhwc = [](const char* name) {
-        return FusedCase{name, miopenTensorNDHWC, {1, 4, 14, 11, 1}, {4, 4, 3, 3, 3}, {1, 1, 1}};
+        return FusedCase{name,
+                         miopenTensorNDHWC,
+                         {1, 4, 14, 11, 1},
+                         {4, 4, 3, 3, 3},
+                         {{1, 1, 1}, {1, 1, 1}, {1, 1, 1}}};
     };
     ASSERT_NO_FATAL_FAILURE(RunFusedCase(ndhwc("3d-ndhwc-plus-z"), {1.0f, 1.0f}));
     ASSERT_NO_FATAL_FAILURE(RunFusedCase(ndhwc("3d-ndhwc-alpha1-2"), {2.0f, 0.0f}));
@@ -835,8 +707,8 @@ TEST(GPU_HipdnnShimConvFusedAlpha_FP16, FusedForwardMatchesCpuReference)
 // MIOpen provider turns fusion off.
 TEST(GPU_HipdnnShimConvBiasActiv2d_FP16, FusedForwardMatchesCpuReference)
 {
-    ASSERT_NO_FATAL_FAILURE(RunFusedCase(
-        FusedCase{"2d-nchw", miopenTensorNCHW, {1, 16, 8, 8}, {16, 16, 3, 3}, {1, 1}}));
+    ASSERT_NO_FATAL_FAILURE(RunFusedCase(FusedCase{
+        "2d-nchw", miopenTensorNCHW, {1, 16, 8, 8}, {16, 16, 3, 3}, {{1, 1}, {1, 1}, {1, 1}}}));
 }
 
 // MIOpen accepts int8 input and weights with an int32 or float output, so the forwarded path must
@@ -890,36 +762,36 @@ void RunInt8Case(const std::string& case_name)
     ASSERT_GT(returned_algo_count, 0);
     ResetAfterFind(y_dev, y);
 
-    const auto status = miopenConvolutionForward(handle,
-                                                 &kOne,
-                                                 &x.desc,
-                                                 x_dev.get(),
-                                                 &w.desc,
-                                                 w_dev.get(),
-                                                 conv.handle,
-                                                 perf.fwd_algo,
-                                                 &kZero,
-                                                 &y.desc,
-                                                 y_dev.get(),
-                                                 wspace.ptr(),
-                                                 wspace.size());
+    const auto result = CaptureCall([&] {
+        return miopenConvolutionForward(handle,
+                                        &kOne,
+                                        &x.desc,
+                                        x_dev.get(),
+                                        &w.desc,
+                                        w_dev.get(),
+                                        conv.handle,
+                                        perf.fwd_algo,
+                                        &kZero,
+                                        &y.desc,
+                                        y_dev.get(),
+                                        wspace.ptr(),
+                                        wspace.size());
+    });
 
     // A decline passes rather than skips, as in the fused test. It must come from hipDNN's engine
     // search: a decline from the up-front checks means the mixed types were never translated.
-    if(status == miopenStatusUnsupportedOp && ForwardingEnabled())
+    if(result.status == miopenStatusUnsupportedOp && ForwardingEnabled())
     {
         RecordServed(case_name, false);
-        const std::string message = miopenGetErrorString(status);
-        EXPECT_NE(message.find("[hipDNN-forwarded]"), std::string::npos)
-            << "decline did not come from hipDNN: " << message;
+        ExpectForwardedDecline(result);
         for(const char* check_reason : {"has no hipDNN convolution", "not forwarded to hipDNN"})
         {
-            EXPECT_EQ(message.find(check_reason), std::string::npos)
-                << "the mixed types were refused instead of translated: " << message;
+            EXPECT_EQ(result.logged.find(check_reason), std::string::npos)
+                << "the mixed types were refused instead of translated: " << result.logged;
         }
         return;
     }
-    ASSERT_EQ(status, miopenStatusSuccess);
+    ASSERT_EQ(result.status, miopenStatusSuccess) << result.message << '\n' << result.logged;
     RecordServed(case_name, true);
 
     y.data = handle_deref.Read<Out>(y_dev, y.data.size());
@@ -932,7 +804,7 @@ void RunInt8Case(const std::string& case_name)
                             geometry.pads,
                             geometry.strides,
                             geometry.dilations,
-                            group_count);
+                            geometry.groups);
     ASSERT_FALSE(miopen::range_zero(ref_y)) << "CPU reference is all zeros";
     // Exact, because every sum is a whole number small enough for a float to hold exactly.
     EXPECT_EQ(ref_y.data, y.data);
@@ -955,12 +827,11 @@ TEST_F(GPU_HipdnnShimConvDeclined_FP32, UnsupportedProblemsAreDeclinedWithReason
     if(!ForwardingEnabled())
         return;
 
-    auto expect_declined_because = [](miopenStatus_t status,
+    auto expect_declined_because = [](const CallResult& result,
                                       const char* reason,
                                       miopenStatus_t expected_status = miopenStatusUnsupportedOp) {
-        EXPECT_EQ(status, expected_status) << reason;
-        const std::string message = miopenGetErrorString(status);
-        EXPECT_NE(message.find(reason), std::string::npos) << message;
+        EXPECT_EQ(result.status, expected_status) << reason;
+        ExpectForwardedDecline(result, reason);
     };
 
     // The declines happen before any hipDNN object is built, so no workspace is needed to
@@ -974,23 +845,25 @@ TEST_F(GPU_HipdnnShimConvDeclined_FP32, UnsupportedProblemsAreDeclinedWithReason
         auto in_dev       = handle_deref.Write(in.data);
         auto weights_dev  = handle_deref.Write(weights.data);
         auto out_dev      = handle_deref.Write(out.data);
-        const auto status = miopenConvolutionForward(handle,
-                                                     alpha,
-                                                     &in.desc,
-                                                     in_dev.get(),
-                                                     &weights.desc,
-                                                     weights_dev.get(),
-                                                     c,
-                                                     miopenConvolutionFwdAlgoGEMM,
-                                                     beta,
-                                                     &out.desc,
-                                                     out_dev.get(),
-                                                     nullptr,
-                                                     0);
+        const auto result = CaptureCall([&] {
+            return miopenConvolutionForward(handle,
+                                            alpha,
+                                            &in.desc,
+                                            in_dev.get(),
+                                            &weights.desc,
+                                            weights_dev.get(),
+                                            c,
+                                            miopenConvolutionFwdAlgoGEMM,
+                                            beta,
+                                            &out.desc,
+                                            out_dev.get(),
+                                            nullptr,
+                                            0);
+        });
         // With a check missing the call is served, so its work must finish before the buffers
         // are freed.
         handle_deref.Finish();
-        return status;
+        return result;
     };
 
     const float two = 2.0f;
@@ -1009,6 +882,17 @@ TEST_F(GPU_HipdnnShimConvDeclined_FP32, UnsupportedProblemsAreDeclinedWithReason
         tensor<float> vectorized_w{miopenTensorNCHWc4, w.desc.GetLengths()};
         expect_declined_because(forward(&kOne, &kZero, vectorized_x, vectorized_w, conv.handle, y),
                                 "vectorized tensor layouts");
+    }
+
+    {
+        // Only a dim of length 1 has the large stride, so the buffers stay small.
+        const std::size_t above_int_max =
+            static_cast<std::size_t>(std::numeric_limits<int>::max()) + 1;
+        tensor<float> wide_x{std::vector<std::size_t>{1, 4, 8, 8},
+                             std::vector<std::size_t>{above_int_max, 64, 8, 1}};
+        tensor<float> wide_y{std::vector<std::size_t>{1, 4, 8, 8}};
+        expect_declined_because(forward(&kOne, &kZero, wide_x, w, conv.handle, wide_y),
+                                "above INT_MAX");
     }
 
     {
@@ -1057,18 +941,17 @@ TEST_F(GPU_HipdnnShimConvDeclined_FP32, UnsupportedProblemsAreDeclinedWithReason
                                 "transposed convolution is not forwarded");
     }
 
-    miopenStatus_t fused_status = miopenStatusSuccess;
-    std::string fused_message;
-    ASSERT_NO_FATAL_FAILURE(RunFused(nullptr, miopenActivationRELU, fused_status, &fused_message));
-    EXPECT_EQ(fused_status, miopenStatusUnsupportedOp);
-    EXPECT_NE(fused_message.find("alpha2 is null"), std::string::npos) << fused_message;
+    CallResult fused;
+    ASSERT_NO_FATAL_FAILURE(RunFused(nullptr, miopenActivationRELU, fused));
+    expect_declined_because(fused, "alpha2 is null");
 }
 
 // Runs in both modes: for an activation other than ReLU, the forwarded path must return the
 // same status as MIOpen's own fused path.
 TEST_F(GPU_HipdnnShimConvDeclined_FP32, NonReluActivationIsNotImplemented)
 {
-    miopenStatus_t status = miopenStatusSuccess;
-    ASSERT_NO_FATAL_FAILURE(RunFused(&kZero, miopenActivationPASTHRU, status));
-    EXPECT_EQ(status, miopenStatusNotImplemented);
+    CallResult result;
+    ASSERT_NO_FATAL_FAILURE(RunFused(&kZero, miopenActivationPASTHRU, result));
+    EXPECT_EQ(result.status, miopenStatusNotImplemented);
+    ExpectForwardedDecline(result, "miopenActivationRELU is supported");
 }

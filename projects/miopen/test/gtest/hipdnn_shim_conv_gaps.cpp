@@ -10,22 +10,9 @@
 
 #include "hipdnn_shim_helpers.hpp"
 
-#include <algorithm>
-#include <array>
-
 using namespace hipdnn_shim_test;
 
 namespace {
-
-enum class Direction
-{
-    Forward,
-    BackwardData,
-    BackwardWeights,
-};
-
-constexpr std::array<Direction, 3> kAllDirections = {
-    Direction::Forward, Direction::BackwardData, Direction::BackwardWeights};
 
 std::string CaseName(const std::string& problem, Direction direction)
 {
@@ -36,178 +23,6 @@ std::string CaseName(const std::string& problem, Direction direction)
     case Direction::BackwardWeights: return problem + "-bwd-weights";
     }
     return problem;
-}
-
-// Filled through data because tensor_elem_gen_integer does not take six dimensions.
-tensor<float> MakeFilled(const std::vector<std::size_t>& lengths)
-{
-    tensor<float> t{lengths};
-    for(auto& value : t.data)
-        value = static_cast<float>(prng::gen_0_to_B(17));
-    return t;
-}
-
-struct CallResult
-{
-    miopenStatus_t status;
-    // Read straight after the call, because a later call that MIOpen serves clears it.
-    std::string message;
-};
-
-// x, w and y hold the problem in forward terms, whatever the direction. The tensor the direction
-// writes holds the result if the call succeeded.
-CallResult FindAndRun(Direction direction,
-                      miopenConvolutionDescriptor_t conv,
-                      tensor<float>& x,
-                      tensor<float>& w,
-                      tensor<float>& y,
-                      const float* alpha = &kOne,
-                      const float* beta  = &kZero)
-{
-    auto& handle_deref    = get_handle();
-    miopenHandle_t handle = &handle_deref;
-
-    auto x_dev = handle_deref.Write(x.data);
-    auto w_dev = handle_deref.Write(w.data);
-    auto y_dev = handle_deref.Write(y.data);
-
-    std::size_t workspace_size = 0;
-    int returned_algo_count    = 0;
-    miopenConvAlgoPerf_t perf{};
-    Workspace wspace;
-    CallResult result{miopenStatusSuccess, {}};
-
-    switch(direction)
-    {
-    case Direction::Forward:
-        miopenConvolutionForwardGetWorkSpaceSize(
-            handle, &w.desc, &x.desc, conv, &y.desc, &workspace_size);
-        wspace.resize(workspace_size);
-        miopenFindConvolutionForwardAlgorithm(handle,
-                                              &x.desc,
-                                              x_dev.get(),
-                                              &w.desc,
-                                              w_dev.get(),
-                                              conv,
-                                              &y.desc,
-                                              y_dev.get(),
-                                              1,
-                                              &returned_algo_count,
-                                              &perf,
-                                              wspace.ptr(),
-                                              wspace.size(),
-                                              false);
-        wspace.resize(std::max(workspace_size, perf.memory));
-        ResetAfterFind(y_dev, y);
-        result.status = miopenConvolutionForward(handle,
-                                                 alpha,
-                                                 &x.desc,
-                                                 x_dev.get(),
-                                                 &w.desc,
-                                                 w_dev.get(),
-                                                 conv,
-                                                 perf.fwd_algo,
-                                                 beta,
-                                                 &y.desc,
-                                                 y_dev.get(),
-                                                 wspace.ptr(),
-                                                 wspace.size());
-        break;
-    case Direction::BackwardData:
-        miopenConvolutionBackwardDataGetWorkSpaceSize(
-            handle, &y.desc, &w.desc, conv, &x.desc, &workspace_size);
-        wspace.resize(workspace_size);
-        miopenFindConvolutionBackwardDataAlgorithm(handle,
-                                                   &y.desc,
-                                                   y_dev.get(),
-                                                   &w.desc,
-                                                   w_dev.get(),
-                                                   conv,
-                                                   &x.desc,
-                                                   x_dev.get(),
-                                                   1,
-                                                   &returned_algo_count,
-                                                   &perf,
-                                                   wspace.ptr(),
-                                                   wspace.size(),
-                                                   false);
-        wspace.resize(std::max(workspace_size, perf.memory));
-        ResetAfterFind(x_dev, x);
-        result.status = miopenConvolutionBackwardData(handle,
-                                                      alpha,
-                                                      &y.desc,
-                                                      y_dev.get(),
-                                                      &w.desc,
-                                                      w_dev.get(),
-                                                      conv,
-                                                      perf.bwd_data_algo,
-                                                      beta,
-                                                      &x.desc,
-                                                      x_dev.get(),
-                                                      wspace.ptr(),
-                                                      wspace.size());
-        break;
-    case Direction::BackwardWeights:
-        miopenConvolutionBackwardWeightsGetWorkSpaceSize(
-            handle, &y.desc, &x.desc, conv, &w.desc, &workspace_size);
-        wspace.resize(workspace_size);
-        miopenFindConvolutionBackwardWeightsAlgorithm(handle,
-                                                      &y.desc,
-                                                      y_dev.get(),
-                                                      &x.desc,
-                                                      x_dev.get(),
-                                                      conv,
-                                                      &w.desc,
-                                                      w_dev.get(),
-                                                      1,
-                                                      &returned_algo_count,
-                                                      &perf,
-                                                      wspace.ptr(),
-                                                      wspace.size(),
-                                                      false);
-        wspace.resize(std::max(workspace_size, perf.memory));
-        ResetAfterFind(w_dev, w);
-        result.status = miopenConvolutionBackwardWeights(handle,
-                                                         alpha,
-                                                         &y.desc,
-                                                         y_dev.get(),
-                                                         &x.desc,
-                                                         x_dev.get(),
-                                                         conv,
-                                                         perf.bwd_weights_algo,
-                                                         beta,
-                                                         &w.desc,
-                                                         w_dev.get(),
-                                                         wspace.ptr(),
-                                                         wspace.size());
-        break;
-    }
-    result.message = miopenGetErrorString(result.status);
-
-    if(result.status == miopenStatusSuccess)
-    {
-        switch(direction)
-        {
-        case Direction::Forward: y.data = handle_deref.Read<float>(y_dev, y.data.size()); break;
-        case Direction::BackwardData:
-            x.data = handle_deref.Read<float>(x_dev, x.data.size());
-            break;
-        case Direction::BackwardWeights:
-            w.data = handle_deref.Read<float>(w_dev, w.data.size());
-            break;
-        }
-    }
-    return result;
-}
-
-// Rules out a silent fall back to MIOpen.
-void ExpectForwardedDecline(const CallResult& result)
-{
-    if(ForwardingEnabled())
-    {
-        EXPECT_NE(result.message.find("[hipDNN-forwarded]"), std::string::npos)
-            << "decline did not come from hipDNN: " << result.message;
-    }
 }
 
 // Natively, 1-D and 4-D calls fail with UnknownError, so unknown_error_declines counts that as a
@@ -465,7 +280,7 @@ TEST(GPU_HipdnnShimConvAlphaBeta_FP32, StatusMatchesMiopen)
             RecordStatus(case_name, result.status);
             if(result.status != miopenStatusSuccess)
             {
-                ExpectForwardedDecline(result);
+                ExpectForwardedDecline(result, "supports only alpha=1, beta=0");
                 continue;
             }
 

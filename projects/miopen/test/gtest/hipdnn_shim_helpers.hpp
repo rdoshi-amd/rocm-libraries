@@ -20,14 +20,15 @@
 #include "../../src/private/routing.hpp"
 
 #include <algorithm>
+#include <array>
+#include <cstdint>
+#include <iostream>
 #include <limits>
 #include <string>
 #include <type_traits>
 #include <vector>
 
 namespace hipdnn_shim_test {
-
-inline constexpr std::size_t group_count = 1;
 
 inline constexpr float kOne  = 1.0f;
 inline constexpr float kZero = 0.0f;
@@ -55,6 +56,28 @@ inline tensor<float> MakeWeights()
     tensor<float> w{4, 4, 3, 3};
     w.generate(tensor_elem_gen_integer{17});
     return w;
+}
+
+// generate() ignores strides, so it would leave part of a strided tensor zero.
+template <class T>
+tensor<T> MakeFilled(miopenTensorLayout_t layout,
+                     const std::vector<std::size_t>& lengths,
+                     const std::vector<std::size_t>& strides,
+                     std::uint64_t max_value)
+{
+    tensor<T> t = strides.empty() ? tensor<T>{layout, lengths} : tensor<T>{lengths, strides};
+    const tensor_elem_gen_integer gen{max_value};
+    t.for_each([&](auto... i) { t(i...) = static_cast<T>(gen(i...)); });
+    return t;
+}
+
+// Filled through data because tensor_elem_gen_integer does not take six dimensions.
+inline tensor<float> MakeFilled(const std::vector<std::size_t>& lengths)
+{
+    tensor<float> t{lengths};
+    for(auto& value : t.data)
+        value = static_cast<float>(prng::gen_0_to_B(17));
+    return t;
 }
 
 // So an ASSERT_* that ends a test early does not leak the handle.
@@ -265,6 +288,219 @@ inline void RecordCorrect(const std::string& case_name, bool correct)
 inline bool ForwardingEnabled()
 {
     return miopen::wrapper::GetForwardingMode() == miopen::wrapper::ForwardingMode::Enabled;
+}
+
+enum class Direction
+{
+    Forward,
+    BackwardData,
+    BackwardWeights,
+};
+
+inline constexpr std::array<Direction, 3> kAllDirections = {
+    Direction::Forward, Direction::BackwardData, Direction::BackwardWeights};
+
+struct CallResult
+{
+    // The first failure from the workspace query or Find. Neither is forwarded, and for some
+    // problems they fail in both modes, so only some callers require success.
+    miopenStatus_t setup_status = miopenStatusSuccess;
+    int algo_count              = 0;
+    miopenStatus_t status       = miopenStatusSuccess;
+    // Read straight after the call, because a later call that MIOpen serves clears it.
+    std::string message;
+    // The forwarded path writes why a call failed to stderr, not into the message.
+    std::string logged;
+};
+
+// Captures stderr, so it cannot be nested or run during another capture.
+template <class Call>
+CallResult CaptureCall(Call&& call)
+{
+    CallResult result;
+    testing::internal::CaptureStderr();
+    result.status  = call();
+    result.message = miopenGetErrorString(result.status);
+    result.logged  = testing::internal::GetCapturedStderr();
+    // Passed on, so the reason still shows in the test log.
+    std::cerr << result.logged;
+    return result;
+}
+
+// x, w and y hold the problem in forward terms, whatever the direction. The tensor the direction
+// writes holds the result if the call succeeded. The workspace is the larger of the query's
+// answer and what Find's choice needs.
+template <class T>
+CallResult FindAndRun(Direction direction,
+                      miopenConvolutionDescriptor_t conv,
+                      tensor<T>& x,
+                      tensor<T>& w,
+                      tensor<T>& y,
+                      const float* alpha = &kOne,
+                      const float* beta  = &kZero)
+{
+    auto& handle_deref    = get_handle();
+    miopenHandle_t handle = &handle_deref;
+
+    auto x_dev = handle_deref.Write(x.data);
+    auto w_dev = handle_deref.Write(w.data);
+    auto y_dev = handle_deref.Write(y.data);
+
+    std::size_t workspace_size = 0;
+    miopenConvAlgoPerf_t perf{};
+    Workspace wspace;
+    miopenStatus_t setup_status = miopenStatusSuccess;
+    int algo_count              = 0;
+    const auto setup            = [&](miopenStatus_t status) {
+        if(setup_status == miopenStatusSuccess)
+            setup_status = status;
+    };
+    CallResult result;
+
+    switch(direction)
+    {
+    case Direction::Forward:
+        setup(miopenConvolutionForwardGetWorkSpaceSize(
+            handle, &w.desc, &x.desc, conv, &y.desc, &workspace_size));
+        wspace.resize(workspace_size);
+        setup(miopenFindConvolutionForwardAlgorithm(handle,
+                                                    &x.desc,
+                                                    x_dev.get(),
+                                                    &w.desc,
+                                                    w_dev.get(),
+                                                    conv,
+                                                    &y.desc,
+                                                    y_dev.get(),
+                                                    1,
+                                                    &algo_count,
+                                                    &perf,
+                                                    wspace.ptr(),
+                                                    wspace.size(),
+                                                    false));
+        wspace.resize(std::max(workspace_size, perf.memory));
+        ResetAfterFind(y_dev, y);
+        result = CaptureCall([&] {
+            return miopenConvolutionForward(handle,
+                                            alpha,
+                                            &x.desc,
+                                            x_dev.get(),
+                                            &w.desc,
+                                            w_dev.get(),
+                                            conv,
+                                            perf.fwd_algo,
+                                            beta,
+                                            &y.desc,
+                                            y_dev.get(),
+                                            wspace.ptr(),
+                                            wspace.size());
+        });
+        break;
+    case Direction::BackwardData:
+        setup(miopenConvolutionBackwardDataGetWorkSpaceSize(
+            handle, &y.desc, &w.desc, conv, &x.desc, &workspace_size));
+        wspace.resize(workspace_size);
+        setup(miopenFindConvolutionBackwardDataAlgorithm(handle,
+                                                         &y.desc,
+                                                         y_dev.get(),
+                                                         &w.desc,
+                                                         w_dev.get(),
+                                                         conv,
+                                                         &x.desc,
+                                                         x_dev.get(),
+                                                         1,
+                                                         &algo_count,
+                                                         &perf,
+                                                         wspace.ptr(),
+                                                         wspace.size(),
+                                                         false));
+        wspace.resize(std::max(workspace_size, perf.memory));
+        ResetAfterFind(x_dev, x);
+        result = CaptureCall([&] {
+            return miopenConvolutionBackwardData(handle,
+                                                 alpha,
+                                                 &y.desc,
+                                                 y_dev.get(),
+                                                 &w.desc,
+                                                 w_dev.get(),
+                                                 conv,
+                                                 perf.bwd_data_algo,
+                                                 beta,
+                                                 &x.desc,
+                                                 x_dev.get(),
+                                                 wspace.ptr(),
+                                                 wspace.size());
+        });
+        break;
+    case Direction::BackwardWeights:
+        setup(miopenConvolutionBackwardWeightsGetWorkSpaceSize(
+            handle, &y.desc, &x.desc, conv, &w.desc, &workspace_size));
+        wspace.resize(workspace_size);
+        setup(miopenFindConvolutionBackwardWeightsAlgorithm(handle,
+                                                            &y.desc,
+                                                            y_dev.get(),
+                                                            &x.desc,
+                                                            x_dev.get(),
+                                                            conv,
+                                                            &w.desc,
+                                                            w_dev.get(),
+                                                            1,
+                                                            &algo_count,
+                                                            &perf,
+                                                            wspace.ptr(),
+                                                            wspace.size(),
+                                                            false));
+        wspace.resize(std::max(workspace_size, perf.memory));
+        ResetAfterFind(w_dev, w);
+        result = CaptureCall([&] {
+            return miopenConvolutionBackwardWeights(handle,
+                                                    alpha,
+                                                    &y.desc,
+                                                    y_dev.get(),
+                                                    &x.desc,
+                                                    x_dev.get(),
+                                                    conv,
+                                                    perf.bwd_weights_algo,
+                                                    beta,
+                                                    &w.desc,
+                                                    w_dev.get(),
+                                                    wspace.ptr(),
+                                                    wspace.size());
+        });
+        break;
+    }
+    result.setup_status = setup_status;
+    result.algo_count   = algo_count;
+
+    if(result.status == miopenStatusSuccess)
+    {
+        switch(direction)
+        {
+        case Direction::Forward: y.data = handle_deref.Read<T>(y_dev, y.data.size()); break;
+        case Direction::BackwardData: x.data = handle_deref.Read<T>(x_dev, x.data.size()); break;
+        case Direction::BackwardWeights: w.data = handle_deref.Read<T>(w_dev, w.data.size()); break;
+        }
+    }
+    return result;
+}
+
+// For a problem both modes must serve. Wrap calls in ASSERT_NO_FATAL_FAILURE.
+inline void AssertServed(const CallResult& result)
+{
+    ASSERT_EQ(result.setup_status, miopenStatusSuccess) << "workspace query or Find failed";
+    ASSERT_GT(result.algo_count, 0) << "Find returned no algorithm";
+    ASSERT_EQ(result.status, miopenStatusSuccess) << result.message << '\n' << result.logged;
+}
+
+// Rules out a silent fallback to MIOpen, and checks the logged reason when one is given.
+inline void ExpectForwardedDecline(const CallResult& result, const char* reason = nullptr)
+{
+    if(!ForwardingEnabled())
+        return;
+    EXPECT_NE(result.message.find("[hipDNN-forwarded]"), std::string::npos)
+        << "decline did not come from hipDNN: " << result.message;
+    // MIOPEN_LOG_LEVEL can turn the reason off.
+    if(reason != nullptr && miopen::wrapper::ErrorLoggingEnabled())
+        EXPECT_NE(result.logged.find(reason), std::string::npos) << result.logged;
 }
 
 // The parity comparison matches known divergences against this device. Recorded only when a

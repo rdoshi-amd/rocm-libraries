@@ -157,6 +157,10 @@ const DisabledSet& GetDisabledSet();
 // environment because the wrapper cannot include MIOpen's logging header.
 bool TracingEnabled();
 
+// False when MIOPEN_LOG_LEVEL hides MIOpen's own errors, so forwarded failures
+// stay just as quiet.
+bool ErrorLoggingEnabled();
+
 // Writes one "[MIOpen] hipDNN routing: ..." line describing the decision.
 void ReportRouteDecision(const char* entryPoint,
                          ForwardingMode mode,

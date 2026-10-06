@@ -29,6 +29,9 @@ const char* const kLogLevelEnvVar   = "MIOPEN_LOG_LEVEL";
 // MIOpen's trace level. Spelled out here because the wrapper cannot include
 // MIOpen's logging header to name the enumerator.
 const char* const kTraceLogLevel = "6";
+// MIOpen's Quiet and Fatal levels, the ones that hide its errors.
+const char* const kQuietLogLevel = "1";
+const char* const kFatalLogLevel = "2";
 
 // Entry points redirected to hipDNN when forwarding is enabled. To add one, list
 // it here and bump the array size.
@@ -214,6 +217,16 @@ bool TracingEnabled()
     static const bool enabled = [] {
         const char* const level = std::getenv(kLogLevelEnvVar);
         return level != nullptr && std::string_view(level) == kTraceLogLevel;
+    }();
+    return enabled;
+}
+
+bool ErrorLoggingEnabled()
+{
+    static const bool enabled = [] {
+        const char* const level = std::getenv(kLogLevelEnvVar);
+        return level == nullptr || (std::string_view(level) != kQuietLogLevel &&
+                                    std::string_view(level) != kFatalLogLevel);
     }();
     return enabled;
 }

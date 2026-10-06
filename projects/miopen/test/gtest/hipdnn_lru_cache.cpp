@@ -50,6 +50,18 @@ TEST(CPU_HipdnnLruCache_NONE, InsertingAnExistingKeyReplacesItsValue)
     EXPECT_EQ(*cache.Find(1), 11);
 }
 
+TEST(CPU_HipdnnLruCache_NONE, InsertingAnExistingKeyKeepsItFromBeingEvicted)
+{
+    Cache cache(2);
+    cache.Insert(1, 10);
+    cache.Insert(2, 20);
+    cache.Insert(1, 11);
+    cache.Insert(3, 30);
+    EXPECT_NE(cache.Find(1), nullptr);
+    EXPECT_EQ(cache.Find(2), nullptr);
+    EXPECT_NE(cache.Find(3), nullptr);
+}
+
 TEST(CPU_HipdnnLruCache_NONE, EraseIfRemovesOnlyMatchingEntries)
 {
     Cache cache(4);

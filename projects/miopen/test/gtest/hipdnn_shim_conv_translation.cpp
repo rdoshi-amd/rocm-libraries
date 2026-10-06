@@ -45,80 +45,20 @@ std::uint64_t FillMax(std::uint64_t fp32_max)
     return std::is_same_v<T, float> ? fp32_max : 5;
 }
 
-// generate() ignores strides, so it would leave part of a strided tensor zero.
-template <class T>
-tensor<T> MakeFilled(miopenTensorLayout_t layout,
-                     const std::vector<std::size_t>& lengths,
-                     const std::vector<std::size_t>& strides,
-                     std::uint64_t max_value)
-{
-    tensor<T> t = strides.empty() ? tensor<T>{layout, lengths} : tensor<T>{lengths, strides};
-    const tensor_elem_gen_integer gen{max_value};
-    t.for_each([&](auto... i) { t(i...) = static_cast<T>(gen(i...)); });
-    return t;
-}
-
 template <class T>
 void CheckForward(miopenTensorLayout_t layout,
                   tensor<T>& x,
                   tensor<T>& w,
                   const ConvGeometry& geometry)
 {
-    auto& handle_deref    = get_handle();
-    miopenHandle_t handle = &handle_deref;
-
     OwnedConvDescriptor conv;
     ASSERT_NO_FATAL_FAILURE(InitConvDescriptor(conv, miopenConvolution, geometry));
     std::vector<std::size_t> out_lengths;
     ASSERT_NO_FATAL_FAILURE(OutputLengths(conv.handle, x, w, out_lengths));
     tensor<T> y{layout, out_lengths};
 
-    auto x_dev = handle_deref.Write(x.data);
-    auto w_dev = handle_deref.Write(w.data);
-    auto y_dev = handle_deref.Write(y.data);
-
-    std::size_t workspace_size = 0;
-    ASSERT_EQ(miopenConvolutionForwardGetWorkSpaceSize(
-                  handle, &w.desc, &x.desc, conv.handle, &y.desc, &workspace_size),
-              miopenStatusSuccess);
-    Workspace wspace{workspace_size};
-
-    int returned_algo_count = 0;
-    miopenConvAlgoPerf_t perf{};
-    ASSERT_EQ(miopenFindConvolutionForwardAlgorithm(handle,
-                                                    &x.desc,
-                                                    x_dev.get(),
-                                                    &w.desc,
-                                                    w_dev.get(),
-                                                    conv.handle,
-                                                    &y.desc,
-                                                    y_dev.get(),
-                                                    1,
-                                                    &returned_algo_count,
-                                                    &perf,
-                                                    wspace.ptr(),
-                                                    wspace.size(),
-                                                    false),
-              miopenStatusSuccess);
-    ASSERT_GT(returned_algo_count, 0);
-    ResetAfterFind(y_dev, y);
-
-    ASSERT_EQ(miopenConvolutionForward(handle,
-                                       &kOne,
-                                       &x.desc,
-                                       x_dev.get(),
-                                       &w.desc,
-                                       w_dev.get(),
-                                       conv.handle,
-                                       perf.fwd_algo,
-                                       &kZero,
-                                       &y.desc,
-                                       y_dev.get(),
-                                       wspace.ptr(),
-                                       wspace.size()),
-              miopenStatusSuccess);
-
-    y.data = handle_deref.Read<T>(y_dev, y.data.size());
+    const auto result = FindAndRun(Direction::Forward, conv.handle, x, w, y);
+    ASSERT_NO_FATAL_FAILURE(AssertServed(result));
     CheckMatchesCpuReference(x, w, y, geometry);
 }
 
@@ -129,9 +69,6 @@ void CheckBackwardData(miopenTensorLayout_t layout,
                        tensor<T>& w,
                        const ConvGeometry& geometry)
 {
-    auto& handle_deref    = get_handle();
-    miopenHandle_t handle = &handle_deref;
-
     OwnedConvDescriptor conv;
     ASSERT_NO_FATAL_FAILURE(InitConvDescriptor(conv, miopenConvolution, geometry));
     std::vector<std::size_t> out_lengths;
@@ -139,52 +76,8 @@ void CheckBackwardData(miopenTensorLayout_t layout,
     tensor<T> dy = MakeFilled<T>(layout, out_lengths, {}, FillMax<T>(13));
     tensor<T> dx{x.desc};
 
-    auto dy_dev = handle_deref.Write(dy.data);
-    auto w_dev  = handle_deref.Write(w.data);
-    auto dx_dev = handle_deref.Write(dx.data);
-
-    std::size_t workspace_size = 0;
-    ASSERT_EQ(miopenConvolutionBackwardDataGetWorkSpaceSize(
-                  handle, &dy.desc, &w.desc, conv.handle, &dx.desc, &workspace_size),
-              miopenStatusSuccess);
-    Workspace wspace{workspace_size};
-
-    int returned_algo_count = 0;
-    miopenConvAlgoPerf_t perf{};
-    ASSERT_EQ(miopenFindConvolutionBackwardDataAlgorithm(handle,
-                                                         &dy.desc,
-                                                         dy_dev.get(),
-                                                         &w.desc,
-                                                         w_dev.get(),
-                                                         conv.handle,
-                                                         &dx.desc,
-                                                         dx_dev.get(),
-                                                         1,
-                                                         &returned_algo_count,
-                                                         &perf,
-                                                         wspace.ptr(),
-                                                         wspace.size(),
-                                                         false),
-              miopenStatusSuccess);
-    ASSERT_GT(returned_algo_count, 0);
-    ResetAfterFind(dx_dev, dx);
-
-    ASSERT_EQ(miopenConvolutionBackwardData(handle,
-                                            &kOne,
-                                            &dy.desc,
-                                            dy_dev.get(),
-                                            &w.desc,
-                                            w_dev.get(),
-                                            conv.handle,
-                                            perf.bwd_data_algo,
-                                            &kZero,
-                                            &dx.desc,
-                                            dx_dev.get(),
-                                            wspace.ptr(),
-                                            wspace.size()),
-              miopenStatusSuccess);
-
-    dx.data = handle_deref.Read<T>(dx_dev, dx.data.size());
+    const auto result = FindAndRun(Direction::BackwardData, conv.handle, dx, w, dy);
+    ASSERT_NO_FATAL_FAILURE(AssertServed(result));
     CheckMatchesCpuBackwardData(dx, w, dy, geometry);
 }
 
@@ -194,9 +87,6 @@ void CheckBackwardWeights(miopenTensorLayout_t layout,
                           tensor<T>& w,
                           const ConvGeometry& geometry)
 {
-    auto& handle_deref    = get_handle();
-    miopenHandle_t handle = &handle_deref;
-
     OwnedConvDescriptor conv;
     ASSERT_NO_FATAL_FAILURE(InitConvDescriptor(conv, miopenConvolution, geometry));
     std::vector<std::size_t> out_lengths;
@@ -204,52 +94,8 @@ void CheckBackwardWeights(miopenTensorLayout_t layout,
     tensor<T> dy = MakeFilled<T>(layout, out_lengths, {}, FillMax<T>(13));
     tensor<T> dw{w.desc};
 
-    auto dy_dev = handle_deref.Write(dy.data);
-    auto x_dev  = handle_deref.Write(x.data);
-    auto dw_dev = handle_deref.Write(dw.data);
-
-    std::size_t workspace_size = 0;
-    ASSERT_EQ(miopenConvolutionBackwardWeightsGetWorkSpaceSize(
-                  handle, &dy.desc, &x.desc, conv.handle, &dw.desc, &workspace_size),
-              miopenStatusSuccess);
-    Workspace wspace{workspace_size};
-
-    int returned_algo_count = 0;
-    miopenConvAlgoPerf_t perf{};
-    ASSERT_EQ(miopenFindConvolutionBackwardWeightsAlgorithm(handle,
-                                                            &dy.desc,
-                                                            dy_dev.get(),
-                                                            &x.desc,
-                                                            x_dev.get(),
-                                                            conv.handle,
-                                                            &dw.desc,
-                                                            dw_dev.get(),
-                                                            1,
-                                                            &returned_algo_count,
-                                                            &perf,
-                                                            wspace.ptr(),
-                                                            wspace.size(),
-                                                            false),
-              miopenStatusSuccess);
-    ASSERT_GT(returned_algo_count, 0);
-    ResetAfterFind(dw_dev, dw);
-
-    ASSERT_EQ(miopenConvolutionBackwardWeights(handle,
-                                               &kOne,
-                                               &dy.desc,
-                                               dy_dev.get(),
-                                               &x.desc,
-                                               x_dev.get(),
-                                               conv.handle,
-                                               perf.bwd_weights_algo,
-                                               &kZero,
-                                               &dw.desc,
-                                               dw_dev.get(),
-                                               wspace.ptr(),
-                                               wspace.size()),
-              miopenStatusSuccess);
-
-    dw.data = handle_deref.Read<T>(dw_dev, dw.data.size());
+    const auto result = FindAndRun(Direction::BackwardWeights, conv.handle, x, dw, dy);
+    ASSERT_NO_FATAL_FAILURE(AssertServed(result));
     CheckMatchesCpuBackwardWeights(x, dw, dy, geometry);
 }
 
@@ -558,7 +404,7 @@ TEST(GPU_HipdnnShimConvNonPackedAfterPacked_FP32, MatchesCpuReference)
                             geometry.pads,
                             geometry.strides,
                             geometry.dilations,
-                            group_count);
+                            geometry.groups);
     RecordCorrect("non-packed-after-packed", WithinTolerance(reference, y_strided));
     // A known MIOpen bug makes the native result wrong, so it is only recorded.
     if(ForwardingEnabled())

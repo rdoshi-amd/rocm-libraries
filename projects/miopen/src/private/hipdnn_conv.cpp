@@ -14,6 +14,7 @@
 
 #include <hipdnn_frontend.hpp>
 
+#include <algorithm>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -40,6 +41,9 @@ struct TensorInfo
     std::vector<int64_t> strides;
     // Above 1 only for NCHWc4, NCHWc8, CHWNc4 and CHWNc8.
     int64_t vectorLength = 1;
+    // Set when a dim or stride is above INT_MAX, which the int getter cuts down.
+    // dims, strides and vectorLength are then unusable.
+    bool truncated = false;
 };
 
 struct ConvInfo
@@ -97,16 +101,35 @@ miopenStatus_t ReadTensor(miopenTensorDescriptor_t desc, TensorInfo& out)
     out.dims.assign(dims.begin(), dims.end());
     out.strides.assign(strides.begin(), strides.end());
 
+    // MIOpen stores no dim or stride below 1, so one here was cut down by the
+    // int getter.
+    const auto belowOne = [](int value) { return value < 1; };
+    if(std::any_of(dims.begin(), dims.end(), belowOne) ||
+       std::any_of(strides.begin(), strides.end(), belowOne))
+    {
+        out.truncated = true;
+        return miopenStatusSuccess;
+    }
+
     // No getter exposes the vector length, but MIOpen's byte count is
     // typeSize * (vectorLength + sum of (dim - 1) * stride), so it can be solved for.
+    // The sum is unsigned, as in MIOpen, so a cut-down value gives a wrong
+    // answer rather than signed overflow.
     size_t numBytes       = 0;
     const size_t typeSize = TypeSize(dataType);
     if(miopenGetTensorNumBytes_impl(desc, &numBytes) != miopenStatusSuccess || typeSize == 0)
         return miopenStatusInvalidValue;
-    int64_t span = 0;
-    for(size_t i = 0; i < out.dims.size(); ++i)
-        span += (out.dims[i] - 1) * out.strides[i];
-    out.vectorLength = static_cast<int64_t>(numBytes / typeSize) - span;
+    uint64_t span = 0;
+    for(size_t i = 0; i < dims.size(); ++i)
+        span += static_cast<uint64_t>(dims[i] - 1) * static_cast<uint64_t>(strides[i]);
+    const uint64_t vectorLength = numBytes / typeSize - span;
+    // MIOpen allows only these, so any other answer means a value was cut down.
+    if(vectorLength != 1 && vectorLength != 4 && vectorLength != 8)
+    {
+        out.truncated = true;
+        return miopenStatusSuccess;
+    }
+    out.vectorLength = static_cast<int64_t>(vectorLength);
     return miopenStatusSuccess;
 }
 
@@ -169,6 +192,8 @@ const char* CheckSupported(const std::vector<TensorInfo>& tensors, const ConvInf
     {
         if(!ToHipdnnDataType(tensor.dataType, unused))
             return "this data type has no hipDNN convolution";
+        if(tensor.truncated)
+            return "tensors with a dim or stride above INT_MAX are not forwarded to hipDNN";
         // hipDNN describes a tensor only by dims and strides, which cannot
         // express a vector packed into each element.
         if(tensor.vectorLength != 1)
@@ -321,14 +346,19 @@ bool PopulateGraph(const ConvProblem& problem, fe::graph::Graph& graph)
     return true;
 }
 
-miopenStatus_t
-RunProblem(miopenHandle_t handle, const ConvProblem& problem, VariantPack& variantPack)
+miopenStatus_t RunProblem(miopenHandle_t handle,
+                          const ConvProblem& problem,
+                          VariantPack& variantPack,
+                          void* workspace,
+                          size_t workspaceSize)
 {
     return RunCachedGraph(
         handle,
         MakePlanKey(handle, problem),
         [&problem](fe::graph::Graph& graph) { return PopulateGraph(problem, graph); },
-        variantPack);
+        variantPack,
+        workspace,
+        workspaceSize);
 }
 
 // Shared tail of the three plain convolution entry points. `a`, `b` and `out`
@@ -343,7 +373,9 @@ miopenStatus_t ForwardConvolution(miopenHandle_t handle,
                                   const void* bData,
                                   miopenConvolutionDescriptor_t convDesc,
                                   miopenTensorDescriptor_t outDesc,
-                                  void* outData)
+                                  void* outData,
+                                  void* workspace,
+                                  size_t workspaceSize)
 {
     if(!IsAvailable())
         return RecordFailure(miopenStatusInternalError, "hipDNN forwarding is unavailable");
@@ -372,14 +404,11 @@ miopenStatus_t ForwardConvolution(miopenHandle_t handle,
         {kUidB, const_cast<void*>(bData)},
         {kUidOut, outData},
     };
-    return RunProblem(handle, problem, variantPack);
+    return RunProblem(handle, problem, variantPack, workspace, workspaceSize);
 }
 
 } // namespace
 
-// The caller's `algo` is ignored and the caller's workSpace/workSpaceSize are
-// left untouched: hipDNN picks its own engine through its heuristics and
-// computes its own workspace requirement, which this wrapper allocates and owns.
 miopenStatus_t ConvolutionForward(miopenHandle_t handle,
                                   const void* alpha,
                                   const miopenTensorDescriptor_t xDesc,
@@ -391,15 +420,24 @@ miopenStatus_t ConvolutionForward(miopenHandle_t handle,
                                   const void* beta,
                                   const miopenTensorDescriptor_t yDesc,
                                   void* y,
-                                  void* /*workSpace*/,
-                                  size_t /*workSpaceSize*/)
+                                  void* workSpace,
+                                  size_t workSpaceSize)
 {
-    return ForwardConvolution(
-        handle, GraphKind::ConvFprop, alpha, beta, xDesc, x, wDesc, w, convDesc, yDesc, y);
+    return ForwardConvolution(handle,
+                              GraphKind::ConvFprop,
+                              alpha,
+                              beta,
+                              xDesc,
+                              x,
+                              wDesc,
+                              w,
+                              convDesc,
+                              yDesc,
+                              y,
+                              workSpace,
+                              workSpaceSize);
 }
 
-// As with ConvolutionForward, `algo` and the caller's workspace are unused:
-// hipDNN owns engine selection and its own workspace.
 miopenStatus_t ConvolutionBackwardData(miopenHandle_t handle,
                                        const void* alpha,
                                        const miopenTensorDescriptor_t dyDesc,
@@ -411,15 +449,24 @@ miopenStatus_t ConvolutionBackwardData(miopenHandle_t handle,
                                        const void* beta,
                                        const miopenTensorDescriptor_t dxDesc,
                                        void* dx,
-                                       void* /*workSpace*/,
-                                       size_t /*workSpaceSize*/)
+                                       void* workSpace,
+                                       size_t workSpaceSize)
 {
-    return ForwardConvolution(
-        handle, GraphKind::ConvDgrad, alpha, beta, dyDesc, dy, wDesc, w, convDesc, dxDesc, dx);
+    return ForwardConvolution(handle,
+                              GraphKind::ConvDgrad,
+                              alpha,
+                              beta,
+                              dyDesc,
+                              dy,
+                              wDesc,
+                              w,
+                              convDesc,
+                              dxDesc,
+                              dx,
+                              workSpace,
+                              workSpaceSize);
 }
 
-// As with ConvolutionForward, `algo` and the caller's workspace are unused:
-// hipDNN owns engine selection and its own workspace.
 miopenStatus_t ConvolutionBackwardWeights(miopenHandle_t handle,
                                           const void* alpha,
                                           const miopenTensorDescriptor_t dyDesc,
@@ -431,15 +478,24 @@ miopenStatus_t ConvolutionBackwardWeights(miopenHandle_t handle,
                                           const void* beta,
                                           const miopenTensorDescriptor_t dwDesc,
                                           void* dw,
-                                          void* /*workSpace*/,
-                                          size_t /*workSpaceSize*/)
+                                          void* workSpace,
+                                          size_t workSpaceSize)
 {
-    return ForwardConvolution(
-        handle, GraphKind::ConvWgrad, alpha, beta, dyDesc, dy, xDesc, x, convDesc, dwDesc, dw);
+    return ForwardConvolution(handle,
+                              GraphKind::ConvWgrad,
+                              alpha,
+                              beta,
+                              dyDesc,
+                              dy,
+                              xDesc,
+                              x,
+                              convDesc,
+                              dwDesc,
+                              dw,
+                              workSpace,
+                              workSpaceSize);
 }
 
-// As with ConvolutionForward, `algo` and the caller's workspace are unused:
-// hipDNN owns engine selection and its own workspace.
 miopenStatus_t ConvolutionBiasActivationForward(miopenHandle_t handle,
                                                 const void* alpha1,
                                                 const miopenTensorDescriptor_t xDesc,
@@ -448,8 +504,8 @@ miopenStatus_t ConvolutionBiasActivationForward(miopenHandle_t handle,
                                                 const void* w,
                                                 const miopenConvolutionDescriptor_t convDesc,
                                                 miopenConvFwdAlgorithm_t /*algo*/,
-                                                void* /*workspace*/,
-                                                size_t /*workspaceSizeInBytes*/,
+                                                void* workspace,
+                                                size_t workspaceSizeInBytes,
                                                 const void* alpha2,
                                                 const miopenTensorDescriptor_t /*zDesc*/,
                                                 const void* /*z*/,
@@ -510,7 +566,7 @@ miopenStatus_t ConvolutionBiasActivationForward(miopenHandle_t handle,
         {kUidBias, const_cast<void*>(bias)},
         {kUidOut, y},
     };
-    return RunProblem(handle, problem, variantPack);
+    return RunProblem(handle, problem, variantPack, workspace, workspaceSizeInBytes);
 }
 
 } // namespace hipdnn

@@ -26,6 +26,9 @@ hipblaslt_jit_test(jit-source-bundle jit-cpu hipblaslt-jit-source-bundle-test
     "${hipblaslt_jit_scratch}/source-bundle")
 
 if(NOT HIPBLASLT_ENABLE_JIT)
+    add_executable(hipblaslt-jit-disabled-test disabled_api_test.cpp)
+    target_link_libraries(hipblaslt-jit-disabled-test PRIVATE roc::hipblaslt hip::host)
+    hipblaslt_jit_test(jit-disabled jit-cpu hipblaslt-jit-disabled-test)
     return()
 endif()
 
@@ -60,3 +63,11 @@ target_link_libraries(hipblaslt-jit-loader-test PRIVATE
     roc::hipblaslt roc::tensilelite-host amd_comgr hip::device)
 hipblaslt_jit_test(jit-loader jit-gpu hipblaslt-jit-loader-test
     "${hipblaslt_jit_bundle}" "${hipblaslt_jit_scratch}/loader")
+
+if(HIPBLASLT_JIT_TESTING)
+    add_executable(hipblaslt-jit-end-to-end-test jit_end_to_end_test.cpp)
+    target_include_directories(hipblaslt-jit-end-to-end-test PRIVATE "${hipblaslt_jit_source}")
+    target_link_libraries(hipblaslt-jit-end-to-end-test PRIVATE roc::hipblaslt hip::device)
+    hipblaslt_jit_test(jit-end-to-end jit-gpu hipblaslt-jit-end-to-end-test
+        "${hipblaslt_jit_bundle}")
+endif()

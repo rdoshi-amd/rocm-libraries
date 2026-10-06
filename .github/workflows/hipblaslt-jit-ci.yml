@@ -10,7 +10,14 @@ on:
       - "projects/hipblaslt/library/src/amd_detail/hipblaslt-jit-*"
       - "projects/hipblaslt/CMakeLists.txt"
       - "projects/hipblaslt/library/src/amd_detail/CMakeLists.txt"
+      - "projects/hipblaslt/library/src/amd_detail/hipblaslt.cpp"
+      - "projects/hipblaslt/library/src/amd_detail/hipblaslt-ext.cpp"
       - "projects/hipblaslt/clients/tests/jit/**"
+      - "projects/hipblaslt/library/src/amd_detail/rocblaslt/src/tensile_host.cpp"
+      - "projects/hipblaslt/library/src/amd_detail/rocblaslt/src/include/tensile_host.hpp"
+      - "projects/hipblaslt/library/src/amd_detail/rocblaslt/src/rocblaslt_auxiliary.cpp"
+      - "projects/hipblaslt/library/src/amd_detail/rocblaslt/src/rocblaslt_mat.cpp"
+      - "projects/hipblaslt/library/src/amd_detail/rocblaslt/src/handle.cpp"
       - "projects/hipblaslt/tensilelite/include/Tensile/CachingLibrary.hpp"
       - "projects/hipblaslt/tensilelite/include/Tensile/ExactLogicLibrary.hpp"
       - "projects/hipblaslt/tensilelite/include/Tensile/ProviderRows.hpp"
@@ -169,7 +176,7 @@ jobs:
             -DPython_EXECUTABLE="$VENV_DIR/bin/python" \
             -DPython3_EXECUTABLE="$VENV_DIR/bin/python" \
             -DGPU_TARGETS="$JIT_ARCHITECTURE" \
-            -DHIPBLASLT_ENABLE_JIT=ON \
+            -DHIPBLASLT_ENABLE_JIT=ON -DHIPBLASLT_JIT_TESTING=ON \
             -DHIPBLASLT_ENABLE_HOST=ON -DHIPBLASLT_ENABLE_DEVICE=OFF \
             -DHIPBLASLT_ENABLE_CLIENT=OFF -DHIPBLASLT_BUILD_TESTING=ON \
             -DHIPBLASLT_ENABLE_ROCROLLER=OFF -DHIPBLASLT_ENABLE_MARKER=OFF \

@@ -164,6 +164,7 @@ if(Python3_FOUND)
                 ${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_support_sidecar.py
     )
     set(HIPDNN_IT_SUPPORT_SIDECAR_TEST hipdnn_support_sidecar_python_tests)
+
     # Skips itself when PyTorch, which the generator needs, is not installed.
     add_test(
         NAME hipdnn_golden_generator_python_tests
@@ -315,6 +316,7 @@ if(EXISTS "${HIPDNN_IT_GTEST_CATEGORIES_YAML}"
     endif()
     if(HIPDNN_IT_SUPPORT_SIDECAR_TEST)
         _apply_provider_ctest_category_labels(${HIPDNN_IT_SUPPORT_SIDECAR_TEST})
+    endif()
     if(HIPDNN_IT_GOLDEN_GENERATOR_TEST)
         _apply_provider_ctest_category_labels(${HIPDNN_IT_GOLDEN_GENERATOR_TEST})
     endif()

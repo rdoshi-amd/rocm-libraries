@@ -522,7 +522,7 @@ id) beats a generic containing it, which beats an empty list. Consequences for a
   every generic of the pack and only entries the pack lists; a kernel with no `arch`
   inherits the pack. A kernel may not name a generic its pack does not list. An `hsaco`
   kernel is stamped with its own `arch`, else the whole pack list, which satisfies this.
-- The generator emits every kernel inline in its pack, so each inherits the pack's `arch`; a hand-authored standalone UKD (referenced by id) with no `arch` is unrestricted, and the packer accepts it only under a KDP whose `arch` is empty too (`has an empty 'arch' (unrestricted) but the KDP lists`).
+- The generator emits every kernel inline in its pack and never a standalone UKD; a kernel without its own `arch` inherits the pack's (an `hsaco` kernel is stamped with the whole pack list). A `kind: rocke` kernel under a generic is a ConfigError (`does not support generic targets yet`).  a hand-authored standalone UKD (referenced by id) with no `arch` is unrestricted, and the packer accepts it only under a KDP whose `arch` is empty too (`has an empty 'arch' (unrestricted) but the KDP lists`).
 - The emitted inventory (and so the generated census) gives every member of a generic row
   the generic's descriptors, and the census checks coverage with the SDK's `archSupports`.
   An `hsaco` object packed under a generic must really be generic-compatible; neither the

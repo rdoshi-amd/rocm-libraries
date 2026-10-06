@@ -30,6 +30,8 @@
 #include "handle.h"
 #include "utility.hpp"
 
+#include <limits>
+
 inline bool isValidOrderForDatatype(hipDataType datatype, hipblasLtOrder_t order)
 {
     if((datatype == HIP_R_16F && order != HIPBLASLT_ORDER_COL16_4R8)
@@ -241,6 +243,25 @@ inline rocblaslt_status validateMatmulArgs(int64_t                       m,
                   << std::endl;
 #endif
         return rocblaslt_status_invalid_size;
+    }
+
+    // Kernels receive batch strides as 32-bit values; a single batch never uses its stride.
+    constexpr int64_t max_batch_stride = std::numeric_limits<uint32_t>::max();
+    if(num_batches_a > 1
+       && (batch_stride_a > max_batch_stride || batch_stride_b > max_batch_stride
+           || batch_stride_c > max_batch_stride || batch_stride_d > max_batch_stride))
+    {
+        log_error(__func__,
+                  "batch strides of 2^32 elements or more are not supported",
+                  "stride_a",
+                  batch_stride_a,
+                  "stride_b",
+                  batch_stride_b,
+                  "stride_c",
+                  batch_stride_c,
+                  "stride_d",
+                  batch_stride_d);
+        return rocblaslt_status_not_implemented;
     }
 
     // quick return 0 is valid in BLAS

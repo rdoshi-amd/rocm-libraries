@@ -58,6 +58,15 @@ The harness walks the bundle root (`--golden-data-dir`, default
 - **Sweeps:** every directory that contains *both* `graph.template.json` and
   `sweep.json`. Each `cases[].id` becomes one test.
 
+To run against part of the tree, point `--golden-data-dir` (`--gd`) at a directory
+that holds only the pieces you want. They can be copies or directory symlinks into
+an existing tree, e.g. `quick/SdpaFwd -> <install>/lib/integration-test-bundles/quick/SdpaFwd`.
+Discovery follows directory links at any depth. Tests take their names from the
+path through the link, so a linked subtree gets the same test names as a copy. A
+link that would lead the walk back into a directory it is already inside (one of
+the link's own parents, including the parents of `--gd` itself) is skipped with a
+warning, and so is a directory the run is not allowed to list.
+
 GTest names come from the path, not from anything inside the files. Each path
 segment is sanitized (any character other than `[A-Za-z0-9_]` becomes `_`):
 

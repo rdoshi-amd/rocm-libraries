@@ -357,6 +357,22 @@ Skipped: 3181
 Failed:  0
 ```
 
+Each verification test body prints the oracle that graded it, between its
+`[ RUN ]` and result lines, and the coverage summary totals them:
+
+```text
+[ VERIFIER ] gpu_ref: .../quick/SdpaFwd/bshd/fp16/hd64_nomask_mqa/Small.json
+...
+Verified by: golden 0, gpu_ref 9, cpu_ref 0, none 3
+```
+
+`golden`, `gpu_ref` and `cpu_ref` name what the outputs were compared against,
+whether the comparison passed or failed. `none` means nothing was compared: a skip
+(the engine declined, or no reference could run the op), a failure before the
+comparison, or a bundle whose `enforcement_level` stops short of comparing. With
+`--gtest_repeat=N` the line counts the last iteration, like the Passed, Skipped and
+Failed counts above it.
+
 **Check all three counts, not just the exit code.** A run that skips every case
 is green. To tell an expected skip from a regression, read the skip reasons:
 

@@ -346,6 +346,7 @@ from .scan import (
 )
 from .schedule import SchedulePolicy
 from .streamk import (
+    StreamKIterArgs,
     StreamKIterPartition,
     StreamKPartition,
     StreamKReductionStrategy,
@@ -395,7 +396,6 @@ from .tensor_view import (
 from .manifest import (
     MANIFEST_SCHEMA,
     attention_args_signature,
-    conv_args_signature,
     gemm_args_signature,
     make_attention_manifest,
     make_conv_manifest,
@@ -541,7 +541,6 @@ __all__ = [
     # Manifest
     "MANIFEST_SCHEMA",
     "attention_args_signature",
-    "conv_args_signature",
     "gemm_args_signature",
     "make_attention_manifest",
     "make_conv_manifest",
@@ -619,6 +618,7 @@ __all__ = [
     "load_sorted_topk_weight",
     "scatter_token_offset",
     # StreamK partitioner ( StreamK GEMM)
+    "StreamKIterArgs",
     "StreamKIterPartition",
     "StreamKPartition",
     "StreamKReductionStrategy",

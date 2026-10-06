@@ -238,32 +238,24 @@ int rocke_streamk_end_iter(const rocke_streamk_iter_partition_t* p, int sk_cta)
  */
 rocke_value_t* rocke_emit_streamk_sk_start_iter(rocke_ir_builder_t* b,
                                                 rocke_value_t* sk_cta,
-                                                const rocke_streamk_iter_partition_t* p)
+                                                const rocke_streamk_iter_args_t* a)
 {
-    const rocke_streamk_iter_plan_t r = rocke_streamk_iter_plan(p);
-    rocke_value_t* c_dp_iters = rocke_b_const_i32(b, (int64_t)r.total_dp_iters);
-    rocke_value_t* c_per_cta = rocke_b_const_i32(b, (int64_t)r.iters_per_sk_cta);
-    rocke_value_t* c_extra = rocke_b_const_i32(b, (int64_t)r.extra_iters);
-    rocke_value_t* body = rocke_b_mul(b, sk_cta, c_per_cta);
-    rocke_value_t* lead = rocke_b_smin(b, sk_cta, c_extra);
+    rocke_value_t* body = rocke_b_mul(b, sk_cta, a->iters_per_sk_cta);
+    rocke_value_t* lead = rocke_b_smin(b, sk_cta, a->extra_iters);
     rocke_value_t* inner = rocke_b_add(b, body, lead);
-    return rocke_b_add(b, c_dp_iters, inner);
+    return rocke_b_add(b, a->total_dp_iters, inner);
 }
 
 /* Python emit_streamk_iter_range; every nested builder call is pinned to a
  * temporary in the Python evaluation order. */
 rocke_streamk_iter_range_t rocke_emit_streamk_iter_range(rocke_ir_builder_t* b,
                                                          rocke_value_t* cta,
-                                                         const rocke_streamk_iter_partition_t* p,
+                                                         const rocke_streamk_iter_args_t* a,
                                                          bool dp)
 {
-    const rocke_streamk_iter_plan_t r = rocke_streamk_iter_plan(p);
     rocke_streamk_iter_range_t res;
-    rocke_value_t* c_dp_tiles = NULL;
     rocke_value_t* sk_cta;
     rocke_value_t* sk_start;
-    rocke_value_t* c_per_cta;
-    rocke_value_t* c_extra;
     rocke_value_t* c_one;
     rocke_value_t* c_zero;
     rocke_value_t* has_extra;
@@ -272,27 +264,21 @@ rocke_streamk_iter_range_t rocke_emit_streamk_iter_range(rocke_ir_builder_t* b,
     rocke_value_t* start;
     rocke_value_t* length;
     if(dp)
-    {
-        c_dp_tiles = rocke_b_const_i32(b, (int64_t)r.dp_tiles);
-        sk_cta = rocke_b_sub(b, cta, c_dp_tiles);
-    }
+        sk_cta = rocke_b_sub(b, cta, a->dp_tiles);
     else
         sk_cta = cta;
-    sk_start = rocke_emit_streamk_sk_start_iter(b, sk_cta, p);
-    c_per_cta = rocke_b_const_i32(b, (int64_t)r.iters_per_sk_cta);
-    c_extra = rocke_b_const_i32(b, (int64_t)r.extra_iters);
+    sk_start = rocke_emit_streamk_sk_start_iter(b, sk_cta, a);
     c_one = rocke_b_const_i32(b, 1);
     c_zero = rocke_b_const_i32(b, 0);
-    has_extra = rocke_b_cmp_lt(b, sk_cta, c_extra);
+    has_extra = rocke_b_cmp_lt(b, sk_cta, a->extra_iters);
     extra = rocke_b_select(b, has_extra, c_one, c_zero);
-    sk_len = rocke_b_add(b, c_per_cta, extra);
+    sk_len = rocke_b_add(b, a->iters_per_sk_cta, extra);
     if(dp)
     {
-        rocke_value_t* c_ipt = rocke_b_const_i32(b, (int64_t)p->iters_per_tile);
-        rocke_value_t* is_dp = rocke_b_cmp_lt(b, cta, c_dp_tiles);
-        rocke_value_t* dp_start = rocke_b_mul(b, cta, c_ipt);
+        rocke_value_t* is_dp = rocke_b_cmp_lt(b, cta, a->dp_tiles);
+        rocke_value_t* dp_start = rocke_b_mul(b, cta, a->iters_per_tile);
         start = rocke_b_select(b, is_dp, dp_start, sk_start);
-        length = rocke_b_select(b, is_dp, c_ipt, sk_len);
+        length = rocke_b_select(b, is_dp, a->iters_per_tile, sk_len);
     }
     else
     {

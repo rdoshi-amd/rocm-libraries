@@ -28,19 +28,25 @@
 #   15 -- split-K=4, two_stage=True (workspace-store epilogue), fp16, gfx950
 #   16 -- split-K=4, two_stage=True (workspace-store epilogue), fp16, gfx942
 #   17 -- gfx1250 wave32 WMMA 16x16x32 K-outer (ds_load_tr16_b128 transpose reads)
-#   18 -- stream-K dp_sk, linear fixup, fp16, gfx950
-#   19 -- stream-K dp_sk, tree fixup, fp16, gfx950
-#   20 -- stream-K dp_sk, atomic reduction, fp32, DP + SK mix, gfx950
-#   21 -- stream-K dp_sk, workspace reduction, fp16, gfx950
-#   22 -- stream-K persistent, linear fixup, 16x16x16 atom, gfx942
-#   23 -- stream-K dp_sk, linear, groups=3 with a partial last M tile, gfx950
-#   24 -- stream-K persistent, tree, bf16 dW, groups=2, gfx950
-#   25 -- stream-K persistent, atomic, fp32, groups=2, gfx950
-#   26 -- stream-K persistent, workspace, fp16, gfx942
-#   27 -- stream-K dp_sk, linear, all-DP partition (tiles divide the pool), gfx950
-#   28 -- stream-K dp_sk, linear, K-outer LDS tile, groups=2, gfx950
-#   (async_dma omitted: C++ async load path does not yet honour the wgrad A-descriptor
-#    override, so it would produce different IR and break the byte-identity gate)
+#   18 -- unroll_k double-buffered loop under split-K=4 (odd-tail prefetch guard), gfx950
+#   19 -- split-K (degree at launch) + two_stage, odd wg_N (C=3), fp16, gfx950
+#   20 -- K-outer + async_dma + split-K=2 with the fp16 cshuffle atomic epilogue,
+#         3 K tiles per slice (odd: the phase-B prefetch is redirected to the
+#         zero-fill offset), gfx950
+#   21 -- stream-K dp_sk, linear fixup, fp16, gfx950
+#   22 -- stream-K dp_sk, tree fixup, fp16, gfx950
+#   23 -- stream-K dp_sk, atomic reduction, fp32, gfx950
+#   24 -- stream-K dp_sk, workspace reduction, fp16, gfx950
+#   25 -- stream-K persistent, linear fixup, 16x16x16 atom, gfx942
+#   26 -- stream-K dp_sk, linear, groups=3 with a partial last M tile, gfx950
+#   27 -- stream-K persistent, tree, bf16 dW, groups=2, gfx950
+#   28 -- stream-K persistent, atomic, fp32, groups=2, gfx950
+#   29 -- stream-K persistent, workspace, fp16, gfx942
+#   30 -- stream-K dp_sk, linear, K-outer LDS tile, groups=2, gfx950
+#   (Grouped wgrad reaches the C++ engine only through stream-K, and its tile
+#    loader has no elem_dtype, so no case loads bf16 operands. The stream-K
+#    partition and CTA pool are kernargs, so no case varies them. async_dma is
+#    rejected with stream-K.)
 #
 # Negative cases (configs 100+) verify that invalid specs are rejected:
 #   100 -- odd C with fp16 split-K (must raise ValueError)
@@ -52,7 +58,7 @@
 #   107 -- streamk with unroll_k (must raise ValueError)
 #   108 -- streamk atomic reduction into fp16 dW (must raise ValueError)
 # (These illustrate the validator contract. The C emitter defines only cases
-# 0-28, so run_diff.py stops at the shared END before reaching 100+; these
+# 0-30, so run_diff.py stops at the shared END before reaching 100+; these
 # configs are not exercised by the differential gate.)
 from kernels.common.conv_implicit_gemm_wgrad import (
     WgradConvSpec,
@@ -338,10 +344,9 @@ def _spec(idx: int):
                 warp_tile_n=32,
                 warp_tile_k=16,
                 pipeline="mem",
-                # fp32 output + the direct-store epilogue. split-K with the
-                # cshuffle atomic epilogue is separately divergent between the
-                # engines (reproducible with neither async nor K-outer), so this
-                # config isolates the async / K-outer path under split-K.
+                # fp32 output + the direct-store epilogue: the async / K-outer
+                # path under split-K on its own. Config 20 covers the same path
+                # with the 16-bit cshuffle atomic epilogue.
                 epilogue="default",
                 data=ConvDataSpec(dtype_d="fp32"),
                 lds_k_outer=True,
@@ -475,12 +480,87 @@ def _spec(idx: int):
             "gfx1250",
         )
 
-    if 18 <= idx <= 27:
+    if idx == 18:
+        # unroll_k: the double-buffered loop computes two tiles per step, so
+        # under split-K the prefetch past an odd slice end has to be redirected
+        # to wg_K or it pulls in the next slice's first tile.
+        from kernels.common._conv_implicit_gemm_common import ConvDataSpec
+
+        p = ConvProblem(N=8, Hi=56, Wi=56, C=64, K=64, Y=3, X=3)
+        return (
+            WgradConvSpec(
+                problem=p,
+                tile_m=64,
+                tile_n=64,
+                tile_k=64,
+                warp_m=2,
+                warp_n=2,
+                warp_tile_m=32,
+                warp_tile_n=32,
+                warp_tile_k=16,
+                pipeline="mem",
+                epilogue="default",
+                data=ConvDataSpec(dtype_d="fp32"),
+                unroll_k=True,
+                split_k=4,
+            ),
+            "gfx950",
+        )
+
+    if idx == 20:
+        # wg_K = 10*6*6 = 360; at tile_k 64 and split_k 2 each slice is 3
+        # tiles, so the ping-pong's last phase B lies past the slice end and
+        # its prefetch takes the k_zero_fill redirect.
+        p = ConvProblem(N=10, Hi=8, Wi=8, C=64, K=64, Y=3, X=3)
+        return (
+            WgradConvSpec(
+                problem=p,
+                tile_m=64,
+                tile_n=64,
+                tile_k=64,
+                warp_m=2,
+                warp_n=2,
+                warp_tile_m=32,
+                warp_tile_n=32,
+                warp_tile_k=16,
+                pipeline="mem",
+                epilogue="cshuffle",
+                lds_k_outer=True,
+                async_dma=True,
+                split_k=2,
+            ),
+            "gfx950",
+        )
+    if idx == 19:
+        # Runtime split-K degree with the two-stage scratch: one binary for
+        # every degree > 1. wg_N = 3*3*3 = 27 is odd, which the packed 16-bit
+        # atomic cannot address -- this is the shape that needs it.
+        p = ConvProblem(N=8, Hi=56, Wi=56, C=3, K=64, Y=3, X=3)
+        return (
+            WgradConvSpec(
+                problem=p,
+                tile_m=64,
+                tile_n=64,
+                tile_k=64,
+                warp_m=2,
+                warp_n=2,
+                warp_tile_m=32,
+                warp_tile_n=32,
+                warp_tile_k=16,
+                pipeline="mem",
+                epilogue="default",
+                split_k=2,
+                two_stage=True,
+            ),
+            "gfx950",
+        )
+
+    if 21 <= idx <= 29:
         return _streamk_spec(idx)
-    if idx == 28:
+    if idx == 30:
         from dataclasses import replace
 
-        spec, arch = _streamk_spec(23)
+        spec, arch = _streamk_spec(26)
         return (
             replace(
                 spec,
@@ -565,7 +645,7 @@ def _spec(idx: int):
 
         from kernels.common._conv_implicit_gemm_common import ConvDataSpec
 
-        base, arch = _streamk_spec(18)
+        base, arch = _streamk_spec(21)
         bad = {
             104: (dict(split_k=4), arch),
             105: (dict(), "gfx1250"),
@@ -579,7 +659,7 @@ def _spec(idx: int):
 
 # (problem kwargs, data dtypes (a/b, d), atom edge, streamk, reduction, ctas, arch)
 _STREAMK_CFGS = {
-    18: (
+    21: (
         dict(N=8, Hi=56, Wi=56, C=64, K=64, Y=3, X=3),
         ("fp16", "fp16"),
         32,
@@ -588,7 +668,7 @@ _STREAMK_CFGS = {
         16,
         "gfx950",
     ),
-    19: (
+    22: (
         dict(N=8, Hi=56, Wi=56, C=64, K=64, Y=3, X=3),
         ("fp16", "fp16"),
         32,
@@ -597,7 +677,7 @@ _STREAMK_CFGS = {
         16,
         "gfx950",
     ),
-    20: (
+    23: (
         dict(N=8, Hi=56, Wi=56, C=64, K=64, Y=3, X=3),
         ("fp16", "fp32"),
         32,
@@ -606,7 +686,7 @@ _STREAMK_CFGS = {
         4,
         "gfx950",
     ),
-    21: (
+    24: (
         dict(N=8, Hi=56, Wi=56, C=64, K=64, Y=3, X=3),
         ("fp16", "fp16"),
         32,
@@ -615,7 +695,7 @@ _STREAMK_CFGS = {
         4,
         "gfx950",
     ),
-    22: (
+    25: (
         dict(N=8, Hi=56, Wi=56, C=64, K=64, Y=3, X=3),
         ("fp16", "fp16"),
         16,
@@ -624,7 +704,7 @@ _STREAMK_CFGS = {
         4,
         "gfx942",
     ),
-    23: (
+    26: (
         dict(N=4, Hi=28, Wi=28, C=96, K=120, Y=3, X=3, pH=1, pW=1, groups=3),
         ("fp16", "fp16"),
         32,
@@ -633,7 +713,7 @@ _STREAMK_CFGS = {
         6,
         "gfx950",
     ),
-    24: (
+    27: (
         dict(N=4, Hi=28, Wi=28, C=64, K=128, Y=3, X=3, pH=1, pW=1, groups=2),
         ("fp16", "bf16"),
         32,
@@ -642,7 +722,7 @@ _STREAMK_CFGS = {
         5,
         "gfx950",
     ),
-    25: (
+    28: (
         dict(N=4, Hi=28, Wi=28, C=64, K=128, Y=3, X=3, pH=1, pW=1, groups=2),
         ("fp16", "fp32"),
         32,
@@ -651,7 +731,7 @@ _STREAMK_CFGS = {
         3,
         "gfx950",
     ),
-    26: (
+    29: (
         dict(N=8, Hi=56, Wi=56, C=64, K=64, Y=3, X=3),
         ("fp16", "fp16"),
         16,
@@ -659,15 +739,6 @@ _STREAMK_CFGS = {
         "workspace",
         6,
         "gfx942",
-    ),
-    27: (
-        dict(N=8, Hi=56, Wi=56, C=64, K=64, Y=3, X=3),
-        ("fp16", "fp16"),
-        32,
-        "dp_sk",
-        "linear",
-        9,
-        "gfx950",
     ),
 }
 

@@ -1781,7 +1781,6 @@ def cases():
             tile_n=64,
             tile_k=16,
             streamk="dp_sk",
-            streamk_ctas=4,
         ),
     )
     add(
@@ -1802,7 +1801,6 @@ def cases():
             dtype_d="fp32",
             streamk="dp_sk",
             streamk_reduction="atomic",
-            streamk_ctas=4,
         ),
     )
     add(
@@ -1822,7 +1820,6 @@ def cases():
             tile_k=16,
             streamk="persistent",
             streamk_reduction="tree",
-            streamk_ctas=6,
         ),
     )
     # Grouped + cshuffle epilogue (MFMA): the LDS-staged store threads the

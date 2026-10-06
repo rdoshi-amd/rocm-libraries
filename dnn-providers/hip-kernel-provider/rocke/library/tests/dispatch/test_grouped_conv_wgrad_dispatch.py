@@ -491,9 +491,9 @@ class TestStreamKSelection(unittest.TestCase):
         k = build_implicit_gemm_conv_wgrad(
             r.spec.to_wgrad_spec(_problem(r.request)), arch="gfx950"
         )
-        # streamk_reduction defaults to the workspace reduction, whose pool is
-        # sized at four CTAs per CU: 256 CUs x 4.
-        self.assertIn("_sk1024_skrworkspace", k.name)
+        # streamk_reduction defaults to the workspace reduction. The CTA pool
+        # is a launch parameter, so it is not part of the kernel name.
+        self.assertTrue(k.name.endswith("_sk_skrworkspace"), k.name)
 
     def test_gfx1250_turns_streamk_away(self):
         with self.assertRaises(ValueError) as cm:
@@ -537,6 +537,104 @@ class TestStreamKGridShape(unittest.TestCase):
         }
         self.assertEqual(len(names), 4)
         self.assertNotIn(off, names)
+
+
+class TestLaunchContractMatchesKernel(unittest.TestCase):
+    """The dispatcher's signature and launch values must describe the kernel
+    ``to_wgrad_spec`` builds and the grid ``_wgrad_grid`` launches.
+
+    Both go through the split-K resolver, so the raw ``spec.split_k`` (-1 on
+    the auto path) and the spec's (absent) two-stage flag must not leak into
+    the kernargs: kernargs pack positionally, and a mismatch launches.
+    """
+
+    def _check(self, req):
+        from dispatch.grouped_convolution import launch_values_for
+        from kernels.common.conv_args import ConvArgs
+
+        r = dispatch_conv_grouped(req)
+        p = _problem(r.request)
+        ws = r.spec.to_wgrad_spec(p)
+        abi = ConvArgs.from_problem(
+            p,
+            direction="wgrad",
+            tile_m=ws.tile_m,
+            tile_n=ws.tile_n,
+            tile_k=ws.tile_k,
+        ).arg_names(two_stage=ws.two_stage)
+        self.assertEqual([a["name"] for a in r.signature], [n for n, _ in abi])
+
+        ws_kw = dict(ws_ptr=0x9000, ws_bytes=64) if ws.two_stage else {}
+        values = launch_values_for(
+            r.request,
+            r.spec,
+            A_ptr=0x1000,
+            B_ptr=0x2000,
+            D_ptr=0x3000,
+            A_bytes=1,
+            B_bytes=1,
+            D_bytes=1,
+            **ws_kw,
+        )
+        self.assertEqual(values["ks_count"], ws.split_k)
+        self.assertEqual(r.grid[2], p.groups * ws.split_k)
+        return ws
+
+    def test_auto_split_k(self):
+        self._check(_wgrad("gfx942", G=4))
+
+    def test_odd_wg_N_two_stage(self):
+        # Odd wg_N with a 16-bit dW cannot use the packed atomic, so split-K
+        # resolves to the two-stage path and its scratch pair joins the ABI.
+        ws = self._check(_wgrad("gfx950", C=3, K=24, Y=3, X=3, dtype="bf16"))
+        if ws.split_k > 1:
+            self.assertTrue(ws.two_stage)
+
+    def test_streamk(self):
+        # The stream-K ABI: the reduction's buffers after ks_count, then the
+        # partition block, filled from the launch shape and the arch pool.
+        from dispatch.grouped_convolution import launch_values_for
+        from kernels.common.conv_args import ConvArgs
+        from kernels.common.conv_implicit_gemm_wgrad import wgrad_streamk_partition
+
+        for mode in ("dp_sk", "persistent"):
+            for reduction in ("linear", "tree", "workspace"):
+                req = _wgrad("gfx950", G=4, streamk=mode, streamk_reduction=reduction)
+                r = dispatch_conv_grouped(req)
+                p = _problem(r.request)
+                ws = r.spec.to_wgrad_spec(p)
+                abi = ConvArgs.from_problem(
+                    p,
+                    direction="wgrad",
+                    tile_m=ws.tile_m,
+                    tile_n=ws.tile_n,
+                    tile_k=ws.tile_k,
+                ).arg_names(streamk=reduction)
+                with self.subTest(mode=mode, reduction=reduction):
+                    self.assertEqual(
+                        [a["name"] for a in r.signature], [n for n, _ in abi]
+                    )
+                    kw = (
+                        dict(ws_ptr=0x9000, ws_bytes=64)
+                        if reduction == "workspace"
+                        else dict(sk_flags=0x9000, sk_partials=0xA000)
+                    )
+                    values = launch_values_for(
+                        r.request,
+                        r.spec,
+                        A_ptr=0x1000,
+                        B_ptr=0x2000,
+                        D_ptr=0x3000,
+                        A_bytes=1,
+                        B_bytes=1,
+                        D_bytes=1,
+                        **kw,
+                    )
+                    part = wgrad_streamk_partition(ws, arch="gfx950")
+                    self.assertEqual(values["sk_dp_tiles"], part.dp_tiles)
+                    self.assertEqual(values["sk_ctas"], part.sk_ctas)
+                    self.assertEqual(values["sk_pool"], part.max_active_wgs)
+                    self.assertEqual(r.grid, (part.grid_size, 1, 1))
 
 
 if __name__ == "__main__":

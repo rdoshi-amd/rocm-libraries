@@ -5,9 +5,10 @@
 No GPU needed. Covers the spec surface (defaults, kernel-name tags), the
 validator gates and their agreement between ``validate()``,
 ``is_valid_wgrad_spec`` and the C++ port, admits-implies-builds over the
-mode x reduction x arch x groups matrix, the host-side launch plan (grid,
-workspace layout, determinism) against the C port, and byte-identical lowering
-between the two engines through the ``rocke_engine`` binding.
+mode x reduction x arch x groups matrix, the AOT kernarg ABI and launch values
+(the partition block), the host-side launch plan (grid, workspace layout,
+determinism) against the C port, and byte-identical lowering between the two
+engines through the ``rocke_engine`` binding.
 
 GPU numerics live in ``test_conv_wgrad_streamk_gpu.py``.
 """
@@ -19,6 +20,8 @@ import unittest
 from dataclasses import replace
 
 from kernels.common._conv_implicit_gemm_common import ConvDataSpec, ConvProblem
+from kernels.common.conv_abi import _STREAMK_SCALARS, conv_arg_names
+from kernels.common.conv_args import ConvArgs, StreamKLaunch
 from kernels.common.conv_implicit_gemm_wgrad import (
     WgradConvSpec,
     build_implicit_gemm_conv_wgrad,
@@ -102,16 +105,28 @@ class TestStreamKSpecSurface(unittest.TestCase):
     def test_name_tags_every_knob_that_changes_the_body(self):
         names = {
             _spec().kernel_name(),
-            _spec(streamk_ctas=8).kernel_name(),
             _spec(streamk="persistent").kernel_name(),
             _spec(streamk_reduction="tree").kernel_name(),
             _spec(streamk_reduction="workspace").kernel_name(),
             _spec(dtype_d="fp32", streamk_reduction="atomic").kernel_name(),
-            _spec(streamk_ctas=-1).kernel_name(),
         }
-        self.assertEqual(len(names), 7, names)
-        self.assertTrue(_spec().kernel_name().endswith("_sk6"))
-        self.assertIn("_skauto", _spec(streamk_ctas=-1).kernel_name())
+        self.assertEqual(len(names), 5, names)
+        self.assertTrue(_spec().kernel_name().endswith("_sk"))
+
+    def test_pool_is_a_launch_parameter(self):
+        # The pool only sizes the host partition: the name and the kernel body
+        # are the same for every pool, like the split-K degree.
+        from rocke.core.lower_llvm import _lower_kernel_to_llvm_python
+
+        def ll(spec):
+            k = build_implicit_gemm_conv_wgrad(spec, arch="gfx950")
+            return _lower_kernel_to_llvm_python(k, arch="gfx950")
+
+        base = ll(_spec())
+        for ctas in (8, -1):
+            spec = _spec(streamk_ctas=ctas)
+            self.assertEqual(spec.kernel_name(), _spec().kernel_name())
+            self.assertEqual(ll(spec), base)
 
     def test_auto_pool_depends_on_the_reduction(self):
         from kernels.common.conv_implicit_gemm_wgrad import wgrad_streamk_default_ctas
@@ -130,9 +145,18 @@ class TestStreamKSpecSurface(unittest.TestCase):
         wide = _spec(streamk_ctas=-1, streamk_reduction="workspace", warp_m=4)
         self.assertEqual(wgrad_streamk_default_ctas(wide, "gfx950"), 1024)
 
-    def test_builder_resolves_auto_pool_into_the_name(self):
-        k = build_implicit_gemm_conv_wgrad(_spec(streamk_ctas=-1), arch="gfx950")
-        self.assertTrue(k.name.endswith("_sk256"), k.name)
+    def test_problem_is_not_baked_in(self):
+        # AOT: the problem shape is a kernarg, so two problems with the same
+        # build-time knobs (here: grouping and 2-D) lower to the same body.
+        from rocke.core.lower_llvm import _lower_kernel_to_llvm_python
+
+        other = ConvProblem(N=8, Hi=20, Wi=6, C=48, K=24, Y=3, X=3, pH=1, pW=1)
+        lls = []
+        for problem in (_DENSE, other):
+            k = build_implicit_gemm_conv_wgrad(_spec(problem), arch="gfx950")
+            body = _lower_kernel_to_llvm_python(k, arch="gfx950")
+            lls.append(body.replace(k.name, "KERNEL"))
+        self.assertEqual(lls[0], lls[1])
 
 
 class TestStreamKValidator(unittest.TestCase):
@@ -146,7 +170,7 @@ class TestStreamKValidator(unittest.TestCase):
         (dict(split_k=4), "both partition K_wg"),
         (dict(split_k=-1), "both partition K_wg"),
         (dict(two_stage=True, split_k=2), "both partition K_wg"),
-        (dict(unroll_k=True), "runtime K trip count"),
+        (dict(unroll_k=True), "one plain K loop"),
         (dict(epilogue="cshuffle"), "epilogue='default'"),
         (dict(chiplet_swizzle=True), "chiplet_swizzle"),
         (dict(streamk_reduction="atomic"), "needs dtype_d='fp32'"),
@@ -261,12 +285,13 @@ class TestStreamKHostPlan(unittest.TestCase):
 
     def test_signature_tracks_reduction(self):
         names = lambda s: [p["name"] for p in wgrad_streamk_signature(s)]  # noqa: E731
-        self.assertEqual(names(_spec())[-2:], ["sk_flags", "sk_partials"])
+        plain = [n for n, _ in conv_arg_names(direction="wgrad")]
+        block = list(_STREAMK_SCALARS)
+        self.assertEqual(names(_spec()), plain + ["sk_flags", "sk_partials"] + block)
+        ws = plain[:-2] + ["ws_ptr", "ws_bytes"] + plain[-2:] + block
+        self.assertEqual(names(_spec(streamk_reduction="workspace")), ws)
         self.assertEqual(
-            names(_spec(streamk_reduction="workspace"))[-2:], ["ws_ptr", "ws_bytes"]
-        )
-        self.assertEqual(
-            len(names(_spec(dtype_d="fp32", streamk_reduction="atomic"))), 6
+            names(_spec(dtype_d="fp32", streamk_reduction="atomic")), plain + block
         )
 
     def test_cpp_host_plan_agrees(self):
@@ -300,6 +325,104 @@ class TestStreamKHostPlan(unittest.TestCase):
                         )
 
 
+class TestStreamKLaunchAbi(unittest.TestCase):
+    """The stream-K kernarg ABI and the launch values that fill it."""
+
+    def _args(self, problem=_DENSE):
+        return ConvArgs.from_problem(
+            problem, direction="wgrad", tile_m=64, tile_n=64, tile_k=32
+        )
+
+    def test_extras_follow_the_unchanged_prefix(self):
+        plain = conv_arg_names(direction="wgrad", is_3d=True)
+        for red in ("atomic", "workspace", "linear", "tree"):
+            sk = conv_arg_names(direction="wgrad", is_3d=True, streamk=red)
+            with self.subTest(reduction=red):
+                head = plain[:-2]
+                if red == "workspace":
+                    head = head + [("ws_ptr", "f32*"), ("ws_bytes", "i32")]
+                self.assertEqual(sk[: len(head) + 2], head + plain[-2:])
+                tail = [n for n, _ in sk[len(head) + 2 :]]
+                bufs = ["sk_flags", "sk_partials"] if red in ("linear", "tree") else []
+                self.assertEqual(tail, bufs + list(_STREAMK_SCALARS))
+
+    def test_abi_rejects(self):
+        with self.assertRaises(ValueError):
+            conv_arg_names(direction="fwd", streamk="linear")
+        with self.assertRaises(ValueError):
+            conv_arg_names(direction="wgrad", streamk="sideways")
+        with self.assertRaises(ValueError):
+            conv_arg_names(direction="wgrad", two_stage=True, streamk="workspace")
+
+    def test_values_are_the_partition(self):
+        for problem in (_DENSE, _GROUPED):
+            for persistent in (False, True):
+                for pool in (5, 6, 7, 1024):
+                    sk = StreamKLaunch(pool=pool, persistent=persistent)
+                    args = self._args(problem)
+                    v = args.to_launch_values(
+                        1, 2, 3, 4, 5, 6, streamk=sk, sk_flags=7, sk_partials=8
+                    )
+                    part = args.streamk_partition(pool, persistent=persistent)
+                    with self.subTest(g=problem.groups, pers=persistent, pool=pool):
+                        self.assertEqual(v["sk_iters_per_tile"], part.iters_per_tile)
+                        self.assertEqual(v["sk_dp_tiles"], part.dp_tiles)
+                        self.assertEqual(v["sk_ctas"], part.sk_ctas)
+                        self.assertEqual(
+                            v["sk_iters_per_cta"], max(part.iters_per_sk_cta, 1)
+                        )
+                        self.assertEqual(v["sk_extra_iters"], part.extra_iters)
+                        self.assertEqual(v["sk_pool"], pool)
+                        self.assertEqual(v["sk_tree_rounds"], part.tree_rounds)
+                        self.assertEqual((v["sk_flags"], v["sk_partials"]), (7, 8))
+                        self.assertEqual(args.streamk_grid(sk), (part.grid_size, 1, 1))
+
+    def test_launch_value_contract(self):
+        args = self._args()
+        with self.assertRaisesRegex(ValueError, "sk_flags must be passed"):
+            args.to_launch_values(1, 2, 3, 4, 5, 6, streamk=StreamKLaunch(pool=6))
+        with self.assertRaisesRegex(ValueError, "ws_ptr must be passed"):
+            args.to_launch_values(
+                1, 2, 3, 4, 5, 6, streamk=StreamKLaunch(pool=6, reduction="workspace")
+            )
+        with self.assertRaisesRegex(ValueError, "split_k=1"):
+            args.to_launch_values(
+                1,
+                2,
+                3,
+                4,
+                5,
+                6,
+                split_k=2,
+                streamk=StreamKLaunch(pool=6, reduction="atomic"),
+            )
+        with self.assertRaisesRegex(ValueError, "not arguments"):
+            args.to_launch_values(
+                1,
+                2,
+                3,
+                4,
+                5,
+                6,
+                sk_flags=7,
+                streamk=StreamKLaunch(pool=6, reduction="atomic"),
+            )
+        with self.assertRaises(ValueError):
+            StreamKLaunch(pool=0)
+
+    def test_launch_shape_overrides_the_spec_problem(self):
+        # One binary, many shapes: the helpers size the launch from `problem`.
+        other = ConvProblem(N=8, Hi=16, Wi=16, C=32, K=96, Y=3, X=3, pH=1, pW=1)
+        spec = _spec()
+        self.assertEqual(
+            wgrad_streamk_partition(spec, problem=other),
+            self._args(other).streamk_partition(6),
+        )
+        self.assertNotEqual(
+            wgrad_streamk_partition(spec, problem=other), wgrad_streamk_partition(spec)
+        )
+
+
 class TestStreamKDualEngine(unittest.TestCase):
     """The C++ builder lowers every stream-K variant to the Python engine's bytes."""
 
@@ -331,11 +454,16 @@ class TestStreamKDualEngine(unittest.TestCase):
                     eng.conv_wgrad_lower_llvm(_spec_dict(spec), arch), py_ll
                 )
 
-    def test_cpp_rejects_auto_pool(self):
+    def test_cpp_builds_auto_pool(self):
+        # The pool is not part of the kernel, so the C++ builder takes -1 too.
+        from rocke.core.lower_llvm import _lower_kernel_to_llvm_python
+
         eng = _engine()
-        with self.assertRaises(RuntimeError) as cm:
-            eng.conv_wgrad_lower_llvm(_spec_dict(_spec(streamk_ctas=-1)), "gfx950")
-        self.assertIn("streamk_ctas=-1 (auto)", str(cm.exception))
+        spec = _spec(streamk_ctas=-1)
+        py_ll = _lower_kernel_to_llvm_python(
+            build_implicit_gemm_conv_wgrad(spec, arch="gfx950"), arch="gfx950"
+        )
+        self.assertEqual(eng.conv_wgrad_lower_llvm(_spec_dict(spec), "gfx950"), py_ll)
 
 
 if __name__ == "__main__":

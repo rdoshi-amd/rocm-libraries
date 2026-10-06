@@ -55,6 +55,7 @@ from ..core.ir import IRBuilder, Value
 
 
 __all__ = [
+    "StreamKIterArgs",
     "StreamKIterPartition",
     "StreamKPartition",
     "StreamKReductionStrategy",
@@ -403,16 +404,28 @@ def streamk_end_iter(part: StreamKIterPartition, sk_cta: int) -> int:
     )
 
 
+class StreamKIterArgs(NamedTuple):
+    """The runtime stream-K partition a shape-agnostic kernel reads.
+
+    The host computes a :class:`StreamKIterPartition` per launch and passes
+    these fields as kernel arguments; the device emitters below only ever
+    see them as SSA values.
+    """
+
+    iters_per_tile: Value  # i32 MAC iterations per output tile
+    dp_tiles: Value  # i32 tiles owned whole by data-parallel CTAs
+    total_dp_iters: Value  # i32 dp_tiles * iters_per_tile
+    iters_per_sk_cta: Value  # i32 base iterations per stream-K CTA (> 0)
+    extra_iters: Value  # i32 stream-K CTAs that own one more iteration
+
+
 def emit_streamk_sk_start_iter(
-    b: IRBuilder, sk_cta: Value, part: StreamKIterPartition
+    b: IRBuilder, sk_cta: Value, args: StreamKIterArgs
 ) -> Value:
     """SSA :func:`streamk_start_iter` for a runtime stream-K CTA index."""
-    c_dp_iters = b.const_i32(part.total_dp_iters)
-    c_per_cta = b.const_i32(part.iters_per_sk_cta)
-    c_extra = b.const_i32(part.extra_iters)
-    body = b.mul(sk_cta, c_per_cta)
-    lead = b.smin(sk_cta, c_extra)
-    return b.add(c_dp_iters, b.add(body, lead))
+    body = b.mul(sk_cta, args.iters_per_sk_cta)
+    lead = b.smin(sk_cta, args.extra_iters)
+    return b.add(args.total_dp_iters, b.add(body, lead))
 
 
 class _IterRange(NamedTuple):
@@ -424,7 +437,7 @@ class _IterRange(NamedTuple):
 
 
 def emit_streamk_iter_range(
-    b: IRBuilder, cta: Value, part: StreamKIterPartition, *, dp: bool
+    b: IRBuilder, cta: Value, args: StreamKIterArgs, *, dp: bool
 ) -> _IterRange:
     """Map a CTA onto its contiguous range of global MAC iterations.
 
@@ -434,21 +447,20 @@ def emit_streamk_iter_range(
     CTA index (the persistent launch runs its DP sweep separately).
     """
     if dp:
-        c_dp_tiles = b.const_i32(part.dp_tiles)
-        sk_cta = b.sub(cta, c_dp_tiles)
+        sk_cta = b.sub(cta, args.dp_tiles)
     else:
         sk_cta = cta
-    sk_start = emit_streamk_sk_start_iter(b, sk_cta, part)
-    c_per_cta = b.const_i32(part.iters_per_sk_cta)
-    c_extra = b.const_i32(part.extra_iters)
+    sk_start = emit_streamk_sk_start_iter(b, sk_cta, args)
     c_one = b.const_i32(1)
     c_zero = b.const_i32(0)
-    sk_len = b.add(c_per_cta, b.select(b.cmp_lt(sk_cta, c_extra), c_one, c_zero))
+    sk_len = b.add(
+        args.iters_per_sk_cta,
+        b.select(b.cmp_lt(sk_cta, args.extra_iters), c_one, c_zero),
+    )
     if dp:
-        c_ipt = b.const_i32(part.iters_per_tile)
-        is_dp = b.cmp_lt(cta, c_dp_tiles)
-        start = b.select(is_dp, b.mul(cta, c_ipt), sk_start)
-        length = b.select(is_dp, c_ipt, sk_len)
+        is_dp = b.cmp_lt(cta, args.dp_tiles)
+        start = b.select(is_dp, b.mul(cta, args.iters_per_tile), sk_start)
+        length = b.select(is_dp, args.iters_per_tile, sk_len)
     else:
         start = sk_start
         length = sk_len

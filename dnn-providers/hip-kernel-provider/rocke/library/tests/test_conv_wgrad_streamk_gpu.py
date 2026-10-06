@@ -73,8 +73,13 @@ def _reference(X, dY, p):
     return w.permute(0, 2, 3, 1).contiguous()
 
 
-def _run(spec, *, launches: int = 1, grid=None):
-    """Build, launch ``launches`` times, return (dW outputs, fp32 reference)."""
+def _run(spec, *, launches: int = 1, grid=None, problem=None, artifact=None):
+    """Build, launch ``launches`` times, return (dW outputs, fp32 reference).
+
+    ``problem`` is the launch shape (default ``spec.problem``): the kernel is
+    AOT, so one binary -- passed in as ``artifact`` to reuse it -- serves any
+    shape its spec admits.
+    """
     import torch
 
     from rocke import compile_kernel
@@ -83,6 +88,7 @@ def _run(spec, *, launches: int = 1, grid=None):
     from kernels.common.conv_implicit_gemm_wgrad import (
         build_implicit_gemm_conv_wgrad,
         wgrad_streamk_grid,
+        wgrad_streamk_launch_values,
         wgrad_streamk_signature,
         wgrad_streamk_workspace_layout,
         wgrad_streamk_workspace_nbytes,
@@ -95,8 +101,10 @@ def _run(spec, *, launches: int = 1, grid=None):
     )
 
     arch = GPU_ARCH
-    p = spec.problem
-    art = compile_kernel(build_implicit_gemm_conv_wgrad(spec, arch=arch), arch=arch)
+    p = problem if problem is not None else spec.problem
+    art = artifact or compile_kernel(
+        build_implicit_gemm_conv_wgrad(spec, arch=arch), arch=arch
+    )
     launcher = KernelLauncher(
         hsaco=art.hsaco,
         kernel_name=art.kernel_name,
@@ -110,24 +118,32 @@ def _run(spec, *, launches: int = 1, grid=None):
     ref = _reference(X.float(), dY.float(), p)
 
     rt = Runtime()
-    ws_bytes = wgrad_streamk_workspace_nbytes(spec, arch=arch)
+    ws_bytes = wgrad_streamk_workspace_nbytes(spec, arch=arch, problem=p)
     bufs = [rt.alloc(dY.nbytes), rt.alloc(X.nbytes), rt.alloc(dW.nbytes)]
     ws = rt.alloc(max(ws_bytes, 4))
     bufs.append(ws)
     rt.memcpy_h2d(bufs[0], _u8(dY), dY.nbytes)
     rt.memcpy_h2d(bufs[1], _u8(X), X.nbytes)
-    values = {
-        "A": bufs[0],
-        "B": bufs[1],
-        "D": bufs[2],
-        "A_bytes": dY.nbytes,
-        "B_bytes": X.nbytes,
-        "D_bytes": dW.nbytes,
-    }
     reduction = spec.streamk_reduction
-    flags_bytes, _ = wgrad_streamk_workspace_layout(spec, arch=arch)
+    flags_bytes, _ = wgrad_streamk_workspace_layout(spec, arch=arch, problem=p)
+    extra = {}
     if reduction == "workspace":
-        values.update(ws_ptr=ws, ws_bytes=ws_bytes)
+        extra = dict(ws_ptr=ws, ws_bytes=ws_bytes)
+    elif reduction in ("linear", "tree"):
+        extra = dict(sk_flags=ws, sk_partials=ws + flags_bytes)
+    values = wgrad_streamk_launch_values(
+        spec,
+        bufs[0],
+        bufs[1],
+        bufs[2],
+        dY.nbytes,
+        X.nbytes,
+        dW.nbytes,
+        arch=arch,
+        problem=p,
+        **extra,
+    )
+    if reduction == "workspace":
         rspec = WgradReduceSpec(
             problem=p,
             dtype_d=spec.data.dtype_d,
@@ -145,14 +161,12 @@ def _run(spec, *, launches: int = 1, grid=None):
         rvalues = {
             "ws_ptr": ws,
             "dw_ptr": bufs[2],
-            "wg_M": spec.wg_M,
-            "wg_N": spec.wg_N,
+            "wg_M": p.K // p.groups,
+            "wg_N": p.Y * p.X * (p.C // p.groups),
             "ws_bytes": ws_bytes,
             "dw_bytes": dW.nbytes,
             "groups": p.groups,
         }
-    elif reduction in ("linear", "tree"):
-        values.update(sk_flags=ws, sk_partials=ws + flags_bytes)
 
     outs = []
     try:
@@ -168,7 +182,7 @@ def _run(spec, *, launches: int = 1, grid=None):
             launcher(
                 values,
                 config=LaunchConfig(
-                    grid=grid or wgrad_streamk_grid(spec, arch=arch),
+                    grid=grid or wgrad_streamk_grid(spec, arch=arch, problem=p),
                     block=(spec.block_size, 1, 1),
                     fence=True,
                 ),
@@ -191,9 +205,11 @@ def _run(spec, *, launches: int = 1, grid=None):
     return outs, ref
 
 
-def _check(test, spec, *, launches: int = 1, grid=None):
-    outs, ref = _run(spec, launches=launches, grid=grid)
-    p = spec.problem
+def _check(test, spec, *, launches: int = 1, grid=None, problem=None, artifact=None):
+    outs, ref = _run(
+        spec, launches=launches, grid=grid, problem=problem, artifact=artifact
+    )
+    p = problem if problem is not None else spec.problem
     out = outs[0].float()
     written = out.reshape(p.K, -1).abs().sum(dim=1) > 0
     expected = ref.reshape(p.K, -1).abs().sum(dim=1) > 0
@@ -320,6 +336,54 @@ class TestConvWgradStreamKGrouped(unittest.TestCase):
                     )
                     with self.subTest(shape=name, mode=mode, reduction=reduction):
                         _check(self, spec)
+
+
+@unittest.skipUnless(not _SKIP_REASON, _SKIP_REASON or "no GPU")
+class TestConvWgradStreamKAot(unittest.TestCase):
+    """One binary per spec serves every launch shape.
+
+    The partition is a kernarg block, so a kernel built for one problem must
+    be correct on others -- with a different tile count, iteration count,
+    data-parallel/stream-K split and group count.
+    """
+
+    def test_one_binary_many_shapes(self):
+        from rocke import compile_kernel
+        from kernels.common._conv_implicit_gemm_common import ConvProblem
+        from kernels.common.conv_implicit_gemm_wgrad import (
+            build_implicit_gemm_conv_wgrad,
+        )
+
+        build = ConvProblem(N=2, Hi=8, Wi=8, C=48, K=96, Y=3, X=3, pH=1, pW=1, groups=3)
+        launches = [
+            ConvProblem(N=4, Hi=10, Wi=10, C=48, K=120, Y=3, X=3, pH=1, pW=1, groups=3),
+            ConvProblem(N=8, Hi=16, Wi=16, C=24, K=96, Y=3, X=3, pH=1, pW=1, groups=3),
+            ConvProblem(
+                N=3,
+                Hi=13,
+                Wi=11,
+                C=72,
+                K=72,
+                Y=3,
+                X=3,
+                sH=2,
+                sW=2,
+                pH=1,
+                pW=1,
+                groups=3,
+            ),
+        ]
+        for mode in ("dp_sk", "persistent"):
+            for reduction, dtype_d in _REDUCTIONS:
+                spec = _spec(
+                    build, mode=mode, reduction=reduction, dtype_d=dtype_d, ctas=6
+                )
+                art = compile_kernel(
+                    build_implicit_gemm_conv_wgrad(spec, arch=GPU_ARCH), arch=GPU_ARCH
+                )
+                for i, problem in enumerate(launches):
+                    with self.subTest(mode=mode, reduction=reduction, shape=i):
+                        _check(self, spec, problem=problem, artifact=art)
 
 
 @unittest.skipUnless(not _SKIP_REASON, _SKIP_REASON or "no GPU")

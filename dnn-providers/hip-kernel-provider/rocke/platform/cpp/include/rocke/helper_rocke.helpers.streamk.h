@@ -151,6 +151,7 @@ rocke_streamk_decoded_tile_t rocke_emit_streamk_decode(rocke_ir_builder_t* b,
  *                                             once by rocke_streamk_iter_plan()
  *   streamk_iter_partition(...)           rocke_streamk_iter_partition_make(...)
  *   streamk_start_iter / streamk_end_iter rocke_streamk_start_iter / _end_iter
+ *   StreamKIterArgs                       rocke_streamk_iter_args_t
  *   emit_streamk_sk_start_iter(...)       rocke_emit_streamk_sk_start_iter(...)
  *   emit_streamk_iter_range(...)          rocke_emit_streamk_iter_range(...)
  *
@@ -198,10 +199,22 @@ rocke_streamk_iter_plan_t rocke_streamk_iter_plan(const rocke_streamk_iter_parti
 int rocke_streamk_start_iter(const rocke_streamk_iter_partition_t* p, int sk_cta);
 int rocke_streamk_end_iter(const rocke_streamk_iter_partition_t* p, int sk_cta);
 
+/* The runtime stream-K partition a shape-agnostic kernel reads (Python
+ * StreamKIterArgs). The host computes a partition per launch and passes these
+ * as kernel arguments; the emitters below only see them as SSA values. */
+typedef struct rocke_streamk_iter_args
+{
+    rocke_value_t* iters_per_tile; /* i32 MAC iterations per output tile */
+    rocke_value_t* dp_tiles; /* i32 tiles owned whole by data-parallel CTAs */
+    rocke_value_t* total_dp_iters; /* i32 dp_tiles * iters_per_tile */
+    rocke_value_t* iters_per_sk_cta; /* i32 base iterations per stream-K CTA (> 0) */
+    rocke_value_t* extra_iters; /* i32 stream-K CTAs that own one more */
+} rocke_streamk_iter_args_t;
+
 /* emit_streamk_sk_start_iter: SSA start iteration of a runtime SK CTA index. */
 rocke_value_t* rocke_emit_streamk_sk_start_iter(rocke_ir_builder_t* b,
                                                 rocke_value_t* sk_cta,
-                                                const rocke_streamk_iter_partition_t* p);
+                                                const rocke_streamk_iter_args_t* a);
 
 /* emit_streamk_iter_range result (Python _IterRange). */
 typedef struct rocke_streamk_iter_range
@@ -211,10 +224,10 @@ typedef struct rocke_streamk_iter_range
     rocke_value_t* sk_cta; /* i32 stream-K CTA index; meaningless for a DP CTA */
 } rocke_streamk_iter_range_t;
 
-/* emit_streamk_iter_range(b, cta, part, *, dp). */
+/* emit_streamk_iter_range(b, cta, args, *, dp). */
 rocke_streamk_iter_range_t rocke_emit_streamk_iter_range(rocke_ir_builder_t* b,
                                                          rocke_value_t* cta,
-                                                         const rocke_streamk_iter_partition_t* p,
+                                                         const rocke_streamk_iter_args_t* a,
                                                          bool dp);
 
 #ifdef __cplusplus

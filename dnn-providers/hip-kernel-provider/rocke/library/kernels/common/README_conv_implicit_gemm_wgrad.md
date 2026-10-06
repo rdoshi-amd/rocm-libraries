@@ -125,10 +125,11 @@ The cshuffle path avoids this entirely:
   the existing `cpg % 2 == 0` constraint).
 - The caller must zero-initialise `dW` before launch (atomic-adds only).
 
-The benchmark driver (`benchmark_implicit_gemm_conv.py`) was updated to generate
-only `split_k=0` (runtime-atomic) combos by default instead of `(1, 0)`, so the
-`epilogue="cshuffle"` requirement is respected without filtering cshuffle combos
-out of the sweep.
+The split degree is never compiled in: every `split_k > 1` builds the same
+kernel (named `..._spk`), which takes the degree as the `ks_count` / `ks`
+kernargs. The benchmark driver (`benchmark_implicit_gemm_conv.py --split-k 0`)
+therefore compiles one split-K kernel per configuration and times it at every
+degree, instead of compiling one kernel per degree.
 
 ### Pointwise explicit-GEMM fast path
 
@@ -257,10 +258,12 @@ Stream-K (CK Tile's `StreamKTilePartitioner`) balances *MAC iterations* instead.
 Output tiles that divide the CTA pool evenly run data-parallel — one CTA, the
 whole K loop, no reduction at all — and only the remainder is spread over
 `streamk_ctas` stream-K CTAs, each owning a contiguous, balanced range of
-iterations that may straddle tile boundaries. rocke builds one kernel per shape,
-so the whole partition is resolved host-side
-(`rocke.helpers.streamk.StreamKIterPartition`) and folded in as constants; the
-device only maps `blockIdx.x` onto its iteration range.
+iterations that may straddle tile boundaries. The partition is resolved
+host-side (`rocke.helpers.streamk.StreamKIterPartition`, reached through
+`ConvArgs.streamk_partition`) and passed in as the `sk_*` kernargs; the device
+only maps `blockIdx.x` onto its iteration range. Like the split-K degree, the
+CTA pool is a launch parameter rather than a build-time constant, so one AOT
+binary serves any shape and any pool.
 
 `streamk="dp_sk"` launches `dp_tiles + sk_ctas` CTAs. `streamk="persistent"`
 launches only the pool: each CTA round-robins the data-parallel tiles
@@ -296,13 +299,14 @@ launch** — partials are always written before they are read.
 Constraints, all enforced by `validate()` / `is_valid_wgrad_spec` in both
 engines: gfx942/gfx950 (MFMA wave64) only; `split_k=1` and no `two_stage`
 (stream-K owns the K range); `epilogue="default"`; no `async_dma` / `unroll_k`
-(the per-tile trip count is a runtime value); no `chiplet_swizzle` or
+(they pipeline the K loop across work items, which stream-K re-enters per tile); no `chiplet_swizzle` or
 `group_merge` (both remap tiles, which stream-K owns). Conv groups are folded
 into GEMM-M instead of riding `block_id_z`: `m_tiles = ceil(wg_M/tile_m) *
 groups`, decoded group-fastest. Defining the tile count per group makes the fold
 exact for any `wg_M`, avoiding CK's `GemmM % MPerBlock` caveat.
 
-`streamk_ctas=-1` resolves per reduction (`wgrad_streamk_default_ctas`):
+`streamk_ctas` sizes the host partition only; `-1` resolves per reduction
+(`wgrad_streamk_default_ctas`):
 
 * `workspace` / `atomic` never wait on another CTA, so their pool is sized for
   throughput: four CTAs per CU (`_STREAMK_CTAS_PER_CU`). Each resident CTA
@@ -324,8 +328,8 @@ split-K kernel otherwise. Elsewhere split-K's equal slices already balance the
 grid and stream-K's per-tile fixup is pure overhead. `"off"` never selects it;
 `"dp_sk"` / `"persistent"` force it. A stream-K choice pins `split_k=1` and the
 direct epilogue and routes `_wgrad_grid` through the instance's own
-`wgrad_streamk_grid`, so the spec and the launch grid cannot disagree about the
-pool.
+`wgrad_streamk_grid`, so the spec, the kernargs and the launch grid cannot
+disagree about the pool.
 
 ## Next steps
 

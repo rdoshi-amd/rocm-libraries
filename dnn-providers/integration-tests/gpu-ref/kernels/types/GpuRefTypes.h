@@ -11,6 +11,7 @@
 #include "GpuRefBatchnormArgs.h"
 #include "GpuRefCommonArgs.h"
 #include "GpuRefConvArgs.h"
+#include "GpuRefDataTypes.hpp"
 #include "GpuRefLayernormArgs.h"
 #include "GpuRefMatmulArgs.h"
 #include "GpuRefPointwiseArgs.h"

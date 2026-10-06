@@ -14,3 +14,10 @@ struct ScaleUniformArgs
     double minValue;
     double maxValue;
 };
+
+struct DataTypeUtilArgs
+{
+    const void* input;
+    void* output;
+    long long count;
+};

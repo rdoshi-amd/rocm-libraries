@@ -169,8 +169,8 @@ const int kNumStreamKScalars = (int)(sizeof(kStreamKScalars) / sizeof(kStreamKSc
 
 bool streamk_reduction_known(const char* red)
 {
-    return strcmp(red, "atomic") == 0 || strcmp(red, "workspace") == 0
-           || strcmp(red, "linear") == 0 || strcmp(red, "tree") == 0;
+    return strcmp(red, "atomic") == 0 || strcmp(red, "workspace") == 0 || strcmp(red, "linear") == 0
+           || strcmp(red, "tree") == 0;
 }
 
 void wgrad_arg_names(rocke_conv_arg_list_t* out, bool is_3d, bool two_stage, const char* streamk)

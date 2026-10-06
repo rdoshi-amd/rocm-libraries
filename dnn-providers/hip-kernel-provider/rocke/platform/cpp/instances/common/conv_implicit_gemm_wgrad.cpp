@@ -2707,10 +2707,8 @@ static rocke_value_t* wgrad_sk_cta_of(wgrad_streamk_env_t* e, rocke_value_t* it)
 }
 
 /* _store_tile: the plain dW store of a finished tile. */
-static void wgrad_sk_store_tile(wgrad_streamk_env_t* e,
-                                rocke_value_t* const* vals,
-                                int wg_M,
-                                int wg_N)
+static void
+    wgrad_sk_store_tile(wgrad_streamk_env_t* e, rocke_value_t* const* vals, int wg_M, int wg_N)
 {
     rocke_conv_build_ctx_t* ctx = e->ctx;
     for(int i = 0; i < ctx->num_accs; ++i)
@@ -2971,8 +2969,7 @@ static void wgrad_emit_streamk(rocke_conv_build_ctx_t* ctx,
                 for(int i = 0; i < n_acc; ++i)
                     yields[i] = vals[i];
                 yields[n_acc] = rocke_b_mul(b, stride, c_two);
-                yields[n_acc + 1]
-                    = rocke_b_select(b, send, c_one, rounds.iter_vars[n_acc + 1]);
+                yields[n_acc + 1] = rocke_b_select(b, send, c_one, rounds.iter_vars[n_acc + 1]);
                 rocke_b_scf_yield(b, yields, n_acc + 2);
             }
             rocke_b_region_leave(b);

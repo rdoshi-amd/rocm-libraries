@@ -28,7 +28,7 @@ ENGINE=<your-bundle-engine-id>
 
 Replace `<your-bundle-engine-id>` with your bundle's engine ID; it is consumed verbatim
 as `--expect-engine` below. A gfx942 dense attention bundle would spell it
-`hipkernel:Gfx942AttentionDense`; this tree ships no such engine.
+`hipkernel:Gfx942AttentionDense`; the name is an illustration, not an engine to look for.
 
 Follow the **Setup** section of `$GEN/README.md`. Authoring and mining imports need the
 profile's rocKE library environment; production packaging uses its own selected
@@ -67,7 +67,9 @@ Exits: 0 feasible, 1 device/path/write failure, 2 invalid invocation, 3 neither
 `rocminfo` nor `hipInfo` could run. Exit 3 means the device was never observed, not that
 it is absent: obtain an inspection utility on this host. For rocKE, confirm the actual
 builder/spec and its `(spec, *, arch)` interface; an unknown architecture inventory
-needs source investigation.
+needs source investigation. A packaged engine whose kernel is a prebuilt per-arch code
+object plus its symbol is authored as `hsaco`, not mined for a rocKE builder; see the
+authored-source table in [SKILL.md](SKILL.md).
 
 **Gate:** feasible target/workspace, representable scope and capable reference. A
 missing dependency blocks its gate; host-only research may continue while a device
@@ -393,8 +395,8 @@ separately:
   required checks `NOT RUN` block acceptance, including missing vocabulary.
 - A packed kernel declaring no specialized `metadata_fields` and carrying no
   `effective_spec` reports **`NOT VERIFIED HERE`** when `provenance.origin_kind` is
-  absent or `hip`: no gate failure and no compiled-specialization proof. AOT HIP
-  specialization stays outside this check.
+  absent, `hip` or `hsaco`: no gate failure and no compiled-specialization proof. AOT
+  HIP specialization stays outside this check.
 - **The exemption does not extend to rocKE.** The same condition with
   `provenance.origin_kind` of `rocke` is a **hard failure**: the packer publishes a
   rocKE kernel's `effective_spec` when it ships it, so the pair means the archive bytes
@@ -529,11 +531,11 @@ provider's default installed CTest root is **`$INSTALL/bin/hip_kernel_provider`*
 `hip_kernel_provider_asm_sdpa_gpu_ref_integration_tests`, which is the ASM SDPA engine
 reached by a different path and never ingestor evidence.
 
-The production descriptor root ships no bundle, so no dense-attention target is
-registered. Replace `<your-bundle-ctest-target>` with the name your own registration
-creates — a gfx942 dense bundle would be shaped like
-`hip_kernel_provider_gfx942_attention_dense_gpu_ref_integration_tests`, which exists
-nowhere in this tree:
+Other bundles in the production root may register their own targets; they are not
+evidence for yours. Replace `<your-bundle-ctest-target>` with the name your own
+registration creates. A gfx942 dense bundle would be shaped like
+`hip_kernel_provider_gfx942_attention_dense_gpu_ref_integration_tests`; treat it as an
+illustration, not a name to copy:
 
 ```bash
 CTEST_ROOT="$INSTALL/bin/hip_kernel_provider"

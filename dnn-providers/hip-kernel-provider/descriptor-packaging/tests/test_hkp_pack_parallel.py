@@ -644,10 +644,8 @@ _HSACO_SOURCE = "hsaco_kernel.cpp"
 def hsaco_corpus(tmp_path):
     """A KDP carrying an hsaco UKD ahead of a compilable hip one.
 
-    Kept out of the selection corpus deliberately: it makes
-    `compile_intermediate` raise, which would stop the golden-sequence corpus
-    from being walkable. The hsaco entry is authored first so the walk reaches
-    its error before it would need a real hipcc for the hip entry.
+    Kept out of the selection corpus deliberately: its hsaco entry has no
+    compile, so it yields no prewarm job, and only the hip sibling does.
     """
     dest = tmp_path / "hsaco-corpus"
     dest.mkdir()
@@ -659,6 +657,7 @@ def hsaco_corpus(tmp_path):
     hsaco_ukd = _ukd(
         "ukd-hsaco",
         {"kind": "hsaco", "file": "prebuilt.co", "symbol": "H1"},
+        arch=[TARGET_ARCH],
     )
     hip_ukd = _ukd("ukd-hsaco-sibling", _hip_ks(_HSACO_SOURCE, "H1", 64))
     _write_json(
@@ -671,17 +670,15 @@ def hsaco_corpus(tmp_path):
 
 @pytest.mark.quick
 def test_prewarm_skips_hsaco_kind(hsaco_corpus):
-    """A pre-built object produces no prewarm job; only its compiling sibling does.
+    """An hsaco UKD produces no job: it has no compile.
 
-    The object is keyed like any variant, so the walk can file it, but there is
-    nothing to compile: the walk resolves the file itself
-    (test_hkp_pack_hsaco.py), and a job for it would hand the worker pool a kind
-    no worker has an arm for.
+    `_variant_key_for` declines the kind, so the prewarm drops it and only the
+    compilable hip sibling is scheduled; the walk keys the hsaco UKD itself.
     """
     flat = load_flat_input(hsaco_corpus, log=_silent)
 
     hsaco_ukd = flat.kdps()[0].doc["kernelDescriptors"][0]
-    assert pipeline._variant_key_for(hsaco_ukd, Path(".")) is not None
+    assert pipeline._variant_key_for(hsaco_ukd, Path(".")) is None
 
     sibling_vk = hip_variant_key(
         hip_source_relpath(Path("."), _HSACO_SOURCE),

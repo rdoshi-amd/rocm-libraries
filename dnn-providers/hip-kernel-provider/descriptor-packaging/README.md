@@ -78,24 +78,26 @@ Two rules govern the walk:
   normalised, so `..` is rejected (one file would take two identities) and an absolute
   path is rejected (the emitted key must be the same on every machine).
 
-`hsaco` is the **pre-built** kind: the UKD names a code object that already exists,
-built ahead of time by a toolchain the packer does not run, with
-`{"kind": "hsaco", "file": <path>, "symbol": <name>}` and an optional `sha256`.
-`file` resolves relative to the descriptor's own folder and must stay inside the
-root, exactly as a `hip` source does. Producing it is resolving the file and, when
-`sha256` is given, verifying it -- a mismatch fails the pack, since it means the
-object changed without its descriptor. From there it takes the compiling producers'
-path unchanged: one archive entry keyed by the root-relative path, the signature read
-out of the object, and a shipped `kind: "kpack"` UKD whose provenance records
-`origin_kind: "hsaco"` and that path. No toolchain is recorded for it; the object's own
-provenance is the producer's to keep (FlyDSL's `manifest.json`). Its contract must be
-matcher-only, like every non-compiling kind.
-
 `embedded_source` is a **passthrough** kind: the descriptor is emitted as authored, no
 producer runs, and it contributes no code object and no archive entry — the packer only
 stamps the shard architecture and records provenance. A root of only passthrough kinds
 therefore produces descriptors and **no** archive, and a shard with no compiled variant
 holds no `kpack/`. Descriptors but no archive is legal.
+
+`hsaco` names a prebuilt code object: `kernel_source: {kind: "hsaco", file, symbol}`.
+`file` resolves relative to the descriptor that names it, must stay inside the root, and
+has no root-relative fallback — the same rule as a `hip` `source`. No compile runs: the
+bytes are packed as-is into the arch's kpack, the kernel signature is read from the
+object's AMDGPU metadata as for a compiled object, and the UKD ships as `kind: kpack`.
+The toc key derives from the file's resolved root-relative path, so one file serving
+several symbols is one archive entry, and one key claimed by two different files is a
+hard error. The packer does not check the object's format or target processor. An
+`hsaco` UKD must list the arch(es) its object runs on in `arch` (a generic-target
+object lists every arch it runs on); an absent or empty `arch` is rejected. The author's own load test on the target arch
+is the only check; no in-tree load test covers `hsaco`. The shipped provenance records
+`origin_kind: "hsaco"`, the root-relative `file`, its `sha256` and the `symbol`, and makes no
+toolchain claim. As for `hip`, the specialization contract must declare
+`metadata_fields: []`: no compiler ran whose specialization a binding could observe.
 
 ## Compiler-bound specialization agreement
 
@@ -167,7 +169,7 @@ not equivalence of arbitrary machine code or correctness of native dispatch.
 ## Packed `kernel_source`
 
 The runtime consumes packed per-architecture descriptors with source kind KPACK, not
-unlowered rocKE/HIP authoring descriptors. A packed `kernel_source` carries **five
+unlowered rocKE, HIP or hsaco authoring descriptors. A packed `kernel_source` carries **five
 mandatory keys**:
 
 ```json

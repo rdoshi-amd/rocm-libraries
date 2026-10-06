@@ -1252,9 +1252,7 @@ def test_unhandled_kind_aborts_the_walk_and_lists_the_accepted_kinds(
 
 
 # A kind the walk accepts but no producer compiles: structurally valid per
-# _validate_ukd_fields, and absent from the pass-through set. `hsaco` is not
-# here: a pre-built object is a producer input (test_hkp_pack_hsaco.py), and
-# `kpack` is what the packer emits, never an input to it.
+# _validate_ukd_fields, and absent from the pass-through set.
 _UNPRODUCED_SOURCES = {
     "kpack": {
         "kind": "kpack",

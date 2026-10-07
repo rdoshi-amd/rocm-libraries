@@ -9,10 +9,12 @@
 # SKSplit > 1: the partial tiles exercise the queue rank carried across work
 # items (raw-rank regimes: WorkGroupMappingXCC -1, and PersistentXCCMapping
 # with WorkGroupMappingXCC > 1) and batch-inclusive partial indexing. Every
-# tile is split, so these kernels (SupportStreamKDynamicParallel) reduce the
-# parts with the parallel (PostGSU) reduction; the arrival fixup by the last
-# part is what logic without that capability, and DP + SK mixes from the
-# TENSILE_STREAMK_TILES debug override, still take.
+# tile is split. These kernels have both reductions (SupportStreamKDynamicParallel
+# and SupportStreamKArrivalFixup): a split of 3 or more parts per tile takes the
+# parallel (PostGSU) reduction, and the 288-tile problem (split 2, below
+# StreamKDynamicParallelMinSplit) takes the arrival fixup by the last part, as
+# logic without the parallel capability and DP + SK mixes from the
+# TENSILE_STREAMK_TILES debug override do.
 # Validation checks the first launch per problem; the Synchronizer check (on
 # by default) catches queue or arrival counters left nonzero, which would
 # corrupt a later launch rather than the one that left them. The activation problem builds
@@ -98,6 +100,9 @@ BenchmarkProblems:
           # Batch > 1 with one tile per batch and a very long K: 4 tiles,
           # split 64, so 256 partial tiles span the batches.
           - Exact: [32, 32, 4, 262144]
+          # 288 tiles on the 768-workgroup grid (3 per CU): split 2, so the
+          # arrival fixup.
+          - Exact: [1024, 1152, 1, 8192]
 
   - - OperationType: GEMM
       DataType: s
@@ -115,5 +120,7 @@ BenchmarkProblems:
         - ProblemSizes:
           - Exact: [64, 64, 1, 65536]
           - Exact: [200, 130, 1, 16384]
+          # Split 2, arrival fixup with the activation call live across it.
+          - Exact: [1024, 1152, 1, 8192]
         - ActivationArgs:
           - [Enum: relu]

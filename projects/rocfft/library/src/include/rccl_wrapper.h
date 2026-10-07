@@ -36,6 +36,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include <vector>
@@ -73,8 +74,8 @@ private:
 // Single-process create(devices) is the special case where every
 // location has comm_rank 0. Multi-process create(mpi_comm, ...)
 // initializes only the caller's local locations; NCCL rank is the
-// index in the sorted location set (one device per MPI rank, matching
-// the MPI rank when each rank's bricks use a single device).
+// index in the location set sorted by (MPI_COMM_WORLD rank, device),
+// and the handle translates to/from plan-communicator ranks.
 //
 // Thread safety: create()/reset_all() are internally synchronized. A given
 // comm is NOT safe for concurrent use (per NCCL: only one thread may
@@ -199,11 +200,16 @@ private:
 #endif
     );
 
+    rocfft_location_t to_world(const rocfft_location_t& comm_location) const;
+    rocfft_location_t to_comm(const rocfft_location_t& world_location) const;
+
     // owning cache keyed by location set
     static std::map<std::set<rocfft_location_t>, rocfft_rccl_comm_t> comm_cache;
     static std::mutex                                                comm_cache_mutex;
 
     std::shared_ptr<Impl> pimpl;
+    // plan-communicator rank -> MPI_COMM_WORLD rank; nullopt for single-process comms
+    std::optional<std::vector<int>> world_ranks;
 };
 
 // RAII wrapper for RCCL group operations

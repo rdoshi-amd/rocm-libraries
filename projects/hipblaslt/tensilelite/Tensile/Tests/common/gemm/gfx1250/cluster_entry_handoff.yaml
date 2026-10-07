@@ -3,11 +3,7 @@
 # Entry handoff after the initial cluster wait: SIA0 reuses the prefetch
 # workgroup barrier; SIA4 needs an explicit join before its early loop signal.
 # Loaded by unit/test_cluster_entry_handoff_codegen.py as well as common tests.
-# The common runner builds once, then starts 20 independent cached runs.
-# The deadline excludes compilation and time waiting for another test's GPU lock.
 TestParameters:
-  run_repetitions: 20
-  run_timeout_seconds: 120
   marks: [gfx1250-strict, skip-gfx900, skip-gfx906, skip-gfx908, skip-gfx90a, skip-gfx940, skip-gfx941, skip-gfx942, skip-gfx950, skip-gfx1010, skip-gfx1011, skip-gfx1012, skip-gfx1030, skip-gfx1100, skip-gfx1101, skip-gfx1102, skip-gfx1200, skip-gfx1201]
 
 GlobalParameters:

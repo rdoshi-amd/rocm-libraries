@@ -94,7 +94,7 @@ namespace rocsparse
             }
 
             // Spin loop until dependency has been resolved
-            (void)rocsparse::spin_loop<SLEEP>(&done[local_col], __MEMORY_SCOPE_DEVICE);
+            rocsparse::spin_loop<SLEEP>(&done[local_col], __MEMORY_SCOPE_DEVICE);
 
             // Make sure updated csr_val is visible globally
             __builtin_amdgcn_fence(__ATOMIC_ACQUIRE, "agent");

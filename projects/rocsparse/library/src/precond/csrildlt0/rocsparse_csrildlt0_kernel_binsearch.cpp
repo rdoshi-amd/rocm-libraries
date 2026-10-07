@@ -106,7 +106,7 @@ namespace rocsparse
             }
 
             // Spin until row local_col has been computed
-            (void)rocsparse::spin_loop<SLEEP>(&done[local_col], __MEMORY_SCOPE_DEVICE);
+            rocsparse::spin_loop<SLEEP>(&done[local_col], __MEMORY_SCOPE_DEVICE);
 
             __builtin_amdgcn_fence(__ATOMIC_ACQUIRE, "agent");
 

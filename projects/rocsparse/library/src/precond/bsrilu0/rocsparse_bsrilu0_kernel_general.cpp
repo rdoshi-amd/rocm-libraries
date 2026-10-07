@@ -98,7 +98,7 @@ namespace rocsparse
                 }
 
                 // Spin loop until dependency has been resolved
-                (void)rocsparse::spin_loop<SLEEP>(&done_array[bsr_col], __MEMORY_SCOPE_DEVICE);
+                rocsparse::spin_loop<SLEEP>(&done_array[bsr_col], __MEMORY_SCOPE_DEVICE);
 
                 // Make sure dependencies are visible in global memory
                 __builtin_amdgcn_fence(__ATOMIC_ACQUIRE, "agent");

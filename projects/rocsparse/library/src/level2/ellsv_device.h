@@ -288,7 +288,7 @@ namespace rocsparse
             // Spin until the dependency row has been solved. Its done flag only
             // ever goes from 0 to 1 here, so the returned value carries no
             // information beyond the wait itself and is discarded.
-            (void)rocsparse::spin_loop<SLEEP>(&done_array[col], __MEMORY_SCOPE_DEVICE);
+            rocsparse::spin_loop<SLEEP>(&done_array[col], __MEMORY_SCOPE_DEVICE);
             __builtin_amdgcn_fence(__ATOMIC_ACQUIRE, "agent");
 
             local_sum = rocsparse::fma(-local_val, y[col * y_inc], local_sum);

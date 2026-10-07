@@ -99,7 +99,7 @@ namespace rocsparse
 
                 // Spin loop until dependency has been resolved
 
-                (void)rocsparse::spin_loop<SLEEP>(&block_done[block_col], __MEMORY_SCOPE_DEVICE);
+                rocsparse::spin_loop<SLEEP>(&block_done[block_col], __MEMORY_SCOPE_DEVICE);
                 __builtin_amdgcn_fence(__ATOMIC_ACQUIRE, "agent");
 
                 for(J k = 0; k < block_dim; k++)

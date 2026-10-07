@@ -68,40 +68,38 @@ The CTest tests are:
 
 ## Test arguments
 
-The Catch2 tests (`jit-source-bundle`, `jit-builder`, `jit-publish` and
-`jit-loader`) take no arguments. CMake compiles in the data directory, the
-library directory and the HIP kernel path. Run `jit-publish` before
-`jit-loader`; the loader reads the library the publisher wrote. Problems are
-FP16 with M=256, N=128 and K=512, 1024 or 256.
+The tests are Catch2 executables and take no arguments. CMake compiles in the
+data directory, the library directory and the HIP kernel path. Run
+`jit-publish` before `jit-loader`; the loader reads the library the publisher
+wrote. Problems are FP16 with M=256, N=128 and K=512, 1024 or 256.
 
-`hipblaslt-jit-end-to-end-test` takes the committed `data` directory and stages
-`plain-pair` for device 0. It creates the replay backend with
-`jit::replay::createBackend` from `hipblaslt-jit-replay.hpp`, so generation
-runs no generator, and solves FP16 problems with M=256, N=128 and K=512 or 256.
-CTest sets `HIPBLASLT_JIT_LIBRARY_PATH` for this test. The test empties that
-directory first and refuses to run unless it is set, so it never publishes into
-the default library. `getJitAlgo` returns a JIT library index, and a second
-lookup of the same problem returns that index without generating.
-`hipblaslt-jit-heuristic-test` takes `off`, `fallback`, `forced`, `ignored` or
-`reuse`, and for every mode except `ignored` and `reuse` the `data` directory.
-CTest sets `HIPBLASLT_JIT` and a private `HIPBLASLT_JIT_LIBRARY_PATH`. The test
-stages that directory's `plain-pair` and sets `HIPBLASLT_JIT_TEST_REPLAY` to it
-before either heuristic query. A JIT heuristic result is a solution library
-index from 2^30. `reuse` is the second process: it queries K=512 once and
-prints that index.
+`hipblaslt-jit-end-to-end-test` stages `plain-pair` from that data directory.
+It creates the replay backend with `jit::replay::createBackend` from
+`hipblaslt-jit-replay.hpp`, so generation runs no generator, and solves FP16
+problems with M=256, N=128 and K=512 or 256. CTest sets `HIPBLASLT_JIT_E2E_MODE`
+to `run` or `library`, and `HIPBLASLT_JIT_LIBRARY_PATH` to a scratch directory.
+The test empties that directory first and refuses to run unless it is set, so
+it never publishes into the default library. `getJitAlgo` returns a JIT library
+index, and a second lookup of the same problem returns that index without
+generating. The `library` mode starts a second process, which sets
+`HIPBLASLT_JIT_E2E_MODE` to `library-reader` and runs the published indices
+before any query of its own.
 
-With `--library` after the data directory, `hipblaslt-jit-end-to-end-test`
-runs the `jit-end-to-end-library` checks instead and starts its second process
-itself. That mode empties `HIPBLASLT_JIT_LIBRARY_PATH` first and refuses to run
-unless it is set, so that it never publishes into the default library.
+`hipblaslt-jit-heuristic-test` reads `HIPBLASLT_JIT_TEST_MODE`: `off`,
+`fallback`, `forced`, `ignored`, or `reuse`. CTest sets that mode,
+`HIPBLASLT_JIT`, and a private `HIPBLASLT_JIT_LIBRARY_PATH`. The test stages
+`plain-pair` and sets `HIPBLASLT_JIT_TEST_REPLAY` before either heuristic
+query. A JIT heuristic result is a solution library index from 2^30. `reuse`
+is the second process: it queries K=512 once and prints that index. Its Catch2
+reporter is sent to `/dev/null`, so the parent reads only that line.
 
 ## JIT solution library tests
 
 `hipblaslt-jit-library-test` compiles the JIT solution library directly. It
-takes the committed `data` directory and publishes the `plain` entry of device
-0's architecture under several kernel names with stand-in code objects, and a
-scratch directory for the libraries it creates; it ignores
-`HIPBLASLT_JIT_LIBRARY_PATH`. Adding
-`--writers N --per-writer M` runs the multi-process check instead: N writer
-processes each publish M entries shared by all writers and M of their own,
-while one reader process looks them up.
+publishes the `plain` entry of the device's architecture under several kernel
+names with stand-in code objects. CTest sets `HIPBLASLT_JIT_LIBRARY_SCRATCH`
+to the directory for those libraries. The test ignores
+`HIPBLASLT_JIT_LIBRARY_PATH`. The concurrency entry also sets
+`HIPBLASLT_JIT_LIBRARY_WRITERS` and `HIPBLASLT_JIT_LIBRARY_PER_WRITER`: that
+many writer processes each publish that many entries shared by all writers and
+that many of their own, while one reader process looks them up.

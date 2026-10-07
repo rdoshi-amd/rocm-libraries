@@ -15,9 +15,12 @@
 #include <Tensile/Tensile.hpp>
 #include <msgpack.hpp>
 
+#include <catch2/catch_test_macros.hpp>
+
 #include <algorithm>
 #include <chrono>
 #include <climits>
+#include <cstdlib>
 #include <fstream>
 #include <functional>
 #include <iostream>
@@ -831,6 +834,11 @@ namespace
                     std::cerr << "FAIL child " << ::getpid() << ": " << error.what() << '\n';
                     code = 1;
                 }
+                catch(...)
+                {
+                    std::cerr << "FAIL child " << ::getpid() << '\n';
+                    code = 1;
+                }
                 ::_exit(code);
             }
             children.push_back(child);
@@ -945,80 +953,68 @@ namespace
     }
 }
 
-int main(int argc, char** argv)
+TEST_CASE("the JIT solution library", "[jit-gpu]")
 {
+    const char* scratchEnv = std::getenv("HIPBLASLT_JIT_LIBRARY_SCRATCH");
+    require(scratchEnv && *scratchEnv, "Set HIPBLASLT_JIT_LIBRARY_SCRATCH");
     int writers = 0, perWriter = 0;
-    if(argc == 7 && std::string(argv[3]) == "--writers" && std::string(argv[5]) == "--per-writer")
-    {
-        writers   = std::atoi(argv[4]);
-        perWriter = std::atoi(argv[6]);
-    }
-    if((argc != 3 && argc != 7) || (argc == 7 && (writers < 1 || perWriter < 1)))
-    {
-        std::cerr << "Usage: " << argv[0]
-                  << " DATA SCRATCH [--writers N --per-writer M]\n";
-        return 2;
-    }
-    try
-    {
-        Context ctx;
-        ctx.scratch = fs::absolute(argv[2]);
-        fs::remove_all(ctx.scratch);
-        fs::create_directories(ctx.scratch);
+    if(const char* value = std::getenv("HIPBLASLT_JIT_LIBRARY_WRITERS"))
+        writers = std::atoi(value);
+    if(const char* value = std::getenv("HIPBLASLT_JIT_LIBRARY_PER_WRITER"))
+        perWriter = std::atoi(value);
+    require((writers == 0 && perWriter == 0) || (writers > 0 && perWriter > 0),
+            "writers and per-writer must both be set");
+    Context ctx;
+    ctx.scratch = fs::absolute(scratchEnv);
+    fs::remove_all(ctx.scratch);
+    fs::create_directories(ctx.scratch);
 
-        int             device = 0;
-        hipDeviceProp_t properties{};
-        require(hipGetDevice(&device) == hipSuccess
-                    && hipGetDeviceProperties(&properties, device) == hipSuccess,
-                "Cannot query the current HIP device");
-        const std::string gcnArchName = properties.gcnArchName;
-        ctx.arch                      = gcnArchName.substr(0, gcnArchName.find(':'));
-        const auto processor          = TensileLite::AMDGPU::toProcessor(ctx.arch);
-        require(TensileLite::AMDGPU::toString(processor) == ctx.arch,
-                "No TensileLite processor for " + ctx.arch);
-        ctx.hardware = TensileLite::AMDGPU(processor, 256, ctx.arch);
-        const auto prepared = hipblaslt_jit_test::prepareSolutions(fs::u8path(argv[1]));
-        const auto plain    = std::find_if(prepared.begin(), prepared.end(), [&](const auto& item) {
-            return item.arch == ctx.arch && item.name == "plain";
-        });
-        require(plain != prepared.end(), "No plain entry for " + ctx.arch);
-        ctx.entry.bytes = plain->solution.entry;
-        const auto library = std::dynamic_pointer_cast<hj::GemmMaster>(
-            TensileLite::LoadLibraryData<ContractionProblemGemm>(ctx.entry.bytes));
-        require(library && library->solutions.count(0), "The replay has no solution 0");
-        const auto& replayed = *library->solutions.at(0);
-        ctx.entry.kernel     = replayed.kernelName;
-        if(!(*replayed.problemPredicate)(gemm(256)))
-        {
-            replayed.problemPredicate->debugEval(gemm(256), std::cerr);
-            throw std::runtime_error("The test problem does not match the replayed solution");
-        }
-        if(!(*replayed.hardwarePredicate)(ctx.hardware))
-        {
-            replayed.hardwarePredicate->debugEval(ctx.hardware, std::cerr);
-            throw std::runtime_error("The " + ctx.arch + " plain solution rejects this device");
-        }
-        std::cout << "PASS " << ctx.arch << " plain entry matches the test problem\n";
-        if(writers)
-            concurrency(ctx, writers, perWriter);
-        else
-        {
-            keys(ctx);
-            directories(ctx);
-            roundTrip(ctx);
-            dedupeAndOrder(ctx);
-            mismatch(ctx);
-            allocator(ctx);
-            crashes(ctx);
-            refresh(ctx);
-            fusedA2A(ctx);
-        }
-        std::cout << "ALL JIT LIBRARY CHECKS PASSED\n";
-    }
-    catch(const std::exception& error)
+    int             device = 0;
+    hipDeviceProp_t properties{};
+    require(hipGetDevice(&device) == hipSuccess
+                && hipGetDeviceProperties(&properties, device) == hipSuccess,
+            "Cannot query the current HIP device");
+    const std::string gcnArchName = properties.gcnArchName;
+    ctx.arch                      = gcnArchName.substr(0, gcnArchName.find(':'));
+    const auto processor          = TensileLite::AMDGPU::toProcessor(ctx.arch);
+    require(TensileLite::AMDGPU::toString(processor) == ctx.arch,
+            "No TensileLite processor for " + ctx.arch);
+    ctx.hardware = TensileLite::AMDGPU(processor, 256, ctx.arch);
+    const auto prepared = hipblaslt_jit_test::prepareSolutions(fs::u8path(HIPBLASLT_JIT_DATA));
+    const auto plain    = std::find_if(prepared.begin(), prepared.end(), [&](const auto& item) {
+        return item.arch == ctx.arch && item.name == "plain";
+    });
+    require(plain != prepared.end(), "No plain entry for " + ctx.arch);
+    ctx.entry.bytes = plain->solution.entry;
+    const auto library = std::dynamic_pointer_cast<hj::GemmMaster>(
+        TensileLite::LoadLibraryData<ContractionProblemGemm>(ctx.entry.bytes));
+    require(library && library->solutions.count(0), "The replay has no solution 0");
+    const auto& replayed = *library->solutions.at(0);
+    ctx.entry.kernel     = replayed.kernelName;
+    if(!(*replayed.problemPredicate)(gemm(256)))
     {
-        std::cerr << "FAIL: " << error.what() << '\n';
-        return 1;
+        replayed.problemPredicate->debugEval(gemm(256), std::cerr);
+        throw std::runtime_error("The test problem does not match the replayed solution");
     }
-    return 0;
+    if(!(*replayed.hardwarePredicate)(ctx.hardware))
+    {
+        replayed.hardwarePredicate->debugEval(ctx.hardware, std::cerr);
+        throw std::runtime_error("The " + ctx.arch + " plain solution rejects this device");
+    }
+    std::cout << "PASS " << ctx.arch << " plain entry matches the test problem\n";
+    if(writers)
+        concurrency(ctx, writers, perWriter);
+    else
+    {
+        keys(ctx);
+        directories(ctx);
+        roundTrip(ctx);
+        dedupeAndOrder(ctx);
+        mismatch(ctx);
+        allocator(ctx);
+        crashes(ctx);
+        refresh(ctx);
+        fusedA2A(ctx);
+    }
+    std::cout << "ALL JIT LIBRARY CHECKS PASSED\n";
 }

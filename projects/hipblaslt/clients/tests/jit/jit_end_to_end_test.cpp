@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 #include "solution_entry.hpp"
 #include <hip/hip_fp16.h>
+#include <catch2/catch_test_macros.hpp>
 
 #include <cstdlib>
 #include <iostream>
@@ -325,19 +326,18 @@ namespace
             return;
 
         std::cout.flush();
-        std::vector<std::string> arguments{
-            "hipblaslt-jit-end-to-end-test", root, "--library-reader"};
-        for(const auto index : indices)
-            arguments.push_back(std::to_string(index));
-        const auto child = fork();
+        const auto packed = text(indices);
+        const auto child  = fork();
         require(child >= 0, "fork failed");
         if(child == 0)
         {
-            std::vector<char*> argv;
-            for(auto& argument : arguments)
-                argv.push_back(argument.data());
-            argv.push_back(nullptr);
-            execv("/proc/self/exe", argv.data());
+            if(setenv("HIPBLASLT_JIT_E2E_MODE", "library-reader", 1) != 0
+               || setenv("HIPBLASLT_JIT_E2E_ROOT", root.c_str(), 1) != 0
+               || setenv("HIPBLASLT_JIT_E2E_INDICES", packed.c_str(), 1) != 0)
+                _exit(127);
+            execl("/proc/self/exe",
+                  "hipblaslt-jit-end-to-end-test",
+                  static_cast<char*>(nullptr));
             _exit(127);
         }
         int status = 0;
@@ -347,29 +347,27 @@ namespace
     }
 }
 
-int main(int argc, char** argv)
+TEST_CASE("replayed JIT GEMM solutions run end to end", "[jit-gpu]")
 {
-    const std::string mode = argc > 2 ? argv[2] : "";
-    if(!(argc == 2 || (argc == 3 && mode == "--library")
-         || (argc == 5 && mode == "--library-reader")))
+    const char* mode = std::getenv("HIPBLASLT_JIT_E2E_MODE");
+    require(mode && *mode, "Set HIPBLASLT_JIT_E2E_MODE");
+    const std::string which = mode;
+    if(which == "run")
+        test(replayRoot(HIPBLASLT_JIT_DATA, "end-to-end").u8string());
+    else if(which == "library")
+        library(replayRoot(HIPBLASLT_JIT_DATA, "end-to-end-library").u8string(), {});
+    else if(which == "library-reader")
     {
-        std::cerr << "Usage: " << argv[0] << " DATA [--library]\n";
-        return 2;
+        const char* root   = std::getenv("HIPBLASLT_JIT_E2E_ROOT");
+        const char* packed = std::getenv("HIPBLASLT_JIT_E2E_INDICES");
+        require(root && *root && packed, "library-reader is missing its root or indices");
+        const std::string indices = packed;
+        const auto        comma   = indices.find(',');
+        require(comma != std::string::npos && indices.find(',', comma + 1) == std::string::npos,
+                "library-reader indices");
+        library(root,
+                {std::stoi(indices.substr(0, comma)), std::stoi(indices.substr(comma + 1))});
     }
-    try
-    {
-        if(argc == 2)
-            test(replayRoot(argv[1], "end-to-end").u8string());
-        else if(argc == 3)
-            library(replayRoot(argv[1], "end-to-end-library").u8string(), {});
-        else
-            library(replayRoot(argv[1], "end-to-end-library").u8string(),
-                    {std::stoi(argv[3]), std::stoi(argv[4])});
-    }
-    catch(const std::exception& error)
-    {
-        std::cerr << "FAIL: " << error.what() << '\n';
-        return 1;
-    }
-    return 0;
+    else
+        require(false, "Unknown mode " + which);
 }

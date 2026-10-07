@@ -21,6 +21,8 @@
 # SOFTWARE.
 #
 ################################################################################
+import hashlib
+import json
 from functools import lru_cache
 
 from ..Common.Constants import MAX_FILENAME_LENGTH
@@ -241,6 +243,11 @@ def _getName(state, requiredParameters: frozenset, splitGSU: bool, ignoreInterna
     if key not in state or key == "CustomKernel":
       continue
     components.append(f'{getParameterNameAbbreviation(key)}{getParameterValueAbbreviation(key, state[key])}')
+
+  # Tuning-only StinkyTofu overrides change the asm, so tag the name; absent when unused.
+  stinkyTune = state.get("_StinkyTofuParameters")
+  if stinkyTune:
+    components.append("STP" + hashlib.md5(json.dumps(stinkyTune, sort_keys=True).encode()).hexdigest()[:8])
 
   state["GlobalSplitU"] = gsuBackup
   state["ProblemType"]["GroupedGemm"] = ggBackup

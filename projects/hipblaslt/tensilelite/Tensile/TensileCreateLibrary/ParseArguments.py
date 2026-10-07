@@ -224,7 +224,7 @@ def parseArguments(input: Optional[List[str]] = None) -> Dict[str, Any]:
         dest="EmitOccupancyProbe",
         action="store_true",
         default=False,
-        help="Emit the CU-occupancy probe store (ProbeAddr/ProbeEpoch kernel args) "
+        help="Emit the CU-occupancy probe (ProbeAddr/ProbeEpoch/ProbeGrid kernel args) "
         "in StreamK hybrid-assignment kernels"
     )
 

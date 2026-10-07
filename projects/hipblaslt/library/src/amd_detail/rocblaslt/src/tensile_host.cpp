@@ -2160,8 +2160,10 @@ namespace
         // the effective CU budget. Non-StreamK=5 solutions ignore it.
         tensileProblem.setParams().setStreamKTileSchedulingMode(prob.streamk_tile_scheduling_ext);
         tensileProblem.setParams().setSmCountTarget(prob.sm_count_target);
-        tensileProblem.setParams().setOccupancyProbe(
-            prob.occupancy_probe_addr, prob.occupancy_probe_epoch, prob.occupancy_probe_min_grid);
+        tensileProblem.setParams().setOccupancyProbe(prob.occupancy_probe_addr,
+                                                     prob.occupancy_probe_epoch,
+                                                     prob.occupancy_probe_min_grid,
+                                                     prob.occupancy_probe_pad);
 
         tensileProblem.setParams().setUniformSummationOrder(prob.uniform_summation_order != 0);
 
@@ -2437,8 +2439,10 @@ namespace
         // companion block in ConstructTensileProblem for details.
         tensileProblem.setParams().setStreamKTileSchedulingMode(prob.streamk_tile_scheduling_ext);
         tensileProblem.setParams().setSmCountTarget(prob.sm_count_target);
-        tensileProblem.setParams().setOccupancyProbe(
-            prob.occupancy_probe_addr, prob.occupancy_probe_epoch, prob.occupancy_probe_min_grid);
+        tensileProblem.setParams().setOccupancyProbe(prob.occupancy_probe_addr,
+                                                     prob.occupancy_probe_epoch,
+                                                     prob.occupancy_probe_min_grid,
+                                                     prob.occupancy_probe_pad);
 
         tensileProblem.setParams().setUniformSummationOrder(prob.uniform_summation_order != 0);
 
@@ -3703,8 +3707,40 @@ rocblaslt_status runContractionProblem(rocblaslt_handle                   handle
         updateTensileProblem(prob, data->problem);
 
         rocblaslt_matmul_algo reselected;
+        const auto*           tagged = algo;
         algo = reselectForAdaptiveHint(
             handle, algo, prob, gemmData, *library, *hardware, reselected);
+
+        // A probe launch whose kernel cannot pad with probe-only WGs runs at
+        // hint 0 instead, for a full grid, if the kernel picked there probes.
+        if(prob.occupancy_probe_launch && prob.sm_count_target != 0)
+        {
+            auto canProbe = [&](const rocblaslt_matmul_algo* a) {
+                auto s
+                    = library->getSolutionByIndex(data->problem, *hardware, *(const int*)a->data);
+                return s && s->internalArgsSupport.occupancyProbe;
+            };
+            if(!canProbe(algo))
+            {
+                RocblasltContractionProblem full    = prob;
+                full.sm_count_target                = 0;
+                full.occupancy_probe_pad            = false;
+                full.occupancy_probe_launch         = false;
+                const auto            launchProblem = data->problem;
+                rocblaslt_matmul_algo zero;
+                updateTensileProblem(full, data->problem);
+                const auto* zeroAlgo = reselectForAdaptiveHint(
+                    handle, tagged, full, gemmData, *library, *hardware, zero);
+                if(rocblaslt::adaptive_sm::probeFallbackToHintZero(
+                       true, uint32_t(prob.sm_count_target), false, canProbe(zeroAlgo)))
+                {
+                    reselected = zero;
+                    algo       = zeroAlgo == &zero ? &reselected : zeroAlgo;
+                }
+                else
+                    data->problem = launchProblem;
+            }
+        }
 
         // Get the values of static member variables flush and rotating size from UserClientArguments
         UserClientArguments ClientArguments;

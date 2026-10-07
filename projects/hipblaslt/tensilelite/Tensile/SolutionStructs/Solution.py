@@ -290,7 +290,7 @@ def _supportStreamKPerTileExtraIters(state):
 
 
 def _supportOccupancyProbe(state):
-  """Whether this solution's asm takes the ProbeAddr/ProbeEpoch tail args.
+  """Whether this solution's asm takes the ProbeAddr/ProbeEpoch/ProbeGrid tail args.
 
   Opt-in at build time (EmitOccupancyProbe); generated SK5 (hybrid assignment)
   non-grouped kernels on gfx94x/gfx95x (HW_REG_XCC_ID) only.

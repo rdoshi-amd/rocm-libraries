@@ -617,10 +617,14 @@ struct RocblasltContractionProblem
     int32_t uniform_summation_order = 0;
     // Occupancy probe target for SK5 kernels built with it (null: no probe),
     // forwarded into ContractionProblemParameters::setOccupancyProbe. Set
-    // post-construction by the C API launch.
+    // post-construction by the C API launch. occupancy_probe_pad pads a grid
+    // below min_grid with probe-only WGs; occupancy_probe_launch marks a
+    // scheduled probe launch, run at hint 0 if its kernel cannot pad.
     void*    occupancy_probe_addr     = nullptr;
     uint32_t occupancy_probe_epoch    = 0;
     uint32_t occupancy_probe_min_grid = 0;
+    bool     occupancy_probe_pad      = false;
+    bool     occupancy_probe_launch   = false;
     // sm_count_target came from the adaptive estimator rather than the user;
     // enables launch-time re-selection of a tagged heuristic algo.
     bool adaptive_sm_count = false;

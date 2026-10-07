@@ -72,13 +72,18 @@ const rocblaslt::adaptive_sm::Config& rocblaslt_adaptive_sm_config()
 }
 
 uint32_t _rocblaslt_handle::adaptiveSmCountForLaunch(hipStream_t stream,
+                                                     bool        tiny,
                                                      void**      probeAddr,
-                                                     uint32_t*   probeEpoch)
+                                                     uint32_t*   probeEpoch,
+                                                     bool*       probePad,
+                                                     bool*       probeLaunch)
 {
     using namespace rocblaslt::adaptive_sm;
 
-    *probeAddr  = nullptr;
-    *probeEpoch = 0;
+    *probeAddr   = nullptr;
+    *probeEpoch  = 0;
+    *probePad    = false;
+    *probeLaunch = false;
     if(!adaptive_streams)
         return 0;
 
@@ -93,6 +98,32 @@ uint32_t _rocblaslt_handle::adaptiveSmCountForLaunch(hipStream_t stream,
 
     const Config&     cfg = rocblaslt_adaptive_sm_config();
     AdaptiveSmStream& st  = adaptive_streams[slot];
+
+    // A tiny launch takes the hint but no epoch: it never probes. A long run
+    // of them drops the hint, which nothing re-measures meanwhile.
+    if(tiny)
+    {
+        if(cfg.force)
+            return cfg.force;
+        const uint32_t run  = st.tinyRun.fetch_add(1, std::memory_order_relaxed) + 1;
+        const uint32_t hint = st.cus.load(std::memory_order_relaxed);
+        if(!tinyRunDecays(run, hint, cfg) || st.busy.test_and_set(std::memory_order_acquire))
+            return hint;
+        st.estimator.reset();
+        st.probeAt.store(0, std::memory_order_relaxed);
+        st.cus.store(0, std::memory_order_relaxed);
+        adaptive_query_cus.store(0, std::memory_order_relaxed);
+        if(cfg.log)
+        {
+            std::ostringstream msg;
+            msg << "hipBLASLt-ADAPTIVE-SM hint stream=" << static_cast<const void*>(stream)
+                << " slot=" << slot << " tiny=" << run << " hint=" << hint << "->0\n";
+            std::cerr << msg.str();
+        }
+        st.busy.clear(std::memory_order_release);
+        return 0;
+    }
+    st.tinyRun.store(0, std::memory_order_relaxed);
 
     // 0 marks a slot no kernel has written.
     uint32_t epoch = st.epoch.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -119,19 +150,22 @@ uint32_t _rocblaslt_handle::adaptiveSmCountForLaunch(hipStream_t stream,
         }
     };
 
+    // The first launch at or past the scheduled probe epoch claims it.
+    uint32_t   at      = st.probeAt.load(std::memory_order_relaxed);
+    const bool claimed = probeDueAt(epoch, at)
+                         && st.probeAt.compare_exchange_strong(at, 0, std::memory_order_relaxed);
+    const LaunchPlan plan = planLaunch(epoch, claimed, cfg);
+    *probeLaunch          = plan.probeLaunch;
+    *probePad             = plan.pad;
+
     if(cfg.force)
     {
         publish(cfg.force);
         return cfg.force;
     }
 
-    // The first launch at or past the scheduled probe epoch runs at hint 0.
-    uint32_t   at    = st.probeAt.load(std::memory_order_relaxed);
-    const bool probe = at != 0 && static_cast<int32_t>(epoch - at) >= 0
-                       && st.probeAt.compare_exchange_strong(at, 0, std::memory_order_relaxed);
-
-    if(epoch % cfg.period != 0 || st.busy.test_and_set(std::memory_order_acquire))
-        return probe ? 0 : st.cus.load(std::memory_order_relaxed);
+    if(!plan.read || st.busy.test_and_set(std::memory_order_acquire))
+        return st.cus.load(std::memory_order_relaxed);
 
     // A slot is never released, so a new stream can inherit a destroyed one's
     // pointer and with it a different CU mask. Its launches use the old
@@ -156,7 +190,7 @@ uint32_t _rocblaslt_handle::adaptiveSmCountForLaunch(hipStream_t stream,
         }
     }
     st.busy.clear(std::memory_order_release);
-    return probe ? 0 : hint;
+    return hint;
 }
 
 /*******************************************************************************

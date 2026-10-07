@@ -170,14 +170,16 @@ def addOccupancyProbeArgs(writer, signature, commonArgsSize):
     """Append the CU-occupancy probe tail args.
 
     ProbeAddr is 8-byte aligned (the host mirrors the padding with
-    appendAligned) and ProbeEpoch follows at +8. probeKernArgOffset is relative
-    to KernArgAddress shifted past the common args (see batchOffset).
+    appendAligned); ProbeEpoch and ProbeGrid (the real grid) follow at +8 and
+    +12. probeKernArgOffset is relative to KernArgAddress shifted past the
+    common args (see batchOffset).
     """
     if signature.offset % 8:
         signature.addArg("ProbePad", SVK.SIG_VALUE, "u32")
     writer.states.probeKernArgOffset = signature.offset - commonArgsSize
     signature.addArg("ProbeAddr",  SVK.SIG_GLOBALBUFFER, "void", "generic")
     signature.addArg("ProbeEpoch", SVK.SIG_VALUE,        "u32")
+    signature.addArg("ProbeGrid",  SVK.SIG_VALUE,        "u32")
 
 
 class SignatureDefault(Signature):

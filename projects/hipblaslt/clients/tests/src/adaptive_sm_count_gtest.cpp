@@ -33,9 +33,13 @@ namespace
 
     // Mirrors _rocblaslt_handle::adaptiveSmCountForLaunch: a read every
     // cfg.period launches, which may schedule a later launch as a probe launch.
-    // The GPU runs `lag` launches behind the host. A launch probes when it runs
-    // at hint 0 (`canProbe`: its grid covers N_CU there), or when its
-    // re-selected grid still does (`probesUnderHint`).
+    // The GPU runs `lag` launches behind the host. A regular launch probes
+    // when it runs at hint 0 with a grid covering N_CU (`canProbe`, and not
+    // `blind`), or when its re-selected grid still does (`probesUnderHint`).
+    // Scheduled probe launches and every cfg.probeStride-th launch probe when
+    // their kernel can (`canProbe` and `probeLaunchesWrite`): padded with
+    // probe-only workgroups, or at hint 0. Tiny launches (`tiny`, by launch
+    // index) take no epoch; a long run of them drops the hint.
     struct Sim
     {
         std::vector<uint32_t> slots                   = std::vector<uint32_t>(c_probeSlots, 0);
@@ -44,7 +48,12 @@ namespace
         uint32_t              batch                   = 1; // GPU completes launches in groups
         bool                  probesUnderHint         = false;
         bool                  probeLaunchesWrite      = true;
+        bool                  blind                    = false; // grid below N_CU even at hint 0
         bool (*canProbe)(uint32_t epoch)              = nullptr;
+        bool (*tiny)(uint32_t launch)                  = nullptr;
+        uint32_t                              launches = 0;
+        uint32_t                              tinyRun  = 0;
+        uint32_t                              hint     = 0; // published
         uint32_t                              probeAt = 0;
         std::vector<uint32_t>                 probeEpochs;
         Config                                cfg;
@@ -65,23 +74,38 @@ namespace
         {
             for(uint32_t i = 0; i < n; ++i)
             {
+                if(tiny && tiny(launches++))
+                {
+                    if(tinyRunDecays(++tinyRun, hint, cfg))
+                    {
+                        est.reset();
+                        probeAt = 0;
+                        hint    = 0;
+                        ++changes;
+                    }
+                    continue;
+                }
+                tinyRun = 0;
                 if(++hostEpoch == 0)
                     ++hostEpoch;
-                const bool probe = probeAt != 0 && static_cast<int32_t>(hostEpoch - probeAt) >= 0;
-                if(probe)
+                const bool claimed = probeDueAt(hostEpoch, probeAt);
+                if(claimed)
                 {
                     probeAt = 0;
                     ++probes;
                     probeEpochs.push_back(hostEpoch);
                 }
-                if(hostEpoch % cfg.period == 0)
+                const LaunchPlan plan = planLaunch(hostEpoch, claimed, cfg);
+                if(plan.read)
                 {
                     changes += est.read(slots.data(), hostEpoch, c_nCu, cfg);
                     if(const uint32_t next = est.probeDue(hostEpoch, cfg))
                         probeAt = next;
+                    hint = est.hint();
                 }
                 const bool fits   = !canProbe || canProbe(hostEpoch);
-                const bool writes = probe ? probeLaunchesWrite && fits : est.hint() == 0 && fits;
+                const bool writes = (plan.pad && probeLaunchesWrite && fits)
+                                    || (est.hint() == 0 && fits && !blind);
                 queue.emplace_back(hostEpoch, writes || probesUnderHint);
                 if(queue.size() < lag + batch)
                     continue;
@@ -131,8 +155,10 @@ namespace
         EXPECT_EQ(confirmations(192, 128, c_nCu, c), c.confirm);
         EXPECT_EQ(confirmations(192, 64, c_nCu, c), c.confirmDown);
         EXPECT_EQ(confirmations(96, 64, c_nCu, c), c.confirmDown);
-        EXPECT_EQ(confirmations(64, 0, c_nCu, c), c.confirm);
+        EXPECT_EQ(confirmations(64, 0, c_nCu, c), c.confirmUp);
         EXPECT_EQ(confirmations(32, 192, c_nCu, c), c.confirm);
+        EXPECT_EQ(confirmations(192, 0, c_nCu, c), c.confirmUp);
+        EXPECT_EQ(confirmations(0, 0, c_nCu, c), c.confirm);
     }
 
     TEST(adaptive_sm_count, applies_only_without_explicit_hint)
@@ -180,28 +206,28 @@ namespace
         Config         cfg;
         ProbeSchedule  ps;
         const uint32_t P = cfg.probePeriod;
-        // No hint, or a recent sample: no probe.
-        EXPECT_EQ(ps.due(1000, 0, 0, true, 900, cfg), 0u);
-        EXPECT_EQ(ps.due(1000, 128, 1000 - P + 1, true, 900, cfg), 0u);
-        // P launches without a sample under a hint: the next launch probes.
-        EXPECT_EQ(ps.due(1000, 128, 1000 - P, true, 900, cfg), 1001u);
+        // A recent sample: no probe.
+        EXPECT_EQ(ps.due(1000, 1000 - P + 1, true, 900, cfg), 0u);
+        // P launches without a sample, with or without a hint: the next
+        // launch probes.
+        EXPECT_EQ(ps.due(1000, 1000 - P, true, 900, cfg), 1001u);
         EXPECT_TRUE(ps.pending());
         // Outstanding until the anchor reaches its epoch...
-        EXPECT_EQ(ps.due(1500, 128, 0, true, 1000, cfg), 0u);
-        EXPECT_EQ(ps.due(1500, 128, 1300, true, 1001, cfg), 1501u);
+        EXPECT_EQ(ps.due(1500, 0, true, 1000, cfg), 0u);
+        EXPECT_EQ(ps.due(1500, 1300, true, 1001, cfg), 1501u);
         EXPECT_EQ(ps.lost(), 0u);
         // ...or the timeout passes, stretched by twice the host's lead at the
         // last sample (1300 - 1001). A lost probe moves the next one a
         // launch later.
         const uint32_t t = 1501 + cfg.probeTimeout() + 2 * 299;
-        EXPECT_EQ(ps.due(t - 1, 128, 0, true, 1200, cfg), 0u);
-        EXPECT_EQ(ps.due(t, 128, 0, true, 1200, cfg), t + 2);
+        EXPECT_EQ(ps.due(t - 1, 0, true, 1200, cfg), 0u);
+        EXPECT_EQ(ps.due(t, 0, true, 1200, cfg), t + 2);
         EXPECT_EQ(ps.lost(), 1u);
         // Wrap-safe.
         ps.reset();
-        EXPECT_EQ(ps.due(0xffffffffu, 128, 0xffffffffu - P, false, 0, cfg), 1u);
-        EXPECT_EQ(ps.due(20, 128, 0, true, 0xfffffff0u, cfg), 0u);
-        EXPECT_EQ(ps.due(30, 128, 30 - P, true, 12, cfg), 31u);
+        EXPECT_EQ(ps.due(0xffffffffu, 0xffffffffu - P, false, 0, cfg), 1u);
+        EXPECT_EQ(ps.due(20, 0, true, 0xfffffff0u, cfg), 0u);
+        EXPECT_EQ(ps.due(30, 30 - P, true, 12, cfg), 31u);
     }
 
     TEST(adaptive_sm_count, small_memo)
@@ -293,6 +319,7 @@ namespace
         // Under the hint the re-selected grid is below N_CU and never probes;
         // periodic probe launches keep the hint confirmed.
         Sim s;
+        s.cfg.probeStride = 0; // scheduled probe launches only
         s.lag = 600;
         s.run(1000, c_nCu);
         ASSERT_LT(s.until(192, 192, 2000), 2000u);
@@ -309,14 +336,15 @@ namespace
     TEST(adaptive_sm_count, probe_launch_recovers_when_contention_ends)
     {
         Sim s;
+        s.cfg.probeStride = 0; // scheduled probe launches only
         s.lag = 600;
         s.run(1000, c_nCu);
         ASSERT_LT(s.until(128, 128, 3000), 3000u);
         s.run(3000, 128);
         ASSERT_EQ(s.est.hint(), 128u);
-        // Two probe launches (confirm = 2), each lag + period + read apart.
+        // confirmUp probe launches, each lag + period + read apart.
         const uint32_t n = s.until(0, c_nCu, 10000);
-        EXPECT_LE(n, 3 * (s.lag + s.cfg.probePeriod + s.cfg.period));
+        EXPECT_LE(n, (s.cfg.confirmUp + 1) * (s.lag + s.cfg.probePeriod + s.cfg.period));
         EXPECT_EQ(s.est.hint(), 0u);
     }
 
@@ -325,6 +353,7 @@ namespace
         // Slots the cotenant took keep their last probe epoch; the window of
         // distinct probe epochs drops them after `window` probe launches.
         Sim s;
+        s.cfg.probeStride = 0; // scheduled probe launches only
         s.lag = 100;
         s.run(500, c_nCu);
         ASSERT_LT(s.until(192, 192, 2000), 2000u);
@@ -338,6 +367,7 @@ namespace
     TEST(adaptive_sm_count, stalled_gpu_holds_hint_with_one_probe_per_timeout)
     {
         Sim s;
+        s.cfg.probeStride = 0; // scheduled probe launches only
         s.run(64, c_nCu);
         s.run(16, 192);
         ASSERT_EQ(s.est.hint(), 192u);
@@ -363,6 +393,7 @@ namespace
         // them, timeouts not stretching, the hint drops to 0 and the
         // full-grid launches re-measure.
         Sim s;
+        s.cfg.probeStride = 0; // scheduled probe launches only
         s.lag = 100;
         s.run(500, c_nCu);
         ASSERT_LT(s.until(192, 192, 2000), 2000u);
@@ -384,6 +415,7 @@ namespace
         // read) cannot probe at hint 0. Probes must land elsewhere and see the
         // CUs come back.
         Sim s;
+        s.cfg.probeStride = 0; // scheduled probe launches only
         s.lag      = 40;
         s.canProbe = [](uint32_t e) { return e % 8 != 0; };
         s.run(400, c_nCu);
@@ -393,6 +425,154 @@ namespace
         const uint32_t n = s.until(0, c_nCu, 10000);
         EXPECT_LE(n, 3 * (s.lag + s.cfg.probePeriod + 2 * s.cfg.period));
         EXPECT_EQ(s.est.hint(), 0u);
+    }
+
+    TEST(adaptive_sm_count, blind_shape_probes_with_padding)
+    {
+        // The grid is below N_CU even at hint 0: only padded launches write,
+        // every probeStride launches, so samples keep the GPU's pace however
+        // far the host runs ahead.
+        Sim s;
+        s.lag   = 600;
+        s.blind = true;
+        s.run(5000, c_nCu);
+        EXPECT_EQ(s.est.hint(), 0u);
+        EXPECT_EQ(s.changes, 0);
+        EXPECT_EQ(s.est.lastCount(), c_nCu);
+        const uint32_t step = s.cfg.probeStride;
+        const uint32_t onset
+            = s.lag + (s.cfg.window + s.cfg.confirmDown + 1) * step + 2 * s.cfg.period;
+        EXPECT_LT(s.until(128, 128, onset), onset);
+        EXPECT_EQ(s.est.lastCount(), 128u);
+        const uint32_t recovery = s.lag + (s.cfg.confirmUp + 2) * step + 2 * s.cfg.period;
+        EXPECT_LT(s.until(0, c_nCu, recovery), recovery);
+    }
+
+    TEST(adaptive_sm_count, blind_shape_scheduled_probes)
+    {
+        // Without padded strides only scheduled probe launches write, about
+        // one per lag + probePeriod launches, at hint 0 too.
+        Sim s;
+        s.cfg.probeStride = 0;
+        s.lag             = 100;
+        s.blind           = true;
+        s.run(5000, c_nCu);
+        EXPECT_EQ(s.est.hint(), 0u);
+        EXPECT_EQ(s.changes, 0);
+        EXPECT_GT(s.probes, 5000 / int(2 * (s.lag + s.cfg.probePeriod)));
+        EXPECT_LT(s.probes, 5000 / int(s.lag + s.cfg.probePeriod) + 2);
+        // One sample per probe interval. Onset waits for the window to drop
+        // the lost CUs' epochs and for the downward confirmations; recovery
+        // needs only the confirmations.
+        const uint32_t interval = s.lag + s.cfg.probePeriod + s.cfg.period;
+        const uint32_t onset    = (s.cfg.window + s.cfg.confirmDown + 1) * interval;
+        EXPECT_LT(s.until(128, 128, onset), onset);
+        EXPECT_EQ(s.est.lastCount(), 128u);
+        const uint32_t recovery = (s.cfg.confirmUp + 2) * interval;
+        EXPECT_LT(s.until(0, c_nCu, recovery), recovery);
+    }
+
+    TEST(adaptive_sm_count, padded_strides_keep_the_hint)
+    {
+        // Under the hint the grid is below N_CU; padded strides keep the hint
+        // confirmed without scheduled probe launches.
+        Sim s;
+        s.lag = 600;
+        s.run(1000, c_nCu);
+        ASSERT_LT(s.until(192, 192, 2000), 2000u);
+        const int changes = s.changes;
+        const int probes  = s.probes;
+        s.run(20000, 192);
+        EXPECT_EQ(s.est.hint(), 192u);
+        EXPECT_EQ(s.changes, changes);
+        EXPECT_EQ(s.est.lastCount(), 192u);
+        EXPECT_LE(s.probes - probes, 2);
+        // Recovery at the padded strides' pace.
+        const uint32_t recovery
+            = s.lag + (s.cfg.confirmUp + 2) * s.cfg.probeStride + 2 * s.cfg.period;
+        EXPECT_LT(s.until(0, c_nCu, recovery), recovery);
+    }
+
+    TEST(adaptive_sm_count, tiny_problems)
+    {
+        Config cfg;
+        cfg.tinyMflops = 100;
+        EXPECT_TRUE(tinyProblem(128, 128, 1024, 1, cfg)); // 33.6 MFLOP
+        EXPECT_FALSE(tinyProblem(256, 256, 1024, 1, cfg)); // 134 MFLOP
+        EXPECT_FALSE(tinyProblem(128, 128, 1024, 4, cfg));
+        EXPECT_TRUE(tinyProblem(128, 128, 1024, 0, cfg));
+        cfg.tinyMflops = 0;
+        EXPECT_FALSE(tinyProblem(1, 1, 1, 1, cfg));
+    }
+
+    TEST(adaptive_sm_count, launch_plan)
+    {
+        Config cfg;
+        // Stride launches pad, reads every period; FORCE pads but never reads.
+        auto p = planLaunch(cfg.probeStride, false, cfg);
+        EXPECT_TRUE(p.pad);
+        EXPECT_FALSE(p.probeLaunch);
+        EXPECT_TRUE(p.read);
+        p = planLaunch(cfg.probeStride + 1, false, cfg);
+        EXPECT_FALSE(p.pad);
+        EXPECT_FALSE(p.read);
+        p = planLaunch(cfg.probeStride + 1, true, cfg);
+        EXPECT_TRUE(p.pad && p.probeLaunch);
+        cfg.force = 128;
+        p         = planLaunch(cfg.probeStride, false, cfg);
+        EXPECT_TRUE(p.pad);
+        EXPECT_FALSE(p.read);
+        cfg.probeStride = 0;
+        EXPECT_FALSE(planLaunch(64, false, cfg).pad);
+        // The scheduled probe is due at or past its epoch, wrap-safe.
+        EXPECT_FALSE(probeDueAt(100, 0));
+        EXPECT_FALSE(probeDueAt(99, 100));
+        EXPECT_TRUE(probeDueAt(100, 100));
+        EXPECT_TRUE(probeDueAt(3, 0xfffffffeu));
+        // Hint-0 fallback only when the hint-0 pick can probe.
+        EXPECT_TRUE(probeFallbackToHintZero(true, 128, false, true));
+        EXPECT_FALSE(probeFallbackToHintZero(true, 128, false, false));
+        EXPECT_FALSE(probeFallbackToHintZero(true, 128, true, true));
+        EXPECT_FALSE(probeFallbackToHintZero(true, 0, false, true));
+        EXPECT_FALSE(probeFallbackToHintZero(false, 128, false, true));
+    }
+
+    TEST(adaptive_sm_count, tiny_launches_take_no_epoch_or_probe)
+    {
+        // Every other launch is tiny: the scheduled probe and the stride land
+        // on non-tiny launches, whose epochs stay consecutive.
+        Sim s;
+        s.cfg.probeStride = 0;
+        s.lag             = 50;
+        s.tiny            = [](uint32_t l) { return l % 2 == 1; };
+        s.run(400, c_nCu);
+        ASSERT_LT(s.until(192, 192, 4000), 4000u);
+        EXPECT_EQ(s.hostEpoch, s.launches / 2 + s.launches % 2);
+        const uint32_t at = s.probeAt;
+        s.run(1, 192); // a tiny launch
+        EXPECT_EQ(s.probeAt, at);
+        EXPECT_EQ(s.est.hint(), 192u);
+    }
+
+    TEST(adaptive_sm_count, all_tiny_stream_drops_a_stale_hint)
+    {
+        Sim s;
+        s.lag = 50;
+        s.run(400, c_nCu);
+        ASSERT_LT(s.until(128, 128, 2000), 2000u);
+        // From here on only tiny launches: nothing re-measures, so the hint
+        // drops after tinyStale() of them.
+        s.tiny               = [](uint32_t) { return true; };
+        const uint32_t epoch = s.hostEpoch;
+        s.run(s.cfg.tinyStale() - 1, c_nCu);
+        EXPECT_EQ(s.hint, 128u);
+        s.run(1, c_nCu);
+        EXPECT_EQ(s.hint, 0u);
+        EXPECT_EQ(s.est.hint(), 0u);
+        EXPECT_EQ(s.hostEpoch, epoch);
+        // Non-tiny launches measure again.
+        s.tiny = nullptr;
+        EXPECT_LT(s.until(128, 128, 2000), 2000u);
     }
 
     TEST(adaptive_sm_count, masked_stream_backs_off_discovery_scans)
@@ -426,7 +606,7 @@ namespace
         t.probesUnderHint = true;
         t.run(16 * t.cfg.period * t.cfg.fullScanEvery, 64);
         ASSERT_EQ(t.est.hint(), 64u);
-        t.run(t.cfg.period * (t.cfg.fullScanEvery + 2 * t.cfg.confirm), c_nCu);
+        t.run(t.cfg.period * (t.cfg.fullScanEvery + 2 * t.cfg.confirmUp), c_nCu);
         EXPECT_EQ(t.est.knownSlots(), c_nCu);
         EXPECT_EQ(t.est.hint(), 0u);
     }

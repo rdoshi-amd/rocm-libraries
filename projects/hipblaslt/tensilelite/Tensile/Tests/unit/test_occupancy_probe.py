@@ -17,8 +17,11 @@ import rocisa
 from rocisa.code import Label, SignatureBase
 from rocisa.instruction import (
     GlobalStoreB32,
+    SCBranchSCC0,
     SCBranchSCC1,
     SCmpEQU64,
+    SCmpGeU32,
+    SEndpgm,
     SGetRegB32,
     SLoadB32,
     SLoadB64,
@@ -107,19 +110,37 @@ def test_occupancy_probe_emission():
         lines = [str(i) for i in items]
 
     loads = [(i, line) for i, line in zip(items, lines) if isinstance(i, (SLoadB64, SLoadB32))]
-    assert [type(i) for i, _ in loads] == [SLoadB64, SLoadB32]
+    assert [type(i) for i, _ in loads] == [SLoadB64, SLoadB64]
     assert "0xc8" in loads[0][1] and "0xd0" in loads[1][1]
     assert "hwreg(HW_REG_HW_ID,8,8)" in text
     assert "hwreg(HW_REG_XCC_ID,0,4)" in text
     assert sum(isinstance(i, SGetRegB32) for i in items) == 2
 
-    # Null address skips the store; only thread 0 stores, with a plain store.
+    # Null address skips everything; only thread 0 stores, with a plain store;
+    # the raw-id test is set before the store and ends probe-only WGs after it.
     order = [type(i) for i in items
-             if isinstance(i, (SCmpEQU64, SCBranchSCC1, VCmpXEqU32, GlobalStoreB32, Label))]
-    assert order == [SCmpEQU64, SCBranchSCC1, VCmpXEqU32, GlobalStoreB32, Label]
+             if isinstance(i, (SCmpEQU64, SCBranchSCC0, SCBranchSCC1, SCmpGeU32, VCmpXEqU32,
+                               GlobalStoreB32, SEndpgm, Label))]
+    assert order == [SCmpEQU64, SCBranchSCC1, SCmpGeU32, VCmpXEqU32, GlobalStoreB32,
+                     SCBranchSCC0, SEndpgm, Label]
     store = next(line for i, line in zip(items, lines) if isinstance(i, GlobalStoreB32))
     assert store.startswith("global_store_dword ")
     assert " sc0" not in store and " sc1" not in store and " nt" not in store
+    labelName = next(i for i in items if isinstance(i, Label)).getLabelName()
+    assert all(labelName in line for i, line in zip(items, lines)
+               if isinstance(i, (SCBranchSCC0, SCBranchSCC1)))
+
+    # Raw pre-remap WG id (StreamKTileIdx snapshot) against ProbeGrid, the
+    # dword after ProbeEpoch in the second load.
+    cmp = next(line for i, line in zip(items, lines) if isinstance(i, SCmpGeU32))
+    gridLoad = re.match(r"s_load_dwordx2 s\[(\d+):(\d+)\]", loads[1][1])
+    assert re.match(r"s_cmp_ge_u32 s\[sgprStreamKTileIdx\], s%s\b" % gridLoad.group(2), cmp)
+
+    # Nothing between the compare and the exit branch writes SCC.
+    cmpIdx = next(n for n, i in enumerate(items) if isinstance(i, SCmpGeU32))
+    brIdx = next(n for n, i in enumerate(items) if isinstance(i, SCBranchSCC0))
+    between = lines[cmpIdx + 1:brIdx]
+    assert all(re.match(r"(s_mov_b(32|64)|v_cmpx_\w+|s_nop|global_store_dword) ", l) for l in between)
 
     # Exec is narrowed by v_cmpx and restored from the same pair after the store.
     cmpx = next(line for i, line in zip(items, lines) if isinstance(i, VCmpXEqU32))
@@ -164,8 +185,9 @@ def test_occupancy_probe_signature_layout(numU32, padded):
     assert addr % 8 == 0
     assert int(args["ProbeAddr"]) == addr
     assert int(args["ProbeEpoch"]) == addr + 8
-    assert sig.offset == addr + 12
-    # Host packing: appendAligned<void*> then append<uint32_t> from numU32 * 4 bytes.
+    assert int(args["ProbeGrid"]) == addr + 12
+    assert sig.offset == addr + 16
+    # Host packing: appendAligned<void*> then 2 x append<uint32_t> from numU32 * 4 bytes.
     hostAddr = (numU32 * 4 + 7) // 8 * 8
     assert hostAddr == addr
 
@@ -194,9 +216,24 @@ def test_occupancy_probe_kernarg_matches_loads():
     assert err == 0
     args = dict(re.findall(r"- \.name:\s+(\w+)\n\s+\.size:\s+\d+\n\s+\.offset:\s+(\d+)", src))
     loads = re.findall(r"s_load_dword\w* s\S+, s\[sgprKernArgAddress:sgprKernArgAddress\+1\], "
-                       r"(0x[0-9a-f]+)\s+// load Probe(Addr|Epoch)", src)
+                       r"(0x[0-9a-f]+)\s+// load (ProbeAddr|ProbeEpoch, ProbeGrid)", src)
     offsets = {name: int(off, 16) + 16 for off, name in loads}
     assert int(args["ProbeAddr"]) % 8 == 0
-    assert offsets == {"Addr": int(args["ProbeAddr"]), "Epoch": int(args["ProbeEpoch"])}
+    assert offsets == {"ProbeAddr": int(args["ProbeAddr"]),
+                       "ProbeEpoch, ProbeGrid": int(args["ProbeEpoch"])}
+    assert int(args["ProbeGrid"]) == int(args["ProbeEpoch"]) + 4
     size = int(re.search(r"kernarg_segment_size:\s+(\d+)", src).group(1))
-    assert size == (int(args["ProbeEpoch"]) + 4 + 7) // 8 * 8
+    assert size == (int(args["ProbeGrid"]) + 4 + 7) // 8 * 8
+
+    # The raw WG id is snapshotted before the wgmXCC remap and read by the
+    # probe exit; nothing between kernel entry and the exit stores, does an
+    # atomic or touches the work queue.
+    body = src[src.index(".text") if ".text" in src else 0:]
+    snap = body.index("snapshot raw pre-remap launch WG id")
+    remap = body.index("remap workgroup to XCCs")
+    exit_ = body.index("probe-only WG: exit before any other side effect")
+    assert snap < remap < exit_
+    prologue = body[:exit_]
+    stores = re.findall(r"^\s*((?:global|buffer|flat|scratch)_(?:store|atomic)\w*|s_store\w*|s_atomic\w*|ds_\w+)",
+                        prologue, re.M)
+    assert stores == ["global_store_dword"]

@@ -203,12 +203,14 @@ namespace TensileLite
         }
 
         // CU-occupancy probe target for kernels built with SupportOccupancyProbe.
-        // Launches with a grid below minGrid get a null probe address.
-        void setOccupancyProbe(void* addr, uint32_t epoch, uint32_t minGrid)
+        // A launch with a grid below minGrid gets a null probe address, unless
+        // padToMinGrid: then its dispatch grows to minGrid with probe-only WGs.
+        void setOccupancyProbe(void* addr, uint32_t epoch, uint32_t minGrid, bool padToMinGrid)
         {
             m_occupancyProbeAddr    = addr;
             m_occupancyProbeEpoch   = epoch;
             m_occupancyProbeMinGrid = minGrid;
+            m_occupancyProbePad     = padToMinGrid;
         }
 
         void* occupancyProbeAddr() const
@@ -224,6 +226,11 @@ namespace TensileLite
         uint32_t occupancyProbeMinGrid() const
         {
             return m_occupancyProbeMinGrid;
+        }
+
+        bool occupancyProbePad() const
+        {
+            return m_occupancyProbePad;
         }
 
     private:
@@ -243,6 +250,7 @@ namespace TensileLite
         void*            m_occupancyProbeAddr    = nullptr;
         uint32_t         m_occupancyProbeEpoch   = 0;
         uint32_t         m_occupancyProbeMinGrid = 0;
+        bool             m_occupancyProbePad     = false;
     };
 
     /**

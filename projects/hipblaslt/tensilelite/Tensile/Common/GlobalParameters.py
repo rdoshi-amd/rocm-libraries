@@ -468,8 +468,9 @@ defaultInternalSupportParams = {
     # and ignores bit 29 -- do not claim it; newly generated StreamK 3 / SK5
     # set it True in Solution.py.
     "SupportStreamKPerTileExtraIters": False,
-    # Kernel takes the ProbeAddr/ProbeEpoch tail args and, when ProbeAddr is
-    # non-null, stores ProbeEpoch into the slot of the CU each WG runs on.
+    # Kernel takes the ProbeAddr/ProbeEpoch/ProbeGrid tail args and, when
+    # ProbeAddr is non-null, stores ProbeEpoch into the slot of the CU each WG
+    # runs on; WGs launched past ProbeGrid then end.
     # Derived in Solution.py from EmitOccupancyProbe.
     "SupportOccupancyProbe": False,
     # Use GG as G's backend

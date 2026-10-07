@@ -187,8 +187,17 @@ rocblaslt_status rocblaslt_matmul_impl(const rocblaslt_handle       handle,
     const bool adaptive      = adaptive_sm_count_applies(handle, matmul_descr);
     void*      probeAddr     = nullptr;
     uint32_t   probeEpoch    = 0;
+    bool       probePad      = false;
+    bool       probeLaunch   = false;
     if(adaptive)
-        smCountTarget = handle->adaptiveSmCountForLaunch(stream, &probeAddr, &probeEpoch);
+        smCountTarget = handle->adaptiveSmCountForLaunch(
+            stream,
+            rocblaslt::adaptive_sm::tinyProblem(
+                m, n, k, matD->batch_count, rocblaslt_adaptive_sm_config()),
+            &probeAddr,
+            &probeEpoch,
+            &probePad,
+            &probeLaunch);
 
     RocblasltContractionProblem problem{opA,
                                         opB,
@@ -262,6 +271,8 @@ rocblaslt_status rocblaslt_matmul_impl(const rocblaslt_handle       handle,
     problem.occupancy_probe_addr     = probeAddr;
     problem.occupancy_probe_epoch    = probeEpoch;
     problem.occupancy_probe_min_grid = uint32_t(handle->properties.multiProcessorCount);
+    problem.occupancy_probe_pad      = probePad;
+    problem.occupancy_probe_launch   = probeLaunch;
 
 #if HIPBLASLT_HAS_GEMM_A2A_FUSION
     problem.fused_epilogue      = matmul_descr->fused_epilogue;

@@ -272,6 +272,7 @@ struct _rocblaslt_handle
         std::atomic<uint32_t>             epoch{0};
         std::atomic<uint32_t>             cus{0}; // published hint, 0 = none
         std::atomic<uint32_t>             probeAt{0}; // epoch of the next probe launch, 0 = none
+        std::atomic<uint32_t>             tinyRun{0}; // tiny launches since the last other one
         std::atomic_flag                  busy = ATOMIC_FLAG_INIT; // guards estimator
         rocblaslt::adaptive_sm::Estimator estimator;
     };
@@ -290,9 +291,17 @@ struct _rocblaslt_handle
     }
 
     // Hint for a C API launch on `stream`; sets the probe target for the
-    // kernel. Returns 0 and a null probe while the stream is capturing, and 0
-    // for a periodic probe launch.
-    uint32_t adaptiveSmCountForLaunch(hipStream_t stream, void** probeAddr, uint32_t* probeEpoch);
+    // kernel. `probePad` asks for a grid below N_CU to be padded with
+    // probe-only workgroups; `probeLaunch` marks a scheduled probe launch,
+    // which runs at hint 0 if its kernel cannot pad. Returns 0 and a null probe
+    // while the stream is capturing; a tiny launch gets the hint and a null
+    // probe.
+    uint32_t adaptiveSmCountForLaunch(hipStream_t stream,
+                                      bool        tiny,
+                                      void**      probeAddr,
+                                      uint32_t*   probeEpoch,
+                                      bool*       probePad,
+                                      bool*       probeLaunch);
 
     uint32_t adaptiveSmCountForQuery() const
     {

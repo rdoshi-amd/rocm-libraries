@@ -9,9 +9,10 @@
 // estimator can be unit-tested GPU-free.
 //
 // Probe protocol: launch e (per-stream epoch, never 0) with a grid of at least
-// N_CU workgroups stores e into slots[XCC<<8 | SE<<5 | SH<<4 | CU] once per
-// workgroup. The host runs ahead of the GPU, so the window is anchored on the
-// newest epoch found in the array (E_max), not on the host's epoch.
+// N_CU workgroups, or padded to N_CU with probe-only workgroups, stores e into
+// slots[XCC<<8 | SE<<5 | SH<<4 | CU] once per workgroup. The host runs ahead
+// of the GPU, so the window is anchored on the newest epoch found in the array
+// (E_max), not on the host's epoch.
 
 #include <algorithm>
 #include <bitset>
@@ -61,15 +62,25 @@ namespace rocblaslt
             uint32_t fullScanEvery = 64; // _FULL_SCAN: reads between full slot scans
             uint32_t confirm       = 2; // _CONFIRM: equal consecutive samples before publishing
             uint32_t confirmDown   = 4; // _CONFIRM_DOWN: same, for large or low downward moves
+            uint32_t confirmUp     = 3; // _CONFIRM_UP: same, for moves from a hint to 0
             uint32_t reselectTopK  = 8; // _TOPK: candidates examined by launch-time re-selection
             uint32_t probeLosses   = 4; // _PROBE_LOSSES: lost probes in a row before hint 0
+            uint32_t probeStride   = 16; // _PROBE_STRIDE: launches between padded probes, 0 = off
+            uint32_t tinyMflops    = 4096; // _TINY_MFLOPS: 2*M*N*K*batch below this never probes
 
-            // A probe launch that never shows up as the anchor (its grid was
-            // below N_CU after all) stops blocking the next one after this
-            // many launches.
+            // A probe launch that never shows up as the anchor (its kernel
+            // could not probe) stops blocking the next one after this many
+            // launches.
             uint32_t probeTimeout() const
             {
                 return 8 * probePeriod;
+            }
+
+            // Tiny launches in a row, with no other launch on the stream, after
+            // which a published hint is dropped: nothing re-measures it.
+            uint32_t tinyStale() const
+            {
+                return probeLosses * probeTimeout();
             }
 
             static uint32_t envU32(const char* name, uint32_t def, uint32_t minValue)
@@ -101,9 +112,13 @@ namespace rocblaslt
                 c.confirm = envU32("HIPBLASLT_ADAPTIVE_SM_COUNT_CONFIRM", c.confirm, 1);
                 c.confirmDown
                     = envU32("HIPBLASLT_ADAPTIVE_SM_COUNT_CONFIRM_DOWN", c.confirmDown, 1);
+                c.confirmUp    = envU32("HIPBLASLT_ADAPTIVE_SM_COUNT_CONFIRM_UP", c.confirmUp, 1);
                 c.reselectTopK = envU32("HIPBLASLT_ADAPTIVE_SM_COUNT_TOPK", c.reselectTopK, 1);
                 c.probeLosses
                     = envU32("HIPBLASLT_ADAPTIVE_SM_COUNT_PROBE_LOSSES", c.probeLosses, 1);
+                c.probeStride
+                    = envU32("HIPBLASLT_ADAPTIVE_SM_COUNT_PROBE_STRIDE", c.probeStride, 0);
+                c.tinyMflops = envU32("HIPBLASLT_ADAPTIVE_SM_COUNT_TINY_MFLOPS", c.tinyMflops, 0);
                 return c;
             }
         };
@@ -113,6 +128,57 @@ namespace rocblaslt
         inline bool applies(bool enabled, bool modeAuto, int32_t descHint, int32_t handleHint)
         {
             return enabled && modeAuto && descHint <= 0 && handleHint <= 0;
+        }
+
+        // A launch this small neither probes nor pads: the probe would cost
+        // more than 1% of it.
+        inline bool tinyProblem(int64_t m, int64_t n, int64_t k, int64_t batch, const Config& cfg)
+        {
+            const double flops
+                = 2.0 * double(m) * double(n) * double(k) * double(std::max<int64_t>(batch, 1));
+            return flops < 1e6 * double(cfg.tinyMflops);
+        }
+
+        // Per-launch probe decisions for a non-tiny launch with epoch `epoch`.
+        // A tiny launch takes no epoch and none of these.
+        struct LaunchPlan
+        {
+            bool probeLaunch; // the scheduled probe launch
+            bool pad; // pad a grid below N_CU with probe-only workgroups
+            bool read; // sample the probe array
+        };
+
+        // Whether `epoch` is at or past the scheduled probe epoch `probeAt`
+        // (0: none). The first such launch claims it.
+        inline bool probeDueAt(uint32_t epoch, uint32_t probeAt)
+        {
+            return probeAt != 0 && static_cast<int32_t>(epoch - probeAt) >= 0;
+        }
+
+        // `claimed`: this launch claimed the scheduled probe. Every
+        // probeStride-th launch is padded too, also under FORCE; FORCE never
+        // reads.
+        inline LaunchPlan planLaunch(uint32_t epoch, bool claimed, const Config& cfg)
+        {
+            return {claimed,
+                    claimed || (cfg.probeStride && epoch % cfg.probeStride == 0),
+                    !cfg.force && epoch % cfg.period == 0};
+        }
+
+        // A run of `tinyRun` tiny launches drops a published hint.
+        inline bool tinyRunDecays(uint32_t tinyRun, uint32_t hint, const Config& cfg)
+        {
+            return hint != 0 && tinyRun >= cfg.tinyStale();
+        }
+
+        // A probe launch under a hint whose kernel cannot pad runs at hint 0
+        // instead, but only if the kernel picked there can probe.
+        inline bool probeFallbackToHintZero(bool     probeLaunch,
+                                            uint32_t hint,
+                                            bool     pickedCanProbe,
+                                            bool     hintZeroPickCanProbe)
+        {
+            return probeLaunch && hint != 0 && !pickedCanProbe && hintZeroPickCanProbe;
         }
 
         // Hint for `count` available CUs: 0 (no hint) within `tolerance` of nCu,
@@ -135,7 +201,9 @@ namespace rocblaslt
             const uint32_t from = current ? current : nCu;
             const uint32_t to   = candidate ? candidate : nCu;
             const bool     down = to < from && (from - to > c_bigDownMove || to <= c_lowHint);
-            return down ? cfg.confirmDown : cfg.confirm;
+            if(down)
+                return cfg.confirmDown;
+            return current && !candidate ? cfg.confirmUp : cfg.confirm;
         }
 
         // Heuristic-query tag in rocblaslt_matmul_algo::data[4..7] (data[0..3] is
@@ -180,20 +248,20 @@ namespace rocblaslt
             return {original, !originalFits};
         }
 
-        // Probe-launch scheduling. Under a published hint the launches may run
-        // grids below N_CU that do not probe; once no sample has arrived for
-        // probePeriod launches, one launch runs at hint 0 (full grid) to
-        // re-measure. The next waits until the anchor reaches that launch's
-        // epoch, or a timeout if it never probed. Each lost probe moves the
-        // next one a launch later, so a periodic workload does not keep
-        // landing on the same GEMM.
+        // Probe-launch scheduling. Launches with a grid below N_CU do not
+        // probe (a small problem, or one under a published hint); once no
+        // sample has arrived for probePeriod launches, one launch keeps the
+        // hint and is padded to N_CU with probe-only workgroups (or runs at
+        // hint 0 if its kernel cannot pad) to re-measure. The next waits until
+        // the anchor reaches that launch's epoch, or a timeout if it never
+        // probed. Each lost probe moves the next one a launch later, so a
+        // periodic workload does not keep landing on the same GEMM.
         class ProbeSchedule
         {
         public:
             // Returns the epoch of the launch to run as a probe (always after
             // hostEpoch), or 0 for none.
             uint32_t due(uint32_t      hostEpoch,
-                         uint32_t      hint,
                          uint32_t      lastSampleEpoch,
                          bool          haveAnchor,
                          uint32_t      anchor,
@@ -210,7 +278,7 @@ namespace rocblaslt
                         return 0;
                     m_pending = false;
                 }
-                if(hint == 0 || hostEpoch - lastSampleEpoch < cfg.probePeriod)
+                if(hostEpoch - lastSampleEpoch < cfg.probePeriod)
                     return 0;
                 // The probe runs after the launches already queued ahead of
                 // it: allow twice the host's lead over the GPU at the last
@@ -235,6 +303,12 @@ namespace rocblaslt
             bool pending() const
             {
                 return m_pending;
+            }
+
+            // Epoch of the last scheduled probe launch, or 0.
+            uint32_t scheduled() const
+            {
+                return m_epoch;
             }
 
             // Probes in a row that never showed up.
@@ -343,14 +417,20 @@ namespace rocblaslt
                 // Window: slots holding one of the `window` newest distinct
                 // probe epochs seen so far, so it spans `window` probing
                 // launches however sparse they are; epochs since overwritten
-                // still count towards it. Probe launches are at least
-                // probePeriod apart, so a closer anchor means the launches in
+                // still count towards it. Scheduled probe launches are at
+                // least probePeriod apart, so a closer anchor that is neither
+                // one nor a padded (probeStride) launch means the launches in
                 // between probed too (a stream mixing probing and non-probing
-                // launches gets a narrower window).
+                // launches gets a narrower window). A stride epoch is taken as
+                // padded whether or not its kernel could pad: if the launches
+                // in between did probe, the window only spans the epochs seen,
+                // which is wider, never miscounted.
                 const uint32_t window = std::clamp(cfg.window, 1u, c_maxWindow);
                 forgetStale(anchor);
                 const uint32_t step = anchor - m_anchor;
-                if(m_haveAnchor && step < cfg.probePeriod)
+                const bool     probeAnchor = (cfg.probeStride && anchor % cfg.probeStride == 0)
+                                         || (m_probe.scheduled() && anchor == m_probe.scheduled());
+                if(m_haveAnchor && step < cfg.probePeriod && !probeAnchor)
                     for(uint32_t d = std::min(step, window) - 1; d > 0; --d)
                         if(anchor - d != 0)
                             remember(anchor - d, anchor, window);
@@ -398,13 +478,13 @@ namespace rocblaslt
                 return false;
             }
 
-            // Epoch of the next launch to run at hint 0 to re-probe, or 0.
+            // Epoch of the next launch to run as a probe launch, or 0.
             // After cfg.probeLosses lost probes in a row the hint drops to 0
             // instead, so every launch runs its full grid again.
             uint32_t probeDue(uint32_t hostEpoch, const Config& cfg)
             {
-                const uint32_t at = m_probe.due(
-                    hostEpoch, m_hint, m_lastSampleEpoch, m_haveAnchor, m_anchor, cfg);
+                const uint32_t at
+                    = m_probe.due(hostEpoch, m_lastSampleEpoch, m_haveAnchor, m_anchor, cfg);
                 if(m_probe.lost() < cfg.probeLosses)
                     return at;
                 m_probe.reset();

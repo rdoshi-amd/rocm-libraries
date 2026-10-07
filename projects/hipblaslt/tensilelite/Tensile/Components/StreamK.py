@@ -3914,6 +3914,67 @@ class StreamKHybrid(StreamK):
     # PrefetchAcrossPersistent (PAP) next-tile handoff can reuse them.
     # ------------------------------------------------------------------
 
+    def _contiguousQueueItem(self, writer, kernel, sWorkItemIdx):
+        """Renumber a popped work item so each per-XCD queue owns a contiguous
+        range of items, when every workgroup gets at most one item and the
+        tiles are whole or split into fewer parts than there are queues.
+
+        Queue q holds the interleaved items i = cnt * numQueues + q, cnt in
+        [0, count_q), count_q = floor(T / numQueues) + [q < T % numQueues],
+        T = TotalItems (see fetchAndBroadcast). The renumbering
+
+            c = q * floor(T / numQueues) + min(q, T % numQueues) + cnt
+
+        is a bijection on [0, T) that gives queue q the items [start_q,
+        start_q + count_q): the chiplet transform WGMXCC applies to static
+        workgroup ranks. Whole tiles then land on the XCDs as on the static
+        path (p127: one tile per workgroup, 2.7x fewer L2 fills than tiles
+        q, q + 8, ... on XCD q), and the workgroup mapping the host picks with
+        origami, which assumes that order, fits both. A tile split into
+        fewer parts than queues keeps its parts on one XCD next to its
+        neighbours. A split of numQueues parts or more keeps the interleaved
+        order: there queue q runs the same K-slices of every tile (the host
+        aligns the split), which shares more of A and B than whole tiles per
+        XCD do. So does a launch with more items than workgroups: the static
+        path runs it round by round (every XCD within the same window of
+        tiles, which then share A and B through the MALL), and the
+        interleaved order stays closer to that than one block per XCD
+        (f32 8192 x 8192 x 1024: +5% with blocks).
+
+        The pop, its validity check and the counter wrap stay on i; only the
+        tile decode reads c. Emitted on the dynamic sub-path only.
+        """
+        module = Module("StreamK Hybrid contiguousQueueItem")
+        numQueues, mask, log2Queues, _ = Component.WorkAssignment.find(writer).queueConstants(writer, kernel)
+        if numQueues < 2:
+            return module
+        skDone = Label(writer.labels.getNameInc("SK_ContiguousItemDone"), "")
+        skRemap = Label(writer.labels.getNameInc("SK_ContiguousItem"), "")
+        module.add(SCmpGtU32(src0=sgpr("TotalItems"), src1=sgpr("SKGrid"), comment="more items than workgroups?"))
+        module.add(SCBranchSCC1(labelName=skDone.getLabelName(), comment="yes: keep the interleaved order"))
+        module.add(SCmpLtU32(src0=sgpr("SKSplit"), src1=numQueues, comment="split into fewer parts than queues?"))
+        module.add(SCBranchSCC1(labelName=skRemap.getLabelName(), comment="yes: contiguous items"))
+        module.add(SCmpEQU32(src0=sgpr("SKTiles"), src1=0, comment="whole tiles?"))
+        module.add(SCBranchSCC0(labelName=skDone.getLabelName(), comment="no: queue q keeps the same parts of every tile"))
+        module.add(skRemap)
+        # PAP calls this inside the OptNLL window, near the SGPR high-water
+        # mark: let the pool grow there rather than trip its overflow guard.
+        sQ = writer.sgprPool.checkOut(1, "contiguousQ", preventOverflow=False)
+        sCnt = writer.sgprPool.checkOut(1, "contiguousCnt", preventOverflow=False)
+        sTmp = writer.sgprPool.checkOut(1, "contiguousTmp", preventOverflow=False)
+        module.add(SAndB32(dst=sgpr(sQ), src0=sgpr(sWorkItemIdx), src1=hex(mask), comment="q = item % numQueues"))
+        module.add(SLShiftRightB32(dst=sgpr(sCnt), src=sgpr(sWorkItemIdx), shiftHex=log2Queues, comment="cnt = item / numQueues"))
+        module.add(SLShiftRightB32(dst=sgpr(sTmp), src=sgpr("TotalItems"), shiftHex=log2Queues, comment="floor(T / numQueues)"))
+        module.add(SMulI32(dst=sgpr(sWorkItemIdx), src0=sgpr(sQ), src1=sgpr(sTmp), comment="q * floor(T / numQueues)"))
+        module.add(SAddU32(dst=sgpr(sWorkItemIdx), src0=sgpr(sWorkItemIdx), src1=sgpr(sCnt), comment="+ cnt"))
+        module.add(SAndB32(dst=sgpr(sTmp), src0=sgpr("TotalItems"), src1=hex(mask), comment="T % numQueues"))
+        module.add(SMinU32(dst=sgpr(sTmp), src0=sgpr(sTmp), src1=sgpr(sQ), comment="min(q, T % numQueues)"))
+        module.add(SAddU32(dst=sgpr(sWorkItemIdx), src0=sgpr(sWorkItemIdx), src1=sgpr(sTmp), comment="contiguous item of queue q"))
+        for r in (sTmp, sCnt, sQ):
+            writer.sgprPool.checkIn(r)
+        module.add(skDone)
+        return module
+
     def _computeNextTileIdentity(self, writer, kernel, sWorkItemIdx):
         """Derive tile identity for a given (already-popped, valid) work item.
 
@@ -3928,6 +3989,8 @@ class StreamKHybrid(StreamK):
         short-circuit are intentionally excluded (handled by the callers).
         """
         module = Module("StreamK Hybrid computeNextTileIdentity")
+
+        module.add(self._contiguousQueueItem(writer, kernel, sWorkItemIdx))
 
         skFullTile    = Label(writer.labels.getNameInc("SK_FullTile"), "")
         skPartialTile = Label(writer.labels.getNameInc("SK_PartialTile"), "")

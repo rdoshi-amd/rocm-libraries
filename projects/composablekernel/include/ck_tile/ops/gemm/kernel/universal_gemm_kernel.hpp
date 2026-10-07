@@ -486,6 +486,15 @@ struct UniversalGemmKernel
         }();
     };
 
+    // Pipelines with constraints of their own (e.g. unchecked async loads that need exact tile
+    // multiples) expose a static IsSupportedArgument(M, N, K, k_batch).
+    template <typename T>
+    using pipeline_is_supported_argument_t =
+        decltype(T::IsSupportedArgument(index_t{}, index_t{}, index_t{}, index_t{}));
+
+    static constexpr bool has_pipeline_is_supported_argument =
+        is_detected<pipeline_is_supported_argument_t, GemmPipeline>{};
+
     // Large single-dimension support (a byte extent exceeding the 2GB buffer-addressing limit)
     // is routed through 64-bit global load/store instead of buffer addressing. Two B layouts are
     // excluded: PermuteB addresses B through a merged K0/K1 transform chain, and Preshuffle uses
@@ -551,6 +560,13 @@ struct UniversalGemmKernel
         if constexpr(has_skip_check_valid_launch_params::value)
         {
             return true;
+        }
+        if constexpr(has_pipeline_is_supported_argument)
+        {
+            if(!GemmPipeline::IsSupportedArgument(kargs.M, kargs.N, kargs.K, kargs.k_batch))
+            {
+                return false;
+            }
         }
         if constexpr(EpiloguePipeline::GetVectorSizeC() % 2 != 0 &&
                      is_any_of<EDataType, fp16_t, bf16_t>::value)

@@ -26,6 +26,7 @@ enum struct GemmPipelineType
     CompV6,
     CompAsync,
     CompAsyncEightWaves,
+    CompAsyncPP,
     CompTDMV1,
     CompTDMV2
 };
@@ -153,6 +154,15 @@ struct GemmPipelineTypeSelector<GemmPipelineType::CompAsync, Problem>
     using pipeline      = ck_tile::GemmPipelineAgBgCrCompAsync<Problem>;
 
     static constexpr auto GetName() { return "GemmPipelineAgBgCrCompAsync"; }
+};
+
+template <typename Problem>
+struct GemmPipelineTypeSelector<GemmPipelineType::CompAsyncPP, Problem>
+{
+    using base_pipeline = ck_tile::BaseGemmPipelineAgBgCrCompAsyncPP<Problem>;
+    using pipeline      = ck_tile::GemmPipelineAgBgCrCompAsyncPP<Problem>;
+
+    static constexpr auto GetName() { return "GemmPipelineAgBgCrCompAsyncPP"; }
 };
 
 template <typename Problem>
@@ -291,6 +301,7 @@ class TestCkTileGemmPipeline : public ::testing::Test
 
         constexpr bool DoubleSmemBuffer = (PipelineType == GemmPipelineType::CompV4 ||
                                            PipelineType == GemmPipelineType::CompAsync ||
+                                           PipelineType == GemmPipelineType::CompAsyncPP ||
                                            PipelineType == GemmPipelineType::CompTDMV1 ||
                                            PipelineType == GemmPipelineType::CompTDMV2);
 

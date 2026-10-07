@@ -73,6 +73,15 @@ def main():
             filter_dif = len(data["cache"]) - len(data_filter)
             if filter_dif > 0:
                 log.warning(f"Skipping failed compilations: {filter_dif}")
+
+            # Filter/skip data entries that has an acrchitecture thats not targeted with -t
+            arch = data["arch_name"]
+            if arch not in gfx_target:
+                log.warning(
+                    f"Skipping {file_path}: arch {arch} not in --target-arch {gfx_target}"
+                )
+                continue
+
             # Find best config
             min_configs = min(data_filter, key=lambda c: c["time"])
             # Drop unrelated entries
@@ -92,20 +101,19 @@ def main():
 
             # Ensure algorithm entry exists
             alg: str = data["algo_name"]
-            if alg not in algs:
-                algs[alg] = {}
-            arch = data["arch_name"]
-            for target in gfx_target:
-                if target != arch:
-                    continue
-                # Ensure target entry exists
-                if target not in algs[alg]:
-                    algs[alg][target] = {}
 
-                config = make_config(data)
-                config["tune_params"] = min_configs
-                # Add config entry
-                algs[alg][target] = config
+            config = make_config(data)
+            config["tune_params"] = min_configs
+            algs.setdefault(alg, {})[arch] = config
+
+    if not algs:
+        log.error(f"No tuning reslults found for targets {gfx_target} in {input_glob}")
+        quit(1)
+
+    found_archs = {arch for targets in algs.values() for arch in targets}
+    for target in gfx_target:
+        if target not in found_archs:
+            log.warning(f"No tuning results found for --target-arch {target}")
 
     log.info(f"Parsed {len(algs)} different algorithm(s)!")
 

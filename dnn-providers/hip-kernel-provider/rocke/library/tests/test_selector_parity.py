@@ -24,6 +24,7 @@ written for the CORRECT behavior (bias should block combo_2d) and are being skip
 
 from __future__ import annotations
 
+import dataclasses
 import unittest
 from dataclasses import asdict
 from types import SimpleNamespace
@@ -383,6 +384,12 @@ class TestRegisterPv(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
+# Combo-shape blocks are 32 tokens x 8 kv-heads x 64 dims x 2 bytes = 32 KiB, so
+# 65534 blocks fill the i32 buffer range (0x7FFF0000 bytes) exactly.
+_AT_I32_LIMIT = 65534
+_OVER_I32_LIMIT = 65535
+
+
 class TestI64KvAddr(unittest.TestCase):
 
     def test_no_kv_blocks_no_i64(self):
@@ -390,24 +397,30 @@ class TestI64KvAddr(unittest.TestCase):
         self.assertFalse(s["use_i64_kv_addr"])
 
     def test_small_cache_no_i64(self):
-        # 65536 blocks × 32 tokens × 8 kv-heads × 64 dims × 2 bytes = 2 GiB exactly
-        # → still i32 (threshold is STRICTLY > 2 GiB)
-        s = _spec(_combo_prob(num_kv_blocks=65536))
+        # Exactly 0x7FFF0000 bytes -> still i32 (threshold is STRICTLY above)
+        s = _spec(_combo_prob(num_kv_blocks=_AT_I32_LIMIT))
         self.assertFalse(s["use_i64_kv_addr"])
 
     def test_large_cache_gets_i64(self):
-        # 65537 blocks × same stride → just over 2 GiB → i64
-        s = _spec(_combo_prob(num_kv_blocks=65537))
+        # One block over the i32 buffer range -> i64
+        s = _spec(_combo_prob(num_kv_blocks=_OVER_I32_LIMIT))
         self.assertTrue(s["use_i64_kv_addr"])
+
+    def test_top_64kib_below_2gib_gets_i64(self):
+        # The tiled builders bound K/V buffer loads at num_records=0x7FFF0000, so
+        # a cache of exactly 2 GiB would read zeros from its top 64 KiB on i32.
+        s = _spec(_combo_prob(num_kv_blocks=65536))
+        self.assertTrue(s["use_i64_kv_addr"])
+        self.assertEqual(_au._I32_KV_BUFFER_BYTES, 0x7FFF0000)
 
     def test_i64_threshold_splits_cache_key(self):
         # Regression guard against dropping the i64 flag from _tiled_cache_key.
-        # Crossing the 2 GiB threshold builds a different kernel (i64 vs i32
-        # paged-KV addressing), so a key without that decision would let a large
-        # cache reuse the i32 launcher cached for a small cache of the same
-        # geometry. Two problems straddling the threshold must not collide.
-        small = _combo_prob(num_kv_blocks=65536)  # 2 GiB exactly -> i32
-        large = _combo_prob(num_kv_blocks=65537)  # just over 2 GiB -> i64
+        # Crossing the threshold builds a different kernel (i64 vs i32 paged-KV
+        # addressing), so a key without that decision would let a large cache
+        # reuse the i32 launcher cached for a small cache of the same geometry.
+        # Two problems straddling the threshold must not collide.
+        small = _combo_prob(num_kv_blocks=_AT_I32_LIMIT)
+        large = _combo_prob(num_kv_blocks=_OVER_I32_LIMIT)
         with _patch_arch("gfx950"):
             self.assertNotEqual(
                 _au._tiled_cache_key(small), _au._tiled_cache_key(large)
@@ -416,8 +429,8 @@ class TestI64KvAddr(unittest.TestCase):
     def test_i64_threshold_splits_3d_cache_key(self):
         # Same guard for the 3D split-KV launcher key, which also folds in
         # _enable_i64_kv_addr.
-        small = _combo_prob(num_kv_blocks=65536)
-        large = _combo_prob(num_kv_blocks=65537)
+        small = _combo_prob(num_kv_blocks=_AT_I32_LIMIT)
+        large = _combo_prob(num_kv_blocks=_OVER_I32_LIMIT)
         with _patch_arch("gfx950"):
             self.assertNotEqual(
                 _au._tiled_3d_cache_key(small), _au._tiled_3d_cache_key(large)
@@ -428,8 +441,8 @@ class TestI64KvAddr(unittest.TestCase):
         # Keying the raw count would compile a new launcher per cache size, and
         # not keying it at all is the collision above. Across the threshold the
         # two keys differ in exactly one field, _enable_i64_kv_addr.
-        small = _combo_prob(num_kv_blocks=65536)
-        large = _combo_prob(num_kv_blocks=65537)
+        small = _combo_prob(num_kv_blocks=_AT_I32_LIMIT)
+        large = _combo_prob(num_kv_blocks=_OVER_I32_LIMIT)
         with _patch_arch("gfx950"):
             ks = _au._tiled_cache_key(small)
             kl = _au._tiled_cache_key(large)
@@ -439,103 +452,253 @@ class TestI64KvAddr(unittest.TestCase):
         diffs = [(a, b) for a, b in zip(ks, kl) if a != b]
         self.assertEqual(diffs, [(i64_small, i64_large)])
 
+    def test_spec_meta_and_guard_agree_at_every_count(self):
+        # The launch meta derives the kernel's flag from _enable_i64_kv_addr
+        # rather than building the spec (100-200 us per new total_q), so the
+        # spec builders must set exactly that. And a spec built from a problem
+        # with the real count must always pass the launch guard: with the old
+        # 2^31 threshold, 65535 and 65536 blocks got an i32 spec over the
+        # buffer range.
+        for arch in ("gfx942", "gfx950"):
+            for n in (_AT_I32_LIMIT - 1, _AT_I32_LIMIT, _OVER_I32_LIMIT, 65536, 65537):
+                p = _combo_prob(num_kv_blocks=n)
+                with self.subTest(arch=arch, n=n), _patch_arch(arch):
+                    spec = _asb._tiled_spec_from_problem(p)
+                    self.assertEqual(spec.use_i64_kv_addr, _au._enable_i64_kv_addr(p))
+                    limit = _au._kv_addr_limit(p, spec.use_i64_kv_addr)
+                    with mock.patch.dict(_au._2D_LAUNCH_META, clear=True):
+                        meta = _au._get_2d_launch_meta(p, _au._tiled_cache_key(p))
+                    self.assertEqual(meta.kv_addr_limit, limit)
+                    _au._check_kv_addr_width(p, _kv_cache(n, p), limit)
+
+
+def _kv_cache(num_blocks: int, problem: UnifiedAttentionProblem):
+    """Shape-only stand-in for a paged K cache tensor."""
+    shape = (num_blocks, problem.block_size, problem.num_kv_heads, problem.head_size)
+    return SimpleNamespace(shape=shape)
+
+
+# Parity NQK shape: 32768 blocks x 64 tokens x 8 kv-heads x 128 dims x 2 bytes is
+# 4 GiB, which is also 2^31 elements.
+_BUG_BLOCKS = 32768
+
+
+def _bug_prob(**overrides) -> UnifiedAttentionProblem:
+    return _prob(128, 64, 64, 8, **overrides)
+
+
+class TestKvAddrLimit(unittest.TestCase):
+    """_kv_addr_limit maps the compiled kernel's flag to the cache it addresses."""
+
+    def test_i64_kernel_is_unbounded(self):
+        self.assertIsNone(_au._kv_addr_limit(_bug_prob(), True))
+
+    def test_i32_kernel_is_bounded_by_the_buffer_range(self):
+        self.assertEqual(_au._kv_addr_limit(_bug_prob(), False), 0x7FFF0000)
+
+    def test_kernel_without_i64_path_is_bounded_by_element_count(self):
+        # Scalar 2D, gfx942 4-warp GQA and gfx1250 tiled 2D: i32 element
+        # offsets, so 2^31 elements of the cache dtype.
+        self.assertEqual(_au._kv_addr_limit(_bug_prob(), None), 2 * 2**31)
+        self.assertEqual(_au._kv_addr_limit(_bug_prob(use_fp8=True), None), 2**31)
+
+    def test_gfx1250_meta_has_no_i64_path(self):
+        p = _bug_prob(num_kv_blocks=_BUG_BLOCKS)
+        with _patch_arch("gfx1250"), mock.patch.dict(_au._2D_LAUNCH_META, clear=True):
+            meta = _au._get_2d_launch_meta(p, ("gfx1250-test",))
+        self.assertEqual(meta.kv_addr_limit, 2 * 2**31)
+
+    def test_gfx942_4warp_route_meta_has_no_i64_path(self):
+        # D128 sliding-window bf16 rides build_gfx942_4warp_gqa, which indexes
+        # K/V with i32 element offsets whatever the problem decides.
+        p = _prob(128, 32, 32, 8, sliding_window=128)
+        with _patch_arch("gfx942"), mock.patch.dict(_au._2D_LAUNCH_META, clear=True):
+            self.assertIsNotNone(_au._gfx942_4warp_route(p))
+            meta = _au._get_2d_launch_meta(p, _au._tiled_cache_key(p))
+        self.assertEqual(meta.kv_addr_limit, 2 * 2**31)
+
+    def test_gfx1250_spec_has_no_i64_field(self):
+        from kernels.gfx1250.attention_tiled_2d import UnifiedAttention2DTiledSpec
+
+        self.assertNotIn(
+            "use_i64_kv_addr",
+            {f.name for f in dataclasses.fields(UnifiedAttention2DTiledSpec)},
+        )
+
+    def test_4warp_builder_rejects_i64(self):
+        from kernels.gfx942.attention_tiled_2d import build_gfx942_4warp_gqa
+
+        p = _prob(128, 32, 32, 8, sliding_window=128, num_kv_blocks=_BUG_BLOCKS)
+        with _patch_arch("gfx942"):
+            spec = _asb._tiled_spec_from_problem(p)
+        spec = dataclasses.replace(spec, use_i64_kv_addr=True)
+        with self.assertRaisesRegex(NotImplementedError, "use_i64_kv_addr"):
+            build_gfx942_4warp_gqa(spec, arch="gfx942")
+
 
 class TestKvAddrWidthGuard(unittest.TestCase):
-    """_check_kv_addr_width rejects an i32 kernel launched on a cache over 2 GiB.
+    """_check_kv_addr_width rejects a cache larger than the kernel addresses."""
 
-    This is the check that catches a caller building the problem without
-    num_kv_blocks; the cache-key tests above cannot, since a problem with
-    num_kv_blocks=0 never reaches the i64 key at all.
-    """
+    _I32 = 0x7FFF0000
 
-    # Parity NQK shape: 32768 blocks x 64 tokens x 8 kv-heads x 128 dims x 2 bytes
-    # is 4 GiB.
-    _BUG_BLOCKS = 32768
+    def test_i32_kernel_over_limit_raises(self):
+        p = _bug_prob()
+        with self.assertRaisesRegex(ValueError, "zeros or wrong data"):
+            _au._check_kv_addr_width(p, _kv_cache(_BUG_BLOCKS, p), self._I32)
 
-    @staticmethod
-    def _bug_prob(**overrides) -> UnifiedAttentionProblem:
-        return _prob(128, 64, 64, 8, **overrides)
+    def test_missing_count_hint_points_at_the_problem(self):
+        p = _bug_prob()
+        with self.assertRaisesRegex(ValueError, "num_kv_blocks=k.shape"):
+            _au._check_kv_addr_width(p, _kv_cache(_BUG_BLOCKS, p), self._I32)
 
-    @staticmethod
-    def _cache(num_blocks: int, problem: UnifiedAttentionProblem):
-        shape = (
-            num_blocks,
-            problem.block_size,
-            problem.num_kv_heads,
-            problem.head_size,
-        )
-        return SimpleNamespace(shape=shape)
-
-    def test_missing_num_kv_blocks_raises(self):
-        p = self._bug_prob()
-        with self.assertRaisesRegex(ValueError, "i32 KV addressing"):
-            _au._check_kv_addr_width(p, self._cache(self._BUG_BLOCKS, p))
-
-    def test_attn_values_raises_before_packing(self):
-        # Every Python 2D and scalar kernarg pack goes through _attn_values, so
-        # the direct-launch harnesses hit the guard there.
-        p = self._bug_prob()
-        with self.assertRaisesRegex(ValueError, "i32 KV addressing"):
-            _au._attn_values(
-                problem=p,
-                q=None,
-                k=self._cache(self._BUG_BLOCKS, p),
-                v=None,
-                out=None,
-                cu_seqlens_q=None,
-                seqused_k=None,
-                softmax_scale=1.0,
-                block_table=None,
-                softcap=0.0,
-                sinks=None,
-                bt_stride=0,
-                include_bt_stride=True,
-            )
-
-    def test_num_kv_blocks_set_passes(self):
-        p = self._bug_prob(num_kv_blocks=self._BUG_BLOCKS)
-        _au._check_kv_addr_width(p, self._cache(self._BUG_BLOCKS, p))
-
-    def test_stale_count_raises(self):
+    def test_stale_count_hint_points_at_the_problem(self):
         # A count taken from a smaller cache than the one launched on.
-        p = self._bug_prob(num_kv_blocks=1024)
-        with self.assertRaises(ValueError):
-            _au._check_kv_addr_width(p, self._cache(self._BUG_BLOCKS, p))
+        p = _bug_prob(num_kv_blocks=1024)
+        with self.assertRaisesRegex(ValueError, "below the cache's block count"):
+            _au._check_kv_addr_width(p, _kv_cache(_BUG_BLOCKS, p), self._I32)
 
-    def test_overcount_passes(self):
-        # Overcounting only costs the i64 path on a small cache.
-        p = self._bug_prob(num_kv_blocks=self._BUG_BLOCKS)
-        _au._check_kv_addr_width(p, self._cache(16, p))
+    def test_correct_count_hint_points_at_the_kernel(self):
+        # A hand-built i32 spec on a problem that already knows the cache size:
+        # fixing the problem would not help, rebuilding the spec would.
+        p = _bug_prob(num_kv_blocks=_BUG_BLOCKS)
+        with self.assertRaisesRegex(ValueError, "use_i64_kv_addr=True"):
+            _au._check_kv_addr_width(p, _kv_cache(_BUG_BLOCKS, p), self._I32)
+
+    def test_i64_kernel_passes(self):
+        p = _bug_prob()
+        _au._check_kv_addr_width(p, _kv_cache(_BUG_BLOCKS, p), None)
 
     def test_small_cache_passes(self):
-        p = self._bug_prob()
-        _au._check_kv_addr_width(p, self._cache(16, p))
+        p = _bug_prob()
+        _au._check_kv_addr_width(p, _kv_cache(16, p), self._I32)
 
-    def test_exactly_2gib_passes(self):
-        # 65536 blocks x 32 x 8 x 64 x 2 bytes is 2 GiB exactly, still i32.
+    def test_buffer_limit_boundary(self):
         p = _combo_prob()
-        _au._check_kv_addr_width(p, self._cache(65536, p))
+        _au._check_kv_addr_width(p, _kv_cache(_AT_I32_LIMIT, p), self._I32)
         with self.assertRaises(ValueError):
-            _au._check_kv_addr_width(p, self._cache(65537, p))
+            _au._check_kv_addr_width(p, _kv_cache(_OVER_I32_LIMIT, p), self._I32)
 
     def test_fp8_halves_cache_bytes(self):
-        # The bug shape at 1 byte per element is 2 GiB, still i32.
-        p = self._bug_prob(use_fp8=True)
-        _au._check_kv_addr_width(p, self._cache(self._BUG_BLOCKS, p))
+        # 64 KiB fp8 blocks: 32767 fill the buffer range exactly.
+        p = _bug_prob(use_fp8=True)
+        _au._check_kv_addr_width(p, _kv_cache(_BUG_BLOCKS - 1, p), self._I32)
         with self.assertRaises(ValueError):
-            _au._check_kv_addr_width(p, self._cache(self._BUG_BLOCKS + 1, p))
-
-    def test_spec_flag_overrides_problem(self):
-        # A hand-built spec can be i32 even when the problem says i64, and the
-        # compiled flag is what the kernel actually does.
-        p = self._bug_prob(num_kv_blocks=self._BUG_BLOCKS)
-        k = self._cache(self._BUG_BLOCKS, p)
-        with self.assertRaises(ValueError):
-            _au._check_kv_addr_width(p, k, use_i64_kv_addr=False)
-        _au._check_kv_addr_width(self._bug_prob(), k, use_i64_kv_addr=True)
+            _au._check_kv_addr_width(p, _kv_cache(_BUG_BLOCKS, p), self._I32)
 
     def test_shapeless_k_is_skipped(self):
-        _au._check_kv_addr_width(self._bug_prob(), None)
+        _au._check_kv_addr_width(_bug_prob(), None, self._I32)
+
+    def test_attn_values_requires_the_limit(self):
+        # Required, so a new direct-launch caller cannot forget it.
+        p = _bug_prob()
+        args = dict(
+            problem=p,
+            q=None,
+            k=_kv_cache(_BUG_BLOCKS, p),
+            v=None,
+            out=None,
+            cu_seqlens_q=None,
+            seqused_k=None,
+            softmax_scale=1.0,
+            block_table=None,
+            softcap=0.0,
+            sinks=None,
+            bt_stride=0,
+            include_bt_stride=True,
+        )
+        with self.assertRaises(TypeError):
+            _au._attn_values(**args)
+        with self.assertRaisesRegex(ValueError, "i32 KV addressing"):
+            _au._attn_values(**args, kv_addr_limit=self._I32)
+
+
+class TestProductionRouteGuard(unittest.TestCase):
+    """run_unified_attention_torch end to end with mocked launchers.
+
+    The K cache is shape-only, so the route through count filling, spec and
+    launch-meta selection and the kernarg pack runs on CPU.
+    """
+
+    def setUp(self):
+        self.launcher = mock.Mock(return_value=None)
+        patches = [
+            _patch_arch("gfx950"),
+            mock.patch.dict(_au._2D_LAUNCH_META, clear=True),
+            mock.patch.object(_au, "_get_2d_launcher", return_value=self.launcher),
+            mock.patch.object(_au, "_get_scalar_launcher", return_value=self.launcher),
+        ]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+
+    def _run(self, problem, num_blocks, **kw):
+        return _au.run_unified_attention_torch(
+            problem=problem,
+            q=None,
+            k=_kv_cache(num_blocks, problem),
+            v=None,
+            out=None,
+            cu_seqlens_q=None,
+            seqused_k=None,
+            softmax_scale=1.0,
+            block_table=SimpleNamespace(shape=(problem.num_seqs, 64)),
+            softcap=0.0,
+            **kw,
+        )
+
+    def test_unset_count_on_4gib_cache_launches_i64(self):
+        self._run(_bug_prob(), _BUG_BLOCKS, backend="tiled")
+        self.launcher.assert_called_once()
+        problem = _au._get_2d_launcher.call_args.args[0]
+        self.assertEqual(problem.num_kv_blocks, _BUG_BLOCKS)
+        self.assertTrue(_au._enable_i64_kv_addr(problem))
+
+    def test_stale_count_raises(self):
+        # A positive count is trusted (only 0 is refilled), so a stale one gets
+        # the i32 kernel and the guard stops the launch.
+        with self.assertRaisesRegex(ValueError, "below the cache's block count"):
+            self._run(_bug_prob(num_kv_blocks=1024), _BUG_BLOCKS, backend="tiled")
+        self.launcher.assert_not_called()
+
+    def test_tuning_spec_rebinds_to_the_real_cache(self):
+        from dispatch.attention import AttentionRequest, attention_candidates
+        from dispatch.attention.common import _tuning_problem
+
+        candidate = next(
+            c
+            for c in attention_candidates()
+            if c.name.startswith("attention_gfx950_u2d_narrow_nw2_mw16_t4xb_llvm")
+        )
+        req = AttentionRequest(
+            batch=1,
+            nhead_q=32,
+            nhead_k=8,
+            seqlen_q=1024,
+            seqlen_k=1024,
+            hdim_q=128,
+            hdim_v=128,
+            arch="gfx950",
+            dtype="bf16",
+            algorithm=candidate.algorithm,
+            spec_id=candidate.spec_id,
+        )
+        spec = next(iter(candidate.sweep_space(req)))
+        self.assertFalse(spec.kernel_spec.use_i64_kv_addr)
+        problem = _tuning_problem(req)
+        # 16-token bf16 blocks of 32 KiB: one block over the i32 buffer range.
+        self._run(problem, _OVER_I32_LIMIT, tuning_spec=spec)
+        self.launcher.assert_called_once()
+        bound = _au._get_2d_launcher.call_args.kwargs["tuning_spec"]
+        self.assertTrue(bound.kernel_spec.use_i64_kv_addr)
+
+    def test_scalar_fallback_is_bounded_by_element_count(self):
+        # The production count is filled, so the old problem-based check passed
+        # here while the scalar kernel's i32 element offsets wrapped.
+        p = _bug_prob()
+        self._run(p, _BUG_BLOCKS, backend="scalar")  # exactly 2^31 elements
+        with self.assertRaisesRegex(ValueError, "kernel itself is i32"):
+            self._run(p, _BUG_BLOCKS + 1, backend="scalar")
+        self.launcher.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

@@ -827,7 +827,7 @@ def _run_rocke(s: Shape, data, launcher, spec, *, warmup: int, attempts: int):
     """
     import torch
     from kernels import UnifiedAttentionProblem
-    from kernels.common.attention_unified import _attn_values
+    from kernels.common.attention_unified import _attn_values, _kv_addr_limit
     from rocke.runtime import (
         LaunchConfig,
         synchronize_and_release,
@@ -877,8 +877,8 @@ def _run_rocke(s: Shape, data, launcher, spec, *, warmup: int, attempts: int):
         qq_bias_stride_0=0,
         include_qq_bias_stride=True,
         # The spec is hand-built from the Shape, not from this problem, so check
-        # the cache against the flag the kernel was actually compiled with.
-        use_i64_kv_addr=spec.use_i64_kv_addr,
+        # the cache against what the kernel was actually compiled with.
+        kv_addr_limit=_kv_addr_limit(problem, spec.use_i64_kv_addr),
     )
     block_q = spec.block_q
     total_num_q_blocks = q.shape[0] // block_q + s.batch

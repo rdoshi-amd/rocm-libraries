@@ -2559,77 +2559,98 @@ def _enable_transposed_subflags(problem: UnifiedAttentionProblem) -> bool:
     return _enable_transposed_qk_32x32(problem)
 
 
+# Largest paged KV cache, in bytes, that i32 addressing reads correctly on the
+# tiled builders. They bound K/V buffer loads at num_records=0x7FFF0000, so a
+# load at or past that offset returns zero.
+_I32_KV_BUFFER_BYTES = 0x7FFF_0000
+# Kernels that index K/V with an i32 element offset instead (scalar 2D, gfx942
+# 4-warp GQA, gfx1250 tiled 2D) have no i64 path and wrap past 2^31 elements.
+_I32_KV_ELEMENTS = 0x8000_0000
+
+
+def kv_cache_needs_i64_addr(num_kv_blocks: int, block_bytes: int) -> bool:
+    """True when ``num_kv_blocks`` blocks of ``block_bytes`` each need i64 KV addressing.
+
+    The single threshold for the spec builders, the dispatcher's tuning specs
+    and the launch guard, so they cannot disagree. ``num_kv_blocks <= 0`` means
+    the cache size is unknown, so assume small.
+    """
+    return num_kv_blocks > 0 and num_kv_blocks * block_bytes > _I32_KV_BUFFER_BYTES
+
+
+def _kv_block_bytes(problem: UnifiedAttentionProblem) -> int:
+    """Byte size of one paged K (or V) block for ``problem``."""
+    elem_bytes = 1 if problem.use_fp8 else 2
+    return problem.block_size * problem.num_kv_heads * problem.head_size * elem_bytes
+
+
 def _enable_i64_kv_addr(problem: UnifiedAttentionProblem) -> bool:
     """Enable 64-bit paged-KV addressing when the cache may exceed ~2 GiB.
 
     The default load path puts the full byte offset (incl.
-    ``physical_block * block_stride``) in a 32-bit buffer voffset, which
-    overflows -- and silently corrupts -- once the paged cache exceeds
-    2 GiB. When the cache is that large we fold the per-block offset into a
+    ``physical_block * block_stride``) in a 32-bit buffer voffset, bounded at
+    ``_I32_KV_BUFFER_BYTES``; past that, loads silently return zeros. When the
+    cache is that large we fold the per-block offset into a
     64-bit buffer base (a tiny, wave-uniform ``make_buffer_rsrc`` per
     block; measured within ~1-2% of the i32 path). Below the cap we keep
     the fast i32 path. ``num_kv_blocks == 0`` means the cache size is
     unknown (caller did not supply it) -> assume small / fast path.
     """
-    if problem.num_kv_blocks <= 0:
-        return False
-    return _kv_cache_exceeds_i32(problem, problem.num_kv_blocks)
+    return kv_cache_needs_i64_addr(problem.num_kv_blocks, _kv_block_bytes(problem))
 
 
-def _kv_cache_bytes(problem: UnifiedAttentionProblem, num_kv_blocks: int) -> int:
-    """Byte size of a paged KV cache of ``num_kv_blocks`` blocks for ``problem``."""
-    elem_bytes = 1 if problem.use_fp8 else 2
-    block_stride = (
-        problem.block_size * problem.num_kv_heads * problem.head_size * elem_bytes
-    )
-    return num_kv_blocks * block_stride
+def _kv_addr_limit(
+    problem: UnifiedAttentionProblem, use_i64_kv_addr: bool | None
+) -> int | None:
+    """Largest paged K cache, in bytes, that a 2D kernel reads correctly.
 
-
-def _kv_cache_exceeds_i32(problem: UnifiedAttentionProblem, num_kv_blocks: int) -> bool:
-    """True when a paged KV cache of ``num_kv_blocks`` blocks needs i64 addressing."""
-    # The within-block voffset is always < block_stride, so the i32 offset
-    # overflows exactly when cache_bytes > 2^31 (the last block's base alone
-    # reaches 2^31). Keep the fast i32 path at/below that; switch to i64
-    # strictly above. (Verified: cap=65536 bf16 = 2^31 bytes, max offset
-    # 2147483646 < 2^31 -> still correct on i32.)
-    return _kv_cache_bytes(problem, num_kv_blocks) > 0x8000_0000
+    ``use_i64_kv_addr`` is the compiled kernel's flag. ``None`` means the
+    kernel has no i64 path (scalar 2D, gfx942 4-warp GQA, gfx1250 tiled 2D)
+    and indexes K/V with an i32 element offset. Returns ``None`` (no limit)
+    for i64 addressing.
+    """
+    if use_i64_kv_addr is None:
+        return _I32_KV_ELEMENTS * (1 if problem.use_fp8 else 2)
+    return None if use_i64_kv_addr else _I32_KV_BUFFER_BYTES
 
 
 def _check_kv_addr_width(
-    problem: UnifiedAttentionProblem,
-    k,
-    use_i64_kv_addr: bool | None = None,
+    problem: UnifiedAttentionProblem, k, kv_addr_limit: int | None
 ) -> None:
-    """Reject a launch whose K cache needs i64 addressing the kernel does not use.
+    """Reject a launch whose K cache is larger than the kernel can address.
 
     ``_enable_i64_kv_addr`` only sees ``problem.num_kv_blocks``. A caller that
     builds the problem without it (0 means unknown, so assume small) or with a
-    stale count gets the i32 voffset path, and on a cache over 2 GiB the
-    overflowed offsets read zeros with no fault. ``k`` is the real cache, so
-    check against it at launch. Overcounting only costs the i64 path on a small
-    cache, which is still correct, so it is allowed.
-
-    ``use_i64_kv_addr`` is the compiled spec's flag. Pass it when the spec was
-    not built from ``problem`` (a hand-built harness spec); otherwise the
-    problem's own decision is what the spec builder used.
+    stale count gets the i32 path, and past the i32 limit the loads read zeros
+    or wrong data with no fault. Some kernels have no i64 path at all. ``k`` is
+    the real cache, so check it at launch against ``kv_addr_limit`` (see
+    ``_kv_addr_limit``). Overcounting only costs the i64 path on a small cache,
+    which is still correct, so it is allowed.
     """
-    if not hasattr(k, "shape") or len(k.shape) < 1:
+    if kv_addr_limit is None or not hasattr(k, "shape") or len(k.shape) < 1:
         return
     num_kv_blocks = int(k.shape[0])
-    if not _kv_cache_exceeds_i32(problem, num_kv_blocks):
+    cache_bytes = num_kv_blocks * _kv_block_bytes(problem)
+    if cache_bytes <= kv_addr_limit:
         return
-    if use_i64_kv_addr is None:
-        use_i64_kv_addr = _enable_i64_kv_addr(problem)
-    if use_i64_kv_addr:
-        return
+    if problem.num_kv_blocks < num_kv_blocks:
+        fix = (
+            f"problem.num_kv_blocks={problem.num_kv_blocks} is below the cache's "
+            "block count. Build the problem with num_kv_blocks=k.shape[0] and the "
+            "spec from that problem (run_unified_attention_torch fills it when "
+            "the caller leaves it at 0)."
+        )
+    else:
+        fix = (
+            "problem.num_kv_blocks already covers the cache, so the kernel itself "
+            "is i32. Rebuild a hand-built spec with use_i64_kv_addr=True, or use "
+            "a kernel with an i64 KV path (the scalar, gfx942 4-warp GQA and "
+            "gfx1250 kernels have none)."
+        )
     raise ValueError(
-        f"paged KV cache has {num_kv_blocks} blocks "
-        f"({_kv_cache_bytes(problem, num_kv_blocks)} bytes), over the 2 GiB i32 "
-        f"voffset cap, but the kernel uses i32 KV addressing "
-        f"(problem.num_kv_blocks={problem.num_kv_blocks}), which would silently "
-        "read zeros past the cap. Build the problem with num_kv_blocks=k.shape[0] "
-        "and the spec from that problem (run_unified_attention_torch does this "
-        "automatically)."
+        f"paged KV cache of {num_kv_blocks} blocks ({cache_bytes} bytes) exceeds "
+        f"the {kv_addr_limit} bytes this kernel's i32 KV addressing reads "
+        f"correctly; past that, loads return zeros or wrong data. {fix}"
     )
 
 
@@ -3361,13 +3382,13 @@ def _attn_values(
     k_scale: float = 1.0,
     v_scale: float = 1.0,
     out_scale: float = 1.0,
-    use_i64_kv_addr: bool | None = None,
+    kv_addr_limit: int | None,
 ):
     # Every Python 2D and scalar kernarg pack goes through here (production and
-    # the direct-launch harnesses), so check the kernel's KV addressing width
-    # against the real K cache. The 3D path packs its own kernargs and is not
-    # covered. Hand-built specs pass their own ``use_i64_kv_addr``.
-    _check_kv_addr_width(problem, k, use_i64_kv_addr)
+    # the direct-launch harnesses), so check the real K cache against what the
+    # compiled kernel addresses (``kv_addr_limit``, from ``_kv_addr_limit``).
+    # The 3D path packs its own kernargs and is not covered.
+    _check_kv_addr_width(problem, k, kv_addr_limit)
     vals = {
         "output_ptr": out,
         "query_ptr": q,
@@ -3652,6 +3673,8 @@ class _Attention3DPrepared:
 class _Attention2DLaunchMeta:
     grid: Tuple[int, int, int]
     block: Tuple[int, int, int]
+    # What the compiled kernel addresses, from ``_kv_addr_limit``.
+    kv_addr_limit: int | None
 
 
 # Per-cache-key prepared 3D launch state. Built lazily at first dispatch for a
@@ -3898,6 +3921,7 @@ def _run_2d_graphed(
 
     key = _tiled_cache_key(problem)
     launcher = _get_2d_launcher(problem, key)
+    meta = _get_2d_launch_meta(problem, key)
     vals = _attn_values(
         problem=problem,
         q=q,
@@ -3919,8 +3943,8 @@ def _run_2d_graphed(
         k_scale=k_scale,
         v_scale=v_scale,
         out_scale=out_scale,
+        kv_addr_limit=meta.kv_addr_limit,
     )
-    meta = _get_2d_launch_meta(problem, key)
     cfg = LaunchConfig(grid=meta.grid, block=meta.block, stream=int(stream))
 
     def _do():
@@ -4322,7 +4346,12 @@ def _get_2d_launch_meta(
     arch = _resolve_attention_arch()
     if tuning_spec is not None:
         meta = _Attention2DLaunchMeta(
-            grid=tuning_spec.launch_grid(problem), block=tuning_spec.launch_block()
+            grid=tuning_spec.launch_grid(problem),
+            block=tuning_spec.launch_block(),
+            # Every 2D tuning builder honours ``use_i64_kv_addr`` or rejects it.
+            kv_addr_limit=_kv_addr_limit(
+                problem, getattr(tuning_spec.kernel_spec, "use_i64_kv_addr", None)
+            ),
         )
         _2D_LAUNCH_META[meta_key] = meta
         return meta
@@ -4345,7 +4374,12 @@ def _get_2d_launch_meta(
             # head. grid = (num_query_heads, q-token-blocks + per-seq padding).
             total_num_q_blocks = problem.total_q // route.block_m + problem.num_seqs
             grid = (int(problem.num_query_heads), int(total_num_q_blocks), 1)
-        meta = _Attention2DLaunchMeta(grid=grid, block=route.block_dim)
+        # The 4-warp builder has no i64 path.
+        meta = _Attention2DLaunchMeta(
+            grid=grid,
+            block=route.block_dim,
+            kv_addr_limit=_kv_addr_limit(problem, None),
+        )
         _2D_LAUNCH_META[meta_key] = meta
         return meta
     if _enable_gfx942_bf16_flash(problem):
@@ -4369,9 +4403,19 @@ def _get_2d_launch_meta(
     )
     total_num_q_blocks = problem.total_q // block_q + problem.num_seqs
     wave_size = 32 if arch == "gfx1250" else 64
+    # The spec builders set ``use_i64_kv_addr=_enable_i64_kv_addr(problem)``
+    # when the arch's spec has the field. Building the spec here instead would
+    # cost 100-200 us on every new total_q.
+    spec_cls, _, _ = _tiled_2d_impl(arch)
+    i64 = (
+        _enable_i64_kv_addr(problem)
+        if "use_i64_kv_addr" in spec_cls.__dataclass_fields__
+        else None
+    )
     meta = _Attention2DLaunchMeta(
         grid=(int(problem.num_kv_heads), int(total_num_q_blocks), 1),
         block=(int(wave_size * num_warps), 1, 1),
+        kv_addr_limit=_kv_addr_limit(problem, i64),
     )
     _2D_LAUNCH_META[meta_key] = meta
     return meta
@@ -4482,7 +4526,7 @@ def run_unified_attention_torch(
     # keep ``num_kv_blocks=0`` -> the correct fast i32 path -> no per-call
     # replace, which otherwise dominates tiny-shape host latency.
     if problem.num_kv_blocks <= 0 and hasattr(k, "shape") and len(k.shape) >= 1:
-        if _kv_cache_exceeds_i32(problem, int(k.shape[0])):
+        if kv_cache_needs_i64_addr(int(k.shape[0]), _kv_block_bytes(problem)):
             problem = replace(problem, num_kv_blocks=int(k.shape[0]))
     if tuning_spec is not None:
         # Explicit specs are initially selected before framework tensors exist.
@@ -4589,6 +4633,10 @@ def run_unified_attention_torch(
                 else _tiled_cache_key(problem)
             )
             launcher = _get_2d_launcher(problem, key, tuning_spec=tuning_spec)
+            # The dispatcher must launch with the same BLOCK_Q/threads the
+            # kernel was built for. Cache that fixed metadata per kernel key so
+            # repeated same-shape calls avoid selector math on the hot path.
+            meta = _get_2d_launch_meta(problem, key, tuning_spec=tuning_spec)
             vals = _attn_values(
                 problem=problem,
                 q=q,
@@ -4610,11 +4658,8 @@ def run_unified_attention_torch(
                 k_scale=k_scale,
                 v_scale=v_scale,
                 out_scale=out_scale,
+                kv_addr_limit=meta.kv_addr_limit,
             )
-            # The dispatcher must launch with the same BLOCK_Q/threads the
-            # kernel was built for. Cache that fixed metadata per kernel key so
-            # repeated same-shape calls avoid selector math on the hot path.
-            meta = _get_2d_launch_meta(problem, key, tuning_spec=tuning_spec)
             return launcher(
                 vals,
                 config=LaunchConfig(
@@ -4651,6 +4696,8 @@ def run_unified_attention_torch(
         k_scale=k_scale,
         v_scale=v_scale,
         out_scale=out_scale,
+        # No i64 mode: K/V are i32 element offsets.
+        kv_addr_limit=_kv_addr_limit(problem, None),
     )
     return launcher(
         vals,

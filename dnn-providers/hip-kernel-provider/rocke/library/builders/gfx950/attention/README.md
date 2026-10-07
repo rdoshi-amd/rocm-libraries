@@ -798,11 +798,16 @@ Only `run_unified_attention_torch` fills `num_kv_blocks` from the K cache. A
 harness that builds `UnifiedAttentionProblem` and launches directly must pass
 `num_kv_blocks=key_cache.shape[0]` itself, since `0` means "unknown" and keeps
 the i32 path. `_attn_values` in
-[`attention_unified.py`](../../../kernels/common/attention_unified.py) enforces
-this for every Python 2D and scalar launch: a K cache over 2 GiB paired with an
-i32 kernel raises `ValueError` instead of silently reading zeros. A hand-built
-spec passes its compiled `use_i64_kv_addr` so the check sees what the kernel
-actually does. The 3D split-KV path packs its own kernargs and is not checked.
+[`attention_unified.py`](../../../kernels/common/attention_unified.py) checks the
+real K cache on every Python 2D and scalar kernarg pack against what the compiled
+kernel addresses, and raises `ValueError` instead of reading zeros or wrong data.
+Every caller passes `kv_addr_limit`, from
+`_kv_addr_limit(problem, spec.use_i64_kv_addr)` for a hand-built spec. The tiled
+builders' i32 path stops at `0x7FFF0000` bytes (their buffer `num_records`), so
+the cache switches to i64 strictly above that. The scalar, gfx942 4-warp GQA and
+gfx1250 kernels have no i64 path and index K/V with i32 element offsets, so their
+limit is 2^31 elements. The 3D split-KV path packs its own kernargs and is not
+checked.
 
 The sliding-window jump (0.67x → 0.91x) came from recognising SW prefill
 is **prelude-bound**, not compute-bound: the window prunes the KV loop to

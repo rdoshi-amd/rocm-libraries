@@ -531,7 +531,7 @@ class CkVariantBench:
 
     def run(self, shape, data, variant, sliding_window, is_fp8, *, warmup, iters):
         import torch
-        from kernels.common.attention_unified import _attn_values
+        from kernels.common.attention_unified import _attn_values, _kv_addr_limit
         from rocke.runtime import LaunchConfig, synchronize_and_release, time_launches
 
         launcher, spec, problem = self.build(
@@ -563,7 +563,7 @@ class CkVariantBench:
             include_qq_bias_stride=True,
             k_scale=1.0,
             v_scale=1.0,
-            use_i64_kv_addr=spec.use_i64_kv_addr,
+            kv_addr_limit=_kv_addr_limit(problem, spec.use_i64_kv_addr),
         )
         cfg = LaunchConfig(
             grid=(

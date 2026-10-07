@@ -16,6 +16,7 @@ from kernels.common.attention_unified import (
     UnifiedAttentionProblem,
     _tiled_2d_impl,
     _tiled_3d_impl,
+    kv_cache_needs_i64_addr,
 )
 
 
@@ -115,10 +116,7 @@ def _semantic_fields(problem: UnifiedAttentionProblem) -> dict:
         * int(problem.head_size)
         * elem_bytes
     )
-    use_i64 = (
-        int(problem.num_kv_blocks) > 0
-        and int(problem.num_kv_blocks) * block_stride > 0x8000_0000
-    )
+    use_i64 = kv_cache_needs_i64_addr(int(problem.num_kv_blocks), block_stride)
     return {
         "head_size": int(problem.head_size),
         "block_size": int(problem.block_size),

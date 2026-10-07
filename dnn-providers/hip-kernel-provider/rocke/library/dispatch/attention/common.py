@@ -51,6 +51,7 @@ from typing import Any, Tuple
 
 from kernels.common.attention_unified import (
     UnifiedAttentionProblem,
+    kv_cache_needs_i64_addr,
     # Re-exported, never redeclared. The kernel owns what it covers; dispatch's
     # job is to state that coverage as a Capability so it can be filtered and
     # queried without probing. Copying the numbers would drift in the one
@@ -556,7 +557,7 @@ class AttentionTuningSpec:
             * int(kernel_spec.head_size)
             * elem_bytes
         )
-        use_i64 = count > 0 and count * block_stride > 0x8000_0000
+        use_i64 = kv_cache_needs_i64_addr(count, block_stride)
         return replace(
             self,
             kernel_spec=replace(kernel_spec, use_i64_kv_addr=use_i64),

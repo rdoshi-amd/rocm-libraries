@@ -141,11 +141,9 @@ struct CDNA5ReadyQueueTestPeer {
     static std::vector<std::vector<StinkyRegister>>& srcs(CDNA5ReadyQueue& q) {
         return q.queuedSrcs_;
     }
-    static void advance(CDNA5ReadyQueue& q, int cycles) {
-        q.advanceTime(cycles);
-    }
-    static void advanceIssue(CDNA5ReadyQueue& q, int cycles) {
-        q.advanceIssueCycles(cycles);
+    using TimeKind = CDNA5ReadyQueue::TimeKind;
+    static void advance(CDNA5ReadyQueue& q, int cycles, TimeKind kind) {
+        q.advanceTime(cycles, kind);
     }
     static void carry(CDNA5ReadyQueue& q) {
         q.carryQueuedWar();
@@ -328,27 +326,35 @@ TEST_F(CDNA5ReadyQueueTest, MixedDrainCapUsesMaxDrainInBurst) {
 }
 
 // Queued windows are concatenated, so a blocked (LD_SCALE) cycle can lie inside an advance. At
-// position 14 with slot 15 blocked:
-//  - two cycles of issue work cross it: 3 cycles elapse, not 2 (queue model on; off keeps the
-//    original landing-only rule);
-//  - an advance that is already elapsed time (a wait, the distance to a window end,
-//    computeValuAdvanceCycles) is not charged for the blocked cycle again.
-TEST_F(CDNA5ReadyQueueTest, BlockedCyclesAreChargedOnceInAQueuedWindow) {
+// position 14 with slot 15 blocked, advanceTime() reads its argument by kind:
+//  - Issue: two cycles of issue work cross the blocked one, so 3 elapse (queue model on; off keeps
+//    the original landing-only rule);
+//  - ValuIssue: the same for a VALU (it skips the blocked slot in both modes);
+//  - Elapsed: already wall time, so the blocked cycle is not charged a second time.
+TEST_F(CDNA5ReadyQueueTest, AdvanceTimeReadsItsArgumentByKind) {
+    using Peer = CDNA5ReadyQueueTestPeer;
     for (int on = 0; on < 2; ++on) {
         PassContext ctx = on ? makeQueueCtx(8, 16) : makeQueueCtx(1, 0);
-        for (int issue = 0; issue < 2; ++issue) {
+        struct Case {
+            Peer::TimeKind kind;
+            int cycles;
+            int wantOff, wantOn;
+            const char* name;
+        };
+        const Case cases[] = {
+            {Peer::TimeKind::Issue, 2, 16, 17, "issue"},
+            {Peer::TimeKind::ValuIssue, 2, 17, 17, "valu issue"},
+            {Peer::TimeKind::Elapsed, 3, 17, 17, "elapsed (14 -> 17, slot 15 included)"},
+        };
+        for (const Case& c : cases) {
             CDNA5ReadyQueue queue(ctx);
-            CDNA5ReadyQueueTestPeer::slots(queue).assign(20, 1);
-            CDNA5ReadyQueueTestPeer::slots(queue)[15] = CDNA5ReadyQueueTestPeer::kBlocked;
-            CDNA5ReadyQueueTestPeer::latency(queue) = 20;
-            CDNA5ReadyQueueTestPeer::pos(queue) = 14;
-            if (issue)
-                CDNA5ReadyQueueTestPeer::advanceIssue(queue, 2);
-            else
-                CDNA5ReadyQueueTestPeer::advance(queue, 3);  // 14 -> 17 elapsed, slot 15 included
-            const int want = issue ? (on ? 17 : 16) : 17;
-            EXPECT_EQ(CDNA5ReadyQueueTestPeer::pos(queue), want)
-                << "queue model " << on << (issue ? ", issue cycles" : ", elapsed cycles");
+            Peer::slots(queue).assign(20, 1);
+            Peer::slots(queue)[15] = Peer::kBlocked;
+            Peer::latency(queue) = 20;
+            Peer::pos(queue) = 14;
+            Peer::advance(queue, c.cycles, c.kind);
+            EXPECT_EQ(Peer::pos(queue), on ? c.wantOn : c.wantOff)
+                << c.name << ", queue model " << on;
         }
     }
 }

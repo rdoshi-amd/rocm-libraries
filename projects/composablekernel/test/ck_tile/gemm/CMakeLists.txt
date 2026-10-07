@@ -26,6 +26,10 @@ if(GPU_TARGETS MATCHES "gfx94|gfx95|gfx90a|gfx11|gfx12")
     target_compile_options(test_ck_tile_gemm_compv3_tail_dispatch PRIVATE ${EXAMPLE_GEMM_COMPILE_OPTIONS})
     list(APPEND CK_TILE_GEMM_TEST_TARGETS test_ck_tile_gemm_compv3_tail_dispatch)
 
+    # LDS K padding specs: host gtests plus gfx125 compile-time descriptor checks.
+    add_gtest_executable(test_ck_tile_gemm_lds_padding test_gemm_lds_padding.cpp)
+    list(APPEND CK_TILE_GEMM_TEST_TARGETS test_ck_tile_gemm_lds_padding)
+
     if(GPU_TARGETS MATCHES "gfx94|gfx95")
         add_gtest_executable(test_ck_tile_gemm_pipeline_mem test_gemm_pipeline_mem.cpp)
         add_gtest_executable(test_ck_tile_gemm_pipeline_compv3 test_gemm_pipeline_compv3.cpp)

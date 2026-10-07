@@ -97,7 +97,8 @@ public:
     /// logs once and changes nothing.
     static constexpr size_t WINNER_CACHE_WARNING_THRESHOLD = 4096;
 
-    /// @throws std::invalid_argument bad pack reference, or duplicate metadata tuple.
+    /// @throws std::invalid_argument bad pack reference, or two kernels sharing a metadata tuple
+    ///         that compete at the same arch tier on a device.
     /// @throws std::runtime_error a UMD or the engine's graph_match names a symbol this
     /// build does not ship.
     ///
@@ -447,8 +448,8 @@ private:
                             "kernel '" + toString(kernel.id)
                             + "' duplicates the metadata tuple of another kernel under schema '"
                             + _schema.name
-                            + "' on an arch both reach; the tuple is the catalog key "
-                            + "and must be unique per device at the same arch tier");
+                            + "' at the same arch tier on a device both reach; a better tier "
+                            + "shadows a worse one, so equal tiers cannot be told apart");
                     }
                 }
                 claimants.push_back(kernelArch);

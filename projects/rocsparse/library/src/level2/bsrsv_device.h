@@ -152,7 +152,7 @@ namespace rocsparse
         // Write "row is done" flag
         if(lid == 0)
         {
-            __scoped_atomic_store_n(&done_array[row], 1, __ATOMIC_RELEASE, __MEMORY_SCOPE_DEVICE);
+            rocsparse::atomic_store(&done_array[row], 1, __ATOMIC_RELEASE, __MEMORY_SCOPE_DEVICE);
 
             if(pivot == true)
             {
@@ -285,7 +285,7 @@ namespace rocsparse
         // Write "row is done" flag
         if(lid == 0)
         {
-            __scoped_atomic_store_n(&done_array[row], 1, __ATOMIC_RELEASE, __MEMORY_SCOPE_DEVICE);
+            rocsparse::atomic_store(&done_array[row], 1, __ATOMIC_RELEASE, __MEMORY_SCOPE_DEVICE);
 
             if(pivot == true)
             {
@@ -453,7 +453,7 @@ namespace rocsparse
         if(lid == 0)
         {
             // Write "row is done" flag
-            __scoped_atomic_store_n(&done_array[row], 1, __ATOMIC_RELEASE, __MEMORY_SCOPE_DEVICE);
+            rocsparse::atomic_store(&done_array[row], 1, __ATOMIC_RELEASE, __MEMORY_SCOPE_DEVICE);
 
             // Find the minimum pivot, if applicable
             if(pivot == true)
@@ -622,7 +622,7 @@ namespace rocsparse
         if(lid == 0)
         {
             // Write "row is done" flag
-            __scoped_atomic_store_n(&done_array[row], 1, __ATOMIC_RELEASE, __MEMORY_SCOPE_DEVICE);
+            rocsparse::atomic_store(&done_array[row], 1, __ATOMIC_RELEASE, __MEMORY_SCOPE_DEVICE);
 
             // Find the minimum pivot, if applicable
             if(pivot == true)

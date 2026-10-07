@@ -231,7 +231,7 @@ namespace rocsparse
         if(hipThreadIdx_x == 0)
         {
             // Write the "row is done" flag
-            __scoped_atomic_store_n(
+            rocsparse::atomic_store(
                 &done_array[row + id], 1, __ATOMIC_RELAXED, __MEMORY_SCOPE_DEVICE);
         }
     }

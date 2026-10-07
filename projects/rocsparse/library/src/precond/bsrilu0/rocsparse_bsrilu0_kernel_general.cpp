@@ -256,7 +256,7 @@ namespace rocsparse
         if(lid == 0)
         {
             // First lane writes "we are done" flag
-            __scoped_atomic_store_n(&done_array[row], 1, __ATOMIC_RELEASE, __MEMORY_SCOPE_DEVICE);
+            rocsparse::atomic_store(&done_array[row], 1, __ATOMIC_RELEASE, __MEMORY_SCOPE_DEVICE);
 
             if(pivot)
             {

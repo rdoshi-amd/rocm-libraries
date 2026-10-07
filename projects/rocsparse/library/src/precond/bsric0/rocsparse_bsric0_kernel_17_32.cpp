@@ -73,7 +73,7 @@ namespace rocsparse
                 rocsparse::atomic_min(zero_pivot, block_row + idx_base);
 
                 // Last lane in wavefront writes "we are done" flag for its block row
-                __scoped_atomic_store_n(
+                rocsparse::atomic_store(
                     &block_done[block_row], 1, __ATOMIC_RELEASE, __MEMORY_SCOPE_DEVICE);
             }
 
@@ -170,7 +170,7 @@ namespace rocsparse
             __threadfence_block();
 
             // Spin loop until dependency has been resolved
-            while(!__scoped_atomic_load_n(
+            while(!rocsparse::atomic_load(
                 &block_done[block_col], __ATOMIC_RELAXED, __MEMORY_SCOPE_DEVICE))
                 ;
 
@@ -379,7 +379,7 @@ namespace rocsparse
         if(tidx == 0 && tidy == 0)
         {
             // First lane in wavefront writes "we are done" flag for its block row
-            __scoped_atomic_store_n(
+            rocsparse::atomic_store(
                 &block_done[block_row], 1, __ATOMIC_RELEASE, __MEMORY_SCOPE_DEVICE);
         }
     }

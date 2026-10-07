@@ -148,7 +148,7 @@ namespace rocsparse
 
             // Spin loop until dependency has been resolved
             while(
-                !__scoped_atomic_load_n(&done[local_col], __ATOMIC_RELAXED, __MEMORY_SCOPE_DEVICE))
+                !rocsparse::atomic_load(&done[local_col], __ATOMIC_RELAXED, __MEMORY_SCOPE_DEVICE))
                 ;
 
             // Make sure updated csr_val is visible
@@ -249,7 +249,7 @@ namespace rocsparse
         if(lid == 0)
         {
             // First lane writes "we are done" flag
-            __scoped_atomic_store_n(&done[row], 1, __ATOMIC_RELEASE, __MEMORY_SCOPE_DEVICE);
+            rocsparse::atomic_store(&done[row], 1, __ATOMIC_RELEASE, __MEMORY_SCOPE_DEVICE);
         }
     }
 

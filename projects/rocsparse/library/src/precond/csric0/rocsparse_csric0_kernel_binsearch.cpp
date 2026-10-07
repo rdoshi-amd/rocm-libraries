@@ -202,7 +202,7 @@ namespace rocsparse
         if(lid == WF_SIZE - 1)
         {
             // Last lane writes "we are done" flag
-            __scoped_atomic_store_n(&done[row], 1, __ATOMIC_RELEASE, __MEMORY_SCOPE_DEVICE);
+            rocsparse::atomic_store(&done[row], 1, __ATOMIC_RELEASE, __MEMORY_SCOPE_DEVICE);
         }
     }
 

@@ -138,11 +138,11 @@ namespace rocsparse
         if(lid == WF_SIZE - 1)
         {
             // Write the local "row is done" flag
-            __scoped_atomic_store_n(
+            rocsparse::atomic_store(
                 &local_done_array[wid], local_max + 1, __ATOMIC_RELAXED, __MEMORY_SCOPE_WRKGRP);
 
             // Write the "row is done" flag
-            __scoped_atomic_store_n(
+            rocsparse::atomic_store(
                 &done_array[row], local_max + 1, __ATOMIC_RELAXED, __MEMORY_SCOPE_DEVICE);
 
             // Obtain maximum nnz
@@ -263,11 +263,11 @@ namespace rocsparse
         if(lid == WF_SIZE - 1)
         {
             // Write the local "row is done" flag
-            __scoped_atomic_store_n(
+            rocsparse::atomic_store(
                 &local_done_array[wid], local_max + 1, __ATOMIC_RELAXED, __MEMORY_SCOPE_WRKGRP);
 
             // Write the "row is done" flag
-            __scoped_atomic_store_n(
+            rocsparse::atomic_store(
                 &done_array[row], local_max + 1, __ATOMIC_RELAXED, __MEMORY_SCOPE_DEVICE);
 
             // Obtain maximum nnz
@@ -447,7 +447,7 @@ namespace rocsparse
             rocsparse::nontemporal_store(local_sum, &y[row * y_inc]);
 
             // Mark row as done
-            __scoped_atomic_store_n(&done_array[row], 1, __ATOMIC_RELEASE, __MEMORY_SCOPE_DEVICE);
+            rocsparse::atomic_store(&done_array[row], 1, __ATOMIC_RELEASE, __MEMORY_SCOPE_DEVICE);
         }
     }
 }

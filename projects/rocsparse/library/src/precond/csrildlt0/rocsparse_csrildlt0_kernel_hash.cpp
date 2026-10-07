@@ -157,7 +157,7 @@ namespace rocsparse
 
             // Spin until row local_col is done
             while(
-                !__scoped_atomic_load_n(&done[local_col], __ATOMIC_RELAXED, __MEMORY_SCOPE_DEVICE))
+                !rocsparse::atomic_load(&done[local_col], __ATOMIC_RELAXED, __MEMORY_SCOPE_DEVICE))
                 ;
 
             __builtin_amdgcn_fence(__ATOMIC_ACQUIRE, "agent");
@@ -250,7 +250,7 @@ namespace rocsparse
 
         if(lid == WFSIZE - 1)
         {
-            __scoped_atomic_store_n(&done[row], 1, __ATOMIC_RELEASE, __MEMORY_SCOPE_DEVICE);
+            rocsparse::atomic_store(&done[row], 1, __ATOMIC_RELEASE, __MEMORY_SCOPE_DEVICE);
         }
     }
 

@@ -107,7 +107,7 @@ namespace rocsparse
                 }
 
                 // Spin loop until dependency has been resolved
-                while(!__scoped_atomic_load_n(
+                while(!rocsparse::atomic_load(
                     &done_array[bsr_col], __ATOMIC_RELAXED, __MEMORY_SCOPE_DEVICE))
                     ;
 
@@ -355,7 +355,7 @@ namespace rocsparse
         if(threadIdx.x == 0 && threadIdx.y == 0)
         {
             // First lane writes "we are done" flag
-            __scoped_atomic_store_n(&done_array[row], 1, __ATOMIC_RELEASE, __MEMORY_SCOPE_DEVICE);
+            rocsparse::atomic_store(&done_array[row], 1, __ATOMIC_RELEASE, __MEMORY_SCOPE_DEVICE);
 
             if(pivot)
             {

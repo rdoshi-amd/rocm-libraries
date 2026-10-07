@@ -61,7 +61,7 @@ namespace rocsparse
                 rocsparse::atomic_min(zero_pivot, block_row + idx_base);
 
                 // Last lane in wavefront writes "we are done" flag for its block row
-                __scoped_atomic_store_n(
+                rocsparse::atomic_store(
                     &block_done[block_row], 1, __ATOMIC_RELEASE, __MEMORY_SCOPE_DEVICE);
             }
 
@@ -327,7 +327,7 @@ namespace rocsparse
         if(lid == WFSIZE - 1)
         {
             // Last lane writes "we are done" flag for current block row
-            __scoped_atomic_store_n(
+            rocsparse::atomic_store(
                 &block_done[block_row], 1, __ATOMIC_RELEASE, __MEMORY_SCOPE_DEVICE);
         }
     }

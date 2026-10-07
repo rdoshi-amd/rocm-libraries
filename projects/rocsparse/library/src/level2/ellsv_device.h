@@ -106,7 +106,7 @@ namespace rocsparse
                 rocsparse::atomic_min(zero_pivot, row + idx_base);
             }
 
-            __scoped_atomic_store_n(
+            rocsparse::atomic_store(
                 &done_array[row], local_max + 1, __ATOMIC_RELAXED, __MEMORY_SCOPE_DEVICE);
         }
     }
@@ -181,7 +181,7 @@ namespace rocsparse
                 rocsparse::atomic_min(zero_pivot, row + idx_base);
             }
 
-            __scoped_atomic_store_n(
+            rocsparse::atomic_store(
                 &done_array[row], local_max + 1, __ATOMIC_RELAXED, __MEMORY_SCOPE_DEVICE);
         }
     }
@@ -306,7 +306,7 @@ namespace rocsparse
         {
             rocsparse::nontemporal_store(local_sum, &y[row * y_inc]);
 
-            __scoped_atomic_store_n(&done_array[row], 1, __ATOMIC_RELEASE, __MEMORY_SCOPE_DEVICE);
+            rocsparse::atomic_store(&done_array[row], 1, __ATOMIC_RELEASE, __MEMORY_SCOPE_DEVICE);
         }
     }
 }

@@ -496,37 +496,19 @@ Run, in this order, **before any UUID is minted**:
    plan-build time against a real device.
 3. Every kernel's `metadata` type-checks against the KMD, with no mandatory field (one with
    no `default_value`) omitted; the real loader drops the whole pack instead.
-4. Every kernel's `arch` is a subset of its pack's `arch`, compared as expanded device
-   sets (a generic stands for its table members), and the generic-target rules below hold.
+4. Every kernel's `arch` is a subset of its pack's `arch`.
 5. Every `arch` entry is a plausible `gfx`-prefixed base id (lowercase, no feature suffix):
    an error if malformed, a **warning** if well-formed but unrecognized (e.g. `gfx94` for
    `gfx942`), since either looks like an ordinary INFO decline at match time and this tool
-   keeps no exhaustive arch list. A generic named in the table is recognized.
+   keeps no exhaustive arch list.
 
-### Generic targets and tiered `arch` matching
+### Generic targets
 
-An `arch` entry may be an LLVM generic target (`gfx11-generic`). Membership is data in
-`plugin_sdk/data/gpu_generic_targets.json`; `codegen/generic_targets.py` reads that file
-(no flag) and mirrors the loader's and the packer's tier rules, held equal by the golden
-vectors in `plugin_sdk/tests/data/arch_tier_vectors.json` (`tests/test_generic_targets.py`).
-A device is matched per `arch` list at one tier: an explicit entry (the device's own base
-id) beats a generic containing it, which beats an empty list. Consequences for a config:
-
-- De-duplication (`build_kdp`) refuses a tuple shared by two kernels only where they select
-  a device at the **same** tier. A generic kernel and an explicit member kernel with one
-  tuple coexist (the explicit one wins on its own device), as do an empty-`arch` kernel and
-  a concrete one; two kernels under the same generic, or two empty lists, still collide.
-- A list may not hold a generic with one of its members, nor two generics sharing a member;
-  an unknown generic-shaped name is an error. The packer enforces the same rules.
-- In a pack whose `arch` lists a generic, a kernel with its own non-empty `arch` must list
-  every generic of the pack and only entries the pack lists; a kernel with no `arch`
-  inherits the pack. A kernel may not name a generic its pack does not list. An `hsaco`
-  kernel is stamped with its own `arch`, else the whole pack list, which satisfies this.
-- The generator emits every kernel inline in its pack and never a standalone UKD; a kernel without its own `arch` inherits the pack's (an `hsaco` kernel is stamped with the whole pack list). A `kind: rocke` kernel under a generic is a ConfigError (`does not support generic targets yet`).  a hand-authored standalone UKD (referenced by id) with no `arch` is unrestricted, and the packer accepts it only under a KDP whose `arch` is empty too (`has an empty 'arch' (unrestricted) but the KDP lists`).
-- The emitted inventory (and so the generated census) gives every member of a generic row
-  the generic's descriptors, and the census checks coverage with the SDK's `archSupports`.
-  An `hsaco` object packed under a generic must really be generic-compatible; neither the
-  generator nor the packer checks this (a mismatch fails at module load).
+Configs accept generic `arch` targets under the
+[packaging rules](../../../../dnn-providers/hip-kernel-provider/descriptor-packaging/README.md#generic-gpu-targets).
+`build_kdp` refuses a tuple shared by two kernels only at the same tier, so an explicit kernel
+may override a generic kernel with the same tuple. The generated census gives every member of
+a generic row the generic's descriptors.
 
 ## Source adapters (`codegen/sources/`)
 
@@ -543,9 +525,8 @@ producing compiler. `hsaco` authoring also uses the packaged path: `kernel_sourc
 descriptor that names it and `symbol` its kernel. `file` must stay inside the source root,
 with no root-relative fallback. `hkp_pack` packs that object as-is, without compiling, so
 like `hip` the specialization declares `metadata_fields: []`. The packer does not check the
-object's format or target processor: every hsaco kernel must carry a non-empty per-kernel `arch` listing the
-arch(es) its object runs on (a generic-target object lists the generic, or each member
-under an explicit pack), and the loader rejects one without.
+object's format or target processor; `arch` follows
+[hsaco kernels and `arch`](../../../../dnn-providers/hip-kernel-provider/descriptor-packaging/README.md#hsaco-kernels-and-arch).
 `hsaco_file` is rejected explicitly, naming `supportsSourceKind()` as the missing
 prerequisite on `IKernelDispatchHandler`.
 

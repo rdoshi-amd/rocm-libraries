@@ -6,48 +6,38 @@ minimal authored source root.
 
 ## Generic GPU targets
 
-`arch` may name a LLVM generic target (`gfx11-generic`) listed in the shared table
-`projects/hipdnn/plugin_sdk/data/gpu_generic_targets.json`; the packer reads it through
-the required `--generic-targets-json` (CMake passes
-`HIPDNN_PLUGIN_SDK_GPU_GENERIC_TARGETS_JSON`). `GPU_TARGETS` stays concrete. After the
-concrete passes, every table generic that a KDP lists and that contains a selected arch
-is compiled and packed once under its own spelling (`kpack/hip_kernel_provider_<G>.kpack`,
-every emitted document `arch: [<G>]`), and that one tree is copied into the folder of each
-selected member whose concrete pass succeeded. No folder is named for the generic, and an
-empty-`arch` KDP is never emitted into a generic copy. The copy is a pure function of the
-source tree, the generic's spelling, hipcc and the table, so the copies are byte-identical
-across member folders and across separate per-arch builds.
+`arch` accepts the LLVM generic targets in `projects/hipdnn/plugin_sdk/data/gpu_generic_targets.json`
+(for example `gfx11-generic`), read through the required `--generic-targets-json`. Keep
+`GPU_TARGETS` concrete. The packer builds each selected generic once and copies its descriptors
+and archive (`arch: [<G>]`) into each selected member's folder; no generic-named folder is
+installed. Disk use grows with the number of members.
 
-Known limitation: every installed member package carries its own copy of the generic content, so disk use scales with the number of installed members. Identical copies collapse to one catalog entry at load; copies built by different compilers differ in `provenance` and are both dropped.
+Copies depend only on the source tree, the generic's spelling, hipcc and the table, so they are
+identical across member folders and separate per-arch builds, and the loader collapses them to
+one entry. Copies from different compilers differ in `provenance`, and the loader drops both.
 
-Known limitation: the configure-time arch probe starts one Python interpreter per KDP of the root (about 135 ms each), so a root of hundreds of KDPs adds tens of seconds to each reconfigure.
+A device ranks an `arch` list explicit, then generic, then empty; duplicate tuples conflict within one tier.
 
-Known limitation: a generic copy is merged into its member folder by staging then renaming; a filesystem failure part-way through the swap (a failed `rmtree` or rename) can lose that member's content, and the build fails.
+Authoring rules. Each violation fails the packer, raises a generator ConfigError, and makes the
+loader log an ERROR and drop the pack:
 
-Authoring rules (packer errors, stable substrings in parentheses):
+- Every `-generic` name is in the table.
+- One `arch` list never holds a generic and one of its members, or two generics sharing a member.
+- A UKD names no generic its KDP does not list.
+- Under a KDP listing generics, a UKD with its own `arch` lists every KDP generic and only
+  entries the KDP lists; an inline UKD without `arch` inherits the pack.
 
-- A name ending `-generic` that the table does not list is an error (`generic target name
-  absent`).
-- One `arch` list may not hold a generic with a member it contains, nor two generics that
-  share a member (`lists '`). Author two KDPs instead: an explicit override plus a generic
-  fallback are separate packs.
-- Under a KDP whose list holds a generic, every UKD with its own `arch` must list every
-  generic of the KDP and only entries the KDP lists (`must list every generic of the KDP`).
-  An inline UKD with no `arch` inherits the pack.
-- A standalone UKD (referenced by id) with an empty or absent `arch` is unrestricted, and is
-  valid only under a KDP whose `arch` is empty too; under a KDP listing any arch, concrete or
-  generic, it is an error (`has an empty 'arch' (unrestricted) but the KDP lists`).
-- A UKD may not name a generic its KDP does not list, including under an empty-`arch` KDP
-  (`ship in no shard`).
-- rocKE does not support generics yet (`does not support generic targets yet`).
-- Two shards whose member sets intersect may not write one path with different bytes
-  (`would be written by shard`); identical shared descriptors merge.
+Packer only: a standalone UKD with empty `arch` needs an empty-`arch` KDP, and shards whose member
+sets intersect may not write one path with different bytes. `kind: rocke` takes no generic.
 
-Duplicate matcher tuples are judged per arch tier (`hkp_desk_check`): an explicit arch
-beats a generic beats an arch-less kernel on a device, so an arch-less kernel and an
-explicit one do not collide, while two arch-less kernels, or two naming the same
-generic, do. `tools/hkp_arch_probe.py` answers the CMake configure's "does this KDP reach
-any selected arch" with the same rule.
+### hsaco kernels and `arch`
+
+An `hsaco` kernel's `arch` resolves in order: the kernel's own `arch`, else its pack's. The
+result must be non-empty; the generator rejects the kernel otherwise, because an unrestricted
+object would ship the same bytes to every shard. The generator writes the resolved list onto the
+descriptor, and the packer requires a non-empty `arch` there; it does not inherit, so an inline
+hsaco UKD without `arch` is refused even under an arch-scoped KDP. A generic-target object
+lists each member or its generic.
 
 ## Source roots and what the walk accepts
 
@@ -96,11 +86,9 @@ bytes are packed as-is into the arch's kpack, the kernel signature is read from 
 object's AMDGPU metadata as for a compiled object, and the UKD ships as `kind: kpack`.
 The toc key derives from the file's resolved root-relative path, so one file serving
 several symbols is one archive entry, and one key claimed by two different files is a
-hard error. The packer does not check the object's format or target processor. An
-`hsaco` UKD must list the arch(es) its object runs on in `arch` (a generic spelling such
-as `gfx11-generic` is allowed and packs the authored bytes under that key, with the
-generic rules above and no ELF check); an absent or empty `arch` is rejected. The author's own load test on the target arch
-is the only check; no in-tree load test covers `hsaco`. The shipped provenance records
+hard error. The packer does not check the object's format or target processor;
+`arch` follows [hsaco kernels and `arch`](#hsaco-kernels-and-arch). The author's own load
+test on the target arch is the only check; no in-tree load test covers `hsaco`. The shipped provenance records
 `origin_kind: "hsaco"`, the root-relative `file`, its `sha256` and the `symbol`, and makes no
 toolchain claim. As for `hip`, the specialization contract must declare
 `metadata_fields: []`: no compiler ran whose specialization a binding could observe.

@@ -1422,16 +1422,11 @@ provider's descriptor cache, reused by every later graph.
 
 **4. Resolve the kernel packs that name this engine, and apply the arch gate.** Each pack (**KDP**)
 contributes a matcher set, one dispatch-descriptor (**UDD**) id, and a kernel vector with each
-kernel's metadata values. A pack whose `arch` list excludes this device is dropped here. An `arch`
-list ranks per device in tiers: an explicit entry (the device's own base id) beats an LLVM generic
-target containing it (e.g. `gfx11-generic`, whose members come from the shared generic target
-table), which beats an empty list. Two kernels of one engine collide on a tuple only where they
-select a device at the same tier, so a generic fallback and an explicit override of one tuple
-coexist. The tiering and the shadowing of a less specific kernel by a more specific one run after
-the matcher set admits the pack, not at the arch gate, so a generic pack is dropped here only when
-no tier of its list reaches the device; shadowing costs one extra pass over the pack's kernels when
-a device's catalog is first built. The dispatch descriptor is named but **not** loaded; nothing
-dispatches yet.
+kernel's metadata values. A pack whose `arch` list excludes this device is dropped here. After its
+matchers admit it, explicit kernels outrank kernels of an LLVM generic target containing the
+device (e.g. `gfx11-generic`), which outrank unrestricted kernels; kernels with one metadata
+tuple coexist at different tiers and the highest applicable tier wins. The
+dispatch descriptor is named but **not** loaded; nothing dispatches yet.
 *Stored:* the parsed packs, matchers, and kernel metadata, in the same descriptor cache.
 
 **5. Run the engine's `graph_match`, lazily, on the first pack that cleared the gate.** It either

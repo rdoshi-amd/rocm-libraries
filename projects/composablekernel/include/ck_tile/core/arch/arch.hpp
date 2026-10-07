@@ -1592,20 +1592,20 @@ CK_TILE_DEVICE static constexpr auto get_n_lds_banks(gfx950_t) { return 64; }
 
 CK_TILE_DEVICE static constexpr auto get_n_lds_banks(gfx_invalid_t) { return 0; }
 
-// the below is for vgpr count per arch
-CK_TILE_DEVICE static constexpr auto get_max_vgpr_count(gfx9_t) { return 512; }
+// the below is for vgpr count per arch (host-usable so that budgets can be checked statically)
+CK_TILE_HOST_DEVICE static constexpr auto get_max_vgpr_count(gfx9_t) { return 512; }
 
-CK_TILE_DEVICE static constexpr auto get_max_vgpr_count(gfx103_t) { return 256; }
+CK_TILE_HOST_DEVICE static constexpr auto get_max_vgpr_count(gfx103_t) { return 256; }
 
-CK_TILE_DEVICE static constexpr auto get_max_vgpr_count(gfx11_t) { return 256; }
+CK_TILE_HOST_DEVICE static constexpr auto get_max_vgpr_count(gfx11_t) { return 256; }
 
-CK_TILE_DEVICE static constexpr auto get_max_vgpr_count(gfx120_t) { return 256; }
+CK_TILE_HOST_DEVICE static constexpr auto get_max_vgpr_count(gfx120_t) { return 256; }
 
-CK_TILE_DEVICE static constexpr auto get_max_vgpr_count(gfx125_t) { return 1024; }
+CK_TILE_HOST_DEVICE static constexpr auto get_max_vgpr_count(gfx125_t) { return 1024; }
 
-CK_TILE_DEVICE static constexpr auto get_max_vgpr_count(gfx950_t) { return 512; }
+CK_TILE_HOST_DEVICE static constexpr auto get_max_vgpr_count(gfx950_t) { return 512; }
 
-CK_TILE_DEVICE static constexpr auto get_max_vgpr_count(gfx_invalid_t) { return 0; }
+CK_TILE_HOST_DEVICE static constexpr auto get_max_vgpr_count(gfx_invalid_t) { return 0; }
 
 // the below is for lds size per arch
 CK_TILE_DEVICE static constexpr auto get_lds_size(gfx9_t) { return 64 * 1024; }
@@ -1621,6 +1621,102 @@ CK_TILE_DEVICE static constexpr auto get_lds_size(gfx125_t) { return 320 * 1024;
 CK_TILE_DEVICE static constexpr auto get_lds_size(gfx950_t) { return 160 * 1024; }
 
 CK_TILE_DEVICE static constexpr auto get_lds_size(gfx_invalid_t) { return 0; }
+
+// the below is for the VGPR file size of one SIMD (per lane), i.e. the registers that all waves
+// resident on that SIMD share. RDNA parts with the 1.5x register file are reported with the
+// smaller (1024 in wave32) file so that the budget derived from it is a lower bound. gfx9_t is
+// modelled as gfx90a/gfx942 (512-entry unified VGPR+AGPR file, granule 8); on gfx906/gfx908
+// (256 arch VGPRs, granule 4) the budget is an upper bound, like get_max_vgpr_count(gfx9_t).
+CK_TILE_HOST_DEVICE static constexpr index_t get_vgpr_file_size_per_simd(gfx9_t, index_t)
+{
+    return 512;
+}
+
+CK_TILE_HOST_DEVICE static constexpr index_t get_vgpr_file_size_per_simd(gfx103_t,
+                                                                         index_t warp_size)
+{
+    return warp_size == 32 ? 1024 : 512;
+}
+
+CK_TILE_HOST_DEVICE static constexpr index_t get_vgpr_file_size_per_simd(gfx11_t,
+                                                                         index_t warp_size)
+{
+    return warp_size == 32 ? 1024 : 512;
+}
+
+CK_TILE_HOST_DEVICE static constexpr index_t get_vgpr_file_size_per_simd(gfx120_t,
+                                                                         index_t warp_size)
+{
+    return warp_size == 32 ? 1024 : 512;
+}
+
+CK_TILE_HOST_DEVICE static constexpr index_t get_vgpr_file_size_per_simd(gfx125_t, index_t)
+{
+    return 1024;
+}
+
+CK_TILE_HOST_DEVICE static constexpr index_t get_vgpr_file_size_per_simd(gfx950_t, index_t)
+{
+    return 512;
+}
+
+CK_TILE_HOST_DEVICE static constexpr index_t get_vgpr_file_size_per_simd(gfx_invalid_t, index_t)
+{
+    return 0;
+}
+
+// the below is for the per-wave VGPR allocation granule per arch
+CK_TILE_HOST_DEVICE static constexpr index_t get_vgpr_alloc_granule(gfx9_t) { return 8; }
+
+CK_TILE_HOST_DEVICE static constexpr index_t get_vgpr_alloc_granule(gfx103_t) { return 16; }
+
+CK_TILE_HOST_DEVICE static constexpr index_t get_vgpr_alloc_granule(gfx11_t) { return 16; }
+
+CK_TILE_HOST_DEVICE static constexpr index_t get_vgpr_alloc_granule(gfx120_t) { return 16; }
+
+CK_TILE_HOST_DEVICE static constexpr index_t get_vgpr_alloc_granule(gfx125_t) { return 16; }
+
+CK_TILE_HOST_DEVICE static constexpr index_t get_vgpr_alloc_granule(gfx950_t) { return 8; }
+
+CK_TILE_HOST_DEVICE static constexpr index_t get_vgpr_alloc_granule(gfx_invalid_t) { return 1; }
+
+// VGPRs one wave can use before the compiler starts spilling, for a kernel compiled with
+// __launch_bounds__(BlockSize, MinBlockPerCu) (see kentry() in host/kernel_launch.hpp).
+//
+// The compiler derives the minimum number of waves that must fit on one SIMD from both
+// launch-bounds arguments: the work-group size forces ceil(waves_per_block / 4) waves onto a
+// SIMD (4 SIMDs per CU/WGP), and the second argument is taken as a minimum waves-per-EU
+// request. The larger of the two divides the per-SIMD VGPR file, rounded down to the
+// allocation granule and clamped to the per-wave addressable maximum:
+//
+//   budget = min(max_vgpr_per_wave,
+//                file_per_simd / max(ceil(BlockSize / WarpSize / 4), MinBlockPerCu)
+//                    / granule * granule)
+//
+// Limitation: if MinBlockPerCu exceeds the arch's maximum waves per EU (8 on gfx90a/gfx942/
+// gfx950, 16 on gfx10.3+), the compiler drops the request and only the work-group size counts;
+// this helper does not model that and returns a smaller (conservative) budget in that case.
+//
+// gfx1250 (wave32, 1024-entry file, granule 16):
+//   (128, 1) -> 1024, (256, 1|2) -> 512, (512, 1|2) -> 256, (1024, 1|2) -> 128
+template <index_t BlockSize, index_t MinBlockPerCu, index_t WarpSize, typename Arch>
+CK_TILE_HOST_DEVICE static constexpr index_t get_vgpr_budget_per_wave(Arch arch)
+{
+    static_assert(BlockSize > 0 && WarpSize > 0, "BlockSize and WarpSize must be positive");
+
+    constexpr index_t simd_per_cu    = 4;
+    constexpr index_t n_waves        = (BlockSize + WarpSize - 1) / WarpSize;
+    constexpr index_t n_min_waves    = MinBlockPerCu > 0 ? MinBlockPerCu : 1;
+    constexpr index_t n_wps          = (n_waves + simd_per_cu - 1) / simd_per_cu;
+    constexpr index_t waves_per_simd = n_wps > n_min_waves ? n_wps : n_min_waves;
+
+    const index_t granule      = get_vgpr_alloc_granule(arch);
+    const index_t budget       = get_vgpr_file_size_per_simd(arch, WarpSize) / waves_per_simd;
+    const index_t max_per_wave = get_max_vgpr_count(arch);
+    const index_t budget_alloc = budget / granule * granule;
+
+    return budget_alloc < max_per_wave ? budget_alloc : max_per_wave;
+}
 
 } // namespace detail
 CK_TILE_DEVICE static constexpr auto get_n_lds_banks()
@@ -1653,6 +1749,17 @@ CK_TILE_DEVICE static constexpr auto get_max_vgpr_count()
 CK_TILE_DEVICE static constexpr auto get_lds_size()
 {
     return detail::get_lds_size(get_device_arch());
+}
+
+/*! @brief VGPRs per wave available to a kernel launched with
+ * __launch_bounds__(BlockSize, MinBlockPerCu) on the current device arch.
+ * See detail::get_vgpr_budget_per_wave for the model.
+ */
+template <index_t BlockSize, index_t MinBlockPerCu>
+CK_TILE_DEVICE static constexpr index_t get_vgpr_budget_per_wave()
+{
+    return detail::get_vgpr_budget_per_wave<BlockSize, MinBlockPerCu, get_warp_size()>(
+        get_device_arch());
 }
 
 CK_TILE_HOST_DEVICE static constexpr auto get_max_mem_vec_inst_width()

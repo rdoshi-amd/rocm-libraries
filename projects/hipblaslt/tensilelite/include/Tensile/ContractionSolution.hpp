@@ -1378,6 +1378,11 @@ namespace TensileLite
             // newly generated StreamK 3 / SK5 set it true. Uniform-summation-order
             // grid steering consults the same bit.
             bool perTileExtraIters  = false;
+            // StreamK Hybrid kernel fixes the split tiles of its dynamic
+            // sub-path up by last arrival (one counter per split tile) instead
+            // of per-part ready flags; streamKDynamicDecomposition() splits
+            // tiles only for these. Older/custom kernels leave this false.
+            bool arrivalFixup       = false;
             bool useUniversalArgs   = true;
             bool useSFC             = false;
         };

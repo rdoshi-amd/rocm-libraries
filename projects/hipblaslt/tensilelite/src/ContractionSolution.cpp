@@ -7340,12 +7340,17 @@ namespace TensileLite
         // fixup sums the parts serially, extra parts mostly cost more than
         // the rebalancing buys.
         in.overDecomposition = 1;
-        // Only the SK5 hybrid kernels without PAP fix split tiles up by last
-        // arrival. SK4 and PAP kernels still spin on per-part ready flags, which
-        // can wait on parts no resident workgroup will run; keep them whole.
+        // Only kernels that fix split tiles up by last arrival may be split:
+        // the generator advertises it (InternalArgsSupport::arrivalFixup) for
+        // SK5 hybrid kernels with scalar atomics, DebugStreamK == 0 and no PAP.
+        // SK4, PAP, DebugStreamK and no-scalar-atomic (e.g. gfx1250) kernels
+        // still spin on per-part ready flags, which can wait on parts no
+        // resident workgroup will run; keep them whole. The hybrid/PAP terms
+        // are implied by the bit and kept as a guard against hand-edited logic.
         // Uniform summation order needs every tile whole: the arrival order of
         // the parts decides the order they are summed in.
-        in.allowSplit = sizeMapping.hasHybridAssignment() && !sizeMapping.prefetchAcrossPersistent
+        in.allowSplit = internalArgsSupport.arrivalFixup && sizeMapping.hasHybridAssignment()
+                        && !sizeMapping.prefetchAcrossPersistent
                         && !problem.getParams().uniformSummationOrder();
         // Arrival counters (and per-part flags) start after the queue counters.
         const size_t prefixEntries = streamKQueueRegionBytes(hardware) / sizeof(int);

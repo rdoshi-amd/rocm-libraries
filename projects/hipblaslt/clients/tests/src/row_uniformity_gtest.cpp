@@ -2880,4 +2880,47 @@ namespace
         EXPECT_EQ(d.partialSlots(), 0u);
     }
 
+    // The same decomposition seen through a synthesised SK5 hybrid solution on
+    // the dynamic sub-path (tile scheduling ON), so the workspace query, the
+    // launch settings, the launch-summary snapshot and the packed launch are
+    // all compared with each other rather than with the pure helper alone.
+    std::shared_ptr<TensileLite::ContractionSolution> dynamicSplitSolution()
+    {
+        auto solution                                = uniformitySteeringSolution();
+        solution->sizeMapping.tileProcessingStrategy = TensileLite::TileProcessingStrategy::StreamK;
+        solution->sizeMapping.workAssignment         = TensileLite::WorkAssignment::Hybrid;
+        solution->internalArgsSupport.arrivalFixup   = true;
+        return solution;
+    }
+
+    TensileLite::ContractionProblemGemm dynamicSplitGemm(size_t m, size_t n, size_t k, size_t batch)
+    {
+        auto problem = TensileLite::ContractionProblemGemm::GEMM(
+            false, false, m, n, k, m, n, m, 1.0, false, batch);
+        problem.setComputeInputTypeA(rocisa::DataType::Float);
+        problem.setComputeInputTypeB(rocisa::DataType::Float);
+        problem.setWorkspaceSize(size_t{1} << 30);
+        problem.setParams().setStreamKTileSchedulingMode(1);
+        return problem;
+    }
+
+    // Only kernels that advertise the arrival fixup are split: the spin-flag
+    // kernels (no scalar atomics, DebugStreamK, PAP, SK4) keep tiles whole.
+    TEST(StreamKDynamicSplit_pre_checkin, SplitNeedsTheArrivalFixup)
+    {
+        auto         device  = uniformitySteeringDevice();
+        auto         problem = dynamicSplitGemm(128, 128, 262144, 1);
+        auto         capable = dynamicSplitSolution();
+        const size_t tiles   = problem.getNumTiles(capable->sizeMapping, 1);
+        ASSERT_GT(capable->streamKDynamicDecomposition(problem, device, tiles).skTiles, 0u);
+
+        auto spinFlag                              = dynamicSplitSolution();
+        spinFlag->internalArgsSupport.arrivalFixup = false;
+        EXPECT_EQ(spinFlag->streamKDynamicDecomposition(problem, device, tiles).skTiles, 0u);
+
+        auto pap                                  = dynamicSplitSolution();
+        pap->sizeMapping.prefetchAcrossPersistent = 1;
+        EXPECT_EQ(pap->streamKDynamicDecomposition(problem, device, tiles).skTiles, 0u);
+    }
+
 } // namespace

@@ -684,10 +684,15 @@ class CDNA5ReadyQueue : public ReadyQueue {
     // Synthetic throttle cycles charged to DS placement in the current WMMA.
     // Kept separate from coIssueCyclePos_, the real hardware/hazard timeline.
     int dsSchedulingBudgetUsed_ = 0;
-    // Accumulator pack fed by a ds_load already issued in this WMMA window.
-    // Leftover cap may prefetch later consumers in that pack, but not the next
-    // pack (B_X2 after B_X1+28).
-    int dsWindowFocusPack_ = INT_MAX;
+    // Unissued ds_loads per accumulator pack of their earliest in-region matrix
+    // consumer, and that pack per ds_load DAG id. Inside a steady loop a ds_load
+    // may issue only once every earlier pack has none left: LDS returns in order,
+    // so a B_X2 load ahead of an outstanding B_X1+28 is waited out by X1's WMMA.
+    std::map<int, int> unissuedDsByPack_;
+    std::vector<int> dsPackById_;
+    int earliestUnissuedDsPack() const {
+        return unissuedDsByPack_.empty() ? INT_MAX : unissuedDsByPack_.begin()->first;
+    }
     // Exact consumer focus used outside a steady-state loop, where there is no
     // next-iteration latency to hide and younger DS work only pollutes FIFO.
     int dsWindowFocusWmmaId_ = INT_MAX;
@@ -1137,8 +1142,11 @@ DAGNode* CDNA5ReadyQueue::popNonWmma(DAGNode* node, int pickKind) {
         dsReadInflight_.pushWithThrottle(dsReadThrottleLatency());
         dsIssueCap_.push(dsIssueCapSpan());
         const auto [pack, wmmaId] = earliestPendingWmmaKey(node);
-        dsWindowFocusPack_ = std::min(dsWindowFocusPack_, pack);
         dsWindowFocusWmmaId_ = std::min(dsWindowFocusWmmaId_, wmmaId);
+        if (node->id < dsPackById_.size()) {
+            auto it = unissuedDsByPack_.find(dsPackById_[node->id]);
+            if (it != unissuedDsByPack_.end() && --it->second == 0) unissuedDsByPack_.erase(it);
+        }
     } else if (pickKind == kOther) {
         otherQueue.erase(node);
     } else if (pickKind == kWmmaParentValu) {
@@ -1601,7 +1609,6 @@ DAGNode* CDNA5ReadyQueue::pickOneFromWMMA(DAGNode* pick) {
             cumulativeWmmaHideBudget_ += hideBudget_.issueBudgetFor(node->inst);
         }
     }
-    dsWindowFocusPack_ = INT_MAX;
     dsWindowFocusWmmaId_ = INT_MAX;
 
     globalReadCounter = 0;
@@ -2453,17 +2460,18 @@ DAGNode* CDNA5ReadyQueue::pickOne() {
         bool pickedPending = false;
         int pickedEarly = INT_MAX;
         const bool holdIssuedOnlyPreload = wmmaIssueConfig.issuedCount > 0;
-        // Steady-state loops may look ahead across consumers in one accumulator
-        // pack. At a tail, retain exact-consumer focus: there is no next
-        // iteration to prepare, and younger loads would only sit ahead of the
-        // current consumer in DS FIFO.
+        // Steady-state loops may look ahead across consumers and, once an earlier
+        // pack has no ds_load left, into the next pack. At a tail, retain
+        // exact-consumer focus: there is no next iteration to prepare, and
+        // younger loads would only sit ahead of the current consumer in DS FIFO.
         const Loop* loop = getLoop();
         const bool inSteadyLoop = loop && currentBB_ && loop->contains(currentBB_);
+        const int openPack = earliestUnissuedDsPack();
         for (DAGNode* n : localReadQueue) {
             if (holdIssuedOnlyPreload && dsFeedsIssuedOnlyWmma(n)) continue;
             const auto [pack, early] = earliestPendingWmmaKey(n);
             if (inSteadyLoop) {
-                if (dsWindowFocusPack_ != INT_MAX && pack > dsWindowFocusPack_) continue;
+                if (pack > openPack) continue;
             } else if (dsWindowFocusWmmaId_ != INT_MAX && early > dsWindowFocusWmmaId_) {
                 continue;
             }
@@ -2982,8 +2990,15 @@ void CDNA5ReadyQueue::onInitRegion(IRList::iterator regionStart, IRList::iterato
                                    IRList::iterator blockBegin, const RegionDependencies& deps) {
     regionDag_ = &deps.dag;
     wmmaIssuedCountThisRegion_ = 0;
-    dsWindowFocusPack_ = INT_MAX;
     dsWindowFocusWmmaId_ = INT_MAX;
+    unissuedDsByPack_.clear();
+    dsPackById_.assign(deps.dag.nodes.size(), INT_MAX);
+    for (const DAGNode& n : deps.dag.nodes) {
+        if (!isDSRead(*n.inst)) continue;
+        const int pack = earliestPendingWmmaKey(&n).first;
+        dsPackById_[n.id] = pack;
+        if (pack != INT_MAX) ++unissuedDsByPack_[pack];
+    }
     lastPickedNode_ = nullptr;
     // SCC chain locks are per-region: chain ids index the prior region's
     // DAGNodeList, and region boundaries are side-effect cuts no reordering

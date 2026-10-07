@@ -446,8 +446,8 @@ static void scheduleRegionWithMovableSideEffects(
 
     // Group matrix ops into accumulator packs. Tensile emits one pack as a run
     // over disjoint C destinations, then starts the next pack by reusing C+0.
-    // The ready queue may prefetch DS inputs across consumers within a pack,
-    // but must not spend leftover window slots on the next pack.
+    // DS inputs are ordered pack by pack, and the ready queue does not issue a
+    // later pack's load while an earlier pack still has one outstanding.
     unsigned wmmaPack = 0;
     std::vector<StinkyRegister> packDests;
     int priorMatrixDest = -1;
@@ -484,8 +484,9 @@ static void scheduleRegionWithMovableSideEffects(
 
     // Pre-scan: assign dsReadPriority. Lower = pick first.
     // If any feedsWmma (wmmaParentValuQueue) node touches an input family
-    // (A / B / MXSA / MXSB), every ds_load of those families is issued first so
-    // splat v_perm can start without waiting dscnt 0. Remaining loads keep the
+    // (A / B / MXSA / MXSB), every ds_load of those families is issued first
+    // within its accumulator pack so splat v_perm can start without waiting
+    // dscnt 0. Remaining loads keep the
     // existing DsReadOrder (default A→B→MXSA→MXSB). Within each tier the same
     // affinity / srcReg sort as before is reused — that is what yields
     // MXSA→A→B→MXSB vs MXSA→MXSB→A→B vs A→MXSA→B→MXSB from the parent set.
@@ -746,8 +747,26 @@ static void scheduleRegionWithMovableSideEffects(
         };
 
         unsigned pri = 0;
-        assignPriorities(parentFed, pri, /*parentTier=*/true);
-        assignPriorities(rest, pri, /*parentTier=*/false);
+        if (mxUnit1Scheduling) {
+            // Accumulator packs read separate buffers (X1, X2, ...). LDS returns in
+            // order, so a later pack's load issued ahead of this pack's remaining
+            // loads would be waited out by this pack's consumers. Order packs first;
+            // the parent tier still leads within each pack. Loads with no in-region
+            // matrix consumer (next-trip preloads) go last.
+            std::map<unsigned, std::pair<std::vector<DsInfo>, std::vector<DsInfo>>> byPack;
+            auto packOf = [&](const DsInfo& d) {
+                return d.consumer == UINT_MAX ? UINT_MAX : dagNodes[d.consumer].wmmaPack;
+            };
+            for (const DsInfo& d : parentFed) byPack[packOf(d)].first.push_back(d);
+            for (const DsInfo& d : rest) byPack[packOf(d)].second.push_back(d);
+            for (auto& [pack, tiers] : byPack) {
+                assignPriorities(tiers.first, pri, /*parentTier=*/true);
+                assignPriorities(tiers.second, pri, /*parentTier=*/false);
+            }
+        } else {
+            assignPriorities(parentFed, pri, /*parentTier=*/true);
+            assignPriorities(rest, pri, /*parentTier=*/false);
+        }
 
         PASS_DEBUG({
             std::cerr << "[DAG schedule] dsReadPriority parentKindMask=" << parentKindMask

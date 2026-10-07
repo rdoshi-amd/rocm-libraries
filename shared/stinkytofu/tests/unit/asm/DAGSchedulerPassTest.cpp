@@ -1428,6 +1428,49 @@ TEST_F(DAGSchedulerPassTest, ParentTierDsLoadOrderFollowsWmmaConsumerNotKind) {
     EXPECT_LT(positionOf(*bb, wait), positionOf(*bb, mxsaNext));
 }
 
+// MX128 loop body: each accumulator pack reads its own buffer (X1, X2). LDS
+// returns in order, so pack 2's MXS load chained ahead of pack 1's A load
+// would be waited out by pack 1's WMMA. The parent tier leads only within its
+// own pack.
+TEST_F(DAGSchedulerPassTest, ParentTierDsLoadOrderStaysWithinAccumulatorPack) {
+    bb->addSuccessor(bb);
+
+    StinkyInstruction* wmmaHead = createWmmaScaleF8(/*destStart=*/32, /*src0Start=*/50);
+    ASSERT_NE(wmmaHead, nullptr);
+
+    StinkyInstruction* mxsP1 = createMovableDsLoad(/*destReg=*/600, /*addrReg=*/80,
+                                                   /*ldsToken=*/0);
+    StinkyInstruction* mxsP2 = createMovableDsLoad(/*destReg=*/700, /*addrReg=*/81,
+                                                   /*ldsToken=*/0);
+    StinkyInstruction* aP1 = createMovableDsLoad(/*destReg=*/200, /*addrReg=*/82,
+                                                 /*ldsToken=*/0);
+    StinkyInstruction* aP2 = createMovableDsLoad(/*destReg=*/400, /*addrReg=*/83,
+                                                 /*ldsToken=*/0);
+
+    createVAddInBlock(bb, arch, /*destReg=*/610, /*src0Reg=*/600, /*src1Reg=*/600);
+    StinkyInstruction* wmmaP1 = createWmmaScaleF8(/*destStart=*/100, /*src0Start=*/200);
+    ASSERT_NE(wmmaP1, nullptr);
+    wmmaP1->addSrcReg(StinkyRegister("v", 610, 1));
+
+    createVAddInBlock(bb, arch, /*destReg=*/710, /*src0Reg=*/700, /*src1Reg=*/700);
+    // Reuse wmmaP1's accumulator destination: this is the next pack.
+    StinkyInstruction* wmmaP2 = createWmmaScaleF8(/*destStart=*/100, /*src0Start=*/400);
+    ASSERT_NE(wmmaP2, nullptr);
+    wmmaP2->addSrcReg(StinkyRegister("v", 710, 1));
+
+    const int beforeCount = countStinkyInstructions(*bb);
+    runPassWithMxUnit1Scheduling();
+    EXPECT_EQ(countStinkyInstructions(*bb), beforeCount);
+
+    EXPECT_LT(positionOf(*bb, mxsP1), positionOf(*bb, aP1))
+        << "the parent tier still leads within its pack";
+    EXPECT_LT(positionOf(*bb, aP1), positionOf(*bb, mxsP2))
+        << "a later pack's MXS load must not issue ahead of an earlier pack's "
+           "outstanding A/B load";
+    EXPECT_LT(positionOf(*bb, mxsP2), positionOf(*bb, aP2));
+    EXPECT_LT(positionOf(*bb, wmmaP1), positionOf(*bb, wmmaP2));
+}
+
 // dsReadPerWmma leftover slots will otherwise take later-pack loads that are
 // also pending (B_X1+28 then B_X2+0/+4). Those occupy the LDS FIFO in front of
 // the next WMMA and WaitCntInsertion emits s_wait_dscnt 2. Rank by earliest

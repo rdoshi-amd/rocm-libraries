@@ -209,10 +209,10 @@ extern "C" float {{algo_name}}_wrapper(
     {% block calculate_time %}
     std::vector<double> bps = executor.get_all_bytes_per_second();
 
-    double total = 0.0;
+    double prod = 1.0;
     for(double x : bps)
-        total += (1000.0 * primbench::GiB) / x;
-    return total / static_cast<double>(bps.size());
+        prod *= (1000.0 * primbench::GiB) / x;
+    return static_cast<float>(std::pow(prod, 1.0 / static_cast<double>(bps.size())));
     {% endblock %}
 
 }

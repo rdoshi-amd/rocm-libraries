@@ -3580,8 +3580,9 @@ namespace
     // With two or more tiles the split is aligned to the per-XCD queues:
     // lowered to a multiple of numQueues / 2 that the SKItersPerWI rounding
     // keeps exact, when that drops at most 1/8 of the parts or, for an odd
-    // split, keeps 3/4 of the CUs the unaligned split kept busy. Splits below
-    // numQueues and single tiles stay as they are.
+    // split or one whose queue-sharing tiles do not exist, keeps 3/4 of the
+    // CUs the unaligned split kept busy. Splits below numQueues and single
+    // tiles stay as they are.
     TEST(StreamKDynamicSplit_pre_checkin, SplitAlignsWithTheQueues)
     {
         auto split = [](size_t tiles, size_t iters, size_t slots, bool parallel, size_t queues) {
@@ -3602,6 +3603,9 @@ namespace
                       Case{19, 250, 224, 11, 11}, // the same: 209 -> 152 of 224 CUs
                       Case{2, 689, 256, 77, 77}, // the next exact multiple of 4, 44, idles 3/7
                       Case{24, 3456, 256, 10, 10}, // even, 8 would drop 1/5
+                      Case{13, 554, 182, 14, 14}, // even, tiles t and t + 4 share; 12 drops 1/7
+                      Case{2, 2304, 220, 110, 96}, // even, but no tile t + 4 to share with
+                      Case{3, 2048, 222, 74, 64}, // the same on 3 tiles: 222 -> 192 CUs
                       Case{17, 4096, 256, 15, 12},
                       Case{36, 4096, 256, 7, 7}, // below the queue count
                       Case{1, 1000, 256, 125, 125}, // one tile: nothing shared

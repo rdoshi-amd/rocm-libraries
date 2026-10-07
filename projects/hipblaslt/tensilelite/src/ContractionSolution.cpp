@@ -50,6 +50,7 @@
 #include <cstring>
 #include <iomanip>
 #include <mutex>
+#include <numeric>
 #include <random>
 #include <unordered_map>
 
@@ -507,10 +508,15 @@ namespace TensileLite
         // through every XCD (p846: 4.6x the L2 fills, 2x the kernel time at
         // split 9 vs 8). Lower the split to the nearest exact multiple of
         // numQueues / 2 when that loses at most 1/8 of the parts; an even
-        // split keeps half the locality and losing more parts costs more than
-        // the rest gains (split 10 -> 8: +7% and +16% on two shapes, 18 -> 16:
-        // -12%). An odd split may lose more, as long as the aligned parts
-        // still cover 3/4 of the CUs the unaligned ones kept busy,
+        // split keeps half the locality (tiles t and t + numQueues /
+        // gcd(split, numQueues) share their queues) and losing more parts
+        // costs more than the rest gains (split 10 -> 8: +7% and +16% on two
+        // shapes, 14 -> 12 on 13-18 tiles: +4% to +12%; 18 -> 16: -12%). An
+        // odd split, or an even one whose queue-sharing tiles do not exist
+        // (2 tiles of 110 parts: tile 1 needs tile 4 to share with), may
+        // lose more (110 -> 96 on 2 tiles: -16% to -21%; 74 -> 64 on 3:
+        // -19%), as long as the aligned parts still cover 3/4 of the CUs the
+        // unaligned ones kept busy,
         // min(tiles * split, computeUnits): parts beyond one per CU only
         // share a CU, so dropping them costs little (8 tiles of 41 parts on
         // 256 CUs -> 24: -30%), while a launch that leaves CUs idle loses
@@ -531,10 +537,11 @@ namespace TensileLite
             const size_t g = q / 2;
             if(s < q || s % g == 0)
                 return split;
-            const size_t busy = std::min(in.tiles * s, alignCUs);
+            const size_t busy     = std::min(in.tiles * s, alignCUs);
+            const bool   unshared = s % 2 == 1 || in.tiles <= q / std::gcd(s, q);
             for(size_t c = s / g * g; c >= q; c -= g)
             {
-                if(s % 2 == 0 ? 8 * c < 7 * s : 4 * in.tiles * c < 3 * busy)
+                if(unshared ? 4 * in.tiles * c < 3 * busy : 8 * c < 7 * s)
                     break;
                 if(decompose(in.tiles, c).skSplit == c)
                     return c;

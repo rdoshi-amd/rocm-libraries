@@ -13,8 +13,9 @@ selection is per-UKD on `kernel_source.kind`, never per-folder, so one root feed
 producer into one kpack per arch. Nothing is registered in CMake: adding a descriptor is
 dropping files in a folder.
 
-The provider wires six roots: production, plus five over the four authored test sets
-(`shared` packs twice, once into each test binary's discovery root).
+The provider wires seven roots: production, plus six over the four authored test sets.
+`shared` packs twice, once into each test binary's discovery root. `archive_fixture` packs
+twice, once for each test binary, so each binary reads its own archive.
 
 | Root | Source | Ships |
 |---|---|---|

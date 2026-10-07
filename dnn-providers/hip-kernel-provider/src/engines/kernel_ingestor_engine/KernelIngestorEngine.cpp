@@ -5,8 +5,10 @@
 
 #ifdef HIPDNN_ENABLE_KERNEL_INGESTOR
 
+#include <algorithm>
 #include <filesystem>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -149,6 +151,30 @@ const std::vector<hipdnn_plugin_sdk::ingestor::DescriptorSet>& discoverDescripto
     }();
 
     return s_sets;
+}
+
+std::optional<std::string> loadedIngestorEngineName(const Handle& handle, int64_t engineId)
+{
+    if(handle.container == nullptr)
+    {
+        return std::nullopt;
+    }
+
+    const auto engineIds = handle.getEngineManager().getAllEngineIds();
+    if(std::find(engineIds.begin(), engineIds.end(), engineId) == engineIds.end())
+    {
+        return std::nullopt;
+    }
+
+    const auto& sets = discoverDescriptorSets();
+    const auto found = std::find_if(sets.begin(), sets.end(), [engineId](const auto& set) {
+        return hipdnn_data_sdk::utilities::engineNameToId(set.engine.name) == engineId;
+    });
+    if(found == sets.end())
+    {
+        return std::nullopt;
+    }
+    return found->engine.name;
 }
 
 } // namespace hip_kernel_provider::kernel_ingestor_engine

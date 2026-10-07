@@ -24,6 +24,7 @@
 #include <cstddef>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 MIOPEN_DECLARE_ENV_VAR_BOOL(MIOPEN_DEBUG_CONV_HIPCONV)
@@ -311,15 +312,21 @@ static std::string HipConvConfigRecord(hipconv::ConvKernelHandle kernel)
     return record;
 }
 
+// Whether `record` carries this build's config version; "unknown" carries none.
+static bool HasCurrentConfigVersion(std::string_view record)
+{
+    const auto version = hipconv::config_version();
+    return version != "unknown" && record.size() > version.size() &&
+           record.substr(0, version.size()) == version && record[version.size()] == ':';
+}
+
 // Resolve `config.descriptor` (a perf-db record) to `config.index` for this
 // build's config enumeration `cfgs`. No-op when the index is already set
 // (search / heuristic path) or the descriptor is empty.
 static void ResolveIndexFromDescriptor(const std::vector<hipconv::ConvKernelHandle>& cfgs,
                                        const PerformanceConfigConvHipConv& config)
 {
-    if(config.index >= 0 || config.descriptor.empty())
-        return;
-    if(hipconv::config_version() == "unknown")
+    if(config.index >= 0 || !HasCurrentConfigVersion(config.descriptor))
         return;
     for(int i = 0; i < static_cast<int>(cfgs.size()); ++i)
     {
@@ -447,6 +454,12 @@ bool PerformanceConfigConvHipConv::IsValidValue() const { return index >= 0; }
 bool PerformanceConfigConvHipConv::IsValid(const ExecutionContext& ctx,
                                            const ProblemDescription& problem) const
 {
+    // A record from another config version matches nothing, so reject it without enumerating.
+    //
+    // The perf-config picker validates every candidate in its bucket this way.
+    if(index < 0 && !descriptor.empty() && !HasCurrentConfigVersion(descriptor))
+        return false;
+
     const auto arch = hipconv::resolve_arch(ctx.GetStream().GetDeviceName());
     if(!arch.has_value())
         return false;

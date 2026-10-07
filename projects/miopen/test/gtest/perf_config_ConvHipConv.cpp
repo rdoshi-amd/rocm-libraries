@@ -54,6 +54,7 @@ TEST(GPU_PerfConfig_ConvHipConv_FP16, VersionStamp)
     };
     EXPECT_TRUE(loads(record));
     EXPECT_FALSE(loads("v999.999:" + body));
+    EXPECT_FALSE(loads(record.substr(0, colon) + "0:" + body));
     EXPECT_FALSE(loads("unknown:" + body));
     EXPECT_FALSE(loads(body));
 }

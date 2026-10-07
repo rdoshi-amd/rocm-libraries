@@ -13,6 +13,7 @@ partials in part order.
 
 import itertools
 import re
+import shutil
 from contextlib import contextmanager
 from types import SimpleNamespace
 
@@ -21,6 +22,7 @@ import pytest
 # Prime the component registry before StreamK imports (avoids circular import).
 from Tensile.KernelWriterAssembly import KernelWriterAssembly  # noqa: F401
 
+import rocisa
 from rocisa.code import Label, Module
 from rocisa.container import ContinuousRegister
 from rocisa.instruction import (
@@ -36,10 +38,24 @@ from rocisa.instruction import (
     SSubU32,
 )
 
+from Tensile.Common import IsaVersion
+from Tensile.Common.Capabilities import makeIsaInfoMap
 from Tensile.Components import StreamK as StreamKModule
 from Tensile.Components.StreamK import StreamK, StreamKHybrid
+from Tensile.Tests.rocisa_test_state import preserve_rocisa_kernel_state
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.fixture(autouse=True)
+def _gfx950():
+    # Instruction spelling (e.g. SMEM "glc" vs "scope:") follows rocisa's
+    # active kernel, which earlier tests may have pointed at another ISA.
+    isa = IsaVersion(9, 5, 0)
+    with preserve_rocisa_kernel_state():
+        makeIsaInfoMap([isa], shutil.which("amdclang++") or "/opt/rocm/bin/amdclang++")
+        rocisa.rocIsa.getInstance().setKernel(isa, 64)
+        yield
 
 
 class _Pool:

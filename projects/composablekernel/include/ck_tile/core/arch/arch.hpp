@@ -1449,6 +1449,23 @@ CK_TILE_DEVICE void block_sync_lds_direct_load()
 #endif
 }
 
+// Like block_sync_lds_direct_load, but also drains DScnt before the barrier. On gfx125
+// the async direct-to-LDS path zero-fills invalid lanes with a plain DS store, which is
+// tracked by DScnt rather than ASYNCcnt; draining DScnt also retires this wave's prior
+// LDS reads of a buffer that the next async load will overwrite (WAR).
+template <index_t asynccnt = 0>
+CK_TILE_DEVICE void block_sync_lds_async_ds()
+{
+#if defined(__gfx125__)
+    s_wait_dscnt<0>();
+    __builtin_amdgcn_s_wait_asynccnt(asynccnt);
+    __builtin_amdgcn_s_barrier_signal(-1);
+    __builtin_amdgcn_s_barrier_wait(-1);
+#else
+    s_waitcnt_barrier<asynccnt, waitcnt_arg::kMaxExpCnt, 0>();
+#endif
+}
+
 CK_TILE_DEVICE void s_nop(index_t cnt = 0)
 {
 #if 1

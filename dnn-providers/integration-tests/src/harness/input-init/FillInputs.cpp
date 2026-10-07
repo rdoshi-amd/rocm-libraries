@@ -4,12 +4,16 @@
 #include "harness/input-init/FillInputs.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
+#include <limits>
 #include <random>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 
 #include <flatbuffers/flatbuffers.h>
+#include <hipdnn_data_sdk/types.hpp>
 #include <hipdnn_data_sdk/types/Bfloat16.hpp>
 #include <hipdnn_data_sdk/types/Half.hpp>
 
@@ -22,6 +26,31 @@ namespace hipdnn_integration_tests
 {
 namespace
 {
+
+using TensorDataTypes = std::unordered_map<int64_t, hipdnn_flatbuffers_sdk::data_objects::DataType>;
+
+TensorDataTypes collectDataTypes(const hipdnn_flatbuffers_sdk::data_objects::Graph& graph)
+{
+    TensorDataTypes dataTypes;
+    if(graph.tensors() == nullptr)
+    {
+        return dataTypes;
+    }
+    for(const auto* tensor : *graph.tensors())
+    {
+        dataTypes.emplace(tensor->uid(), tensor->data_type());
+    }
+    return dataTypes;
+}
+
+// Symmetric range over every finite value of T, so a uniform draw rounds onto
+// each representable magnitude, including the extremes.
+template <typename T>
+FillRecipe symmetricFullRange()
+{
+    const auto max = static_cast<float>(std::numeric_limits<T>::max());
+    return FillRecipe::free(-max, max);
+}
 
 // ── Fill dispatch ───────────────────────────────────────────────────────────
 
@@ -157,7 +186,18 @@ void setRmsnormBackwardInitDefaults(const hipdnn_flatbuffers_sdk::data_objects::
 
 // ── Block-scale quantization ─────────────────────────────────────────────────
 
+// Largest magnitude a recipe can produce.
+float recipeMagnitude(const FillRecipe& recipe)
+{
+    if(recipe.kind == FillRecipe::Kind::FIXED)
+    {
+        return std::fabs(recipe.value);
+    }
+    return std::max(std::fabs(recipe.lo), std::fabs(recipe.hi));
+}
+
 void setBlockScaleDequantizeInitDefaults(const hipdnn_flatbuffers_sdk::data_objects::Node& node,
+                                         const TensorDataTypes& dataTypes,
                                          InputFillRecipes& recipes)
 {
     const auto* a = node.attributes_as_BlockScaleDequantizeAttributes();
@@ -165,10 +205,23 @@ void setBlockScaleDequantizeInitDefaults(const hipdnn_flatbuffers_sdk::data_obje
     {
         return;
     }
-    // [0.5, 2.0]: UE8M0 scales have zero mantissa bits, so any value stored
-    // discretizes to a power of two ({0.5, 1.0, 2.0}), keeping dequantized
-    // products within FP16 range.
-    recipes.setDefault(a->scale_tensor_uid(), FillRecipe::free(0.5f, 2.0f));
+
+    const auto xType = dataTypes.find(a->x_tensor_uid());
+    if(xType != dataTypes.end())
+    {
+        recipes.setDefault(a->x_tensor_uid(), defaultFillFor(xType->second));
+    }
+
+    // Scale is normalized against the operand range in effect (default or a
+    // test override), as OCP MX does: scale ~ 2^-floor(log2(amax)). The
+    // dequantized block then peaks near 4 whatever the element format, so
+    // products stay within FP16 range. UE8M0 has no mantissa bits, so the
+    // [0.5, 2] * 2^-e draw discretizes to three powers of two. An operand in
+    // [-1, 1] gives e = 0, i.e. [0.5, 2].
+    const float amax = recipeMagnitude(recipes.fill(a->x_tensor_uid()));
+    const int e = amax >= 1.0f ? std::ilogb(amax) : 0;
+    recipes.setDefault(a->scale_tensor_uid(),
+                       FillRecipe::free(std::ldexp(0.5f, -e), std::ldexp(2.0f, -e)));
 }
 
 // ── SDPA ─────────────────────────────────────────────────────────────────────
@@ -205,6 +258,7 @@ void setSdpaBackwardInitDefaults(const hipdnn_flatbuffers_sdk::data_objects::Nod
 // ── Dispatch ─────────────────────────────────────────────────────────────────
 
 bool applyDefaultFills(const hipdnn_flatbuffers_sdk::data_objects::Node& node,
+                       const TensorDataTypes& dataTypes,
                        InputFillRecipes& recipes)
 {
     using NA = hipdnn_flatbuffers_sdk::data_objects::NodeAttributes;
@@ -236,7 +290,7 @@ bool applyDefaultFills(const hipdnn_flatbuffers_sdk::data_objects::Node& node,
         setRmsnormBackwardInitDefaults(node, recipes);
         return true;
     case NA::BlockScaleDequantizeAttributes:
-        setBlockScaleDequantizeInitDefaults(node, recipes);
+        setBlockScaleDequantizeInitDefaults(node, dataTypes, recipes);
         return true;
     case NA::SdpaAttributes:
         setSdpaForwardInitDefaults(node, recipes);
@@ -244,7 +298,7 @@ bool applyDefaultFills(const hipdnn_flatbuffers_sdk::data_objects::Node& node,
     case NA::SdpaBackwardAttributes:
         setSdpaBackwardInitDefaults(node, recipes);
         return true;
-    // All-FREE ops: valid ops whose inputs need no special init (all default to FREE [-1,1]).
+    // Ops whose inputs need no special init; they get defaultFillFor(dtype).
     case NA::PointwiseAttributes:
     case NA::ConvolutionFwdAttributes:
     case NA::ConvolutionBwdAttributes:
@@ -423,21 +477,87 @@ private:
 
 } // anonymous namespace
 
+FillRecipe defaultFillFor(hipdnn_flatbuffers_sdk::data_objects::DataType dataType)
+{
+    using DataType = hipdnn_flatbuffers_sdk::data_objects::DataType;
+    namespace types = hipdnn_data_sdk::types;
+
+    switch(dataType)
+    {
+    case DataType::FLOAT:
+    case DataType::HALF:
+    case DataType::BFLOAT16:
+    case DataType::DOUBLE:
+        return FillRecipe{};
+    // Few enough codes that a uniform draw over the full range reaches all of them;
+    // [-1, 1] would only reach 3 of the 8 FP4 magnitudes.
+    case DataType::FP4_E2M1:
+        return symmetricFullRange<types::fp4_e2m1>();
+    case DataType::FP6_E2M3:
+        return symmetricFullRange<types::fp6_e2m3>();
+    case DataType::FP6_E3M2:
+        return symmetricFullRange<types::fp6_e3m2>();
+    // FP8 codes are spread logarithmically, so no uniform range reaches most of
+    // them: a wide range leaves the small exponents empty. Full coverage needs a
+    // log-uniform or code-uniform distribution, which ITensor cannot draw yet.
+    case DataType::FP8_E4M3:
+    case DataType::FP8_E5M2:
+    case DataType::FP8_E4M3_FNUZ:
+    case DataType::FP8_E5M2_FNUZ:
+        return FillRecipe{};
+    // Power-of-two scale; [0.5, 2] discretizes to {0.5, 1, 2}.
+    case DataType::FP8_E8M0:
+        return FillRecipe::free(0.5f, 2.0f);
+    // Integer draws from [-1, 1] collapse to a few values. A meaningful range is
+    // op-specific (indices, offsets, masks), so it belongs in per-op defaults.
+    case DataType::UINT8:
+    case DataType::INT32:
+    case DataType::INT8:
+    case DataType::INT4:
+    case DataType::INT64:
+    case DataType::BOOLEAN:
+        return FillRecipe{};
+    case DataType::UNSET:
+    default:
+        throw std::invalid_argument("defaultFillFor: no fill default for data type "
+                                    + std::string(EnumNameDataType(dataType)));
+    }
+}
+
 FillResult fillInputs(const hipdnn_flatbuffers_sdk::data_objects::Graph& graph,
                       InputTensorMap& inputs,
                       const std::vector<int64_t>& ownedUids,
                       InputFillRecipes& recipes,
                       DeviceInputFiller* device)
 {
+    const auto dataTypes = collectDataTypes(graph);
+
     for(flatbuffers::uoffset_t i = 0; i < graph.nodes()->size(); ++i)
     {
         const auto& node = *graph.nodes()->Get(i);
-        if(!applyDefaultFills(node, recipes))
+        if(!applyDefaultFills(node, dataTypes, recipes))
         {
             const auto* name = node.name();
             return FillResult::unsupported(
                 "no input fill registered for op "
                 + std::string(name != nullptr ? name->c_str() : "(unnamed)"));
+        }
+    }
+
+    // Dtype defaults sit below test and per-op recipes. Only those that differ
+    // from the generic FREE[-1, 1] are recorded, so meta.inputs stays unchanged
+    // for float graphs and names the range for narrow formats.
+    for(const int64_t uid : ownedUids)
+    {
+        const auto dataType = dataTypes.find(uid);
+        if(dataType == dataTypes.end())
+        {
+            continue;
+        }
+        const auto recipe = defaultFillFor(dataType->second);
+        if(recipe != FillRecipe{})
+        {
+            recipes.setDefault(uid, recipe);
         }
     }
 

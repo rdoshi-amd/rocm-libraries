@@ -28,6 +28,7 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
+from utils import BASE_DIR
 
 """
 This script performs comparative analysis of different optimization strategies for kernel tuning simulations.
@@ -239,7 +240,7 @@ def create_performance_heatmap(df, output_filename, algo, arch):
 def main():
     args = parse_arguments()
 
-    base_dir = "."
+    base_dir = BASE_DIR
     simulated_output_dir = os.path.join(base_dir, "../simulated_output")
     output_dir = os.path.join(base_dir, "../output")
 

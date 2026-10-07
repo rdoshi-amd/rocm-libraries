@@ -1929,8 +1929,13 @@ struct DeviceGroupedConvFwdMultipleABD_WaveletModel_Xdl_CShuffle_V3
             str << "_MergedGroups";
         }
 
+        if constexpr(DirectLoad)
+        {
+            str << "_DirectLoad";
+        }
+
         str << "<"
-            << TileLoadThreadGroupSize << "l+" << TileMathThreadGroupSize << "m, "
+            << TileLoadThreadGroupSize << "l," << TileMathThreadGroupSize << "m, "
             << MPerBlock << ", "
             << NPerBlock << ", "
             << KPerBlock << ", "

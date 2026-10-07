@@ -3665,6 +3665,32 @@ namespace
         }
     }
 
+    // Few tiles (8 or more parts each at one part per CU) are split for one
+    // part per CU, not per workgroup slot; more tiles keep the slots.
+    TEST(StreamKDynamicSplit_pre_checkin, FewTilesSplitOnePartPerCU)
+    {
+        auto split = [](size_t tiles, size_t iters, size_t cus) {
+            auto in         = parallelSplitInputs(tiles, iters);
+            in.maxGrid      = 768;
+            in.splitSlots   = 768; // 256 CUs x occupancy 3
+            in.computeUnits = cus;
+            return TensileLite::streamKDynamicSplit(in);
+        };
+        // 2 tiles of 6912: 384 parts on the slots, 128 on the CUs.
+        EXPECT_EQ(split(2, 6912, 0).skSplit, 384u);
+        const auto d = split(2, 6912, 256);
+        EXPECT_TRUE(d.parallel);
+        EXPECT_EQ(d.skSplit, 128u);
+        EXPECT_EQ(d.grid, 256u);
+        // 32 tiles still get 8 parts each at one per CU.
+        EXPECT_EQ(split(32, 4096, 0).skSplit, 24u);
+        EXPECT_EQ(split(32, 4096, 256).skSplit, 8u);
+        // 33 tiles would get 7: they keep the slots (768 / 33 = 23 parts).
+        EXPECT_EQ(split(33, 4096, 256).skSplit, 23u);
+        // A CU-count hint lowers the CUs: 192 -> 2 tiles of 96 parts.
+        EXPECT_EQ(split(2, 6912, 192).skSplit, 96u);
+    }
+
     // The split sized for a CU-count hint is aligned too: 20 tiles on the 192
     // slots of a 192-CU hint is 9 parts, lowered to 8.
     TEST(StreamKDynamicSplit_pre_checkin, HintedSplitAlignsWithTheQueues)

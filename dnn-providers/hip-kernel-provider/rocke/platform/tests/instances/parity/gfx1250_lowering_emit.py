@@ -239,6 +239,45 @@ def build_tensor_transfers(b: IRBuilder) -> None:
     b.ret()
 
 
+def build_tdm_descriptor(b: IRBuilder) -> None:
+    """A real rank-2 TDM descriptor, not the zeroed placeholder above.
+
+    ``build_tensor_transfers`` pins the intrinsic's *call shape* with zeroed
+    descriptor groups. This pins the descriptor's *construction*: the GROUP0 /
+    GROUP1 bit packing, the ``readfirstlane`` on every runtime word (the
+    descriptor is read as SGPRs, so a VGPR-resident word is silently wrong),
+    and the row-pad encode. That is the half where a wrong bit gives garbage or
+    a hang rather than a compile error, so it is the half worth pinning across
+    the two engines.
+
+    Built at a 1-byte element width on purpose: every 8-bit defect found in
+    this load path so far has been a 2-bytes-per-element assumption, and this
+    config is what would catch the next one in the descriptor math.
+    """
+    from rocke.core.tdm import build_tdm_descriptor_2d, tdm_padding_for_tile
+
+    pad_enable, pad_interval, pad_amount = tdm_padding_for_tile(1, 128, 80)
+    groups = build_tdm_descriptor_2d(
+        b,
+        global_addr=b.const_i64(0),
+        lds_addr=b.const_i64(0),
+        elem_bytes=1,
+        tensor_dim0=b.const_i32(4096),
+        tensor_dim1=b.const_i32(8192),
+        tile_dim0=128,
+        tile_dim1=128,
+        dim0_stride=8192,
+        dim1_stride=1,
+        pad_enable=pad_enable,
+        pad_interval=pad_interval,
+        pad_amount=pad_amount,
+    )
+    b.tensor_load_to_lds(*groups, cachepolicy=0)
+    b.s_wait_tensorcnt(0)
+    b.ret()
+
+
+
 # (builder, arch). Each gfx1250 config that tests a *choice* of encoding is
 # followed by its gfx950 twin, so the pair pins both branches.
 CONFIGS = [
@@ -301,6 +340,10 @@ def _scale_coordinates(block_k):
 
 
 CONFIGS.extend((_scale_coordinates(block), "gfx1250") for block in (32, 16))
+
+# Appended last on purpose: inserting into the list above renumbers every
+# later config and churns the C mirror for no reason.
+CONFIGS.append((build_tdm_descriptor, "gfx1250"))
 
 
 def _spec(idx: int):

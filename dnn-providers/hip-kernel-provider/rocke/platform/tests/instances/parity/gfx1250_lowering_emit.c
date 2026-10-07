@@ -14,6 +14,7 @@
 
 #include "rocke/arch_target.h"
 #include "rocke/ir.h"
+#include "rocke/tdm.h"
 #include "rocke/ir_serialize.h"
 #include "rocke/lower_llvm.h"
 #include "rocke/verify.h"
@@ -398,6 +399,44 @@ typedef struct config
 /* Each gfx1250 config that tests a *choice* of encoding is followed by its
  * gfx950 twin, so the pair pins both branches. Index-for-index with the Python
  * emitter's CONFIGS list. */
+
+/* Mirrors gfx1250_lowering_emit.py build_tdm_descriptor: a real rank-2 TDM
+ * descriptor rather than the zeroed placeholder build_tensor_transfers uses.
+ * Pins the GROUP0 / GROUP1 bit packing, the readfirstlane on every runtime
+ * word, and the row-pad encode -- the half where a wrong bit gives garbage or
+ * a hang rather than a compile error. Built at a 1-byte element width because
+ * every 8-bit defect in this load path has been a 2-bytes-per-element
+ * assumption. */
+static void build_tdm_descriptor(rocke_ir_builder_t* b)
+{
+    rocke_tdm_desc_2d_params_t p;
+    rocke_value_t* groups[5];
+    int pad_enable = 0;
+    int pad_interval = 0;
+    int pad_amount = 0;
+
+    rocke_tdm_padding_for_tile(1, 128, 80, &pad_enable, &pad_interval, &pad_amount);
+
+    p.global_addr = rocke_b_const_i64(b, 0);
+    p.lds_addr = rocke_b_const_i64(b, 0);
+    p.tensor_dim0 = rocke_b_const_i32(b, 4096);
+    p.tensor_dim1 = rocke_b_const_i32(b, 8192);
+    p.dim0_stride_value = NULL;
+    p.elem_bytes = 1;
+    p.tile_dim0 = 128;
+    p.tile_dim1 = 128;
+    p.dim0_stride = 8192;
+    p.dim1_stride = 1;
+    p.pad_enable = pad_enable;
+    p.pad_interval = pad_interval;
+    p.pad_amount = pad_amount;
+
+    rocke_b_tdm_descriptor_2d(b, &p, groups);
+    rocke_b_tensor_load_to_lds(b, groups[0], groups[1], groups[2], groups[3], groups[4], 0);
+    rocke_b_s_wait_tensorcnt(b, 0);
+    rocke_b_ret(b);
+}
+
 static const config_t CONFIGS[] = {
     {build_wmma_k32_f16, "gfx1250"},
     {build_wmma_k32_bf16, "gfx1250"},
@@ -427,6 +466,9 @@ static const config_t CONFIGS[] = {
     {build_wmma_scale16_bf8, "gfx1250"},
     {build_scale_coordinates_k32, "gfx1250"},
     {build_scale_coordinates_k16, "gfx1250"},
+    /* Appended last, mirroring the Python: inserting earlier would
+     * renumber every later config in both emitters. */
+    {build_tdm_descriptor, "gfx1250"},
 };
 
 static const int NUM_CONFIGS = (int)(sizeof(CONFIGS) / sizeof(CONFIGS[0]));

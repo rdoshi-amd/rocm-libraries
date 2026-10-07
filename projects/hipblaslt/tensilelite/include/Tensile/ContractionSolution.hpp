@@ -650,6 +650,12 @@ namespace TensileLite
         // Workgroups the dynamic grid policy may launch (CUs x occupancy,
         // capped by persistentMaxCUs and a fixed grid).
         size_t maxGrid = 0;
+        // Work items a split may create: the workgroup slots the launch can
+        // expect to be resident, so that every part has a slot of its own.
+        // 0 means maxGrid; a larger value is capped by it. The split paths
+        // size from it; whole tiles keep the maxGrid grid, whose queues
+        // rebalance them onto whichever workgroups are resident.
+        size_t splitSlots = 0;
         // The kernel can fix split tiles up by last arrival. With neither this
         // nor allowParallel every tile stays whole unless the debug overrides
         // ask otherwise.
@@ -686,12 +692,15 @@ namespace TensileLite
      * the packed SKTiles/SKSplit/SKItersPerWI/TotalItems, the dynamic grid, the
      * reduction of split tiles, the partials workspace and the launch summary.
      *
-     * Problems with at least maxGrid tiles keep every tile whole (skTiles = 0,
-     * the historical packing). Fewer tiles are all split.
+     * The split paths size for the work-item slots S = splitSlots (maxGrid
+     * when unset, capped by it). Problems with at least S tiles keep every
+     * tile whole (skTiles = 0, the historical packing) on a grid of up to
+     * maxGrid workgroups. Fewer tiles are all split, on a grid of one
+     * workgroup per part.
      *
      * With allowParallel (the kernel supports the parallel reduction) the
      * parts are reduced by a PostGSU kernel (parallel = true): skSplit is the
-     * largest value with tiles*skSplit <= parallelItemsPerWorkgroup*maxGrid, at
+     * largest value with tiles*skSplit <= parallelItemsPerWorkgroup*S, at
      * least parallelMinItersPerWI iterations per part and within the workspace
      * (tiles*skSplit partial tiles plus the linear parallel extras). No
      * serial-fixup cap and no flag bound apply. If that skSplit is below
@@ -702,7 +711,7 @@ namespace TensileLite
      *
      * Otherwise, with allowSplit, the last part to arrive fixes each tile up:
      * skSplit is the largest value with tiles*skSplit <=
-     * StreamKDynamicWorkItemsPerWorkgroup*maxGrid, at least
+     * StreamKDynamicWorkItemsPerWorkgroup*S, at least
      * StreamKDynamicMinItersPerWI iterations per part, at most sqrt(I/2) parts
      * (that fixup sums the parts serially, so beyond that it costs more than
      * the split saves), within flagSlots and within the workspace.

@@ -448,6 +448,9 @@ namespace TensileLite
         // Every tile whole. Split 2 is what the packers always sent for
         // skTiles == 0, so this keeps those launches' kernel arguments as they were.
         const StreamKDynamicSplit whole = decompose(0, 2);
+        // Work items a split may create (every part gets a workgroup slot).
+        const size_t slots
+            = in.splitSlots > 0 ? std::min(in.splitSlots, in.maxGrid) : in.maxGrid;
 
         // Parallel reduction applies when every tile is split (into at least
         // two parts) and the kernel supports it.
@@ -490,14 +493,14 @@ namespace TensileLite
             return d;
         }
 
-        if((!in.allowSplit && !in.allowParallel) || in.tiles == 0 || in.maxGrid == 0
-           || in.tiles >= in.maxGrid)
+        if((!in.allowSplit && !in.allowParallel) || in.tiles == 0 || slots == 0
+           || in.tiles >= slots)
             return whole;
 
         // Arrival fixup. One part per workgroup (times the over-decomposition
         // factor) ...
         auto arrival = [&]() {
-            size_t split = StreamKDynamicWorkItemsPerWorkgroup * in.maxGrid / in.tiles;
+            size_t split = StreamKDynamicWorkItemsPerWorkgroup * slots / in.tiles;
             // ... but enough iterations per part to amortise its prologue/epilogue ...
             split = std::min(split, itersPerTile / StreamKDynamicMinItersPerWI);
             // ... and no more parts than the serial fixup can sum profitably:
@@ -526,7 +529,7 @@ namespace TensileLite
         // prologue/epilogue, within the workspace.
         if(in.allowParallel)
         {
-            size_t split = in.parallelItemsPerWorkgroup * in.maxGrid / in.tiles;
+            size_t split = in.parallelItemsPerWorkgroup * slots / in.tiles;
             split = std::min(split, itersPerTile / std::max(size_t{1}, in.parallelMinItersPerWI));
             const size_t bytesPerSplit
                 = in.tiles * in.partialTileBytes + in.parallelBytesPerSplit;
@@ -7485,13 +7488,24 @@ namespace TensileLite
                     = std::min(in.maxGrid, static_cast<size_t>(pAMDGPU->persistentFixedGrid));
             in.overrideTiles = pAMDGPU->skTiles;
             in.overrideSplit = pAMDGPU->skSplit;
+            // The split is sized for the CU-count hint (smCountTarget), as the
+            // static grid is (origami's num_cus): every part is one
+            // equal-length work item, so the queues cannot rebalance parts
+            // that find no resident workgroup, and they run as a second
+            // round (e.g. 252 parts on the 240 CUs a 16-CU cotenant leaves:
+            // 2x the kernel time). Whole tiles keep the device-wide grid;
+            // the queues hand them to whichever workgroups are resident.
+            // The hint arrives rounded down to a multiple of 32 CUs
+            // (setSmCountTarget), the budget the static grid gets too. The
+            // workspace query builds the problem with the same hint as the
+            // launch; a launch given less workspace than its split needs
+            // shrinks the split to fit (see streamKDynamicSplit()).
+            const int smt = problem.getParams().smCountTarget();
+            if(smt > 0)
+                in.splitSlots = std::min(static_cast<size_t>(pAMDGPU->computeUnitCount),
+                                         static_cast<size_t>(smt))
+                                * std::min(occupancy, size_t{3});
         }
-        // The split ignores the CU-count hint (smCountTarget) on purpose: it
-        // is sized for the whole device (StreamKDynamicWorkItemsPerWorkgroup
-        // parts per workgroup), and the dynamic queues rebalance the parts
-        // onto whichever workgroups are resident. Sizing it for the hint
-        // (f = 2 at smCountTarget > 0) measured mixed under a cotenant, for
-        // the arrival fixup and the parallel reduction alike.
         // Only kernels that fix split tiles up by last arrival may be split:
         // the generator advertises it (InternalArgsSupport::arrivalFixup) for
         // SK5 hybrid kernels with scalar atomics, DebugStreamK == 0 and no PAP.

@@ -29,7 +29,13 @@ def table():
 
 @pytest.mark.parametrize(
     "doc",
-    [{"schemaVersion": 1}, {"generics": []}, {"generics": {"gfx11-generic": 5}}, []],
+    [
+        {"schemaVersion": 1},
+        {"schemaVersion": 2, "generics": {"gfx11-generic": ["gfx1100"]}},
+        {"generics": []},
+        {"generics": {"gfx11-generic": 5}},
+        [],
+    ],
 )
 def test_rejects_a_malformed_table(tmp_path, doc):
     path = tmp_path / "table.json"
@@ -70,6 +76,8 @@ def test_list_tier(table, arch, device, expect):
         (["gfx11-generic"], ["gfx11-generic"], True),
         (["gfx11-generic"], ["gfx12-generic"], False),
         (["gfx9-4-generic"], ["gfx1151"], False),
+        (["gfx942", "gfx11-generic"], ["gfx942", "gfx1100"], True),
+        (["gfx942", "gfx11-generic"], ["gfx950", "gfx1100"], False),
     ],
 )
 def test_covers(table, outer, inner, expect):

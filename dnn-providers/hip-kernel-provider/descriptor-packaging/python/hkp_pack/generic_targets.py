@@ -34,6 +34,8 @@ class GenericTargets:
         path = Path(path)
         try:
             doc = json.loads(path.read_text(encoding="utf-8"))
+            if doc["schemaVersion"] != 1:
+                raise ValueError(f"unsupported schemaVersion {doc['schemaVersion']!r}")
             generics = {n: tuple(m) for n, m in doc["generics"].items()}
         except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
             raise HkpPackError(f"{path}: unusable generic target table: {exc!r}")

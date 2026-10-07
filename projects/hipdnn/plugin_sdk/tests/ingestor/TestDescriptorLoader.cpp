@@ -2039,6 +2039,9 @@ TEST(TestDescriptorLoader, DropsAPackListingAGenericAndOneOfItsMembers)
     EXPECT_EQ(
         engineNames(candidateWithKernelArch(arch({"gfx11-generic", "gfx1151"}), arch({}), false)),
         INTACT_ONLY);
+    EXPECT_EQ(
+        engineNames(candidateWithKernelArch(arch({"gfx1151", "gfx11-generic"}), arch({}), false)),
+        INTACT_ONLY);
     EXPECT_EQ(engineNames(candidateWithKernelArch(
                   arch({"gfx11-generic", "gfx12-generic", "gfx942"}), arch({}), false)),
               BOTH);

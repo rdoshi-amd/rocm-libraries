@@ -179,8 +179,18 @@ def test_generic_entries_land_in_every_selected_member_folder_only(
 
 @pytest.mark.quick
 def test_generic_entry_is_not_materialized_when_no_member_is_selected(
-    tmp_path, empty_arch_fixture, rocm_kpack_dir
+    tmp_path, empty_arch_fixture, rocm_kpack_dir, monkeypatch
 ):
+    seen = []
+    for step in ("compile_intermediate", "pack_arch"):
+        real = getattr(pipeline, step)
+
+        def spy(*args, _real=real, _step=step, **kwargs):
+            seen.append(args[2] if _step == "compile_intermediate" else args[1].arch)
+            return _real(*args, **kwargs)
+
+        monkeypatch.setattr(pipeline, step, spy)
+
     root = _root(
         tmp_path,
         empty_arch_fixture,
@@ -194,6 +204,8 @@ def test_generic_entry_is_not_materialized_when_no_member_is_selected(
     out = tmp_path / "out"
     assert sorted(p.name for p in out.iterdir()) == ["gfx942"]
     assert not (out / "gfx942" / "g.kdp.json").exists()
+    assert seen
+    assert GENERIC not in seen
 
 
 @pytest.mark.quick
@@ -357,6 +369,12 @@ _REJECTED = {
     "inline_narrower_than_generic_kdp": ([GENERIC], "inline", [MEMBER_B], None),
     "inline_unknown_generic": ([GENERIC], "inline", ["gfx99-generic"], None),
     "inline_generic_beside_member": ([GENERIC], "inline", [GENERIC, MEMBER_B], None),
+    "mixed_list_ukd_missing_the_generic": (
+        ["gfx942", GENERIC],
+        "inline",
+        ["gfx942"],
+        None,
+    ),
     "standalone_without_arch_under_concrete_kdp": (
         ["gfx942"],
         "standalone",

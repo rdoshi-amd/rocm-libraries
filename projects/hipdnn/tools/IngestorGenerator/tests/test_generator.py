@@ -1032,7 +1032,7 @@ class TestEmittedInventory:
         assert inventory["total_descriptor_count"] == 1
 
     def test_inventory_gives_every_member_the_generic_rows(self):
-        """Each member's row holds the generic's descriptors and its own."""
+        """Each member's row holds the generic's descriptors, its own, and the wildcard's."""
         generic = make_pack(
             name="generic",
             arch=["gfx11-generic"],
@@ -1048,18 +1048,24 @@ class TestEmittedInventory:
             arch=["gfx942"],
             kernels=[make_kernel(name="other.k", metadata={"block_size": 256})],
         )
-        config = make_minimal_config(packs=[generic, explicit, other])
+        everywhere = make_pack(
+            name="everywhere",
+            arch=[],
+            kernels=[make_kernel(name="any.k", metadata={"block_size": 512})],
+        )
+        config = make_minimal_config(packs=[generic, explicit, other, everywhere])
         documents = build_kdp_documents(config, mint_ids(config))
         arches = emitted_inventory(config, documents)["arches"]
 
         names = {a: set(row["descriptor_names"]) for a, row in arches.items()}
-        assert names["gfx1100"] == {"generic.k"}
-        assert names["gfx1153"] == {"generic.k"}
-        assert names["gfx1151"] == {"generic.k", "explicit.k"}
-        assert names["gfx942"] == {"other.k"}
-        assert names["gfx11-generic"] == {"generic.k"}
+        assert names["gfx1100"] == {"generic.k", "any.k"}
+        assert names["gfx1153"] == {"generic.k", "any.k"}
+        assert names["gfx1151"] == {"generic.k", "explicit.k", "any.k"}
+        assert names["gfx942"] == {"other.k", "any.k"}
+        assert names["gfx11-generic"] == {"generic.k", "any.k"}
         assert "gfx1154" not in names
-        assert set(arches["gfx1100"]["pack_names"]) == {config.kdp_stem(generic)}
+        stems = {config.kdp_stem(p) for p in (generic, everywhere)}
+        assert set(arches["gfx1100"]["pack_names"]) == stems
 
     def test_the_packaged_dialect_reports_the_kind_that_actually_ships(self):
         """hkp_pack lowers ``rocke``/``hip`` to ``kpack`` before the loader reads it, so

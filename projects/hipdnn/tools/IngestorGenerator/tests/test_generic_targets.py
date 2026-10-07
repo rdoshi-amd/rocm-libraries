@@ -60,6 +60,8 @@ def test_list_tier(arch, device, expect):
         (["gfx1100", "gfx1151"], [_G11], True),
         ([_G11], [_G11], True),
         ([_G11], [_G12], False),
+        (["gfx942", _G11], ["gfx942", "gfx1100"], True),
+        (["gfx942", _G11], ["gfx950", "gfx1100"], False),
     ],
 )
 def test_covers(outer, inner, expect):

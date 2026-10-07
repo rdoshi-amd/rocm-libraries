@@ -512,6 +512,19 @@ namespace TensileLite
      * tiles, the remaining skTiles tiles are each cut into skSplit parts of
      * skItersPerWI iterations, for totalItems work items in all. grid is the
      * workgroup count the dynamic grid policy launches for it.
+     *
+     * parallel selects how split tiles are reduced. False: the last part to
+     * arrive sums the others' MT-sized partial tiles in the kernel (arrival
+     * fixup). True (only with skTiles == tiles, i.e. every tile split): every
+     * part stores its unscaled partial to the M x N workspace slot of its part
+     * and a PostGSU kernel with gsu = skSplit sums the slots and applies
+     * alpha/beta/bias, as static StreamK's parallel reduction does.
+     *
+     * workspaceBytes is what the launch reserves for this decomposition (and
+     * what the workspace query reports): partialTileSize(partialSlots()) for
+     * the arrival fixup, the split-tile GSU workspace for skSplit slots when
+     * parallel, 0 when every tile is whole. Filled by
+     * ContractionSolution::streamKDynamicDecomposition().
      */
     struct StreamKDynamicSplit
     {
@@ -520,6 +533,8 @@ namespace TensileLite
         uint32_t skItersPerWI = 0;
         uint32_t totalItems   = 0;
         size_t   grid         = 0;
+        bool     parallel     = false;
+        size_t   workspaceBytes = 0;
 
         // Workspace partial-tile slots (and, on the flag-protocol kernels, ready
         // flags) the kernel indexes: one per part of every split tile.
@@ -598,6 +613,24 @@ namespace TensileLite
     TENSILELITEHOST_EXPORT StreamKStaticSplit streamKStaticSplit(
         size_t tiles, size_t itersPerTile, size_t skGrid, int skFullTiles, bool forceDPOnly);
 
+    // Fewest main-loop iterations a split part may get.
+    constexpr size_t StreamKDynamicMinItersPerWI = 8;
+
+    // Work items per launched workgroup when splitting few-tile problems for
+    // the arrival fixup (over-decomposition factor f: tiles*skSplit <=
+    // f*maxGrid). f = 1: two per workgroup measured slower on most few-tile
+    // shapes without a cotenant and mixed with one, because the serial fixup
+    // makes extra parts cost more than the rebalancing buys.
+    constexpr size_t StreamKDynamicWorkItemsPerWorkgroup = 1;
+
+    // The same factor for the parallel (PostGSU) reduction. f = 1 measured best
+    // or equal at N = 0 on 13 shapes (1 to 225 tiles); f = 2 doubles the
+    // PostGSU traffic (+5 to +10% on 16..64-tile shapes). Under an in-process
+    // cotenant f = 2 rebalances better on some shapes (-5 to -24%) and worse on
+    // others (+8 to +12%), and with an SM-count hint the static path sized for
+    // the hint beats both, so the default stays 1 (phaseC.md has the data).
+    constexpr size_t StreamKDynamicParallelWorkItemsPerWorkgroup = 1;
+
     struct StreamKDynamicSplitInputs
     {
         // Batch-inclusive tile count, getNumTiles(sizeMapping, 1).
@@ -607,42 +640,59 @@ namespace TensileLite
         // Workgroups the dynamic grid policy may launch (CUs x occupancy,
         // capped by persistentMaxCUs and a fixed grid).
         size_t maxGrid = 0;
-        // False keeps every tile whole unless the debug overrides ask otherwise.
+        // The kernel can fix split tiles up by last arrival. With neither this
+        // nor allowParallel every tile stays whole unless the debug overrides
+        // ask otherwise.
         bool allowSplit = true;
         // Flag-region entries left after the per-XCD queue counters.
         size_t flagSlots = 0;
         // Workspace the launch is given, and the bytes of one partial tile.
         size_t workspaceBytes   = 0;
         size_t partialTileBytes = 0;
+        // The kernel can reduce split tiles in parallel (PostGSU kernel), so
+        // when every tile is split they are, with no serial-fixup cap. Its
+        // workspace is skTiles*skSplit partial tiles plus
+        // parallelBytesPerSplit*skSplit + parallelFixedBytes (split-tile GSU
+        // sizing: bias-gradient and amaxD buffers).
+        bool   allowParallel              = false;
+        size_t parallelBytesPerSplit      = 0;
+        size_t parallelFixedBytes         = 0;
+        // Parallel split policy: work items per workgroup (over-decomposition
+        // factor) and fewest main-loop iterations per part.
+        size_t parallelItemsPerWorkgroup = StreamKDynamicParallelWorkItemsPerWorkgroup;
+        size_t parallelMinItersPerWI     = StreamKDynamicMinItersPerWI;
         // TENSILE_STREAMK_TILES / TENSILE_STREAMK_SPLIT, -1 when unset.
         int overrideTiles = -1;
         int overrideSplit = -1;
     };
 
-    // Fewest main-loop iterations a split part may get.
-    constexpr size_t StreamKDynamicMinItersPerWI = 8;
-
-    // Work items per launched workgroup when splitting few-tile problems
-    // (over-decomposition factor f: tiles*skSplit <= f*maxGrid). f = 1: two per
-    // workgroup measured slower on most few-tile shapes without a cotenant and
-    // mixed with one, because the serial fixup makes extra parts cost more than
-    // the rebalancing buys. Revisit once the fixup is parallel.
-    constexpr size_t StreamKDynamicWorkItemsPerWorkgroup = 1;
 
     /**
      * Choose the dynamic StreamK work decomposition. Single source of truth for
      * the packed SKTiles/SKSplit/SKItersPerWI/TotalItems, the dynamic grid, the
-     * partials workspace and the launch summary.
+     * reduction of split tiles, the partials workspace and the launch summary.
      *
      * Problems with at least maxGrid tiles keep every tile whole (skTiles = 0,
-     * the historical packing). Fewer tiles are all split: skSplit is the largest
-     * value with tiles*skSplit <= StreamKDynamicWorkItemsPerWorkgroup*maxGrid,
-     * at least StreamKDynamicMinItersPerWI iterations per part, at most sqrt(I/2) parts
-     * (the fixup sums the parts serially, so beyond that it costs more than the
-     * split saves), within flagSlots and within the workspace. A split below 2
-     * keeps the tiles whole. The debug overrides replace the policy; if the
-     * partials they ask for do not fit the workspace or the flag region the
-     * tiles stay whole.
+     * the historical packing). Fewer tiles are all split.
+     *
+     * With allowParallel (the kernel supports the parallel reduction) the
+     * parts are reduced by a PostGSU kernel (parallel = true): skSplit is the
+     * largest value with tiles*skSplit <= parallelItemsPerWorkgroup*maxGrid, at
+     * least parallelMinItersPerWI iterations per part and within the workspace
+     * (tiles*skSplit partial tiles plus the linear parallel extras). No
+     * serial-fixup cap and no flag bound apply.
+     *
+     * Otherwise, with allowSplit, the last part to arrive fixes each tile up:
+     * skSplit is the largest value with tiles*skSplit <=
+     * StreamKDynamicWorkItemsPerWorkgroup*maxGrid, at least
+     * StreamKDynamicMinItersPerWI iterations per part, at most sqrt(I/2) parts
+     * (that fixup sums the parts serially, so beyond that it costs more than
+     * the split saves), within flagSlots and within the workspace.
+     *
+     * A split below 2 keeps the tiles whole. The debug overrides replace the
+     * policy (parallel when they split every tile and the kernel supports it,
+     * so a DP + SK mix takes the arrival fixup); if the partials they ask for
+     * do not fit the workspace or the flag region the tiles stay whole.
      */
     TENSILELITEHOST_EXPORT StreamKDynamicSplit
         streamKDynamicSplit(StreamKDynamicSplitInputs const& in);

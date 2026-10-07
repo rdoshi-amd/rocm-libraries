@@ -440,6 +440,38 @@ struct GemmPipelineAgBgCrCompAsyncV2 : public BaseGemmPipelineAgBgCrCompAsyncV2<
             constexpr index_t AB_Async_Load_Inst_Num =
                 MPerBlock * KPerBlock / (BlockSize * GetVectorSizeA()) +
                 NPerBlock * KPerBlock / (BlockSize * GetVectorSizeB());
+            // The hot loop waits until only the loads of the newest window are in flight. On
+            // gfx125 a lane whose element is out of bounds does not issue its async load (it
+            // zero-fills LDS instead), so a wave can issue fewer than AB_Async_Load_Inst_Num loads
+            // and the partial wait would leave loads of the window about to be read in flight.
+            // Drain fully whenever a window can reach past its tensor: in a padded tile, or when
+            // the farthest element the block reads over the K loop is out of bounds (e.g. the
+            // last block of an M or N tail). The check is block uniform.
+#if defined(__gfx125__)
+            const auto reaches_past_end = [&](const auto& window, const auto& step) {
+                auto idx = window.get_window_origin();
+                static_for<0, 2, 1>{}([&](auto d) {
+                    idx(d) += window.get_window_lengths()[d] - 1 + (num_loop - 1) * step[d];
+                });
+                const auto& desc = window.get_bottom_tensor_view().get_tensor_descriptor();
+                return desc.calculate_offset(idx) >= desc.get_element_space_size();
+            };
+            const bool drain_async_loads =
+                kPadM || kPadN || kPadK ||
+                amd_wave_read_first_lane(
+                    static_cast<index_t>(reaches_past_end(a_dram_block_window_tmp[number<0>{}],
+                                                          a_dram_tile_window_step) ||
+                                         reaches_past_end(b_dram_block_window_tmp[number<0>{}],
+                                                          b_dram_tile_window_step))) != 0;
+#else
+            constexpr bool drain_async_loads = false;
+#endif
+            const auto wait_async_loads = [&]() {
+                if(drain_async_loads)
+                    block_sync_lds_direct_load<0>();
+                else
+                    block_sync_lds_direct_load<AB_Async_Load_Inst_Num>();
+            };
 
             __builtin_amdgcn_sched_barrier(0);
             if(HasHotLoop)
@@ -483,7 +515,7 @@ struct GemmPipelineAgBgCrCompAsyncV2 : public BaseGemmPipelineAgBgCrCompAsyncV2<
                         Base::GlobalPrefetchAsync(b_copy_lds_windows[I0{}],
                                                   b_tile_windows[number<0>{}],
                                                   b_dram_tile_window_step);
-                        block_sync_lds_direct_load<AB_Async_Load_Inst_Num>();
+                        wait_async_loads();
 
                         constexpr index_t final_prefetch_idx = sub_tile_num % 2;
                         constexpr index_t final_compute_idx  = (sub_tile_num - 1) % 2;
@@ -541,7 +573,7 @@ struct GemmPipelineAgBgCrCompAsyncV2 : public BaseGemmPipelineAgBgCrCompAsyncV2<
                                                       b_tile_windows[number<0>{}],
                                                       b_dram_tile_window_step);
                             // write to LDS window(0) must complete before the local prefetch
-                            block_sync_lds_direct_load<AB_Async_Load_Inst_Num>();
+                            wait_async_loads();
                         }
                         else
                         {

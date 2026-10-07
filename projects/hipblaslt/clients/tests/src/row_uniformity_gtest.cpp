@@ -2783,12 +2783,8 @@ namespace
         EXPECT_EQ(d.totalItems, 256u);
         EXPECT_EQ(d.grid, 256u);
 
-        auto in              = dynamicSplitInputs(1, 4 * 262144);
-        in.overDecomposition = 2;
-        const auto f2        = TensileLite::streamKDynamicSplit(in);
-        EXPECT_EQ(f2.skSplit, 512u) << "two work items per workgroup";
-        EXPECT_EQ(f2.totalItems, 512u);
-        EXPECT_EQ(f2.grid, 256u) << "the grid never exceeds maxGrid";
+        EXPECT_EQ(d.totalItems, TensileLite::StreamKDynamicWorkItemsPerWorkgroup * 256u)
+            << "one work item per workgroup";
     }
 
     TEST(StreamKDynamicSplit_pre_checkin, FewTilesSplitWithinOneWave)

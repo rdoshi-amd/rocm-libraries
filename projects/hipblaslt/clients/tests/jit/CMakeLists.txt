@@ -65,7 +65,8 @@ hipblaslt_jit_catch_test(jit-source-bundle jit-cpu hipblaslt-jit-source-bundle-t
 
 if(NOT HIPBLASLT_ENABLE_JIT)
     add_executable(hipblaslt-jit-disabled-test disabled_api_test.cpp)
-    hipblaslt_jit_test(jit-disabled jit-cpu hipblaslt-jit-disabled-test)
+    target_link_libraries(hipblaslt-jit-disabled-test PRIVATE roc::hipblaslt hip::host)
+    hipblaslt_jit_catch_test(jit-disabled jit-cpu hipblaslt-jit-disabled-test)
 
     # HIPBLASLT_JIT must not change heuristic queries when JIT is not built.
     set(hipblaslt_jit_gpu OFF)

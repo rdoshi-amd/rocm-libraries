@@ -219,6 +219,7 @@ if(HIPDNN_ENABLE_KERNEL_INGESTOR AND HIPDNN_ENABLE_SDPA
         ${_gfx950_shard_args}
         REFERENCE_EXECUTOR gpu
         GTEST_FILTER "quick_SdpaFwd_Default.*:standard_SdpaFwd_Default.*"
+        ENVIRONMENT_MODIFICATION ${TEST_ENVIRONMENT_MODIFICATION}
     )
 endif()
 
@@ -232,5 +233,7 @@ if(ENABLE_ASM_SDPA_ENGINE AND HIPDNN_ENABLE_SDPA
         REFERENCE_EXECUTOR gpu
         GTEST_FILTER
             Smoke/IntegrationGpuSdpaFwdBfp16.Correctness/*
+        ENVIRONMENT_MODIFICATION
+            ${TEST_ENVIRONMENT_MODIFICATION}
     )
 endif()

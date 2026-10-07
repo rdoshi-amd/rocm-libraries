@@ -1,6 +1,6 @@
 // Copyright Advanced Micro Devices, Inc., or its affiliates.
 // SPDX-License-Identifier: MIT
-#include "test_helpers.hpp"
+#include "solution_entry.hpp"
 #include <hip/hip_fp16.h>
 
 #include <cstdlib>
@@ -9,8 +9,9 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-// Replays the plain-pair bundle of the current device's architecture through
-// Jit and publishes each solution into the JIT solution library. getJitAlgo
+// Stages the plain-pair sources of the current device's architecture and replays
+// them through Jit, which publishes each solution into the JIT solution library.
+// getJitAlgo
 // returns its first solution for K=512 and its second for K=256 as library
 // indices from 2^30; each runs through hipblasLtMatmul and hipblaslt_ext::Gemm,
 // and D is checked against the host. A second lookup returns the same index
@@ -19,7 +20,20 @@ namespace jit = hipblaslt_ext::experimental::jit;
 
 namespace
 {
+    namespace fs = std::filesystem;
     using hipblaslt_jit_test::require;
+
+    // data is the committed assembly tree. A path that already holds plain-pair
+    // is a staged replay directory, which the second process receives.
+    fs::path replayRoot(const std::string& data, const std::string& tag)
+    {
+        const auto path = fs::u8path(data);
+        if(hipblaslt_jit_test::isDescribedReplayRoot(path))
+            return path;
+        const auto stage = fs::u8path(HIPBLASLT_JIT_REPLAY_ROOT) / tag;
+        hipblaslt_jit_test::stageDescribedSources(path, stage);
+        return stage;
+    }
     using hipblaslt_jit_test::Device;
     using hipblaslt_jit_test::Fp16Gemm;
 
@@ -339,17 +353,18 @@ int main(int argc, char** argv)
     if(!(argc == 2 || (argc == 3 && mode == "--library")
          || (argc == 5 && mode == "--library-reader")))
     {
-        std::cerr << "Usage: " << argv[0] << " BUNDLES [--library]\n";
+        std::cerr << "Usage: " << argv[0] << " DATA [--library]\n";
         return 2;
     }
     try
     {
         if(argc == 2)
-            test(argv[1]);
+            test(replayRoot(argv[1], "end-to-end").u8string());
         else if(argc == 3)
-            library(argv[1], {});
+            library(replayRoot(argv[1], "end-to-end-library").u8string(), {});
         else
-            library(argv[1], {std::stoi(argv[3]), std::stoi(argv[4])});
+            library(replayRoot(argv[1], "end-to-end-library").u8string(),
+                    {std::stoi(argv[3]), std::stoi(argv[4])});
     }
     catch(const std::exception& error)
     {

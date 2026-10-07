@@ -1,13 +1,14 @@
 # Validate the JIT implementation
 
 The JIT tests check the comgr code-object builder, the source bundle reader,
-the TensileLite loader and, through the replay backend, the internal entry
-points that run a JIT solution with the GEMM APIs. The JIT headers are not
-installed. The tests include them from `library/src/amd_detail`. They build
-the gfx90a, gfx942 and gfx950 kernel assembly committed in
-[`data`](data/README.md), as the bundles that the `jit-bundles` test writes
-with their library entries and manifests, so they need neither Python nor a
-generator.
+the JIT solution library, the TensileLite loader and, through the replay
+backend, the internal entry points that run a JIT solution with the GEMM APIs.
+The JIT headers are not installed. The tests include them from
+`library/src/amd_detail`. They build the gfx90a, gfx942 and gfx950 kernel
+assembly committed in [`data`](data/README.md) and publish it into a JIT
+solution library, so they need neither Python nor a generator. Replay tests
+stage a temporary source directory from the same descriptions. That directory
+is the input `readTensileSourceBundle` already accepts.
 
 ## Build and run from a checkout
 
@@ -25,37 +26,38 @@ ctest --test-dir "$project_build/clients/tests/jit" -L jit-gpu --output-on-failu
 
 `-L jit-cpu` runs the tests that need no GPU. `-L jit-gpu` runs the tests that
 need device 0. `GPU_TARGETS` is that device's architecture, `gfx90a`, `gfx942`
-or `gfx950`; the command above uses `gfx950`. Replay, the JIT solution library
-and the heuristic queries run the committed bundles of that architecture, the
-same way on each of the three. Each test empties its own directory
-under `clients/tests/jit/scratch` in the build directory before it runs.
+or `gfx950`; the command above uses `gfx950`. The publish, load, replay,
+library and heuristic tests use the committed assembly of that architecture,
+the same way on each of the three. Each test empties its own directory
+under `clients/tests/jit/scratch` in the build directory before it runs, except
+`jit-loader`, which reads the library `jit-publish` wrote.
 
 The CTest tests are:
 
-- `jit-cpu`: `jit-bundles`, `jit-source-bundle` and `jit-builder`. A build
-  with `HIPBLASLT_ENABLE_JIT=OFF` has `jit-source-bundle` and `jit-disabled`.
-  CTest runs `jit-bundles` before each test that reads a bundle.
-- `jit-gpu`: `jit-loader`, `jit-library`, `jit-library-concurrency`,
-  `jit-end-to-end`, `jit-end-to-end-library`, `jit-heuristic-off`,
-  `jit-heuristic-fallback` and `jit-heuristic-forced`, when `GPU_TARGETS`
-  include an architecture with committed bundles. A build with
+- `jit-cpu`: `jit-source-bundle` and `jit-builder`. A build with
+  `HIPBLASLT_ENABLE_JIT=OFF` has `jit-source-bundle` and `jit-disabled`.
+- `jit-gpu`: `jit-publish`, `jit-loader`, `jit-library`,
+  `jit-library-concurrency`, `jit-end-to-end`, `jit-end-to-end-library`,
+  `jit-heuristic-off`, `jit-heuristic-fallback` and `jit-heuristic-forced`,
+  when `GPU_TARGETS` include an architecture with committed assembly. CTest
+  runs `jit-publish` before `jit-loader`. A build with
   `HIPBLASLT_JIT_ENABLE_HIPKITTENS=ON` and gfx950 also has `jit-hipkittens`.
   The library tests load no code, but TensileLite queries the current device
-  when it reads a library entry, and they publish the `plain` bundle of that
-  architecture. Replay and the heuristic queries use its `plain-pair`. A build with
-  `HIPBLASLT_ENABLE_JIT=OFF` has `jit-heuristic-ignored` instead, which sets
-  `HIPBLASLT_JIT=2` and requires that the queries still do not return JIT
-  algorithms. A build with `HIPBLASLT_ENABLE_YAML=ON` has none of them, because
-  the library entries are MsgPack.
+  when it reads a library entry, and they publish the `plain` entry of that
+  architecture. Replay and the heuristic queries use its `plain-pair`. A build
+  with `HIPBLASLT_ENABLE_JIT=OFF` has `jit-heuristic-ignored` instead, which
+  sets `HIPBLASLT_JIT=2` and requires that the queries still do not return JIT
+  algorithms. A build with `HIPBLASLT_ENABLE_YAML=ON` has none of the MsgPack
+  tests.
 
 ## What each test checks
 
 | CTest test | Behavior under test |
 | --- | --- |
-| `jit-bundles` | Writes each bundle that `bundle_writer.cpp` describes under `clients/tests/jit/scratch/bundles/<architecture>` in the build directory: the committed assembly, and a library entry and manifest built from it and from the description of each solution. `plain` has one solution; `plain-pair` has two that run the plain kernel, the first for K a multiple of 512 and the second for any K |
 | `jit-source-bundle` | The source bundle reader: assembly, HIP sources and headers sorted by name, relative paths, symbolic links that escape the bundle, size limits, and a library entry that is missing, empty or not named `library/TensileLibrary.dat` |
-| `jit-builder` | The comgr builder, without a GPU, building the hand-written HIP kernel `builder_test_kernel.hip` for each written bundle's target, then each bundle's assembly linked with that kernel into one code object; each code object defines its kernels and has the builder's code-object version, and a kernel name it does not define fails the build |
-| `jit-loader` | `plain` and `plain-pair` built with comgr for device 0 and loaded through the TensileLite loader. `plain` selects its solution for the FP16 GEMM it was generated for; `plain-pair` selects its first solution for K=512 and its second for K=256; neither selects anything for a transposed A. The loader rejects an entry with solutions 0 and 2, a solution whose kernel was not built, and a built kernel no solution names. Launches no kernel |
+| `jit-builder` | The comgr builder, without a GPU, building the hand-written HIP kernel `builder_test_kernel.hip` for each committed assembly target, then each assembly file linked with that kernel into one code object; each code object defines its kernels and has the builder's code-object version, and a kernel name it does not define fails the build |
+| `jit-publish` | Builds the device's committed assembly and publishes it into the JIT solution library: `plain` for K=512, and `plain-pair`'s two solutions for K=1024 and K=256. Indices are at least `2^30` |
+| `jit-loader` | Loads that library, finds each published solution and the pre-generated kernel, resolves the kernel from its code object, and finds nothing for a transposed A. An entry whose solutions are not 0 to N-1 is rejected. Launches no kernel |
 | `jit-end-to-end` | `plain-pair` replayed and built with comgr. `getJitAlgo` publishes its first solution for K=512 and its second for K=256 as JIT library indices, and each runs through `hipblasLtMatmul` and `hipblaslt_ext::Gemm` with D checked against a host reference. A second lookup returns the same index from the library without generating. A problem neither solution solves is not supported |
 | `jit-end-to-end-library` | `getLibraryAlgos` publishes the first `plain-pair` solution for K=512 and the second for K=256 into a fresh JIT solution library, each as its own entry, and returns two reserved indices, which `getAlgosFromIndex` and `hipblasLtMatmul` run with checked numerics. Later queries return the same indices from the library without generating. A second process runs the indices before any query, then finds them the same way |
 | `jit-library` | The JIT solution library: cache-key fields and compiler-environment filtering; rejected group- or other-writable, linked and non-directory roots; the stock TensileLite loader reading a published library; exact-size matching with the solution predicates still applied; deduplication, hash collisions, order, count and excluded kernels; mismatched and tampered keys ignored and left untouched; index allocation up to `INT32_MAX` and exhaustion; a publisher killed after each publication step; readers reloading after another instance publishes; and a fused GEMM and all-to-all problem rejected by lookup, publication and the ProblemType key without touching the library, even beside a plain solution of the same sizes |
@@ -69,26 +71,29 @@ The CTest tests are:
 
 ## Test arguments
 
-`hipblaslt-jit-bundle-writer` takes the `data` directory and an output
-directory. `hipblaslt-jit-builder-test` takes the output directory, the HIP
-kernel and a scratch directory. `hipblaslt-jit-end-to-end-test` takes the output directory
-and replays the `plain-pair` of device 0's architecture. It creates the replay
-backend with `jit::replay::createBackend` from `hipblaslt-jit-replay.hpp`, so
-generation runs no generator, and solves FP16 problems with M=256, N=128 and
-K=512 or 256. CTest sets `HIPBLASLT_JIT_LIBRARY_PATH` for this test. The test
-empties that directory first and refuses to run unless it is set, so it never
-publishes into the default library. `getJitAlgo` returns a JIT library index,
-and a second lookup of the same problem returns that index without generating. `hipblaslt-jit-loader-test` takes the output directory and a
-scratch directory, and checks the same problems with the bundles of the same
-architecture. `hipblaslt-jit-source-bundle-test` takes a scratch directory.
-`hipblaslt-jit-heuristic-test` takes `off`, `fallback`, `forced`, `ignored` or
-`reuse`, and for every mode except `ignored` the bundle directory. CTest sets
-`HIPBLASLT_JIT` and a private `HIPBLASLT_JIT_LIBRARY_PATH`. The test sets
-`HIPBLASLT_JIT_TEST_REPLAY` to that directory's `plain-pair` before either
-heuristic query. A JIT heuristic result is a solution library index from 2^30.
-`reuse` is the second process: it queries K=512 once and prints that index.
+The Catch2 tests (`jit-source-bundle`, `jit-builder`, `jit-publish` and
+`jit-loader`) take no arguments. CMake compiles in the data directory, the
+library directory and the HIP kernel path. Run `jit-publish` before
+`jit-loader`; the loader reads the library the publisher wrote. Problems are
+FP16 with M=256, N=128 and K=512, 1024 or 256.
 
-With `--library` after the output directory, `hipblaslt-jit-end-to-end-test`
+`hipblaslt-jit-end-to-end-test` takes the committed `data` directory and stages
+`plain-pair` for device 0. It creates the replay backend with
+`jit::replay::createBackend` from `hipblaslt-jit-replay.hpp`, so generation
+runs no generator, and solves FP16 problems with M=256, N=128 and K=512 or 256.
+CTest sets `HIPBLASLT_JIT_LIBRARY_PATH` for this test. The test empties that
+directory first and refuses to run unless it is set, so it never publishes into
+the default library. `getJitAlgo` returns a JIT library index, and a second
+lookup of the same problem returns that index without generating.
+`hipblaslt-jit-heuristic-test` takes `off`, `fallback`, `forced`, `ignored` or
+`reuse`, and for every mode except `ignored` and `reuse` the `data` directory.
+CTest sets `HIPBLASLT_JIT` and a private `HIPBLASLT_JIT_LIBRARY_PATH`. The test
+stages that directory's `plain-pair` and sets `HIPBLASLT_JIT_TEST_REPLAY` to it
+before either heuristic query. A JIT heuristic result is a solution library
+index from 2^30. `reuse` is the second process: it queries K=512 once and
+prints that index.
+
+With `--library` after the data directory, `hipblaslt-jit-end-to-end-test`
 runs the `jit-end-to-end-library` checks instead and starts its second process
 itself. That mode empties `HIPBLASLT_JIT_LIBRARY_PATH` first and refuses to run
 unless it is set, so that it never publishes into the default library.
@@ -96,8 +101,8 @@ unless it is set, so that it never publishes into the default library.
 ## JIT solution library tests
 
 `hipblaslt-jit-library-test` compiles the JIT solution library directly. It
-takes the written bundle directory and publishes the `plain` entry of device 0's
-architecture under several kernel names with stand-in code objects, and a
+takes the committed `data` directory and publishes the `plain` entry of device
+0's architecture under several kernel names with stand-in code objects, and a
 scratch directory for the libraries it creates; it ignores
 `HIPBLASLT_JIT_LIBRARY_PATH`. Adding
 `--writers N --per-writer M` runs the multi-process check instead: N writer

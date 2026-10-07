@@ -27,7 +27,7 @@ generate a GEMM solution through a backend and run it with `hipblasLtMatmul`
 or `hipblaslt_ext::Gemm`, or publish generated solutions into a persistent
 JIT solution library on disk, whose solution indices any later process runs
 without generating again. The only backend is a test backend that replays
-pre-generated source bundles. No generator backend is implemented yet.
+pre-generated source directories. No generator backend is implemented yet.
 `hipblasLtMatmulAlgoGetHeuristic` and `Gemm::algoGetHeuristic` consult JIT
 when the library is built with JIT support and `HIPBLASLT_JIT` is `1` or `2`.
 Those queries, and `jit::getJitAlgo`, publish into the JIT solution library
@@ -404,10 +404,11 @@ the file count (1024), each file (64 MiB) and the sources in total (256 MiB).
 The JIT tests use one kernel, generated for gfx90a, gfx942 and gfx950, in
 `clients/tests/jit/data`, of which only the assembly is committed. The assembly
 records the kernel-argument and persistent-loop argument layout versions of the
-generator that wrote it. The `jit-bundles` test writes source bundles from it
-for each architecture, each with the library entry and manifest built from the
-assembly and a description of each solution: `plain` with one solution and
-`plain-pair` with two. The tests that need a GPU run the bundles of its
-architecture.
+generator that wrote it. `jit-publish` builds that assembly for the current
+device and publishes it into the JIT solution library: `plain` as one solution
+and `plain-pair` as two. `jit-loader` reads that library and resolves the
+pre-generated kernel. Replay tests stage a temporary source directory from the
+same descriptions, which is the input `readTensileSourceBundle` already
+accepts, and do not publish a second format.
 [The data README](clients/tests/jit/data/README.md) gives the command that
 generated the assembly.

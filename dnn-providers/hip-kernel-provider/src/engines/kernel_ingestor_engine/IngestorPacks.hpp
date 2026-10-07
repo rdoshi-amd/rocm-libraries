@@ -46,6 +46,17 @@ void resetPointwiseModuleCache();
 
 /// @see packs/ConvNative.cpp
 void registerConvFwdSymbols(hipdnn_plugin_sdk::ingestor::SymbolScope<Handle>& scope);
+void resetConvFwdModuleCache();
+
+/// The engine name gfx950_attention_dense.ued.json declares. The pack table, the pack's
+/// own log lines and the descriptor census (which looks the loaded set up by this name)
+/// all read it here, so a rename that misses the descriptor fails the census.
+inline constexpr std::string_view GFX950_ATTENTION_DENSE_ENGINE_NAME
+    = "hipkernel:Gfx950AttentionDense";
+
+/// @see packs/Gfx950AttentionDenseNative.cpp
+void registerGfx950AttentionDenseSymbols(hipdnn_plugin_sdk::ingestor::SymbolScope<Handle>& scope);
+void resetGfx950AttentionDenseModuleCache();
 
 /// Drops every pack's cached kpack modules, so the next dispatch re-reads its archive
 /// from disk.
@@ -54,7 +65,7 @@ void registerConvFwdSymbols(hipdnn_plugin_sdk::ingestor::SymbolScope<Handle>& sc
 /// process-lifetime guarantee -- one hipModule_t per (archive, toc_key, arch) -- not a
 /// cache to be invalidated. It exists because a test that deliberately corrupts a
 /// staged archive cannot otherwise observe the failure it asserts on: a resident module
-/// serves the plan and the damaged bytes are read by nothing.
+/// serves the plan and nothing reads the damaged bytes.
 ///
 /// Clearing releases each cache's own reference only. A module still held by a live
 /// plan stays loaded until that plan drops it, so this cannot unload a module out from

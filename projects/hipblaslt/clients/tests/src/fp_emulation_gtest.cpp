@@ -1947,14 +1947,23 @@ namespace
     // ── BoundaryValues: FP64 boundary-value inputs handled gracefully ─────────
     //
     // Tests fp64EmulatedGemm with extreme FP64 inputs spanning the full range
-    // from the minimum subnormal to the maximum finite value.  Since A = 2×2
-    // identity and D = I × B = B exactly (mathematically), each column of D
-    // must reproduce the corresponding column of B within the accuracy of the
-    // Ozaki extraction.
+    // from the minimum subnormal to the maximum finite value.  Since A = identity
+    // and D = I × B = B exactly (mathematically), each column of D must reproduce
+    // the corresponding column of B within the accuracy of the Ozaki extraction.
     //
-    // Test design (m=2, n=6, k=2, NN, alpha=1, beta=0):
-    //   A  = 2×2 identity.
-    //   B  = 2×6 column-major matrix (hB[col*2+row]):
+    // CRITICAL: m and n MUST be >= FIXED_POINT_EMUL_MIN_MN (=16).  Below that
+    // threshold emulated_gemm_impl<> short-circuits to native_gemm_fallback<>
+    // and the Ozaki extraction path this test targets is NOT exercised.  We
+    // therefore use a 16×16×16 GEMM: the six boundary scenarios occupy columns
+    // 0..5 (rows 0/1), the remaining columns 6..15 hold an ordinary [1.0, 0.0]
+    // pattern, and all rows 2..15 are 0.0.  Because A=I the per-column max
+    // (col_max[j] → sftB[j]) depends only on rows 0/1, so the zero padding does
+    // not perturb the hand-derived sftB and the boundary expectations below are
+    // preserved verbatim.
+    //
+    // Test design (m=16, n=16, k=16, NN, alpha=1, beta=0), boundary columns:
+    //   A  = 16×16 identity.
+    //   B  = 16×16 column-major matrix (hB[col*16+row]), rows 0/1 shown:
     //
     //   Col │ B[row=0]     │ B[row=1]   │ D[row=0] expected  │ D[row=1] expected
     //   ────┼─────────────┼────────────┼────────────────────┼──────────────────
@@ -1964,6 +1973,7 @@ namespace
     //    3  │ NMIN        │ 1.0        │ 0.0  (*)           │ ≈ 1.0
     //    4  │ NMIN        │ 0.0        │ NMIN (§)           │ 0.0 (exact)
     //    5  │ EPS         │ 1.0        │ EPS  (¶)           │ ≈ 1.0
+    //   6..15│ 1.0         │ 0.0        │ ≈ 1.0              │ 0.0 (exact)
     //
     //   TINY = denorm_min() = 2^-1074  (minimum subnormal)
     //   NMIN = min()        = 2^-1022  (minimum normal, DBL_MIN)
@@ -1995,21 +2005,37 @@ namespace
     //   5. D[row=1] of col 2: EXPECT_NEAR(DMAX, 1e-9).
     //   6. D[row=1] of cols 0,3,5: EXPECT_NEAR(1.0, 1e-9).
     //   7. D[row=1] of cols 1,4: EXPECT_EQ(0.0).
+    //   8. Padded cols 6..15: D[row=0]≈1.0, D[row=1]=0.0.
+    //   9. All rows 2..15 across every column: EXPECT_EQ(0.0).
     //
-    // Sub-test 2 (A = 2*I, 6 cols including [TINY,DMAX]):
-    //   B2 = [[TINY,1],[TINY,0],[NMIN,1],[NMIN,0],[EPS,1],[TINY,DMAX]].
-    //   D2 = 2×B2 for cols 0-4; col 5 row 1: 2×DMAX = +Inf (IEEE overflow).
+    // Sub-test 2 (A = 2*I, 16 cols; boundary cols 0..5 include [TINY,DMAX] at col 5):
+    //   B2 cols 0..5 = [[TINY,1],[TINY,0],[NMIN,1],[NMIN,0],[EPS,1],[TINY,DMAX]];
+    //   cols 6..15 = [1.0, 0.0].
+    //   D2 = 2×B2 for cols 0-4 and 6..15; col 5 row 1: 2×DMAX = +Inf (IEEE overflow).
     TEST_F(FixedPointEmulationTest, BoundaryValues_HandledGracefully)
     {
         set_enabled(true);
         set_strategy(HIPBLASLT_EMULATION_STRATEGY_EAGER);
 
-        constexpr int64_t M       = 2; /* output rows   */
-        constexpr int64_t N       = 6; /* output cols   */
-        constexpr int64_t K       = 2; /* contraction   */
-        constexpr size_t  MN      = static_cast<size_t>(M * N); /* 12 elements */
-        constexpr size_t  MK      = static_cast<size_t>(M * K); /* 4 elements  */
-        constexpr size_t  KN      = static_cast<size_t>(K * N); /* 12 elements */
+        /* IMPORTANT: m and n MUST be >= FIXED_POINT_EMUL_MIN_MN (=16), otherwise
+         * emulated_gemm_impl<> falls straight into native_gemm_fallback<> and the
+         * Ozaki extraction / sftA/sftB refinement / INT8 GEMM / CRT-accumulation
+         * path is never exercised.  We therefore use a 16×16×16 GEMM with A=I so
+         * that D = A·B = B holds exactly, while still running true emulation.
+         *
+         * The six boundary scenarios live in columns 0..5 (rows 0 and 1); the
+         * remaining columns 6..15 hold an ordinary [1.0, 0.0] pattern, and all
+         * rows 2..15 are 0.0.  Because A=I, column j of A·B equals column j of B,
+         * so the per-column max (col_max[j] → sftB[j]) is determined solely by the
+         * values in rows 0/1 — exactly as in the original 2-row derivation.  The
+         * zero padding rows therefore do NOT perturb the hand-derived sftB and the
+         * expected outputs for rows 0/1 are preserved verbatim.                   */
+        constexpr int64_t M       = 16; /* output rows   */
+        constexpr int64_t N       = 16; /* output cols   */
+        constexpr int64_t K       = 16; /* contraction   */
+        constexpr size_t  MN      = static_cast<size_t>(M * N); /* 256 elements */
+        constexpr size_t  MK      = static_cast<size_t>(M * K); /* 256 elements */
+        constexpr size_t  KN      = static_cast<size_t>(K * N); /* 256 elements */
         const size_t      bytes_A = MK * sizeof(double);
         const size_t      bytes_B = KN * sizeof(double);
         const size_t      bytes_D = MN * sizeof(double);
@@ -2020,34 +2046,35 @@ namespace
         const double EPS  = std::numeric_limits<double>::epsilon(); /* 2^-52   */
         const double DMAX = std::numeric_limits<double>::max(); /* ~1.8e308 */
 
-        /* A = 2×2 identity (column-major, lda=M). */
+        /* A = 16×16 identity (column-major, lda=M). */
         std::vector<double> hA(MK, 0.0);
-        hA[0] = 1.0;
-        hA[3] = 1.0; /* A[0,0]=1, A[1,1]=1 */
+        for(int64_t i = 0; i < M; ++i)
+            hA[static_cast<size_t>(i + i * M)] = 1.0;
 
-        /* B = 2×6 column-major matrix (ldb=K=2).
-         * hB[col*2+row]:
+        /* B = 16×16 column-major matrix (ldb=K=16), hB[col*16+row].
+         * Columns 0..5 carry the boundary scenarios in rows 0,1 (rows 2..15 = 0);
+         * columns 6..15 carry an ordinary [1.0, 0.0] pattern (rows 2..15 = 0):
          *   col 0: [TINY, 1.0 ]
          *   col 1: [TINY, 0.0 ]
          *   col 2: [TINY, DMAX]
          *   col 3: [NMIN, 1.0 ]
          *   col 4: [NMIN, 0.0 ]
          *   col 5: [EPS,  1.0 ]
+         *   col 6..15: [1.0, 0.0]
          */
-        const std::vector<double> hB = {
-            TINY,
-            1.0, /* col 0 */
-            TINY,
-            0.0, /* col 1 */
-            TINY,
-            DMAX, /* col 2 */
-            NMIN,
-            1.0, /* col 3 */
-            NMIN,
-            0.0, /* col 4 */
-            EPS,
-            1.0, /* col 5 */
+        std::vector<double> hB(KN, 0.0);
+        auto setB = [&](int col, double r0, double r1) {
+            hB[static_cast<size_t>(col) * static_cast<size_t>(K) + 0] = r0;
+            hB[static_cast<size_t>(col) * static_cast<size_t>(K) + 1] = r1;
         };
+        setB(0, TINY, 1.0);
+        setB(1, TINY, 0.0);
+        setB(2, TINY, DMAX);
+        setB(3, NMIN, 1.0);
+        setB(4, NMIN, 0.0);
+        setB(5, EPS, 1.0);
+        for(int col = 6; col < static_cast<int>(N); ++col)
+            setB(col, 1.0, 0.0);
 
         double *dA = nullptr, *dB = nullptr, *dC = nullptr, *dD = nullptr;
         ASSERT_EQ(hipMalloc(&dA, bytes_A), hipSuccess);
@@ -2107,8 +2134,8 @@ namespace
         ASSERT_EQ(hipMemcpy(hD.data(), dD, bytes_D, hipMemcpyDeviceToHost), hipSuccess);
         cleanup();
 
-        /* Convenience indexing: hD[col*2+row]. */
-        auto d = [&](int col, int row) -> double { return hD[col * 2 + row]; };
+        /* Convenience indexing: hD[col*M+row]. */
+        auto d = [&](int col, int row) -> double { return hD[static_cast<size_t>(col) * M + row]; };
 
         /* 1. All outputs must be finite. */
         for(size_t i = 0; i < MN; ++i)
@@ -2142,48 +2169,62 @@ namespace
         EXPECT_EQ(d(1, 1), 0.0) << "Col 1 row 1: 0.0";
         EXPECT_EQ(d(4, 1), 0.0) << "Col 4 row 1: 0.0";
 
-        /* ── Sub-test 2: A = 2 × identity, B = 2×6 ──────────────────────────── *
+        /* Ordinary padded columns 6..15: D[:,col] = [1.0, 0.0, 0, ...]. */
+        for(int col = 6; col < static_cast<int>(N); ++col)
+        {
+            EXPECT_NEAR(d(col, 0), 1.0, 1e-9) << "Padded col " << col << " row 0: 1.0";
+            EXPECT_EQ(d(col, 1), 0.0) << "Padded col " << col << " row 1: 0.0";
+        }
+
+        /* Zero padding rows 2..15 in every column must be exactly 0.0. */
+        for(int col = 0; col < static_cast<int>(N); ++col)
+            for(int row = 2; row < static_cast<int>(M); ++row)
+                EXPECT_EQ(d(col, row), 0.0)
+                    << "Padding row must be zero at col " << col << " row " << row;
+
+        /* ── Sub-test 2: A = 2 × identity, B = 16×16 ────────────────────────── *
          *
          * For A = 2*I:
-         *   sftA[0] = 5  (6 − floor(log2(2.0)) = 5),  A8i[0,0] = trunc(ldexp(2,5)) = 64.
+         *   sftA[i] = 5  (6 − floor(log2(2.0)) = 5),  A8i[i,i] = trunc(ldexp(2,5)) = 64.
          * Because A8i is identical to the A=I case, the preliminary GEMM and sftB
          * refinement are unchanged.  The only difference is the inverse scale:
          *   D = ldexp(X, −(5 + sftB))  vs.  ldexp(X, −(6 + sftB))  for A=I.
          * This shifts the result by one power of 2, so D = 2 × (A=I result).
          *
-         *   B2 cols: [TINY,1.0], [TINY,0.0], [NMIN,1.0], [NMIN,0.0], [EPS,1.0],
-         *            [TINY,DMAX]
+         *   B2 cols 0..5: [TINY,1.0], [TINY,0.0], [NMIN,1.0], [NMIN,0.0], [EPS,1.0],
+         *                 [TINY,DMAX]
+         *   B2 cols 6..15: [1.0, 0.0]
          *   Expected: D2 = 2 × B2  (col 5: 2×DMAX overflows to +Inf).
          *
          * Col 5 ([TINY,DMAX]): sftB_final≈−963; X_true = 2^67−2^14;
          *   ldexp(X_true, 958) = 2^1025−2^972 → +Inf (IEEE overflow).
          */
         {
-            constexpr int64_t N2       = 6; /* 6 output columns */
-            constexpr size_t  MN2      = static_cast<size_t>(M * N2); /* 12 elements */
-            constexpr size_t  KN2      = static_cast<size_t>(K * N2); /* 12 elements */
+            /* Same 16×16×16 shape as sub-test 1. */
+            constexpr int64_t N2       = N; /* 16 output columns */
+            constexpr size_t  MN2      = static_cast<size_t>(M * N2);
+            constexpr size_t  KN2      = static_cast<size_t>(K * N2);
             const size_t      bytes_B2 = KN2 * sizeof(double);
             const size_t      bytes_D2 = MN2 * sizeof(double);
 
-            /* A = 2×2 scaled identity: A[0,0]=2, A[1,1]=2 (column-major). */
+            /* A = 16×16 scaled identity: A[i,i] = 2 (column-major). */
             std::vector<double> hA2(MK, 0.0);
-            hA2[0] = 2.0;
-            hA2[3] = 2.0;
+            for(int64_t i = 0; i < M; ++i)
+                hA2[static_cast<size_t>(i + i * M)] = 2.0;
 
-            const std::vector<double> hB2 = {
-                TINY,
-                1.0, /* col 0 */
-                TINY,
-                0.0, /* col 1 */
-                NMIN,
-                1.0, /* col 2 */
-                NMIN,
-                0.0, /* col 3 */
-                EPS,
-                1.0, /* col 4 */
-                TINY,
-                DMAX, /* col 5 — 2×DMAX overflows to +Inf */
+            std::vector<double> hB2(KN2, 0.0);
+            auto                setB2 = [&](int col, double r0, double r1) {
+                hB2[static_cast<size_t>(col) * static_cast<size_t>(K) + 0] = r0;
+                hB2[static_cast<size_t>(col) * static_cast<size_t>(K) + 1] = r1;
             };
+            setB2(0, TINY, 1.0);
+            setB2(1, TINY, 0.0);
+            setB2(2, NMIN, 1.0);
+            setB2(3, NMIN, 0.0);
+            setB2(4, EPS, 1.0);
+            setB2(5, TINY, DMAX); /* col 5 — 2×DMAX overflows to +Inf */
+            for(int col = 6; col < static_cast<int>(N2); ++col)
+                setB2(col, 1.0, 0.0);
 
             double *dA2 = nullptr, *dB2 = nullptr, *dC2 = nullptr, *dD2 = nullptr;
             ASSERT_EQ(hipMalloc(&dA2, bytes_A), hipSuccess);
@@ -2227,13 +2268,14 @@ namespace
                              << " (INT8 device library may be unavailable)";
             }
 
-            /* Convenience indexing for sub-test 2. */
-            auto d2 = [&](int col, int row) -> double { return hD2[col * 2 + row]; };
+            /* Convenience indexing for sub-test 2: hD2[col*M+row]. */
+            auto d2
+                = [&](int col, int row) -> double { return hD2[static_cast<size_t>(col) * M + row]; };
 
             /* All outputs must be finite except col 5 row 1 (2×DMAX = +Inf). */
             for(size_t i = 0; i < MN2; ++i)
             {
-                if(i == 5 * 2 + 1)
+                if(i == static_cast<size_t>(5) * M + 1)
                     continue; /* col 5 row 1 = +Inf is expected */
                 ASSERT_TRUE(std::isfinite(hD2[i]))
                     << "A=2*I sub-test: non-finite output at index " << i;
@@ -2265,6 +2307,20 @@ namespace
                    "fallback)";
             EXPECT_TRUE(std::isinf(d2(5, 1)) && d2(5, 1) > 0.0)
                 << "A=2*I col 5 row 1: 2*DMAX overflows to +Inf, got " << d2(5, 1);
+
+            /* Ordinary padded columns 6..15: D2[:,col] = [2.0, 0.0, 0, ...]. */
+            for(int col = 6; col < static_cast<int>(N2); ++col)
+            {
+                EXPECT_NEAR(d2(col, 0), 2.0, 2e-9) << "A=2*I padded col " << col << " row 0: 2.0";
+                EXPECT_EQ(d2(col, 1), 0.0) << "A=2*I padded col " << col << " row 1: 0.0";
+            }
+
+            /* Zero padding rows 2..15 in every column must be exactly 0.0
+             * (col 5 rows 2..15 included — only col 5 row 1 is the +Inf overflow). */
+            for(int col = 0; col < static_cast<int>(N2); ++col)
+                for(int row = 2; row < static_cast<int>(M); ++row)
+                    EXPECT_EQ(d2(col, row), 0.0)
+                        << "A=2*I padding row must be zero at col " << col << " row " << row;
         }
         if(_d_bv1_ws)
             (void)hipFree(_d_bv1_ws);

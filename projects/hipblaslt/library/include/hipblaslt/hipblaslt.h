@@ -1472,6 +1472,7 @@ hipblasStatus_t hipblasLtMatrixTransform(hipblasLtHandle_t              lightHan
                                          void*                   C,
                                          hipblasLtMatrixLayout_t Cdesc,
                                          hipStream_t             stream);
+
 /*! \ingroup library_module
  *  \brief Compute the GPU workspace required by FP64/FP32 emulation for a given problem.
  *
@@ -1479,11 +1480,7 @@ hipblasStatus_t hipblasLtMatrixTransform(hipblasLtHandle_t              lightHan
  *  Returns the number of bytes needed in the workspace buffer that must be
  *  passed to \ref hipblasLtMatmul when emulation is active.  The size depends
  *  on the matrix dimensions and on the input precision: the workspace layout
- *  always covers the maximum number of CRT moduli for the requested precision
- *  (20 moduli for ``HIP_R_64F``, 12 moduli for ``HIP_R_32F``), since ADP
- *  (dynamic-precision) mode is always active.  Because FP64 and FP32 use a
- *  different number of moduli, the returned size differs between the two, so
- *  the input precision must be supplied explicitly via \p computeInputType.
+ *  always covers the maximum number of CRT moduli for the requested precision.
  *
  *  The transpose modes for A and B are read from \p matmulDesc
  *  (``HIPBLASLT_MATMUL_DESC_TRANSA`` / ``HIPBLASLT_MATMUL_DESC_TRANSB``); they

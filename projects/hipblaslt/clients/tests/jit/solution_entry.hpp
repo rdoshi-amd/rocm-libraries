@@ -444,17 +444,21 @@ namespace hipblaslt_jit_test
             const auto entry = bundle / "library" / "TensileLibrary.dat";
             {
                 std::ofstream out(entry, std::ios::binary);
-                require(bool(out.write(reinterpret_cast<const char*>(item.solution.entry.data()),
-                                       static_cast<std::streamsize>(item.solution.entry.size()))),
-                        "Cannot write " + entry.u8string());
+                {
+                    INFO(("Cannot write " + entry.u8string()));
+                    REQUIRE((bool(out.write(reinterpret_cast<const char*>(item.solution.entry.data()),
+                        static_cast<std::streamsize>(item.solution.entry.size())))));
+                }
             }
             for(const auto& unit : item.solution.units)
             {
                 const auto path = bundle / "sources" / fs::u8path(unit.name);
                 std::ofstream out(path, std::ios::binary);
-                require(bool(out.write(reinterpret_cast<const char*>(unit.bytes.data()),
-                                       static_cast<std::streamsize>(unit.bytes.size()))),
-                        "Cannot write " + path.u8string());
+                {
+                    INFO(("Cannot write " + path.u8string()));
+                    REQUIRE((bool(out.write(reinterpret_cast<const char*>(unit.bytes.data()),
+                        static_cast<std::streamsize>(unit.bytes.size())))));
+                }
             }
         }
     }

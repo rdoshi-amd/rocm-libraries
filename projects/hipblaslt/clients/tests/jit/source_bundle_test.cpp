@@ -25,12 +25,30 @@ std::vector<std::string> names(const std::vector<a::SourceFile>& files)
 
 TEST_CASE("the source bundle reader accepts only a contained directory", "[jit-cpu]")
 {
-    require(hipblaslt_jit_test::endsWith("solution_WGM1", "_WGM1"), "a proper suffix");
-    require(hipblaslt_jit_test::endsWith("abc", "abc"), "a string ends with itself");
-    require(hipblaslt_jit_test::endsWith("abc", ""), "an empty suffix matches");
-    require(hipblaslt_jit_test::endsWith("", ""), "empty ends with empty");
-    require(!hipblaslt_jit_test::endsWith("ab", "abc"), "a longer suffix does not match");
-    require(!hipblaslt_jit_test::endsWith("", "a"), "empty does not end with a letter");
+    {
+        INFO(("a proper suffix"));
+        REQUIRE((hipblaslt_jit_test::endsWith("solution_WGM1", "_WGM1")));
+    }
+    {
+        INFO(("a string ends with itself"));
+        REQUIRE((hipblaslt_jit_test::endsWith("abc", "abc")));
+    }
+    {
+        INFO(("an empty suffix matches"));
+        REQUIRE((hipblaslt_jit_test::endsWith("abc", "")));
+    }
+    {
+        INFO(("empty ends with empty"));
+        REQUIRE((hipblaslt_jit_test::endsWith("", "")));
+    }
+    {
+        INFO(("a longer suffix does not match"));
+        REQUIRE((!hipblaslt_jit_test::endsWith("ab", "abc")));
+    }
+    {
+        INFO(("empty does not end with a letter"));
+        REQUIRE((!hipblaslt_jit_test::endsWith("", "a")));
+    }
     const auto root = fs::u8path(HIPBLASLT_JIT_SCRATCH);
     fs::remove_all(root);
     fs::create_directories(root);

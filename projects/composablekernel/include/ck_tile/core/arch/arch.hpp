@@ -1492,10 +1492,19 @@ __host__ __device__ T CK_TILE_CONSTANT_ADDRESS_SPACE* cast_pointer_to_constant_a
 #endif
 }
 
+/**
+ * @brief LDS bytes addressable by one workgroup for the architecture being compiled.
+ *
+ * @note Keyed on the device target macros, so the host compilation pass always returns the
+ * 65536 default. Results that must agree between the host and device passes (smem sizing,
+ * IsSupportedArgument checks) cannot rely on this helper for gfx950 or gfx125.
+ */
 CK_TILE_HOST_DEVICE constexpr index_t get_smem_capacity()
 {
 #if defined(__gfx950__)
     return 163840;
+#elif defined(__gfx125__)
+    return 327680;
 #else
     return 65536;
 #endif

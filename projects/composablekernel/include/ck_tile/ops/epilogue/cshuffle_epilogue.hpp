@@ -262,9 +262,17 @@ struct CShuffleEpilogue
     {
         constexpr index_t m_val = MPerXdl * MWave * m_shuffle_tile;
         constexpr index_t n_val = NPerXdl * NWave * n_shuffle_tile;
+#if defined(__gfx125__)
+        // TODO: get_smem_capacity() is 320 KiB in the gfx125 device pass but 64 KiB in the host
+        // pass. Keep the pre-existing 64 KiB shuffle budget so existing gfx125 shuffle tiles
+        // and LDS footprints do not change, until the budget becomes an explicit arch-aware knob.
+        constexpr index_t smem_budget = 65536;
+#else
+        constexpr index_t smem_budget = get_smem_capacity();
+#endif
 
         constexpr auto shuffle_tile =
-            m_val * n_val * sizeof(CShuffleDataType) > get_smem_capacity() || DoubleSmemBuffer
+            m_val * n_val * sizeof(CShuffleDataType) > smem_budget || DoubleSmemBuffer
                 ? std::make_tuple(1, 1)
                 : std::make_tuple(m_shuffle_tile, n_shuffle_tile);
 

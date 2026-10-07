@@ -234,6 +234,7 @@ const ckc::CompilerInfo* loaded_info()
     static std::string requested, comgr_path, query_path;
     static bool queried = false;
     std::lock_guard<std::mutex> lock(mutex);
+    // Retain success; a failed load may recover after library availability changes.
     if(!library)
         library = load_comgr(requested);
     if(!library)

@@ -9,8 +9,8 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
-
 from rocke.core import lower_llvm
+from rocke.core.ir import IRBuilder
 from rocke.runtime import comgr
 
 
@@ -109,6 +109,58 @@ def test_unavailable_library_does_not_prevent_offline_emission(monkeypatch):
     monkeypatch.setenv("ROCKE_LLVM_FLAVOR", "llvm23")
     with patch.object(comgr, "_resolve_lib", side_effect=AssertionError("offline")):
         assert lower_llvm._resolve_llvm_flavor() == "llvm23"
+
+
+def test_auto_lowering_recovers_then_retains_success(monkeypatch):
+    monkeypatch.setenv("ROCKE_BACKEND", "python")
+    monkeypatch.setattr(comgr, "_lib", None)
+    monkeypatch.setattr(comgr, "_library_for_symbol", lambda fn: None)
+    library = compiler_library((23, 0, 0))
+    load = Mock(side_effect=[comgr.ComgrError("missing"), library])
+    monkeypatch.setattr(comgr, "_load_lib", load)
+    builder = IRBuilder("compiler_recovery")
+    builder.kernel.attrs["max_workgroup_size"] = 64
+    builder.const_i32(1)
+    first = lower_llvm.lower_kernel_to_llvm(builder.kernel)
+    assert lower_llvm._datalayout_for_flavor("llvm22") in first
+    second = lower_llvm.lower_kernel_to_llvm(builder.kernel)
+    assert lower_llvm._datalayout_for_flavor("llvm23") in second
+    info = comgr.loaded_compiler_info()
+    assert lower_llvm.lower_kernel_to_llvm(builder.kernel) == second
+    assert comgr.loaded_compiler_info() is info
+    assert load.call_count == 2
+    library.LLVMGetVersion.assert_called_once()
+
+
+def test_unqueryable_success_is_retained_without_retry(monkeypatch):
+    monkeypatch.setattr(comgr, "_lib", None)
+    monkeypatch.setattr(comgr, "_library_for_symbol", lambda fn: None)
+    load = Mock(return_value=SimpleNamespace(_name="unknown.so"))
+    monkeypatch.setattr(comgr, "_load_lib", load)
+    probe = Mock(side_effect=comgr.ComgrError("unqueryable"))
+    monkeypatch.setattr(comgr, "_probe_llvm_version", probe)
+    info = comgr.loaded_compiler_info()
+    assert info.llvm_version is None
+    assert comgr.loaded_compiler_info() is info
+    assert lower_llvm._resolve_llvm_flavor() == "llvm22"
+    load.assert_called_once()
+    probe.assert_called_once()
+
+
+@pytest.mark.parametrize("source", ["api", "environment"])
+def test_explicit_lowering_bypasses_library_load(monkeypatch, source):
+    monkeypatch.setenv("ROCKE_BACKEND", "python")
+    load = Mock(side_effect=AssertionError("explicit lowering loaded COMGR"))
+    monkeypatch.setattr(comgr, "_load_lib", load)
+    monkeypatch.setattr(comgr, "_lib", None)
+    builder = IRBuilder("explicit_flavor")
+    builder.const_i32(1)
+    kwargs = {"llvm_flavor": "llvm23"} if source == "api" else {}
+    if source == "environment":
+        monkeypatch.setenv("ROCKE_LLVM_FLAVOR", "llvm23")
+    ir = lower_llvm.lower_kernel_to_llvm(builder.kernel, **kwargs)
+    assert lower_llvm._datalayout_for_flavor("llvm23") in ir
+    load.assert_not_called()
 
 
 @pytest.mark.parametrize(

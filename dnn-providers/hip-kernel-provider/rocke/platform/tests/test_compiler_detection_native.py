@@ -5,13 +5,12 @@
 
 import json
 import os
-from pathlib import Path
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
-
 
 PLATFORM = Path(__file__).resolve().parents[1]
 
@@ -47,6 +46,16 @@ def native_detector(tmp_path_factory):
     wrapper = output.with_suffix(".cpp")
     wrapper.write_text(
         '#include "compiler_version.h"\n'
+        "#include <dlfcn.h>\n"
+        "static bool block_loads = false;\n"
+        "static unsigned load_calls = 0;\n"
+        'extern "C" void* __real_dlopen(const char*, int);\n'
+        'extern "C" void* __wrap_dlopen(const char* path, int mode) {\n'
+        "    ++load_calls;\n"
+        "    return block_loads ? nullptr : __real_dlopen(path, mode);\n"
+        "}\n"
+        'extern "C" void fixture_block_loads(int block) { block_loads = block; }\n'
+        'extern "C" unsigned fixture_load_calls() { return load_calls; }\n'
         'extern "C" const ckc::CompilerInfo* rocke_loaded_compiler_info() {\n'
         "    return ckc::candidate_compiler_info();\n"
         "}\n"
@@ -58,6 +67,7 @@ def native_detector(tmp_path_factory):
             "-shared",
             "-fPIC",
             "-pthread",
+            "-Wl,--wrap=dlopen",
             str(PLATFORM / "cpp/core/lower_llvm/compiler_version.cpp"),
             str(wrapper),
             "-I",
@@ -186,3 +196,61 @@ def test_preprocessing_fallback_and_provenance_agree(native_detector, tmp_path):
     assert info["llvm_version"] == [20, 0, 7]
     assert info["source"] == "COMGR preprocessing"
     assert info["query_library_path"] == info["comgr_path"] == str(library)
+
+
+@pytest.mark.parametrize("queryable", [True, False])
+def test_native_recovers_then_retains_loaded_candidate(
+    native_detector, tmp_path, queryable
+):
+    text = "unsigned fixture_queries = 0;\n"
+    if queryable:
+        text += (
+            "void LLVMGetVersion(unsigned*a,unsigned*b,unsigned*c)"
+            "{++fixture_queries;*a=23;*b=0;*c=0;}\n"
+        )
+    library = build_library(tmp_path, text)
+    script = r"""
+import ctypes, os, sys
+class Info(ctypes.Structure):
+    _fields_ = [(n, ctypes.c_uint) for n in ('major', 'minor', 'patch')] + [
+        (n, ctypes.c_char_p) for n in
+        ('source', 'requested_comgr', 'comgr_path', 'query_library_path')]
+native = ctypes.CDLL(sys.argv[1])
+native.rocke_loaded_compiler_info.restype = ctypes.POINTER(Info)
+native.fixture_block_loads.argtypes = [ctypes.c_int]
+native.fixture_load_calls.restype = ctypes.c_uint
+native.fixture_block_loads(1)
+assert not native.rocke_loaded_compiler_info()
+failed_calls = native.fixture_load_calls()
+assert failed_calls > 0
+native.fixture_block_loads(0)
+first = native.rocke_loaded_compiler_info()
+assert first
+assert first.contents.major == (23 if sys.argv[3] == 'True' else 0)
+assert first.contents.requested_comgr.decode() == sys.argv[2]
+successful_calls = native.fixture_load_calls()
+assert successful_calls > failed_calls
+os.environ['ROCKE_COMGR_LIB'] = 'replacement-that-must-not-be-loaded.so'
+for _ in range(3):
+    current = native.rocke_loaded_compiler_info()
+    assert ctypes.addressof(current.contents) == ctypes.addressof(first.contents)
+assert native.fixture_load_calls() == successful_calls
+fixture = ctypes.CDLL(sys.argv[2])
+assert ctypes.c_uint.in_dll(fixture, 'fixture_queries').value == (
+    1 if sys.argv[3] == 'True' else 0)
+"""
+    env = dict(os.environ, ROCKE_COMGR_LIB=str(library))
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            script,
+            str(native_detector),
+            str(library),
+            str(queryable),
+        ],
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )

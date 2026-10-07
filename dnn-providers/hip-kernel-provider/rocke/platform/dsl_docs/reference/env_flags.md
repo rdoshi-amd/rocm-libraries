@@ -141,9 +141,11 @@ while `requested_comgr` preserves the original loader input. A null result means
 COMGR could not be loaded; a result without a version means the loaded compiler
 could not be queried. No release metadata is substituted in either case.
 
-Python retains its successfully loaded library and query result for the process
-lifetime. Configure library selection before the first automatic lowering or
-compilation.
+Python and native AUTO retain the first successfully loaded library and its query
+result for the process lifetime, including a loaded compiler whose version cannot
+be queried. Failed loads remain retryable if library availability changes. Configure
+library selection before automatic lowering or compilation; changing a retained
+compiler requires a new process.
 
 Standalone C++ AUTO is a convenience adapter: it discovers and retains a native
 COMGR candidate and queries that binary. Its diagnostics are implementation

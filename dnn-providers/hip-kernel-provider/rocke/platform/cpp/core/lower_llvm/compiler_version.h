@@ -23,7 +23,8 @@ struct CompilerInfo
     const char* query_library_path;
 };
 
-/* Load/query the native COMGR candidate once. Returns NULL if loading fails.
+/* Retain the first successfully loaded native COMGR candidate and query it once.
+ * Failed loads return NULL and may be retried by a later call.
  * Explicit emission flavors do not call this function automatically. */
 const CompilerInfo* candidate_compiler_info();
 

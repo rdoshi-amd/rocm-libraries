@@ -96,6 +96,7 @@ _compiler_info: CompilerInfo | None = None
 
 
 def _resolve_lib() -> ctypes.CDLL:
+    """Retain a successful load; failed loads may recover on a later call."""
     global _lib
     with _lib_lock:
         if _lib is None:
@@ -298,6 +299,8 @@ def loaded_compiler_info() -> CompilerInfo | None:
     No GPU, external compiler executable, or release metadata is needed.
     None means loading failed; llvm_version=None means this loaded compiler
     could not be queried. Neither case invents a version from another install.
+    Failed loads may be retried. A successful load, including an unqueryable
+    compiler, is retained for the process lifetime.
     """
     global _llvm_version_lib, _compiler_info
     with _lib_lock:

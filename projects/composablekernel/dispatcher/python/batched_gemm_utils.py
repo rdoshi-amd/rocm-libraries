@@ -404,6 +404,8 @@ class GpuBatchedGemmRunner:
     def kernel_name(self) -> str:
         return self._kernel_name
 
+    reference = _gu.GpuGemmRunner.reference
+
     def run(
         self,
         A: np.ndarray,

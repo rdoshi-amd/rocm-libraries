@@ -1263,17 +1263,34 @@ _NATIVE_IN_NP = {"fp16": np.float16, "fp32": np.float32, "int8": np.int8}
 _C_NP = {"fp16": np.float16, "bf16": np.uint16, "fp32": np.float32, "int32": np.int32}
 
 
+def _native_codec(np_type):
+    return (
+        lambda x, ocp: np.ascontiguousarray(x, dtype=np_type),
+        lambda h, ocp: h.astype(np.float32),
+    )
+
+
+# Host codec for the A/B elements of a kernel dtype: (encode fp32 -> the host
+# buffer the kernel reads, decode that buffer -> fp32). The second argument is
+# the fp8/bf8 OCP flag (None -> local arch). run() and reference() share it.
+_INPUT_CODEC = {
+    **{d: _native_codec(t) for d, t in _NATIVE_IN_NP.items()},
+    "bf16": (lambda x, ocp: _fp32_to_bf16_u16(x), lambda h, ocp: _bf16_u16_to_fp32(h)),
+    "fp8": (_fp32_to_fp8_u8, _fp8_u8_to_fp32),
+    "bf8": (_fp32_to_bf8_u8, _bf8_u8_to_fp32),
+}
+
+
+def _input_codec(dtype: str):
+    """Return the (encode, decode) host codec of A/B ``dtype``; raise if unknown."""
+    if dtype not in _INPUT_CODEC:
+        raise ValueError(f"unsupported input dtype {dtype!r}; add it to _NATIVE_IN_NP")
+    return _INPUT_CODEC[dtype]
+
+
 def _encode_operand(x: np.ndarray, dtype: str, use_ocp: Optional[bool] = None) -> np.ndarray:
     """Encode an A/B host operand into the kernel's element dtype; raise if unknown."""
-    if dtype == "bf16":
-        return _fp32_to_bf16_u16(x)
-    if dtype == "fp8":
-        return _fp32_to_fp8_u8(x, use_ocp=use_ocp)
-    if dtype == "bf8":
-        return _fp32_to_bf8_u8(x, use_ocp=use_ocp)
-    if dtype not in _NATIVE_IN_NP:
-        raise ValueError(f"unsupported input dtype {dtype!r}; add it to _NATIVE_IN_NP")
-    return np.ascontiguousarray(x, dtype=_NATIVE_IN_NP[dtype])
+    return _input_codec(dtype)[0](x, use_ocp)
 
 
 def _c_numpy_dtype(dtype: str):
@@ -1338,6 +1355,18 @@ class GpuGemmRunner:
     @property
     def kernel_name(self) -> str:
         return self._kernel_name
+
+    def reference(self, A: np.ndarray, B: np.ndarray) -> np.ndarray:
+        """fp32 ``A @ B`` on the values the kernel reads in run(A, B, ...).
+
+        A and B are rounded through the same host encoding run() uses (bf16,
+        fp8/bf8 in the arch's OCP or FNUZ format, fp16), so a verify metric
+        measures compute error, not input quantization. Leading batch axes
+        broadcast, so GpuBatchedGemmRunner shares this method.
+        """
+        encode, decode = _input_codec(_dtype_from_kernel_name(self._kernel_name))
+        Aq, Bq = (decode(encode(X, self._use_ocp), self._use_ocp) for X in (A, B))
+        return Aq @ Bq
 
     def run(
         self, A: np.ndarray, B: np.ndarray, problem: GemmProblem

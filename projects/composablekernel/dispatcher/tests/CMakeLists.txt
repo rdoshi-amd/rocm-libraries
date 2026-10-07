@@ -255,6 +255,20 @@ set_tests_properties(dispatcher_test_gemm_utils PROPERTIES
     ENVIRONMENT "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/../python:${CMAKE_CURRENT_SOURCE_DIR}/../codegen:${CMAKE_CURRENT_SOURCE_DIR}/../scripts"
 )
 
+# tile_engine GEMM sweep driver: --verify reference built from the kernel's
+# quantized inputs (fp8/bf8 included) and a non-zero exit on failed rows. CPU-only.
+add_test(
+    NAME dispatcher_test_gemm_driver_verify
+    COMMAND ${Python3_EXECUTABLE} -m pytest -q ${CMAKE_CURRENT_SOURCE_DIR}/test_gemm_driver_verify.py
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+set_tests_properties(dispatcher_test_gemm_driver_verify PROPERTIES
+    LABELS "dispatcher;python;gemm;validation"
+    TIMEOUT 60
+    ENVIRONMENT "PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/../python:${CMAKE_CURRENT_SOURCE_DIR}/../codegen:${CMAKE_CURRENT_SOURCE_DIR}/../scripts"
+)
+
 # gfx1250 comp_async / comp_tdm / comp_tdm_v2 pipelines and the tdm epilogue:
 # ArchFilter, codegen and gemm_utils gates, LDS budget and codegen output.
 # CPU-only.

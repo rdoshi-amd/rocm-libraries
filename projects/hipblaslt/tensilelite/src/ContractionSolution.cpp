@@ -494,6 +494,31 @@ namespace TensileLite
            || in.tiles >= in.maxGrid)
             return whole;
 
+        // Arrival fixup. One part per workgroup (times the over-decomposition
+        // factor) ...
+        auto arrival = [&]() {
+            size_t split = StreamKDynamicWorkItemsPerWorkgroup * in.maxGrid / in.tiles;
+            // ... but enough iterations per part to amortise its prologue/epilogue ...
+            split = std::min(split, itersPerTile / StreamKDynamicMinItersPerWI);
+            // ... and no more parts than the serial fixup can sum profitably:
+            // the last part to arrive reads the other split-1 partial tiles one
+            // after the other, each costing about two main-loop iterations, so
+            // the launch time I/split + 2*split is minimal at split = sqrt(I/2).
+            split = std::min(
+                split, static_cast<size_t>(std::sqrt(static_cast<double>(itersPerTile) / 2.0)));
+            // ... and inside the flag region and the workspace (shrink, not fall back).
+            if(in.flagSlots / in.tiles < split)
+                split = in.flagSlots / in.tiles;
+            if(in.partialTileBytes > 0)
+                split = std::min(split, in.workspaceBytes / in.partialTileBytes / in.tiles);
+            if(split < 2)
+                return whole;
+            StreamKDynamicSplit d = decompose(in.tiles, split);
+            if(d.skSplit < 2 || !fits(d.skTiles, d.skSplit, false))
+                return whole;
+            return d;
+        };
+
         // Parallel reduction: the parts are summed by a separate kernel, in
         // parallel and in part order, so nothing in the launch serialises on
         // the split. One part per workgroup (times the over-decomposition
@@ -515,35 +540,25 @@ namespace TensileLite
                 StreamKDynamicSplit d = decompose(in.tiles, split);
                 d.parallel            = parallelFor(d);
                 if(d.parallel && fits(d.skTiles, d.skSplit, true))
+                {
+                    // A few large parts: the PostGSU kernel reads and writes
+                    // every slot of the whole M x N output, which costs more
+                    // than the arrival fixup's one extra partial-tile read
+                    // per tile. Take the arrival fixup when the kernel has it
+                    // and it splits the tiles too.
+                    if(in.allowSplit && d.skSplit < in.parallelMinSplit)
+                    {
+                        const StreamKDynamicSplit a = arrival();
+                        if(a.skTiles > 0)
+                            return a;
+                    }
                     return d;
+                }
             }
         }
         if(!in.allowSplit)
             return whole;
-
-        // Arrival fixup. One part per workgroup (times the over-decomposition
-        // factor) ...
-        size_t split = StreamKDynamicWorkItemsPerWorkgroup * in.maxGrid / in.tiles;
-        // ... but enough iterations per part to amortise its prologue/epilogue ...
-        split = std::min(split, itersPerTile / StreamKDynamicMinItersPerWI);
-        // ... and no more parts than the serial fixup can sum profitably: the
-        // last part to arrive reads the other split-1 partial tiles one after
-        // the other, each costing about two main-loop iterations, so the launch
-        // time I/split + 2*split is minimal at split = sqrt(I/2).
-        split = std::min(split,
-                         static_cast<size_t>(std::sqrt(static_cast<double>(itersPerTile) / 2.0)));
-        // ... and inside the flag region and the workspace (shrink, not fall back).
-        if(in.flagSlots / in.tiles < split)
-            split = in.flagSlots / in.tiles;
-        if(in.partialTileBytes > 0)
-            split = std::min(split, in.workspaceBytes / in.partialTileBytes / in.tiles);
-        if(split < 2)
-            return whole;
-
-        StreamKDynamicSplit d = decompose(in.tiles, split);
-        if(d.skSplit < 2 || !fits(d.skTiles, d.skSplit, false))
-            return whole;
-        return d;
+        return arrival();
     }
 
     StreamKStaticSplit streamKStaticSplit(
@@ -7490,8 +7505,10 @@ namespace TensileLite
                                 && !sizeMapping.prefetchAcrossPersistent
                                 && !problem.getParams().uniformSummationOrder();
         in.allowSplit = internalArgsSupport.arrivalFixup && splittable;
-        // Parallel reduction (PostGSU) when every tile is split, for kernels
-        // that advertise it (InternalArgsSupport::dynamicParallel): the parts
+        // Parallel reduction (PostGSU) when every tile is split into at least
+        // StreamKDynamicParallelMinSplit parts (any split >= 2 for kernels
+        // without the arrival fixup), for kernels that advertise it
+        // (InternalArgsSupport::dynamicParallel): the parts
         // store to M x N workspace slots through the same D-is-workspace
         // arguments as static parallel reduction, so strided batches only (a
         // pointer-array D would be dereferenced, see

@@ -631,6 +631,16 @@ namespace TensileLite
     // the hint beats both, so the default stays 1 (phaseC.md has the data).
     constexpr size_t StreamKDynamicParallelWorkItemsPerWorkgroup = 1;
 
+    // Smallest split the parallel reduction takes when the kernel also has the
+    // arrival fixup; below it the arrival fixup reduces the parts. With two
+    // parts per tile the PostGSU pass over the whole M x N output costs more
+    // than the last part's one extra partial-tile read: kernel time (GEMM +
+    // PostGSU, f32 xf32, N = 0) parallel vs arrival was +1.0 to +2.3% on 5 of 7
+    // split-2 shapes (96 to 128 tiles; -0.7% at best). Split 3 was a wash (-1.0%,
+    // 0.0%) and split 4 favours parallel (-2.7 to -5.0%, 4 shapes), so the
+    // threshold is 3 (phaseC_review_fixes.md has the data).
+    constexpr size_t StreamKDynamicParallelMinSplit = 3;
+
     struct StreamKDynamicSplitInputs
     {
         // Batch-inclusive tile count, getNumTiles(sizeMapping, 1).
@@ -650,7 +660,8 @@ namespace TensileLite
         size_t workspaceBytes   = 0;
         size_t partialTileBytes = 0;
         // The kernel can reduce split tiles in parallel (PostGSU kernel), so
-        // when every tile is split they are, with no serial-fixup cap. Its
+        // when every tile is split they are, with no serial-fixup cap (unless
+        // the split is below parallelMinSplit and allowSplit holds). Its
         // workspace is skTiles*skSplit partial tiles plus
         // parallelBytesPerSplit*skSplit + parallelFixedBytes (split-tile GSU
         // sizing: bias-gradient and amaxD buffers).
@@ -661,6 +672,9 @@ namespace TensileLite
         // factor) and fewest main-loop iterations per part.
         size_t parallelItemsPerWorkgroup = StreamKDynamicParallelWorkItemsPerWorkgroup;
         size_t parallelMinItersPerWI     = StreamKDynamicMinItersPerWI;
+        // With allowSplit too, a parallel split below this takes the arrival
+        // fixup instead when that splits the tiles.
+        size_t parallelMinSplit = StreamKDynamicParallelMinSplit;
         // TENSILE_STREAMK_TILES / TENSILE_STREAMK_SPLIT, -1 when unset.
         int overrideTiles = -1;
         int overrideSplit = -1;
@@ -680,7 +694,11 @@ namespace TensileLite
      * largest value with tiles*skSplit <= parallelItemsPerWorkgroup*maxGrid, at
      * least parallelMinItersPerWI iterations per part and within the workspace
      * (tiles*skSplit partial tiles plus the linear parallel extras). No
-     * serial-fixup cap and no flag bound apply.
+     * serial-fixup cap and no flag bound apply. If that skSplit is below
+     * parallelMinSplit and the kernel also has the arrival fixup (allowSplit),
+     * the arrival fixup's split is taken instead, unless it keeps the tiles
+     * whole. The choice depends only on these inputs, so the workspace query
+     * and the launch (given the queried workspace) make the same one.
      *
      * Otherwise, with allowSplit, the last part to arrive fixes each tile up:
      * skSplit is the largest value with tiles*skSplit <=

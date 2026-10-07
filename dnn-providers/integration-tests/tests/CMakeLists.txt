@@ -135,6 +135,8 @@ add_executable(hipdnn_gpu_ref_tests
     gpu-ref/TestGpuRefLaunch.cpp
     gpu-ref/data-types/TestFp8E5M2Device.cpp
     gpu-ref/data-types/TestFp8E4M3Device.cpp
+    gpu-ref/data-types/TestFp6E3M2Device.cpp
+    gpu-ref/data-types/TestFp4E2M1Device.cpp
 )
 
 target_link_libraries(hipdnn_gpu_ref_tests

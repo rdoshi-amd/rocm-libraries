@@ -13,6 +13,8 @@ set(GPU_REF_TYPE_HEADERS
     ${CMAKE_CURRENT_SOURCE_DIR}/data-types/Common.hpp
     ${CMAKE_CURRENT_SOURCE_DIR}/data-types/Fp8E4M3.hpp
     ${CMAKE_CURRENT_SOURCE_DIR}/data-types/Fp8E5M2.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/data-types/Fp6E3M2.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/data-types/Fp4E2M1.hpp
     ${CMAKE_CURRENT_SOURCE_DIR}/data-types/GpuRefDataTypes.hpp
 )
 list(APPEND GPU_REF_KERNEL_FILES ${GPU_REF_TYPE_HEADERS})

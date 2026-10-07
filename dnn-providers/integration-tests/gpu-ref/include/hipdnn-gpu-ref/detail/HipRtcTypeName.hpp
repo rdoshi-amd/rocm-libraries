@@ -68,4 +68,16 @@ struct HipRtcTypeName<hipdnn_data_sdk::types::fp8_e4m3>
     static constexpr const char* VALUE = "hipdnn_gpu_ref::data_types::fp8_e4m3";
 };
 
+template <>
+struct HipRtcTypeName<hipdnn_data_sdk::types::fp6_e3m2>
+{
+    static constexpr const char* VALUE = "hipdnn_gpu_ref::data_types::fp6_e3m2";
+};
+
+template <>
+struct HipRtcTypeName<hipdnn_data_sdk::types::fp4_e2m1>
+{
+    static constexpr const char* VALUE = "hipdnn_gpu_ref::data_types::fp4_e2m1";
+};
+
 } // namespace hipdnn_gpu_ref::detail

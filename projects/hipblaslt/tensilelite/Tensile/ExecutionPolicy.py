@@ -121,6 +121,13 @@ def usesStreamKDynamicParallel(debugStreamK, streamKAtomic, prefetchAcrossPersis
     dynamic queues keep non-zero, and DebugStreamK keeps its debug fixups.
     StreamKHybrid.usesDynamicParallel() (codegen) and the
     SupportStreamKDynamicParallel capability (host) both come from here.
+
+    Unlike the arrival fixup it does not need scalar atomics: the reduction
+    is plain stores plus the PostGSU kernel, and the work queues fetch with
+    s_atomic_inc or, without HasSAtomic (e.g. gfx1250), a lane-0
+    global_atomic_inc_u32 (fetchNextWorkItem). No shipped logic has SK5
+    Hybrid kernels for such targets (only gfx950); the gfx1250 test kernels
+    assemble with it but it has not run on gfx1250 hardware.
     """
     return debugStreamK == 0 and not streamKAtomic and not prefetchAcrossPersistent
 

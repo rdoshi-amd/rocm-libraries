@@ -163,7 +163,7 @@ class PersistentLoopOn(PersistentLoop):
             # Hybrid SK3+SK4: dispatch on the runtime mode bit captured at
             # preLoop into StreamKHybridMode. SK4 close: barrier + always
             # restart (dynamic queue drives exit via KernelEnd). SK3 close:
-            # compare StreamKIter against StreamKIterEnd.
+            # barrier, then compare StreamKIter against StreamKIterEnd.
             sk5DynamicCloseLabel = Label("SK5_DynamicClose", "")
             sk5StaticCloseLabel = Label("SK5_StaticClose", "")
             sk5CloseDoneLabel = Label("SK5_CloseDone", "")
@@ -173,6 +173,7 @@ class PersistentLoopOn(PersistentLoop):
                                     comment="SK5: branch to SK4 (dynamic) close"))
             # SK3 (static) close path
             module.add(sk5StaticCloseLabel)
+            module.add(SBarrier(comment="SK5/SK3 path: sync before persistent re-entry"))
             module.add(SCmpGeU32(src0=sgpr("StreamKIter"), src1=sgpr("StreamKIterEnd"),
                                  comment="SK5/SK3 path: check if done all StreamK iterations"))
             module.add(writer.longBranchScc0(Label("PersistentLoopStart", ""), posNeg=-1))
@@ -185,6 +186,9 @@ class PersistentLoopOn(PersistentLoop):
                 module.add(SLongBranchNegative(Label("PersistentLoopStart", ""), tmpSgprInfo))
             module.add(sk5CloseDoneLabel)
         else:
+            # The next work item's prologue writes LDS that slower waves may
+            # still be reading in this item's epilogue.
+            module.add(SBarrier(comment="Sync before persistent re-entry"))
             module.add(SCmpGeU32(src0=sgpr("StreamKIter"), src1=sgpr("StreamKIterEnd"), comment="Check if done all StreamK iterations"))
             # Under RAP the compute section is peeled, so later tiles re-enter at
             # the second copy rather than at the loop head; the first copy exists

@@ -206,7 +206,7 @@ jobs:
         {
           "repository": "${{ github.repository }}",
           "ref": "${{ github.sha }}",
-          "extra_cmake_options": "-DTHEROCK_FLAG_HIPKERNELPROVIDER_ENABLE_ROCKE=ON"
+          "extra_cmake_options": "-DTHEROCK_FLAG_HIPKERNELPROVIDER_ENABLE_ROCKE=OFF"
         }
 
   linux_build_and_test:

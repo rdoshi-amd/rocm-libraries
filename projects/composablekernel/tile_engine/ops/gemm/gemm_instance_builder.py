@@ -858,6 +858,26 @@ struct SelectedKernel {{
     static constexpr ck_tile::index_t WarpTileK = {tile_config["warp_tile_k"]};"""
         return instance_code
 
+    def _gfx1250_transpose_c(self, epilogue):
+        """True when the gfx1250 TransposeC rule applies to this kernel.
+
+        On gfx1250, TransposeC with a row-major C and a square warp tile turns
+        the per-lane C shuffle into 16-byte LDS writes (CShuffle / TDM epilogue)
+        instead of 2-byte ones. The rule itself (RowMajor C && WarpTileM ==
+        WarpTileN) is emitted as C++ and matches the gfx1250 TransposeC rule in
+        test/ck_tile/gemm/test_gemm_pipeline_util.hpp. gemm_universal is limited
+        to the LDS-staged epilogues covered by that test; the default epilogue
+        keeps TransposeC=false.
+        """
+        if self.gpu_target.split(":")[0] != "gfx1250":
+            return False
+        if self.kernel_name_prefix == "mx_gemm":
+            return True
+        return self.kernel_name_prefix == "gemm_universal" and epilogue in (
+            "cshuffle",
+            "tdm",
+        )
+
     def populate_trait_config(self, trait_combo):
         (
             pipeline,
@@ -875,7 +895,7 @@ struct SelectedKernel {{
     static constexpr bool kPadM = {"true" if pad_m in [True, "true"] else "false"};
     static constexpr bool kPadN = {"true" if pad_n in [True, "true"] else "false"};
     static constexpr bool kPadK = {"true" if pad_k in [True, "true"] else "false"};
-    static constexpr bool TransposeC = {"std::is_same_v<CLayout, ck_tile::tensor_layout::gemm::RowMajor> && WarpTileM == WarpTileN" if self.kernel_name_prefix == "mx_gemm" and self.gpu_target.split(":")[0] == "gfx1250" else "false"};
+    static constexpr bool TransposeC = {"std::is_same_v<CLayout, ck_tile::tensor_layout::gemm::RowMajor> && WarpTileM == WarpTileN" if self._gfx1250_transpose_c(epilogue) else "false"};
     static constexpr bool DoubleSmemBuffer = {"true" if pipeline in ["compv4", "preshufflev2", "comp_async", "comp_tdm", "comp_tdm_v2", "comp_async_eight_waves", "weight_preshuffle"] else "false"};"""
 
         if self.kernel_name_prefix == "gemm_aquant":

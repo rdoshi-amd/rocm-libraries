@@ -365,6 +365,37 @@ struct GemmConfigComputeAsync : public GemmConfigBase
     static constexpr bool UseStructuredSparsity     = false;
 };
 
+// gfx1250 bf16 compute config for rocKE "Opt-4" class shapes: 256x128x64 tile, 4x2 waves,
+// 16x16x32 WMMA, no padding (M/N/K must be multiples of the tile), CShuffle epilogue. With a
+// row-major C and a square warp tile, TransposeC turns the per-lane CShuffle LDS writes from 2-byte
+// into 16-byte stores (same rule as test/ck_tile/gemm/test_gemm_pipeline_util.hpp).
+template <typename CLayout = ck_tile::tensor_layout::gemm::RowMajor>
+struct GemmConfigGfx1250Bf16_Opt4 : public GemmConfigBase
+{
+    static constexpr ck_tile::index_t M_Tile = 256;
+    static constexpr ck_tile::index_t N_Tile = 128;
+    static constexpr ck_tile::index_t K_Tile = 64;
+
+    static constexpr ck_tile::index_t M_Warp = 4;
+    static constexpr ck_tile::index_t N_Warp = 2;
+    static constexpr ck_tile::index_t K_Warp = 1;
+
+    static constexpr ck_tile::index_t M_Warp_Tile = 16;
+    static constexpr ck_tile::index_t N_Warp_Tile = 16;
+    static constexpr ck_tile::index_t K_Warp_Tile = 32;
+
+#if defined(CK_USE_GFX1250)
+    static constexpr bool TransposeC =
+        std::is_same_v<CLayout, ck_tile::tensor_layout::gemm::RowMajor> &&
+        M_Warp_Tile == N_Warp_Tile;
+#else
+    static constexpr bool TransposeC = false;
+#endif
+
+    static constexpr bool DoubleSmemBuffer          = false;
+    static constexpr ck_tile::GemmPipeline Pipeline = ck_tile::GemmPipeline::COMPUTE_V3;
+};
+
 template <typename PrecType>
 struct GemmConfigPreshuffleDecode : public GemmConfigBase
 {
@@ -696,7 +727,7 @@ struct EpilogueTypeTraits<ck_tile::GemmPipeline::COMPUTE_TDM_V2, Problem>
     using Epilogue = ck_tile::TdmEpilogue<Problem>;
 };
 
-inline auto create_args()
+inline auto create_args(const std::string& default_prec = "fp16")
 {
     ck_tile::ArgParser arg_parser;
     arg_parser.insert("m", "3840", "m dimension")
@@ -709,7 +740,9 @@ inline auto create_args()
         .insert("stride_b", "0", "Tensor B stride")
         .insert("stride_c", "0", "Tensor C stride")
         .insert("v", "2", "0. No validation, 1. Validation on CPU, 2. Validation on GPU")
-        .insert("prec", "fp16", "data type. fp16/bf16/fp8/bf8/pk_int4_t/tf32 (tf32 only on gfx950)")
+        .insert("prec",
+                default_prec,
+                "data type. fp16/bf16/fp8/bf8/pk_int4_t/tf32 (tf32 only on gfx950)")
         .insert("warmup", "50", "number of iterations before benchmark the kernel")
         .insert("repeat", "100", "number of iterations to benchmark the kernel")
         .insert("timer", "gpu", "gpu:gpu timer, cpu:cpu timer")

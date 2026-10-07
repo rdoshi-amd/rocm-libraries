@@ -168,6 +168,12 @@ if(GPU_TARGETS MATCHES "gfx94|gfx95|gfx90a|gfx11|gfx12")
     foreach(test_target ${CK_TILE_GEMM_TEST_TARGETS})
         set_tests_properties(${test_target} PROPERTIES LABELS "CK_TILE_GEMM_TESTS")
     endforeach()
+    # Joined after the relabel above so it keeps SMOKE_TEST; gfx1250 CI runs only `ninja smoke`.
+    if(TEST test_ck_tile_gemm_pipeline_tdm_producer_consumer_wmma)
+        set_property(TEST test_ck_tile_gemm_pipeline_tdm_producer_consumer_wmma
+            APPEND PROPERTY LABELS "CK_TILE_GEMM_TESTS")
+        list(APPEND CK_TILE_GEMM_TEST_TARGETS test_ck_tile_gemm_pipeline_tdm_producer_consumer_wmma)
+    endif()
 
     # Umbrella target to build and run all ck_tile gemm tests
     # Usage: ninja ck_tile_gemm_tests

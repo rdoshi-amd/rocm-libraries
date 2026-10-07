@@ -642,9 +642,11 @@ namespace TensileLite
     // threshold is 3 (phaseC_review_fixes.md has the data).
     constexpr size_t StreamKDynamicParallelMinSplit = 3;
 
-    // Fewest parts per tile at one part per CU from which the split is sized
-    // for one part per CU (computeUnits) rather than per workgroup slot: with
-    // so few tiles the extra co-resident parts only add partial tiles
+    // The split is sized for one part per CU (computeUnits) rather than per
+    // workgroup slot for at most computeUnits / StreamKDynamicFewTilesMinSplit
+    // tiles, i.e. while one part per CU gives every tile this many parts
+    // (fewer when persistentMaxCUs or a fixed grid caps the slots below the
+    // CUs): with so few tiles the extra co-resident parts only add partial tiles
     // (1.44-1.53x static at 2-4 workgroups per CU on 2-4 tile huge-K shapes,
     // 1.01-1.09x at one).
     constexpr size_t StreamKDynamicFewTilesMinSplit = 8;

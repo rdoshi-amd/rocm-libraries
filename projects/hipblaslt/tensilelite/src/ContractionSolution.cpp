@@ -520,8 +520,9 @@ namespace TensileLite
         // -19%), as long as the aligned parts still cover 3/4 of the CUs the
         // unaligned ones kept busy,
         // min(tiles * split, computeUnits): parts beyond one per CU only
-        // share a CU, so dropping them costs little (8 tiles of 41 parts on
-        // 256 CUs -> 24: -30%), while a launch that leaves CUs idle loses
+        // share a CU, so dropping them costs little (43 tiles of 11 parts on
+        // 512 slots of 256 CUs -> 8: 344 parts, still one per CU), while a
+        // launch that leaves CUs idle loses
         // compute and memory parallelism faster than the locality gains
         // (2 tiles 77 -> 44: +22%; 17 and 19 tiles 11 -> 8: +10% and +14%).
         // The exact multiples of numQueues / 2 thin out as the parts grow
@@ -540,6 +541,11 @@ namespace TensileLite
             if(s < q || s % g == 0)
                 return split;
             const size_t busy     = std::min(in.tiles * s, alignCUs);
+            // Every odd split counts as unshared: numQueues is a power of two
+            // (streamKDynamicQueueUnsupported() rejects any other count), so
+            // an odd split is coprime to it and the parts of every tile run
+            // through all the queues. Another queue count would need the
+            // gcd test for odd splits too.
             const bool   unshared = s % 2 == 1 || in.tiles <= q / std::gcd(s, q);
             for(size_t c = s / g * g; c >= q; c -= g)
             {
@@ -551,9 +557,10 @@ namespace TensileLite
             return split;
         };
 
-        // Few tiles, each split into StreamKDynamicFewTilesMinSplit or more
-        // parts even at one part per CU (huge K): one part per CU, not per
-        // slot. The second and third workgroup of a CU only add parts, each
+        // Few tiles, at most computeUnits / StreamKDynamicFewTilesMinSplit
+        // (StreamKDynamicFewTilesMinSplit or more parts each at one part per
+        // CU, unless persistentMaxCUs or a fixed grid caps the slots below
+        // the CUs): one part per CU, not per slot. The second and third workgroup of a CU only add parts, each
         // another partial tile to write and sum, and buy no bandwidth or
         // compute: few-tile problems (2 to 4 tiles) with a huge K went from
         // 1.44-1.53x static at 2 to 4 workgroups per CU to 1.01-1.09x at

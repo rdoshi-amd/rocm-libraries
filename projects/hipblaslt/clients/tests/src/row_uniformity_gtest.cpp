@@ -3606,6 +3606,8 @@ namespace
                       Case{13, 554, 182, 14, 14}, // even, tiles t and t + 4 share; 12 drops 1/7
                       Case{2, 2304, 220, 110, 96}, // even, but no tile t + 4 to share with
                       Case{3, 2048, 222, 74, 64}, // the same on 3 tiles: 222 -> 192 CUs
+                      Case{4, 4096, 56, 14, 12}, // 4 tiles: tile 4 would share, 3/4 keeps 12
+                      Case{5, 4096, 70, 14, 14}, // tiles 0 and 4 share: 12 drops 1/7
                       Case{17, 4096, 256, 15, 12},
                       Case{36, 4096, 256, 7, 7}, // below the queue count
                       Case{1, 1000, 256, 125, 125}, // one tile: nothing shared
@@ -3627,23 +3629,24 @@ namespace
         EXPECT_EQ(split(2, 4096, 256, false, 8).skSplit, 44u);
         EXPECT_EQ(split(2, 4096, 256, false, 0).skSplit, 45u);
 
-        // The CUs kept busy are counted up to computeUnits: 8 tiles on 512
-        // slots of 256 CUs (two workgroups per CU) give 8 x 41 parts. 24
-        // keeps 192 of the 256 CUs busy, 3/4, so it is taken; counted against
-        // the 328 parts (computeUnits unset: the slots) it would not be.
+        // The CUs kept busy are counted up to computeUnits: 43 tiles on 512
+        // slots of 256 CUs (two workgroups per CU; too many tiles for one
+        // part per CU) give 43 x 11 = 473 parts. 8 keeps 344 parts, every
+        // CU busy, so it is taken; counted against the 473 parts
+        // (computeUnits unset or above them: the slots) it is below 3/4.
         {
-            auto in          = parallelSplitInputs(8, 369);
+            auto in          = parallelSplitInputs(43, 4096);
             in.maxGrid       = 512;
             in.splitSlots    = 512;
             in.numQueues     = 8;
             const auto plain = TensileLite::streamKDynamicSplit(in);
-            EXPECT_EQ(plain.skSplit, 41u);
+            EXPECT_EQ(plain.skSplit, 11u);
             in.computeUnits = 256;
             const auto d    = TensileLite::streamKDynamicSplit(in);
-            EXPECT_EQ(d.skSplit, 24u);
-            EXPECT_EQ(d.grid, 192u);
+            EXPECT_EQ(d.skSplit, 8u);
+            EXPECT_EQ(d.grid, 344u);
             in.computeUnits = 512;
-            EXPECT_EQ(TensileLite::streamKDynamicSplit(in).skSplit, 41u);
+            EXPECT_EQ(TensileLite::streamKDynamicSplit(in).skSplit, 11u);
         }
 
         // Four queues align to multiples of 2, from 4 parts up.
@@ -3669,8 +3672,8 @@ namespace
         }
     }
 
-    // Few tiles (8 or more parts each at one part per CU) are split for one
-    // part per CU, not per workgroup slot; more tiles keep the slots.
+    // Few tiles (at most computeUnits / 8) are split for one part per CU,
+    // not per workgroup slot; more tiles keep the slots.
     TEST(StreamKDynamicSplit_pre_checkin, FewTilesSplitOnePartPerCU)
     {
         auto split = [](size_t tiles, size_t iters, size_t cus) {
@@ -3747,6 +3750,46 @@ namespace
         const auto inv = solveWithWorkspace(*solution, problem, device);
         ASSERT_EQ(inv.size(), 2u);
         EXPECT_EQ(inv[0].numWorkGroups.x, 224u);
+    }
+
+    // The few-tile split through the solution: with no CU-count hint the
+    // device's CUs size it, one part per CU, and the query and a launch handed
+    // its workspace agree.
+    TEST(StreamKDynamicSplit_pre_checkin, FewTilesSplitQueryAndLaunchAgree)
+    {
+        auto solution = dynamicParallelSolution();
+        // 256 CUs x occupancy 3: 768 workgroup slots.
+        solution->sizeMapping.CUOccupancy = 3;
+        auto device                       = uniformitySteeringDevice();
+        struct Shape
+        {
+            size_t m, n, tiles, split;
+        };
+        // 128 x 128 tiles of 6912 iterations of 64.
+        for(Shape c : {Shape{256, 128, 2, 128}, Shape{256, 256, 4, 64}})
+        {
+            SCOPED_TRACE(std::to_string(c.tiles) + " tiles");
+            auto         problem = dynamicSplitGemm(c.m, c.n, 6912 * 64, 1);
+            const size_t tiles   = problem.getNumTiles(solution->sizeMapping, 1);
+            ASSERT_EQ(tiles, c.tiles);
+            const auto wanted = solution->streamKDynamicDecomposition(problem, device, tiles);
+            ASSERT_TRUE(wanted.parallel);
+            EXPECT_EQ(wanted.skTiles, c.tiles);
+            EXPECT_EQ(wanted.skSplit, c.split) << "256 CUs / tiles, not 768 slots / tiles";
+            EXPECT_EQ(wanted.grid, 256u);
+
+            const size_t required = solution->requiredWorkspaceSize(problem, device);
+            EXPECT_EQ(required, wanted.workspaceBytes);
+            problem.setWorkspaceSize(required);
+            expectSameSplit(solution->streamKDynamicDecomposition(problem, device, tiles), wanted);
+            const auto launch = solution->resolvePersistentSettings(problem, device);
+            ASSERT_TRUE(launch.dynamicSplit.has_value());
+            expectSameSplit(*launch.dynamicSplit, wanted);
+            EXPECT_EQ(launch.workspaceBytes, required);
+            const auto inv = solveWithWorkspace(*solution, problem, device);
+            ASSERT_EQ(inv.size(), 2u);
+            EXPECT_EQ(inv[0].numWorkGroups.x, 256u);
+        }
     }
 
 } // namespace

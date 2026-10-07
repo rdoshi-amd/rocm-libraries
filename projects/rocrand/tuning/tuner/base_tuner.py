@@ -189,15 +189,8 @@ class BaseTuner(ABC):
         cls(defaults).tune()
 
     def _get_grid_sizes(self) -> str:
-        rocminfo_out = subprocess.check_output("rocminfo", encoding="utf-8")
-        match = re.search(
-            r"^\s*Name:\s*gfx\d+.*?^\s*Compute Unit:\s*(\d+)",
-            rocminfo_out,
-            flags=re.MULTILINE | re.DOTALL,
-        )
-        if not match:
-            raise Exception("Could not find Compute Unit info in rocminfo output")
-        num_compute_units = int(match.group(1))
+        num_compute_units = self.device_properties.multiProcessorCount
+
         compute_unit_multipliers = [4, 5, 8, 10, 16, 32]
         min_grid_size = 128
         max_grid_size = 4096
@@ -209,6 +202,7 @@ class BaseTuner(ABC):
                 grid_sizes.append(new_grid_size)
         grid_sizes = list(set(grid_sizes))  # Unique
         grid_sizes.sort()
+
         return grid_sizes
 
     def _get_tune_params(self) -> OrderedDict:

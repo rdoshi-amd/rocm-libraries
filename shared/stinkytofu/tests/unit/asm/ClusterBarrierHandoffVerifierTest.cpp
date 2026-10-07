@@ -232,6 +232,33 @@ TEST_F(ClusterBarrierHandoffVerifierTest, ZeroTripWaitCannotReachMainLoopSignal)
     EXPECT_TRUE(verify().empty());
 }
 
+// The nonzero entry path must not inherit the later zero-trip bypass. Once
+// that counter is overwritten, both outcomes are possible and the gap is real.
+class ClusterBarrierNonzeroGuardTest : public ClusterBarrierHandoffVerifierTest,
+                                      public testing::WithParamInterface<bool> {};
+
+TEST_P(ClusterBarrierNonzeroGuardTest, RequiresJoinOnEveryFeasiblePath) {
+    compare(11, 0);
+    branch("exit", true);
+    wait(-3);
+    clobberScc();
+    if (GetParam()) {
+        auto* mov = instruction(GFX::s_mov_b64);
+        mov->addDestReg(StinkyRegister("s", 10, 2));
+        mov->addSrcReg(StinkyRegister("s", 20, 2));
+    }
+    compare(11, 0);
+    branch("next_signal", true);
+    join();
+    label("next_signal");
+    signal(-3);
+    label("exit");
+    end();
+    EXPECT_EQ(verify().empty(), !GetParam());
+}
+
+INSTANTIATE_TEST_SUITE_P(CounterWrites, ClusterBarrierNonzeroGuardTest, testing::Values(false, true));
+
 TEST_F(ClusterBarrierHandoffVerifierTest, CounterWriteInvalidatesZeroTripFact) {
     zeroTripPrefix();
     auto* mov = instruction(GFX::s_mov_b32);

@@ -13,6 +13,7 @@
 #include <utility>
 #include <vector>
 
+#include "stinkytofu/analysis/asm/ScalarBranchFacts.hpp"
 #include "stinkytofu/core/PassManager.hpp"
 #include "stinkytofu/ir/asm/StinkyAsmIR.hpp"
 #include "stinkytofu/support/ErrorHandling.hpp"
@@ -100,92 +101,6 @@ struct FinalControlFlow {
     }
 };
 
-// A small, conservative predicate domain: only equality facts established by
-// scalar eq/ne-u32 branches. This is enough to preserve a zero-trip guard across
-// shadow initialization and a later re-test of the same, unmodified counter.
-// Unsupported operations lose facts; they never justify pruning a CFG edge.
-struct ScalarFacts {
-    struct Predicate {
-        uint32_t reg;
-        uint32_t value;
-        bool equal;
-        bool operator==(const Predicate&) const = default;
-    };
-    std::unordered_map<uint32_t, uint32_t> equalities;
-    std::optional<Predicate> predicate;
-    std::optional<bool> scc;
-
-    bool merge(const ScalarFacts& other) {
-        bool changed = false;
-        for (auto it = equalities.begin(); it != equalities.end();) {
-            auto found = other.equalities.find(it->first);
-            if (found == other.equalities.end() || found->second != it->second) {
-                it = equalities.erase(it);
-                changed = true;
-            } else {
-                ++it;
-            }
-        }
-        if (predicate && predicate != other.predicate) {
-            predicate.reset();
-            changed = true;
-        }
-        if (scc && scc != other.scc) {
-            scc.reset();
-            changed = true;
-        }
-        return changed;
-    }
-
-    void transfer(const StinkyInstruction& inst) {
-        bool writesScc = inst.is(InstFlag::IF_ImplicitWriteSCC);
-        for (const auto& dst : inst.getDestRegs()) {
-            if (!dst.isRegister()) continue;
-            writesScc |= dst.reg.type == RegType::SCC;
-            if (dst.reg.type != RegType::S) continue;
-            if (dst.reg.offset != 0) {
-                // Do not reason about symbolic/offset destination aliases.
-                equalities.clear();
-                predicate.reset();
-                continue;
-            }
-            for (uint32_t i = dst.reg.idx; i < dst.reg.idx + dst.reg.num; ++i) {
-                equalities.erase(i);
-                if (predicate && predicate->reg == i) predicate.reset();
-            }
-        }
-        if (writesScc) {
-            predicate.reset();
-            scc.reset();
-        }
-        const auto opcode = inst.getUnifiedOpcode();
-        if (opcode != GFX::s_cmp_eq_u32 && opcode != GFX::s_cmp_lg_u32) return;
-        // Also handle minimal IR whose implicit SCC destination is not explicit.
-        predicate.reset();
-        scc.reset();
-        const auto& srcs = inst.getSrcRegs();
-        if (srcs.size() < 2) return;
-        const StinkyRegister* reg = &srcs[0];
-        const StinkyRegister* value = &srcs[1];
-        if (reg->dataType == StinkyRegister::Type::LiteralInt) std::swap(reg, value);
-        if (!reg->isRegister() || reg->reg.type != RegType::S || reg->reg.num != 1 ||
-            reg->reg.offset != 0 || reg->reg.isMinus || reg->reg.isAbs ||
-            value->dataType != StinkyRegister::Type::LiteralInt) return;
-        predicate = Predicate{reg->reg.idx, static_cast<uint32_t>(value->getLiteralInt()),
-                              opcode == GFX::s_cmp_eq_u32};
-        if (auto found = equalities.find(predicate->reg); found != equalities.end())
-            scc = (found->second == predicate->value) == predicate->equal;
-    }
-
-    bool assumeScc(bool value) {
-        if (scc && *scc != value) return false;
-        if (predicate && value == predicate->equal)
-            equalities[predicate->reg] = predicate->value;
-        scc = value;
-        return true;
-    }
-};
-
 class ClusterBarrierHandoffVerifierPass : public Pass {
    public:
     static char ID;
@@ -212,7 +127,7 @@ std::string verifyClusterBarrierHandoffs(Function& func) {
     struct State {
         Phase phase = Joined;
         size_t clusterWait = 0;
-        ScalarFacts facts;
+        ScalarBranchFacts facts;
     };
     // Keep joined paths separate from pending paths. Merging them would lose
     // the zero-iteration predicate of a wait that only executes on the exit path.
@@ -256,8 +171,6 @@ std::string verifyClusterBarrierHandoffs(Function& func) {
         if (isCall(inst)) {
             if (!cfg.barrierFreeCall(inst))
                 return error("through a call whose barrier behavior is not proven");
-            // Even a barrier-free helper may overwrite scalar registers/SCC.
-            state.facts = {};
         }
         state.facts.transfer(inst);
         if (!isBranch(inst)) {

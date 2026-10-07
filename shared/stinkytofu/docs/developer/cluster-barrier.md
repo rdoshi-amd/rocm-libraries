@@ -397,9 +397,9 @@ paths using final branch targets and inline labels rather than potentially stale
 basic-block edges. A local signal before the latest cluster wait cannot satisfy
 the handoff. A path may exit without another signal; it needs no extra rendezvous.
 
-Scalar equality/inequality guards preserve facts such as a zero loop counter
-across unrelated SCC writes. A later comparison of the unchanged counter can
-then prove that a zero-iteration wait exits instead of entering the compute loop.
+The verifier uses the same scalar equality/inequality facts as barrier reuse.
+Zero and nonzero loop-counter facts survive unrelated SCC writes, so repeated
+guards can exclude infeasible exits or bypasses of an existing local barrier.
 Register writes invalidate the affected facts, calls invalidate all scalar facts,
 and control-flow merges keep only common facts. Unsupported predicates retain
 both edges; unresolved branches or calls with unproven barrier behavior report
@@ -414,8 +414,9 @@ writer contracts.
 `Tensile/Tests/unit/test_cluster_entry_handoff_codegen.py` loads the executable
 `common/gemm/gfx1250/cluster_entry_handoff.yaml` through the real Python and
 backend pipeline. It checks SIA0 barrier reuse and the required SIA4 entry pair
-for three layouts, with iteration cloning enabled and disabled, and assembles all
-12 generated kernels. In the common GPU runner, the YAML's
+for three wave-tile layouts, with iteration cloning enabled and disabled. It also
+checks nonpersistent DU128 insertion and DU256 prefetch-barrier reuse under both
+schedulers, and assembles the generated kernels. In the common GPU runner, the YAML's
 `TestParameters.run_repetitions: 20` starts 20 fresh cached-run processes after
 one build. `run_timeout_seconds: 120` bounds each execution and kills its process
 group on timeout, including the client. The shared GPU lock is acquired before

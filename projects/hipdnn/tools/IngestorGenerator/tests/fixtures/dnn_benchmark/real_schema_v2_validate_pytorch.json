@@ -1,0 +1,256 @@
+{
+  "_provenance": "Verbatim from a real dnn-benchmark run (dnn-benchmarking PR #77 head ef492f4, result schema 2, `-g graphs/sample_conv_fwd.json -e MIOPEN_ENGINE --warmup 3 --iters 5 --validate pytorch`, gfx90a MI210, 2026-10-07): hostname replaced and local path prefixes shortened to /work; nothing else edited.",
+  "schema_version": 2,
+  "tool": {
+    "name": "dnn-benchmarking",
+    "version": "0.1.0"
+  },
+  "run": {
+    "started_at": "2026-10-07T04:30:32.668137+00:00",
+    "finished_at": "2026-10-07T04:30:41.006514+00:00",
+    "complete": true,
+    "argv": [
+      "/work/dnn-benchmarking/src/dnn_benchmarking/__main__.py",
+      "-g",
+      "graphs/sample_conv_fwd.json",
+      "-e",
+      "MIOPEN_ENGINE",
+      "--warmup",
+      "3",
+      "--iters",
+      "5",
+      "--validate",
+      "pytorch",
+      "-o",
+      "/tmp/r6sweep_v2.json"
+    ],
+    "config": {
+      "backend": "hipdnn",
+      "engine_filter": [
+        "0x15B46865C717A122"
+      ],
+      "plugin_paths": [
+        "/work/venv/lib/python3.12/site-packages/_rocm_sdk_libraries/lib/hipdnn_plugins/engines"
+      ],
+      "warmup_iters": 3,
+      "iters": 5,
+      "min_time_ms": 0.0,
+      "cache_mode": "warm",
+      "timing_block": 1,
+      "seed": 0,
+      "validate": "pytorch",
+      "rtol": null,
+      "atol": null,
+      "oracle_mode": "off",
+      "autotune": false,
+      "cache_dir": null,
+      "pytorch_sdpa_backend": "default",
+      "pytorch_rocm_fa_library": null,
+      "metrics_tier": "basic",
+      "profiling": {
+        "pmc": null,
+        "emit_trace": null,
+        "perf": false,
+        "roofline": false
+      }
+    }
+  },
+  "environment": {
+    "hostname": "fixture-host",
+    "cpu_model": "AMD EPYC 7513 32-Core Processor",
+    "cpu_count": 128,
+    "numa_nodes": 8,
+    "total_ram_gb": 503.59,
+    "kernel_version": "5.15.0-112-generic",
+    "gpu_model": "AMD Instinct MI210",
+    "gpu_arch": "gfx90a",
+    "gpu_compute_units": 104,
+    "gpu_hbm_gb": null,
+    "gpu_pcie_link": null,
+    "amdgpu_driver_version": null,
+    "gpu_power_cap_w": null,
+    "gpu_max_sclk_mhz": null,
+    "gpu_compute_partition": null,
+    "rocm_version": "7.16.26332",
+    "cuda_version": null,
+    "cudnn_version": null,
+    "hipdnn_version": "0.2.0",
+    "python_version": "3.12.13",
+    "torch_version": "2.14.0+rocm10.1.0a20260822",
+    "amdsmi_available": false,
+    "selection_env": null,
+    "end_of_run": {
+      "host_rss_mb": 2903.3359375,
+      "host_ram_available_mb": 489468.08984375,
+      "vram_used_mb": null,
+      "vram_total_mb": null
+    }
+  },
+  "summary": {
+    "graphs": 1,
+    "rows": 1,
+    "passed": 1,
+    "unchecked": 0,
+    "failed": 0,
+    "skipped": 0,
+    "errors": 0,
+    "graph_errors": 0,
+    "no_engine_graphs": 0
+  },
+  "graphs": [
+    {
+      "graph_id": "e50543fd1d83",
+      "graph_name": "sample_conv_fwd_16x16x16x16_k16_3x3",
+      "graph_path": "graphs/sample_conv_fwd.json",
+      "status": "ok",
+      "error": null,
+      "message": null,
+      "results": [
+        {
+          "provider": "pytorch",
+          "role": "reference",
+          "engine": {
+            "id": null,
+            "name": "pytorch",
+            "version": "2.14.0+rocm10.1.0a20260822",
+            "plugin_path": null
+          },
+          "status": "success",
+          "verdict": "reference",
+          "message": null,
+          "started_at": "2026-10-07T04:30:32.676413+00:00",
+          "elapsed_s": 8.109810300171375,
+          "build_ms": 0.10883808135986328,
+          "timing": {
+            "mode": "staged",
+            "backend": "hip",
+            "cache_mode": "warm",
+            "warmup_iters": 3,
+            "first_call_ms": 7973.883748054504,
+            "capped": false,
+            "fallback_reason": null,
+            "timing_block": 1
+          },
+          "kernel": {
+            "n": 5,
+            "mean_ms": 0.02566399984061718,
+            "std_ms": 0.00018242823187791758,
+            "cv": 0.0071083320219320284,
+            "min_ms": 0.025439999997615814,
+            "p25_ms": 0.025599999353289604,
+            "median_ms": 0.025599999353289604,
+            "p75_ms": 0.025760000571608543,
+            "p95_ms": null,
+            "max_ms": 0.025919999927282333,
+            "iqr_ms": 0.0001600012183189392
+          },
+          "host": {
+            "n": 5,
+            "mean_ms": 0.05205720663070679,
+            "std_ms": 0.002760171133101557,
+            "cv": 0.05302188326550402,
+            "min_ms": 0.04953891038894653,
+            "p25_ms": 0.05014985799789429,
+            "median_ms": 0.05061924457550049,
+            "p75_ms": 0.05420297384262085,
+            "p95_ms": null,
+            "max_ms": 0.05577504634857178,
+            "iqr_ms": 0.0040531158447265625
+          },
+          "metrics": {
+            "flops": 18874368,
+            "flops_partial": false,
+            "io_bytes": 533504,
+            "tflops": 0.7372800186252599,
+            "gbps": 20.840000526462696,
+            "workspace_bytes": null,
+            "vram_mb": null,
+            "clocks_before": null,
+            "clocks_after": null
+          },
+          "correctness": null,
+          "warnings": [],
+          "oracle": null,
+          "extra_metrics": null
+        },
+        {
+          "provider": "hipdnn",
+          "role": "engine",
+          "engine": {
+            "id": "0x15B46865C717A122",
+            "name": "MIOPEN_ENGINE",
+            "version": "0.2.0.31634ece56",
+            "plugin_path": "/work/venv/lib/python3.12/site-packages/_rocm_sdk_libraries/lib/hipdnn_plugins/engines"
+          },
+          "status": "success",
+          "verdict": "passed",
+          "message": null,
+          "started_at": "2026-10-07T04:30:40.786404+00:00",
+          "elapsed_s": 0.21966923773288727,
+          "build_ms": 5.2273571491241455,
+          "timing": {
+            "mode": "staged",
+            "backend": "hip",
+            "cache_mode": "warm",
+            "warmup_iters": 3,
+            "first_call_ms": 2.38664448261261,
+            "capped": false,
+            "fallback_reason": null,
+            "timing_block": 1
+          },
+          "kernel": {
+            "n": 5,
+            "mean_ms": 0.025695999339222907,
+            "std_ms": 0.00021466249438589096,
+            "cv": 0.008353926677536361,
+            "min_ms": 0.025599999353289604,
+            "p25_ms": 0.025599999353289604,
+            "median_ms": 0.025599999353289604,
+            "p75_ms": 0.025599999353289604,
+            "p95_ms": null,
+            "max_ms": 0.026079999282956123,
+            "iqr_ms": 0.0
+          },
+          "host": {
+            "n": 5,
+            "mean_ms": 0.014105439186096191,
+            "std_ms": 0.0007599482640710728,
+            "cv": 0.05387625681447466,
+            "min_ms": 0.013373792171478271,
+            "p25_ms": 0.013619661331176758,
+            "median_ms": 0.013887882232666016,
+            "p75_ms": 0.01434236764907837,
+            "p95_ms": null,
+            "max_ms": 0.015303492546081543,
+            "iqr_ms": 0.0007227063179016113
+          },
+          "metrics": {
+            "flops": 18874368,
+            "flops_partial": false,
+            "io_bytes": 533504,
+            "tflops": 0.7372800186252599,
+            "gbps": 20.840000526462696,
+            "workspace_bytes": 0,
+            "vram_mb": null,
+            "clocks_before": null,
+            "clocks_after": null
+          },
+          "correctness": {
+            "match": true,
+            "rtol": 1e-05,
+            "atol": 1e-06,
+            "max_abs_diff": 0.0,
+            "max_rel_diff": 0.0,
+            "n_mismatch": 0,
+            "n_total": 65536,
+            "worst_output_uid": 0,
+            "message": null
+          },
+          "warnings": [],
+          "oracle": null,
+          "extra_metrics": null
+        }
+      ]
+    }
+  ]
+}

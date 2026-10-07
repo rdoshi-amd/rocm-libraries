@@ -161,6 +161,17 @@ resolved, it names the arm's `lib/hipdnn_plugins/engines`
 directory itself or a plugin directly inside it; a sibling tree or a deeper descendant
 makes that graph ambiguous. Failures stay in the outcome ledger.
 
+The driver reads dnn-benchmark result schema 1 (no `schema_version`; top-level
+`metadata`) and schema 2 (`schema_version: 2`, dnn-benchmarking `docs/results-schema.md`),
+and refuses any other version as a result parse failure. A schema-2 file is read under
+the schema-1 names this page uses. `engine.name`, `engine.id` and `engine.plugin_path`
+are `engine_name`, `engine_id` and `plugin_path`; `engine.id` is the unsigned ID in hex,
+and a row labelled with that hex ID because the bindings cannot name the engine reads as
+`engine_0x<hex>`. `kernel` is `gpu_kernel_stats`, `message` is `skip_reason` or
+`error_message`, and `correctness.match` is `tolerance_match`. The metadata gate takes
+`environment.gpu_arch` and its counts from `summary`: `failed`, and `errors` plus
+`graph_errors` plus `no_engine_graphs`, all three of which schema 1 wrote as error rows.
+
 Each graph's identity (`graph_name` in the ledger, and the `name` the driver writes into
 its staged copy, which the benchmark reports back) is the graph JSON `name`, or the file
 stem when there is none. When several files in one corpus share that name, for example

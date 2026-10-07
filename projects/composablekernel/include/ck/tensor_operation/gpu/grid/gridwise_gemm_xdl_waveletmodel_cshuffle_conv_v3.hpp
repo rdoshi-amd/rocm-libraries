@@ -4,6 +4,7 @@
 #pragma once
 
 #include "ck/utility/common_header.hpp"
+#include "ck/host_utility/device_prop.hpp"
 #include "ck/tensor_description/multi_index_transform_helper.hpp"
 #include "ck/tensor_description/tensor_descriptor.hpp"
 #include "ck/tensor_description/tensor_descriptor_helper.hpp"
@@ -512,7 +513,7 @@ struct GridwiseGemm_xdl_waveletmodel_cshuffle_conv_v3
     // Shared memory sizing
     // =========================================================================
     template <typename DeviceArch>
-    __device__ static constexpr index_t GetSharedMemoryNumberOfByte(DeviceArch)
+    __host__ __device__ static constexpr index_t GetSharedMemoryNumberOfByte(DeviceArch)
     {
         constexpr auto a_block_desc_ak0_m_ak1 =
             GetABlockDescriptor_AK0PerBlock_MPerBlock_AK1(DeviceArch{});
@@ -539,6 +540,24 @@ struct GridwiseGemm_xdl_waveletmodel_cshuffle_conv_v3
             c_shuffle_block_desc_mblock_mperblock_nblock_nperblock.GetElementSpaceSize();
 
         return math::max(data_lds_bytes, c_block_size * sizeof(CShuffleDataType));
+    }
+
+    __host__ static index_t GetSharedMemoryNumberOfByteOnHost()
+    {
+#if !defined(__HIPCC_RTC__) || !defined(CK_CODE_GEN_RTC)
+        if(is_gfx125_supported())
+        {
+            return GetSharedMemoryNumberOfByte(gfx125_t{});
+        }
+        else if(ck::get_device_name() == "gfx950")
+        {
+            return GetSharedMemoryNumberOfByte(gfx950_t{});
+        }
+        else
+#endif
+        {
+            return GetSharedMemoryNumberOfByte(gfx_invalid_t{});
+        }
     }
 
     // =========================================================================

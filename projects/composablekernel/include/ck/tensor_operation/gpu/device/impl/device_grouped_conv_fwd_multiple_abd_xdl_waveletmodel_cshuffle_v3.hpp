@@ -99,21 +99,25 @@ __launch_bounds__(GridwiseGemm::LaunchBlockSize, MinimumOccupancy)
         const long_index_t e_n_offset =
             amd_wave_read_first_lane(compute_ptr_offset_of_n.GetEPtrOffset(n_idx));
 
-        __shared__ char p_shared[GridwiseGemm::GetSharedMemoryNumberOfByte(get_device_arch())];
+        constexpr index_t LDS_size = GridwiseGemm::GetSharedMemoryNumberOfByte(get_device_arch());
+        if constexpr(LDS_size <= get_lds_size(get_device_arch()))
+        {
+            __shared__ char p_shared[LDS_size];
 
-        GridwiseGemm::template Run<decltype(a_grid_desc_ak0_m_ak1),
-                                   decltype(b_grid_desc_bk0_n_bk1),
-                                   decltype(c_grid_desc_mblock_mperblock_nblock_nperblock),
-                                   HasMainKBlockLoop,
-                                   CGlobalMemoryDataOperation,
-                                   true>(karg.p_a_grid + a_group_offset + a_n_offset,
-                                         karg.p_b_grid + b_group_offset,
-                                         karg.p_c_grid + e_group_offset + e_n_offset,
-                                         p_shared,
-                                         karg,
-                                         a_grid_desc_ak0_m_ak1,
-                                         b_grid_desc_bk0_n_bk1,
-                                         c_grid_desc_mblock_mperblock_nblock_nperblock);
+            GridwiseGemm::template Run<decltype(a_grid_desc_ak0_m_ak1),
+                                       decltype(b_grid_desc_bk0_n_bk1),
+                                       decltype(c_grid_desc_mblock_mperblock_nblock_nperblock),
+                                       HasMainKBlockLoop,
+                                       CGlobalMemoryDataOperation,
+                                       true>(karg.p_a_grid + a_group_offset + a_n_offset,
+                                             karg.p_b_grid + b_group_offset,
+                                             karg.p_c_grid + e_group_offset + e_n_offset,
+                                             p_shared,
+                                             karg,
+                                             a_grid_desc_ak0_m_ak1,
+                                             b_grid_desc_bk0_n_bk1,
+                                             c_grid_desc_mblock_mperblock_nblock_nperblock);
+        }
     }
 #else
     ignore = karg;
@@ -165,28 +169,32 @@ __launch_bounds__(GridwiseGemm::LaunchBlockSize, MinimumOccupancy)
         const long_index_t e_n_offset =
             amd_wave_read_first_lane(compute_ptr_offset_of_n.GetEPtrOffset(n_idx));
 
-        // Pass two lds pointer is the key to tell compiler that ds_read/write
-        // operate on different lds chunk at same time without order dependecy
-        __shared__ char p_shared_0[GridwiseGemm::GetSharedMemoryNumberOfByte(get_device_arch())];
-        __shared__ char p_shared_1[GridwiseGemm::GetSharedMemoryNumberOfByte(get_device_arch())];
+        constexpr index_t LDS_size = GridwiseGemm::GetSharedMemoryNumberOfByte(get_device_arch());
+        if constexpr(2 * LDS_size <= get_lds_size(get_device_arch()))
+        {
+            // Pass two lds pointer is the key to tell compiler that ds_read/write
+            // operate on different lds chunk at same time without order dependecy
+            __shared__ char p_shared_0[LDS_size];
+            __shared__ char p_shared_1[LDS_size];
 
-        // only direct load pipeline with double buffer supported
-        GridwiseGemm::template Run<HasMainKBlockLoop, CGlobalMemoryDataOperation, TailNum>(
-            karg.p_a_grid + a_group_offset + a_n_offset,
-            karg.p_b_grid + b_group_offset,
-            karg.p_c_grid + e_group_offset + e_n_offset,
-            p_shared_0,
-            p_shared_1,
-            karg,
-            GridwiseGemm::template TransformGrid<decltype(a_grid_desc_ak0_m_ak1),
-                                                 GridwiseGemm::AK0Number,
-                                                 GridwiseGemm::AK1Number>(a_grid_desc_ak0_m_ak1,
-                                                                          get_device_arch()),
-            GridwiseGemm::template TransformGrid<decltype(b_grid_desc_bk0_n_bk1),
-                                                 GridwiseGemm::BK0Number,
-                                                 GridwiseGemm::BK1Number>(b_grid_desc_bk0_n_bk1,
-                                                                          get_device_arch()),
-            c_grid_desc_m_n);
+            // only direct load pipeline with double buffer supported
+            GridwiseGemm::template Run<HasMainKBlockLoop, CGlobalMemoryDataOperation, TailNum>(
+                karg.p_a_grid + a_group_offset + a_n_offset,
+                karg.p_b_grid + b_group_offset,
+                karg.p_c_grid + e_group_offset + e_n_offset,
+                p_shared_0,
+                p_shared_1,
+                karg,
+                GridwiseGemm::template TransformGrid<decltype(a_grid_desc_ak0_m_ak1),
+                                                     GridwiseGemm::AK0Number,
+                                                     GridwiseGemm::AK1Number>(a_grid_desc_ak0_m_ak1,
+                                                                              get_device_arch()),
+                GridwiseGemm::template TransformGrid<decltype(b_grid_desc_bk0_n_bk1),
+                                                     GridwiseGemm::BK0Number,
+                                                     GridwiseGemm::BK1Number>(b_grid_desc_bk0_n_bk1,
+                                                                              get_device_arch()),
+                c_grid_desc_m_n);
+        }
     }
 #else
     ignore = karg;
@@ -1228,6 +1236,38 @@ struct DeviceGroupedConvFwdMultipleABD_WaveletModel_Xdl_CShuffle_V3
     static bool IsSupportedArgument(const Argument& arg)
     {
         namespace ctc = tensor_layout::convolution;
+
+        constexpr index_t ldsBufferCount = DirectLoad ? 2 : 1;
+        if(get_warp_size() == 64)
+        {
+            if constexpr(NXdlPerWave64 > 0)
+            {
+                if(GridwiseGemm64::GetSharedMemoryNumberOfByteOnHost() * ldsBufferCount >
+                   get_lds_size())
+                {
+                    return false;
+                }
+            }
+        }
+        else
+        {
+            if constexpr(NXdlPerWave32 > 0)
+            {
+                if(GridwiseGemm32::GetSharedMemoryNumberOfByteOnHost() * ldsBufferCount >
+                   get_lds_size())
+                {
+                    return false;
+                }
+            }
+        }
+
+        if constexpr(DirectLoad)
+        {
+            if(!(is_gfx125_supported() || ck::get_device_name() == "gfx950"))
+            {
+                return false;
+            }
+        }
 
         const index_t G = arg.b_g_k_c_xs_lengths_[I0];
         const index_t K = arg.b_g_k_c_xs_lengths_[I1];

@@ -7494,6 +7494,12 @@ class KernelWriter(metaclass=abc.ABCMeta):
         return int(kernel["MatrixInstK"]) // block
       mx_units = [u for u in (_mx_unit("A"), _mx_unit("B")) if u]
       stinky_module_options["MxUnit1Scheduling"] = bool(mx_units) and all(u == 1 for u in mx_units)
+      if stinky_module_options["MxUnit1Scheduling"]:
+        # Up to 4 ds_loads per WMMA window, with the read throttle matched to that rate
+        # (32 / queue depth 16 = one load per 2 cycles). The policy default of 3 leaves
+        # each pack's loads unfinished before its WMMAs; measured +7.5% on MX128 tn30.
+        stinky_module_options["DsReadPerCap"] = 4
+        stinky_module_options["DsReadThrottleLatency"] = 32
 
       # Region-clone jobs for StinkyTofu RegionClonePass.
       cloneList = []

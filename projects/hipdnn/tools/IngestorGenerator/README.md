@@ -506,8 +506,8 @@ Run, in this order, **before any UUID is minted**:
 
 Configs accept generic `arch` targets under the
 [packaging rules](../../../../dnn-providers/hip-kernel-provider/descriptor-packaging/README.md#generic-gpu-targets).
-`build_kdp` refuses a tuple shared by two kernels only at the same tier, so an explicit kernel
-may override a generic kernel with the same tuple. The generated census gives every member of
+`build_kdp` refuses a tuple shared by two kernels only at the same arch tier
+([RFC 0017](../../docs/rfcs/0017_UniversalKernelDescriptor.md#4-resolve-the-kernel-packs-that-name-this-engine-and-apply-the-arch-gate)). The generated census gives every member of
 a generic row the generic's descriptors.
 
 ## Source adapters (`codegen/sources/`)

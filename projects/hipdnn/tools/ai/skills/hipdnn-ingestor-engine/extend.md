@@ -12,8 +12,8 @@ KMD whose filename does not follow the individual packs.
 
 Preserve old names, UUIDs, symbols, references and native hooks; only genuinely new
 objects get new IDs. Compare completed, KMD-typed metadata across the whole engine:
-conflicting tuples on overlapping effective architectures fail, equal tuples on disjoint
-architectures are legal. New topology, layouts, attributes or feature combinations
+equal tuples fail only when they compete at the same arch tier on a device; disjoint
+architectures or different tiers (explicit over generic over empty) are legal. New topology, layouts, attributes or feature combinations
 reopen [graph-contract.md](graph-contract.md), even for a "variant".
 
 A new variant can be one added KDP entry or a standalone UKD reference, with no new

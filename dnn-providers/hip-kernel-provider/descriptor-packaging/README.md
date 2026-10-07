@@ -16,7 +16,8 @@ Copies depend only on the source tree, the generic's spelling, hipcc and the tab
 identical across member folders and separate per-arch builds, and the loader collapses them to
 one entry. Copies from different compilers differ in `provenance`, and the loader drops both.
 
-A device ranks an `arch` list explicit, then generic, then empty; duplicate tuples conflict within one tier.
+Kernels sharing a metadata tuple are ranked per device by arch tier; see
+[RFC 0017](../../../projects/hipdnn/docs/rfcs/0017_UniversalKernelDescriptor.md#4-resolve-the-kernel-packs-that-name-this-engine-and-apply-the-arch-gate).
 
 Authoring rules. Each violation fails the packer, raises a generator ConfigError, and makes the
 loader log an ERROR and drop the pack:

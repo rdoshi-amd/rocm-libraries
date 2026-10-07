@@ -1479,6 +1479,7 @@
     'StaggerU',
     'StaggerUMapping',
     'StaggerUStride',
+    'StinkyTofuParameters',
     'StorePriorityOpt',
     'StoreRemapVectorWidth',
     'StoreSyncOpt',
@@ -2583,6 +2584,10 @@
       ]),
       'len': 10,
       'type': 'list',
+    }),
+    'StinkyTofuParameters': dict({
+      'type': 'int',
+      'value': -1,
     }),
     'StorePriorityOpt': dict({
       'head': list([

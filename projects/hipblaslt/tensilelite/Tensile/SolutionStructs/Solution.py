@@ -770,8 +770,9 @@ class Solution(collections.abc.Mapping):
     # User-facing StinkyTofuParameters -> internal _StinkyTofuParameters. The public key is
     # removed; the internal copy tags the kernel name when set and is dropped before the logic yaml.
     self._state.pop("StinkyTofuParameters", None)
-    self._state["_StinkyTofuParameters"] = dict(
-      config.get("StinkyTofuParameters") or config.get("_StinkyTofuParameters") or {})
+    stinkyTune = config.get("StinkyTofuParameters") or config.get("_StinkyTofuParameters")
+    if stinkyTune:
+      self._state["_StinkyTofuParameters"] = dict(stinkyTune)
     userTune = config.get("StinkyTofuParameters")
     if userTune:
       tuneKey = tuple(sorted(userTune.items()))

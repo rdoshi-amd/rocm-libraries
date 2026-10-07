@@ -812,7 +812,10 @@ def _benchmarkProblemType(backendConfig, problemTypeConfig, problemSizeGroupConf
             with timing_context("python_write_solutions"):
                 # Tuning-only: names above already carry its tag; keep the values out of the yaml.
                 for s in solutions or []:
-                    s.dropStinkyTofuParameters()
+                    if isinstance(s, dict):
+                        s.pop("_StinkyTofuParameters", None)
+                    else:
+                        s.dropStinkyTofuParameters()
                 LibraryIO.writeSolutions(solutionsFileName, benchmarkStep.problemSizes, benchmarkStep.biasTypeArgs,
                     benchmarkStep.activationArgs, solutions, gateTypeArgs=getattr(benchmarkStep, "gateTypeArgs", None), cache=isCached)
 

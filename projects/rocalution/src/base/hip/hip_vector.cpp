@@ -1738,7 +1738,7 @@ namespace rocalution
 
             assert(cast_sort != NULL);
 
-            void*  buffer = NULL;
+            char*  buffer = NULL;
             size_t size;
 
             unsigned int begin_bit = 0;
@@ -1758,8 +1758,7 @@ namespace rocalution
                     HIPSTREAM(_get_backend_descriptor()->HIP_stream_current)));
                 CHECK_HIP_ERROR(__FILE__, __LINE__);
 
-                DISCARD_HIP_ERROR(hipMalloc(&buffer, size));
-                CHECK_HIP_ERROR(__FILE__, __LINE__);
+                allocate_hip(size, &buffer);
 
                 DISCARD_HIP_ERROR(rocprim::radix_sort_keys(
                     buffer,
@@ -1772,8 +1771,7 @@ namespace rocalution
                     HIPSTREAM(_get_backend_descriptor()->HIP_stream_current)));
                 CHECK_HIP_ERROR(__FILE__, __LINE__);
 
-                DISCARD_HIP_ERROR(hipFree(buffer));
-                CHECK_HIP_ERROR(__FILE__, __LINE__);
+                free_hip(&buffer);
             }
             else
             {
@@ -1805,8 +1803,7 @@ namespace rocalution
                     HIPSTREAM(_get_backend_descriptor()->HIP_stream_current)));
                 CHECK_HIP_ERROR(__FILE__, __LINE__);
 
-                DISCARD_HIP_ERROR(hipMalloc(&buffer, size));
-                CHECK_HIP_ERROR(__FILE__, __LINE__);
+                allocate_hip(size, &buffer);
 
                 DISCARD_HIP_ERROR(rocprim::radix_sort_pairs(
                     buffer,
@@ -1821,8 +1818,7 @@ namespace rocalution
                     HIPSTREAM(_get_backend_descriptor()->HIP_stream_current)));
                 CHECK_HIP_ERROR(__FILE__, __LINE__);
 
-                DISCARD_HIP_ERROR(hipFree(buffer));
-                CHECK_HIP_ERROR(__FILE__, __LINE__);
+                free_hip(&buffer);
             }
         }
     }

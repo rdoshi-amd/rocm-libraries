@@ -265,7 +265,12 @@ namespace rocalution
 
         // initial residual norm
         ValueType res = this->Norm_(*r);
-        this->iter_ctrl_.InitResidual(std::abs(res));
+
+        if(this->iter_ctrl_.InitResidual(std::abs(res)) == false)
+        {
+            log_debug(this, "FCG::SolveNonPrecond_()", " #*# end");
+            return;
+        }
 
         // w = Ar
         op->Apply(*r, w);
@@ -359,7 +364,12 @@ namespace rocalution
 
         // initial residual norm
         ValueType res = this->Norm_(*r);
-        this->iter_ctrl_.InitResidual(std::abs(res));
+
+        if(this->iter_ctrl_.InitResidual(std::abs(res)) == false)
+        {
+            log_debug(this, "FCG::SolvePrecond_()", " #*# end");
+            return;
+        }
 
         // Mz = r
         this->precond_->SolveZeroSol(*r, z);

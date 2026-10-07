@@ -1756,22 +1756,31 @@ inline void
         nlohmann::json document;
         try
         {
-            std::ifstream file(path, std::ios::binary);
-            if(!file.is_open())
-            {
-                HIPDNN_PLUGIN_LOG_ERROR("descriptor loader: failed to open " << path);
-                continue;
-            }
             // Comments only, no trailing commas: RFC 0020 §4.3's authored form strips
             // `//` and `/* */` before validation, narrower than what "JSONC" commonly
             // implies (VS Code, tsconfig) -- a trailing comma is still a hard nlohmann
             // parse_error.101. Only the parser ever sees the comments --
             // `insertCatalogEntry` compares the parsed documents, so a comment cannot
             // make two copies of one descriptor look like a collision.
-            document = nlohmann::json::parse(file,
-                                             nullptr,
-                                             /*allow_exceptions=*/true,
-                                             /*ignore_comments=*/true);
+            if(fileType->suffix == SUFFIX_UHD)
+            {
+                // Size-bounded, and a repeated key is refused rather than resolved to its
+                // last spelling: a UHD can name code to load and a model to trust.
+                document = uhd::readUhdDocument(path);
+            }
+            else
+            {
+                std::ifstream file(path, std::ios::binary);
+                if(!file.is_open())
+                {
+                    HIPDNN_PLUGIN_LOG_ERROR("descriptor loader: failed to open " << path);
+                    continue;
+                }
+                document = nlohmann::json::parse(file,
+                                                 nullptr,
+                                                 /*allow_exceptions=*/true,
+                                                 /*ignore_comments=*/true);
+            }
         }
         catch(const std::exception& parseError)
         {
@@ -1914,9 +1923,12 @@ namespace detail
  * @brief Why @p model's recorded training provenance does not match what binds it, or "".
  *
  * RFC 0019 §8.1: checks the UHD's `trained_against` set by UUID and major/minor revision.
+ * A model bound to a UED that records provenance must record that set: a
+ * `selector_revision` alone would leave the UED, KMD and UMDs it was trained on unchecked.
+ * A model recording none reads no features, since UhdParser requires it of one that does.
  *
  * @param engine  The UED the model is bound to, or nullptr for an engine that ships no
- *                descriptor set; any `trained_against` is then incompatible.
+ *                descriptor set; any recorded descriptor set is then incompatible.
  * @param schema  The KMD @p engine names; nullptr exactly when @p engine is.
  */
 inline std::string provenanceError(const HeuristicDescriptor& model,
@@ -1928,6 +1940,11 @@ inline std::string provenanceError(const HeuristicDescriptor& model,
 {
     if(!model.trainedAgainst.has_value())
     {
+        if(engine != nullptr && model.trainedAgainstJson.is_object())
+        {
+            return "trained_against records no descriptor set, which a model bound to a UED "
+                   "must";
+        }
         return {};
     }
     if(engine == nullptr || schema == nullptr)
@@ -1983,11 +2000,8 @@ inline std::string provenanceError(const HeuristicDescriptor& model,
     }
     if(!relevant.empty())
     {
-        // Extra matchers are not a provenance break; their inputs still pass the normal
-        // feature/coverage guards.
-        HIPDNN_PLUGIN_LOG_WARN("descriptor loader: engine '"
-                               << engine->name << "' heuristic '" << model.name << "' arch='"
-                               << arch << "' has additional matchers outside training provenance");
+        return "arch-relevant UMD is missing from training provenance: "
+               + toString(*relevant.begin());
     }
     return {};
 }
@@ -2026,17 +2040,17 @@ inline bool usableModel(const std::string& engineName,
         std::error_code error;
         const auto resolved
             = std::filesystem::weakly_canonical(model.baseDir / model.modelArtifactPath, error);
-        const auto boundary = std::filesystem::weakly_canonical(
-            model.treeRoot.empty() ? model.baseDir : model.treeRoot, error);
+        const auto boundary = std::filesystem::weakly_canonical(model.baseDir, error);
         const auto relative = resolved.lexically_relative(boundary);
-        if(error || relative.empty() || relative.is_absolute()
+        if(error || relative.empty() || relative == "." || relative.is_absolute()
            || (!relative.empty() && *relative.begin() == ".."))
         {
             HIPDNN_PLUGIN_LOG_ERROR(
                 "descriptor loader: engine '"
                 << engineName << "' arch='" << arch << "' model=" << toString(model.id)
-                << " artifact '" << model.modelArtifactPath << "' is outside the descriptor tree '"
-                << boundary.string() << "'; disabling model, preserving engine");
+                << " artifact '" << model.modelArtifactPath
+                << "' is outside its descriptor directory '" << boundary.string()
+                << "'; disabling model, preserving engine");
             usable = false;
         }
         else if(!std::filesystem::is_regular_file(resolved, error))
@@ -2398,6 +2412,7 @@ inline std::vector<DescriptorSet> resolveDescriptorSets(const DescriptorCatalog&
                                        id,
                                        "declares no score.metric, which every "
                                            + std::string(roleName) + " UHD must");
+                              unidentified = true;
                               continue;
                           }
                           declared[model->score.metric].emplace_back(id, model);
@@ -2438,8 +2453,9 @@ inline std::vector<DescriptorSet> resolveDescriptorSets(const DescriptorCatalog&
                               resolved.arch = arch;
                           }
                       }
-                      // A missing entry may have declared any metric not otherwise served here,
-                      // so each is withheld on this key rather than falling back across arches.
+                      // A missing or metric-less entry may stand for any metric not otherwise
+                      // served here, so each is withheld on this key rather than falling back
+                      // across arches.
                       if(unidentified)
                       {
                           std::vector<std::string> candidates;

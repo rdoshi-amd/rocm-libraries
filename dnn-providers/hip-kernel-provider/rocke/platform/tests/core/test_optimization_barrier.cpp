@@ -37,16 +37,20 @@ static int lower_hip(rocke_ir_builder_t* b, const char* arch, bool print)
 
 static int test_admission()
 {
-    const rocke_type_t* logical[]
-        = {rocke_fp4e2m1(), rocke_fp6e2m3(), rocke_fp6e3m2(), rocke_e8m0(), rocke_e5m3()};
-    for(int index = 0; index < 8; ++index)
+    const rocke_type_t* logical[] = {rocke_fp4e2m1(),
+                                     rocke_fp6e2m3(),
+                                     rocke_fp6e3m2(),
+                                     rocke_e8m0(),
+                                     rocke_e5m3(),
+                                     rocke_tf32()};
+    for(int index = 0; index < 9; ++index)
     {
         rocke_ir_builder_t b;
         CHECK(rocke_ir_builder_init(&b, "barrier_rejection") == ROCKE_OK);
-        const auto* type = index < 5    ? logical[index]
-                           : index == 5 ? rocke_ptr_type(&b, rocke_f32(), "global")
+        const auto* type = index < 6    ? logical[index]
+                           : index == 6 ? rocke_ptr_type(&b, rocke_f32(), "global")
                                         : rocke_vector_type(&b, rocke_f32(), 2);
-        auto* value = index == 7 ? nullptr : rocke_b_param(&b, "value", type, nullptr);
+        auto* value = index == 8 ? nullptr : rocke_b_param(&b, "value", type, nullptr);
         int before = b.kernel->body->num_ops;
         bool rejected = false;
         try

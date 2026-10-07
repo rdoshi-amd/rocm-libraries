@@ -409,3 +409,40 @@ TEST(PersistentArgumentLayout, DataParallelCustomDescriptorMatchesCompleteNormal
         EXPECT_FLOAT_EQ(value<float>(custom.args, "beta"), useBeta ? -1.25f : 0.0f);
     }
 }
+
+TEST(PersistentArgumentLayout, OccupancyProbeTailArgs)
+{
+    auto problem = persistentProblem();
+    auto device  = persistentDevice(7);
+    int  probe   = 0;
+
+    ContractionSolution plain;
+    configurePersistentSolution(plain, 3, 1);
+    auto plainCall = plain.generateSingleCall<true>(
+        problem, persistentInputs(), device, plain.resolvePersistentSettings(problem, device), GSUSettings{});
+    EXPECT_FALSE(hasArgument(plainCall.args, "ProbeAddr"));
+    EXPECT_FALSE(hasArgument(plainCall.args, "ProbeEpoch"));
+
+    ContractionSolution solution;
+    configurePersistentSolution(solution, 3, 1);
+    solution.internalArgsSupport.occupancyProbe = true;
+    for(auto [minGrid, expectAddr] : std::vector<std::tuple<uint32_t, bool>>{
+            {0, true}, {7, true}, {8, false}})
+    {
+        SCOPED_TRACE(minGrid);
+        problem.setParams().setOccupancyProbe(&probe, 41 + minGrid, minGrid);
+        auto launch = solution.resolvePersistentSettings(problem, device);
+        auto call   = solution.generateSingleCall<true>(
+            problem, persistentInputs(), device, launch, GSUSettings{});
+        auto const& args = call.args;
+        ASSERT_EQ(call.numWorkGroups.x, 7u);
+        EXPECT_EQ(value<void*>(args, "ProbeAddr"), expectAddr ? static_cast<void*>(&probe) : nullptr);
+        EXPECT_EQ(value<uint32_t>(args, "ProbeEpoch"), 41 + minGrid);
+        auto addrOffset = offset(args, "ProbeAddr");
+        EXPECT_EQ(addrOffset % 8, 0u);
+        EXPECT_GE(addrOffset, plainCall.args.size());
+        EXPECT_LT(addrOffset, plainCall.args.size() + 8);
+        EXPECT_EQ(offset(args, "ProbeEpoch"), addrOffset + 8);
+        EXPECT_EQ(args.size(), addrOffset + 12);
+    }
+}

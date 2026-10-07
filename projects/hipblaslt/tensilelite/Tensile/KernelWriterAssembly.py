@@ -61,7 +61,7 @@ from rocisa.instruction import BranchInstruction, BufferLoadB128, BufferLoadB32,
   SWaitCnt, SWaitAlu, SXorB32, VAShiftRightI32, VAccvgprReadB32, VAccvgprWrite, VAccvgprWriteB32, \
   VAdd3U32, VAddCCOU32, VAddCOU32, VAddF32, VAddF64, VAddLShiftLeftU32, VAddU32, VAndB32, \
   VBfeU32, VCmpEQI32, VCmpEQU32, VCmpGEI32, VCmpGEU32, VCmpGtU32, VCmpGTI32, VCmpLeI32, VCmpLtI32, \
-  VCmpLtU32, VCmpNeU64, VCmpUF32, VCmpXGeU32, VCmpXLtU32, VCmpXLtU64, VCndMaskB32, VCvtF16toF32, VCvtI32toF32, \
+  VCmpLtU32, VCmpNeU64, VCmpUF32, VCmpXEqU32, VCmpXGeU32, VCmpXLtU32, VCmpXLtU64, VCndMaskB32, VCvtF16toF32, VCvtI32toF32, \
   VCvtF32toF16, VCvtFP8toF32, VCvtInstruction, VCvtPkF32toBF16, VCvtPkF32toBF8, \
   VCvtPkF32toFP8, VCvtPkFP8toF32, VCvtSRF32toBF8, VCvtSRF32toFP8, VCvtScaleFP8toF16, \
   VCvtScalePkF16toBF8, VCvtScalePkF16toFP8, VCvtScalePkFP8toF16, VLShiftLeftB32, \
@@ -2636,6 +2636,53 @@ class KernelWriterAssembly(KernelWriter):
 
     return module
 
+  def occupancyProbe(self, kernel):
+    # CU-occupancy probe: when ProbeAddr != 0, thread 0 of the WG stores
+    # ProbeEpoch to ProbeAddr[XCC_ID << 8 | HW_ID[15:8]] (HW_ID[15:8] =
+    # SE << 5 | SH << 4 | CU). Plain store, no wait. Requires KernArgAddress
+    # shifted past the common args (ArgType 0/3 path).
+    module = Module("OccupancyProbe")
+    if self.states.probeKernArgOffset < 0:
+      return module
+    module.addComment1("CU-occupancy probe")
+    skipLabel = Label(self.labels.getNameInc("OccupancyProbe_Skip"), "")
+    # tmp+0..1 ProbeAddr, tmp+2 ProbeEpoch then XCC, tmp+3 slot; tmp+2..3 then
+    # save exec.
+    with self.allocTmpSgpr(4, alignment=2, tag="occupancyProbe_tmpSgpr") as tmpSgprInfo:
+      sAddr = tmpSgprInfo.idx
+      sTmp  = sAddr + 2
+      sSlot = sAddr + 3
+      module.add(SLoadB64(dst=sgpr(sAddr, 2), base=sgpr("KernArgAddress", 2),
+                          soffset=hex(self.states.probeKernArgOffset), comment="load ProbeAddr"))
+      module.add(SLoadB32(dst=sgpr(sTmp), base=sgpr("KernArgAddress", 2),
+                          soffset=hex(self.states.probeKernArgOffset + 8), comment="load ProbeEpoch"))
+      module.add(SGetRegB32(dst=sgpr(sSlot), src=HWRegContainer(reg="HW_REG_HW_ID", value=[8, 8]),
+                            comment="SE << 5 | SH << 4 | CU"))
+      module.add(SWaitCnt(kmcnt=0, comment="wait for probe args"))
+      module.add(SCmpEQU64(src0=sgpr(sAddr, 2), src1=0, comment="ProbeAddr == 0 ?"))
+      module.add(SCBranchSCC1(labelName=skipLabel.getLabelName(), comment="no probe"))
+      vOffset = self.vgprPool.checkOut(1, "occupancyProbe_vOffset")
+      vEpoch  = self.vgprPool.checkOut(1, "occupancyProbe_vEpoch")
+      module.add(VMovB32(dst=vgpr(vEpoch), src=sgpr(sTmp), comment="ProbeEpoch"))
+      module.add(SGetRegB32(dst=sgpr(sTmp), src=HWRegContainer(reg="HW_REG_XCC_ID", value=[0, 4]),
+                            comment="XCC id"))
+      module.add(SLShiftLeftB32(dst=sgpr(sTmp), shiftHex=8, src=sgpr(sTmp), comment="XCC << 8"))
+      module.add(SOrB32(dst=sgpr(sSlot), src0=sgpr(sSlot), src1=sgpr(sTmp), comment="probe slot"))
+      module.add(SLShiftLeftB32(dst=sgpr(sSlot), shiftHex=2, src=sgpr(sSlot), comment="probe slot byte offset"))
+      module.add(VMovB32(dst=vgpr(vOffset), src=sgpr(sSlot), comment="probe slot byte offset"))
+      laneSgprs = self.states.laneSGPRCount
+      execMovInst = SMovB32 if kernel["WavefrontSize"] == 32 else SMovB64
+      module.add(execMovInst(dst=sgpr(sTmp, laneSgprs), src=EXEC(), comment="save exec"))
+      module.add(VCmpXEqU32(dst=EXEC(), src0=vgpr("Serial"), src1=0, comment="thread 0 stores"))
+      module.add(SNop(waitState=4, comment="VALU write exec -> VMEM"))
+      module.add(GlobalStoreB32(vaddr=vgpr(vOffset), src=vgpr(vEpoch), saddr=sgpr(sAddr, 2),
+                                comment="ProbeAddr[slot] = ProbeEpoch"))
+      module.add(execMovInst(dst=EXEC(), src=sgpr(sTmp, laneSgprs), comment="restore exec"))
+      self.vgprPool.checkIn(vEpoch)
+      self.vgprPool.checkIn(vOffset)
+    module.add(skipLabel)
+    return module
+
   def clusterPadEarlyExit(self, kernel):
     # Exit padded work-groups from a grid rounded up to a ClusterDim multiple
     # (see ContractionSolution::generateSingleCall), before any TDM load,
@@ -3234,6 +3281,7 @@ class KernelWriterAssembly(KernelWriter):
       module.add(SCBranchSCC0(labelName=labelMultiGemm.getLabelName()))
       module.add(ArgType3_Routed_To_ArgType0)
       module.add(deepcopy(moduleWg))
+      module.add(self.occupancyProbe(kernel))
       module.add(self.clusterPadEarlyExit(kernel))
       if not isPersistent(kernel):
         if clusterEnabled(kernel["ClusterDim"]):

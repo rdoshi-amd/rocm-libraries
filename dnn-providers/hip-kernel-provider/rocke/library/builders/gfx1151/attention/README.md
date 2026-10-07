@@ -606,6 +606,6 @@ repacks that silently regress an issue-bound kernel.
 - `combo.py`: the cartesian-product sweep across the single-wave levers.
 - `survey.py`: the shape survey, which runs the best single-wave kernels per
   shape and compares against PyTorch SDPA.
-- `wmma_fmha_fwd_bench.py`, `wmma_fmha_fwd_verify.py`,
-  `wmma_fmha_fwd_sweep_profile.py`: benchmark, verification, and sweep-profile
-  drivers for the production kernel.
+- `wmma_fmha_fwd_bench.py`, `wmma_fmha_fwd_sweep_profile.py`: benchmark and
+  sweep-profile drivers for the production kernel. Its numeric checks live in
+  `library/tests/test_wmma_fmha_fwd_numeric.py`.

@@ -4,10 +4,10 @@
 
 Builds the RDNA3.5 WMMA attention kernel, verifies it once against a numpy
 dense-attention reference, then times the launch with HIP events and reports
-latency and achieved attention throughput. Companion to
-``wmma_fmha_fwd_verify`` (same kernel and ABI); this one measures the kernel
-with either direct V gathers or optional LDS V staging, allowing the two
-strategies to be compared on the target architecture.
+latency and achieved attention throughput. It measures the kernel with either
+direct V gathers or optional LDS V staging, allowing the two strategies to be
+compared on the target architecture. Numeric coverage lives in
+``library/tests/test_wmma_fmha_fwd_numeric.py``.
 
 Must run on a gfx1151 device.
 

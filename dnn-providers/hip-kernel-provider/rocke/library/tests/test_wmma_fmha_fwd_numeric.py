@@ -66,6 +66,94 @@ def _dense_values(
     }
 
 
+def _reference_attention(q, k, v, *, causal):
+    """FP32 dense attention over [B, S, H, D] inputs; K/V heads repeat for GQA."""
+    group = q.shape[2] // k.shape[2]
+    q32 = q.astype(np.float32)
+    k32 = np.repeat(k.astype(np.float32), group, axis=2)
+    v32 = np.repeat(v.astype(np.float32), group, axis=2)
+    scores = np.einsum("bqhd,bkhd->bhqk", q32, k32) / math.sqrt(q.shape[-1])
+    if causal:
+        keep = np.arange(k.shape[1])[None, :] <= np.arange(q.shape[1])[:, None]
+        scores = np.where(keep, scores, -np.inf)
+    probs = np.exp(scores - scores.max(axis=-1, keepdims=True))
+    probs /= probs.sum(axis=-1, keepdims=True)
+    return np.einsum("bhqk,bkhd->bqhd", probs, v32)
+
+
+@pytest.mark.gpu
+@pytest.mark.skipif(get_device_arch() != "gfx1151", reason="needs a gfx1151 GPU")
+@pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize("head_size,heads_q,heads_kv", [(64, 4, 4), (128, 8, 2)])
+def test_dense_attention_matches_reference(head_size, heads_q, heads_kv, causal):
+    """Direct-builder FP16 MHA/GQA attention against an FP32 reference."""
+    from benchmarks.gfx1151.attention.benchmark_sdpa import DeviceBuffers
+    from benchmarks.gfx1151.attention.cases import CaseInputs
+    from kernels.gfx1151.wmma_fmha_fwd import (
+        WmmaFmhaFwdSpec,
+        build_wmma_fmha_fwd,
+        wmma_fmha_fwd_grid,
+        wmma_fmha_fwd_signature,
+    )
+    from rocke.helpers import compile_kernel
+    from rocke.runtime.hip_module import Runtime
+
+    batch, seqlen = 2, 64
+    rng = np.random.default_rng(0xA11E)
+
+    def tensor(heads):
+        shape = (batch, seqlen, heads, head_size)
+        return (rng.standard_normal(shape) * 0.3).astype(np.float16)
+
+    inputs = CaseInputs(q=tensor(heads_q), k=tensor(heads_kv), v=tensor(heads_kv))
+    spec = WmmaFmhaFwdSpec(
+        head_size=head_size, mask_mode="causal" if causal else "none"
+    )
+    rt = Runtime()
+    buffers = DeviceBuffers(rt, inputs)
+    module = None
+    try:
+        artifact = compile_kernel(
+            build_wmma_fmha_fwd(spec, arch="gfx1151"),
+            arch="gfx1151",
+            backend="python",
+        )
+        module = rt.load_module(artifact.hsaco)
+        values = _dense_values(
+            inputs.q,
+            inputs.k,
+            inputs.v,
+            buffers.arrays["rocke_out"],
+            q_ptr=buffers.ptrs["q"],
+            k_ptr=buffers.ptrs["k"],
+            v_ptr=buffers.ptrs["v"],
+            out_ptr=buffers.ptrs["rocke_out"],
+            scale_log2=math.log2(math.e) / math.sqrt(head_size),
+            seqlen_q=seqlen,
+            seqlen_k=seqlen,
+            num_query_heads=heads_q,
+            num_kv_heads=heads_kv,
+        )
+        rt.launch(
+            module.get_function(artifact.kernel_name),
+            wmma_fmha_fwd_grid(
+                spec, seqlen_q=seqlen, num_query_heads=heads_q, batch=batch
+            ),
+            (spec.block_size, 1, 1),
+            pack_args(wmma_fmha_fwd_signature(spec), values),
+        )
+        rt.sync()
+        expected = _reference_attention(inputs.q, inputs.k, inputs.v, causal=causal)
+        np.testing.assert_allclose(
+            buffers.read_output("rocke_out"), expected, rtol=0, atol=2e-2
+        )
+    finally:
+        rt.sync()
+        if module is not None:
+            module.unload()
+        buffers.close()
+
+
 @pytest.mark.gpu
 @pytest.mark.skipif(get_device_arch() != "gfx1151", reason="needs a gfx1151 GPU")
 @pytest.mark.parametrize(

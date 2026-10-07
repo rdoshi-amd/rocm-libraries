@@ -788,8 +788,12 @@ inline std::vector<std::string> requireArchList(const nlohmann::json& object,
     {
         if(isGenericShapedArchName(value) && findGenericTarget(value) == nullptr)
         {
-            fail("key 'arch' in " + where + " names '" + value
-                 + "', a generic target absent from the generic target table");
+            std::string message = "key 'arch' in ";
+            message += where;
+            message += " names '";
+            message += value;
+            message += "', a generic target absent from the generic target table";
+            fail(message);
         }
     }
     for(size_t i = 0; i < values.size(); ++i)
@@ -798,8 +802,15 @@ inline std::vector<std::string> requireArchList(const nlohmann::json& object,
         {
             if(const auto shared = sharedGenericMember(values[i], values[j]); !shared.empty())
             {
-                fail("key 'arch' in " + where + " lists '" + values[i] + "' and '" + values[j]
-                     + "', which both cover " + shared);
+                std::string message = "key 'arch' in ";
+                message += where;
+                message += " lists '";
+                message += values[i];
+                message += "' and '";
+                message += values[j];
+                message += "', which both cover ";
+                message += shared;
+                fail(message);
             }
         }
     }
@@ -1174,7 +1185,13 @@ inline KernelDescriptorPack parseKernelDescriptorPack(const nlohmann::json& root
             if(const auto violation = genericArchViolation(pack.arch, kernel->arch);
                !violation.empty())
             {
-                fail("kernel '" + kernel->name + "' in " + where + " " + violation);
+                std::string message = "kernel '";
+                message += kernel->name;
+                message += "' in ";
+                message += where;
+                message += " ";
+                message += violation;
+                fail(message);
             }
             pack.kernels.push_back(std::move(*kernel));
         }

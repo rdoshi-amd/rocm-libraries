@@ -5,6 +5,7 @@ from pathlib import Path
 import re
 
 import pytest
+import yaml
 
 from config_harness import assert_assembles, emit_kernels_from_config
 
@@ -65,3 +66,46 @@ def test_cluster_entry_handoff_codegen(kernels, sia, clone):
         assert any(instructions[i:i + 2] == ["s_barrier_signal -1", "s_barrier_wait -1"]
                    for i in range(entry_wait + 1, next_signal - 1)), name
         assert ("label_InitCIterWmma_" in source) == bool(clone), name
+
+
+@pytest.mark.parametrize("sia", [0, 4])
+@pytest.mark.parametrize("depth_u", [128, 256])
+def test_nonpersistent_cluster_entry_reuses_prefetch_join(tmp_path, sia, depth_u):
+    # DU128 has effective PLR0 and needs an entry join. DU256 has effective
+    # PLR1: its existing prefetch join is sufficient under the nonzero-K guard.
+    config = yaml.safe_load(_CONFIG.read_text())
+    forks = config["BenchmarkProblems"][0][1]["ForkParameters"]
+    overrides = {
+        "TileProcessingStrategy": ["None"], "GlobalSplitU": [1],
+        "ScheduleIterAlg": [sia], "InitCIterWmma": [1], "DepthU": [depth_u],
+        "Groups": [[{"MatrixInstruction": [16, 16, 128, 1, 1, 2, 2, 2, 2]}]],
+    }
+    for fork in forks:
+        for key in fork.keys() & overrides.keys():
+            fork[key] = overrides[key]
+    path = tmp_path / "nonpersistent.yaml"
+    path.write_text(yaml.safe_dump(config, sort_keys=False))
+    results = emit_kernels_from_config(
+        path, limit=1, arch="gfx1250", canonical=False, expected_fork_count=1,
+    )
+    assert len(results) == 1
+    name, source, error = results[0]
+    assert error == 0, (name, error)
+    assert_assembles(source, name)
+    instructions = [line.split("//", 1)[0].strip() for line in source.splitlines()]
+    instructions = [line for line in instructions
+                    if line.startswith(("s_", "v_", "tensor_", "ds_", "global_", "buffer_"))]
+    first_load = next(i for i, line in enumerate(instructions)
+                      if line.startswith("tensor_load_to_lds"))
+    if depth_u == 128:
+        assert instructions[first_load - 3:first_load] == [
+            "s_barrier_wait -3", "s_barrier_signal -1", "s_barrier_wait -1",
+        ], name
+    else:
+        assert instructions[first_load - 1] == "s_barrier_wait -3", name
+    entry_wait = max(i for i in range(first_load)
+                     if instructions[i] == "s_barrier_wait -3")
+    next_signal = next(i for i in range(first_load, len(instructions))
+                       if instructions[i] == "s_barrier_signal -3")
+    assert any(instructions[i:i + 2] == ["s_barrier_signal -1", "s_barrier_wait -1"]
+               for i in range(entry_wait + 1, next_signal - 1)), name

@@ -120,8 +120,10 @@ proving a named engine; a generic `command:` line is not that proof.
 ## Packaging probes
 
 When the build was configured with `HIPKERNELPROVIDER_ENABLE_PACKAGING_PROBES=ON`
-(superbuild-only, OFF by default), the probe ctest entries are `hkp-probe-<NAME>`, one per
-`hkp_add_packaging_probe()` line, plus `hkp-probe-tools`. A full ctest run includes them;
+(superbuild-only, OFF by default), the probe ctest entries are `hkp-probe-<arch>`, one per
+architecture explicitly named under the production descriptor root that `GPU_TARGETS`
+does not include (automatic; none when the build targets them all), `hkp-probe-<NAME>`,
+one per named `hkp_add_packaging_probe()` line in `probes.cmake`, and `hkp-probe-tools`. A full ctest run includes them;
 to run them alone, select with the anchored `-R '^hkp-probe-'` and `--no-tests=error`.
 `<build-dir>/hkp-probes/manifest.txt` lists the entries that must run. Check a ctest junit
 (`--output-junit`) against it with `.github/scripts/check_probe_junit.py --junit <junit>

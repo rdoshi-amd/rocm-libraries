@@ -19,10 +19,6 @@ _PROBES_TESTS_DIR = Path(__file__).resolve().parent
 _PKG_DIR = _PROBES_TESTS_DIR.parent.parent
 _HKP_DIR = _PKG_DIR.parent
 
-# hkp_pack is imported to pin the probe tools' arch rules to the packer's.
-if str(_PKG_DIR / "python") not in sys.path:
-    sys.path.insert(0, str(_PKG_DIR / "python"))
-
 ARCH = "gfx950"
 STAMP_NAME = ".hkp-packed.stamp"
 HKP_PACK = _PKG_DIR / "tools" / "hkp_pack.py"

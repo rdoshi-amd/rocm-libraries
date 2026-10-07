@@ -9,6 +9,11 @@ exits 0 when a test is disabled or not run, so this script reads that junit file
 and checks it against the manifest the CMake configure wrote (one ctest test
 name per line). Testcases not named in the manifest are ignored.
 
+The manifest always names the probe tooling test "hkp-probe-tools", plus one entry
+per declared probe. A lane whose GPU_TARGETS cover every architecture the
+descriptors name declares no probe, so "hkp-probe-tools" alone is a valid manifest;
+an empty one means the configure did not write it properly.
+
 For every manifest name, the junit must hold exactly one testcase with that
 name, and that testcase must have run (status "run" or "fail"; without a status
 attribute, no <skipped> child) and must have no <failure> or <error> child.
@@ -30,8 +35,8 @@ import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-# One probe plus the "hkp-probe-tools" test.
-MIN_MANIFEST_ENTRIES = 2
+# The "hkp-probe-tools" test; probes are optional.
+MIN_MANIFEST_ENTRIES = 1
 
 
 def read_manifest(path: Path) -> list[str]:
@@ -63,7 +68,7 @@ def check(junit_path: Path, manifest_path: Path) -> list[tuple[str, str]]:
             (
                 "manifest-too-small",
                 f"{manifest_path} lists {len(names)} test(s), expected at least "
-                f"{MIN_MANIFEST_ENTRIES} (one probe plus hkp-probe-tools)",
+                f"{MIN_MANIFEST_ENTRIES} (hkp-probe-tools)",
             )
         )
 

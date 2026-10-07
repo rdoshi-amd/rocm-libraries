@@ -27,20 +27,30 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class Kind:
     # kernel_source fields that define a compile group within a KDP: UKDs of one kind
-    # agreeing on all of them share a compile path, so by default one stands for the
-    # group. Every field must be present in kernel_source. Empty means the kind compiles
-    # nothing and one UKD per KDP stands for it; authors who want more UKDs of a group
-    # packed list them by name (hkp_add_packaging_probe UKDS).
+    # agreeing on all of them share a compile path. Every field must be present in
+    # kernel_source. Empty means the kind compiles nothing and the whole KDP is one
+    # group. Authors who want specific UKDs of a group packed list them by name
+    # (hkp_add_packaging_probe UKDS).
     group_by: tuple[str, ...]
     # Names of provenance checks (hkp_probe_assert._PROVENANCE_CHECKS) a shipped UKD of
     # this kind must satisfy, beyond provenance.origin_kind == the kind itself.
     provenance: tuple[str, ...]
     # Packed output type: a key of hkp_probe_assert._OUTPUT_CHECKS.
     output: str = "kpack"
+    # kernel_source field holding an object whose values select code within one
+    # compile group (rocke: `spec`, which the builder bakes into the kernel). With a
+    # sweep field, a group keeps UKDs until each value of each field that varies within
+    # the group is packed at least once (greedy, ties by sorted name); combinations of
+    # values are not guaranteed. None keeps one UKD per group, the first by sorted name.
+    sweep_field: str | None = None
 
 
 KINDS = {
-    "rocke": Kind(group_by=("source", "builder"), provenance=("wheel", "comgr")),
+    "rocke": Kind(
+        group_by=("source", "builder"),
+        provenance=("wheel", "comgr"),
+        sweep_field="spec",
+    ),
     "hip": Kind(group_by=("source", "build"), provenance=()),
     "hsaco": Kind(group_by=(), provenance=()),
     "embedded_source": Kind(group_by=(), provenance=(), output="passthrough"),

@@ -96,11 +96,9 @@ class CheckProbeJunitTest(unittest.TestCase):
         xml = junit_xml([case_xml(n) for n in MANIFEST])
         self.assertIn("manifest-too-small", self.run_check(xml, []))
 
-    def test_manifest_without_probe_fails(self):
+    def test_manifest_without_probe_passes(self):
         xml = junit_xml([case_xml("hkp-probe-tools")])
-        self.assertEqual(
-            self.run_check(xml, ["hkp-probe-tools"]), ["manifest-too-small"]
-        )
+        self.assertEqual(self.run_check(xml, ["hkp-probe-tools"]), [])
 
     def test_failure_fails(self):
         xml = junit_xml([case_xml(MANIFEST[0], "failure"), case_xml(MANIFEST[1])])

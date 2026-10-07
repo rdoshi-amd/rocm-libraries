@@ -38,8 +38,8 @@ endfunction()
 #   Derive the probe root at configure time (FATAL with the tool's stderr when the root
 #   cannot be derived, e.g. a kept KDP references a standalone UKD, or a listed UKD is
 #   kept nowhere) and re-run configure when a source file or the derive tooling
-#   changes. Each <ukd> is passed as one --ukd; with none, derive keeps one UKD per
-#   compile group. The tool writes <out_dir>/../expect.json, the list of kept UKDs the
+#   changes. Each <ukd> is passed as one --ukd; with none, derive selects per compile
+#   group (one UKD, or a value sweep for kinds with a sweep field). The tool writes <out_dir>/../expect.json, the list of kept UKDs the
 #   assertion expects; <expect_var> receives its path. FATAL when that list is empty: no
 #   KDP under <from_dir> ships for <arch>, so the pack would prune everything. Deriving
 #   is idempotent, so a reconfigure leaves the derived root's mtimes alone and does not
@@ -140,9 +140,11 @@ endfunction()
 #   ROOT defaults to the production descriptors, HIPKERNELPROVIDER_PRODUCTION_DESCRIPTOR_
 #   SOURCE_ROOT; a relative ROOT is resolved against the directory of the probes file.
 #   It is copied at configure time into the build tree with every KDP that ships for
-#   ARCH trimmed (see hkp_probe_derive_root.py). Without UKDS, each such KDP keeps one
-#   UKD per compile group, so the probe packs the real descriptors but compiles each
-#   distinct compile path once. With UKDS, the probe packs exactly the listed UKDs (by
+#   ARCH trimmed (see hkp_probe_derive_root.py). Without UKDS, each compile group of
+#   such a KDP keeps one UKD, or for a kind with a sweep field (rocke: spec) enough UKDs
+#   that each value of each spec field varying within the group is packed at least once
+#   (combinations of values are not guaranteed). So the probe packs the real
+#   descriptors but compiles each compile path, and each value, once. With UKDS, the probe packs exactly the listed UKDs (by
 #   UKD name): KDPs keeping none of them are left out of the derived root, and
 #   configure fails when a listed name is kept by no KDP shipping for ARCH. The
 #   assertion expects exactly the kept UKDs, each with the provenance of its producer
@@ -158,7 +160,8 @@ endfunction()
 #   ${CMAKE_BINARY_DIR}/hkp-probes/<NAME>/out) and ctest entry hkp-probe-<NAME>. The
 #   pack targets are part of `all` (hkp_wire_pack_target declares them so); the
 #   aggregate hkp_packaging_probes builds every probe's pack. Only callable from a
-#   probes file loaded by hkp_load_packaging_probes().
+#   probes file loaded by hkp_load_packaging_probes(), which also calls it for the
+#   automatic arches.
 # ---------------------------------------------------------------------------
 function(hkp_add_packaging_probe)
     cmake_parse_arguments(PARSE_ARGV 0 ARG "" "ARCH;ROOT;NAME;PACK_JOBS" "UKDS")
@@ -248,12 +251,62 @@ function(hkp_add_packaging_probe)
 endfunction()
 
 # ---------------------------------------------------------------------------
+# _hkp_probe_automatic_arches(<out_var>)
+#   The architectures to probe automatically: every explicit `arch` entry on a KDP or
+#   UKD under HIPKERNELPROVIDER_PRODUCTION_DESCRIPTOR_SOURCE_ROOT, minus the build's own
+#   targets (hkp_selected_arches). Descriptors with no `arch` (wildcards) name no arch:
+#   they ship for every build target, so the build's own production pack covers them.
+#   FATAL with the tool's stderr when the packer's loader rejects the root. Configure
+#   re-runs when a file under the root or the derive tooling changes.
+# ---------------------------------------------------------------------------
+function(_hkp_probe_automatic_arches out_var)
+    set(_root "${HIPKERNELPROVIDER_PRODUCTION_DESCRIPTOR_SOURCE_ROOT}")
+    file(GLOB_RECURSE _root_inputs CONFIGURE_DEPENDS "${_root}/*")
+    set_property(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" APPEND
+                 PROPERTY CMAKE_CONFIGURE_DEPENDS ${_root_inputs}
+                          "${HKP_PKG_DIR}/tools/hkp_probe_derive_root.py"
+                          "${HKP_PKG_DIR}/tools/hkp_probe_kinds.py")
+    execute_process(
+        COMMAND "${Python3_EXECUTABLE}"
+                "${HKP_PKG_DIR}/tools/hkp_probe_derive_root.py"
+                --list-arches --from "${_root}"
+        RESULT_VARIABLE _rc
+        OUTPUT_VARIABLE _out
+        ERROR_VARIABLE _err)
+    if(NOT _rc EQUAL 0)
+        message(FATAL_ERROR
+            "hkp probe: listing the architectures of the production root ${_root} "
+            "failed (exit ${_rc}).\n${_err}")
+    endif()
+    string(REGEX REPLACE "\n+$" "" _out "${_out}")
+    string(REPLACE "\n" ";" _named "${_out}")
+
+    hkp_selected_arches(_targets _targets_source)
+    set(_auto "${_named}")
+    if(_targets)
+        list(REMOVE_ITEM _auto ${_targets})
+    endif()
+    list(JOIN _auto ", " _auto_text)
+    list(JOIN _named ", " _named_text)
+    list(JOIN _targets ", " _targets_text)
+    message(STATUS
+        "hkp: automatic probe arches: [${_auto_text}] (explicit arches under ${_root}: "
+        "[${_named_text}]; build targets: [${_targets_text}])")
+    set(${out_var} "${_auto}" PARENT_SCOPE)
+endfunction()
+
+# ---------------------------------------------------------------------------
 # hkp_load_packaging_probes(<rocm_kpack_dir> <hipcc> <rocke_comgr_lib> [<rocke args>...])
-#   Store the toolchain hkp_add_packaging resolved, load the declared probes from
-#   probes/probes.cmake, register the probe tooling tests, write the manifest of ctest
-#   names (${CMAKE_BINARY_DIR}/hkp-probes/manifest.txt) and define the aggregate target
-#   hkp_packaging_probes. Configuration fails when no probe is declared or pytest is not
-#   importable by Python3_EXECUTABLE.
+#   Store the toolchain hkp_add_packaging resolved, load the named probes from
+#   probes/probes.cmake, then declare one automatic probe per architecture the production
+#   root names that the build does not target: the explicit `arch` entries of its KDPs
+#   and UKDs (hkp_probe_derive_root.py --list-arches; wildcard descriptors name none)
+#   minus hkp_selected_arches(), each as hkp_add_packaging_probe(ARCH <arch>). Register
+#   the probe tooling tests, write the manifest of ctest names
+#   (${CMAKE_BINARY_DIR}/hkp-probes/manifest.txt) and define the aggregate target
+#   hkp_packaging_probes. Zero probes is valid: every explicit arch is a build target,
+#   so the production pack covers it. Configuration fails when the production root
+#   cannot be read or pytest is not importable by Python3_EXECUTABLE.
 # ---------------------------------------------------------------------------
 function(hkp_load_packaging_probes rocm_kpack_dir hipcc rocke_comgr_lib)
     set_property(GLOBAL PROPERTY HKP_PROBE_ROCM_KPACK_DIR "${rocm_kpack_dir}")
@@ -264,15 +317,15 @@ function(hkp_load_packaging_probes rocm_kpack_dir hipcc rocke_comgr_lib)
     set_property(GLOBAL PROPERTY HKP_PROBE_TOOLCHAIN_SET TRUE)
 
     include("${HKP_PKG_DIR}/probes/probes.cmake")
-    # Calls from anywhere but the probes file hit the guard in hkp_add_packaging_probe.
+    _hkp_probe_automatic_arches(_auto_arches)
+    foreach(_arch IN LISTS _auto_arches)
+        hkp_add_packaging_probe(ARCH "${_arch}")
+    endforeach()
+    # Calls from anywhere but the probes file and the automatic probes above hit the
+    # guard in hkp_add_packaging_probe.
     set_property(GLOBAL PROPERTY HKP_PROBE_TOOLCHAIN_SET FALSE)
 
     get_property(_names GLOBAL PROPERTY HKP_PROBE_NAMES)
-    if(NOT _names)
-        message(FATAL_ERROR
-            "hkp probe: HIPKERNELPROVIDER_ENABLE_PACKAGING_PROBES is ON but "
-            "${HKP_PKG_DIR}/probes/probes.cmake declared no probe.")
-    endif()
 
     execute_process(
         COMMAND "${Python3_EXECUTABLE}" -c "import pytest"
@@ -310,5 +363,7 @@ function(hkp_load_packaging_probes rocm_kpack_dir hipcc rocke_comgr_lib)
     file(WRITE "${CMAKE_BINARY_DIR}/hkp-probes/manifest.txt" "${_manifest}\n")
 
     add_custom_target(hkp_packaging_probes COMMENT "hkp: packaging probes")
-    add_dependencies(hkp_packaging_probes ${_targets})
+    if(_targets)
+        add_dependencies(hkp_packaging_probes ${_targets})
+    endif()
 endfunction()

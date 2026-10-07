@@ -5,16 +5,31 @@ Copies every file under `--from` to `--out`, except that each KDP shipping for
 `--arch` has its inline `kernelDescriptors` reduced to the UKDs the probe packs,
 among the UKDs that themselves ship for `--arch`.
 
-Default mode (no `--ukd`): one UKD per compile group, where the group key is the
-kind plus the kernel_source fields hkp_probe_kinds.KINDS names for it:
+The root is read with the packer's own loader (`hkp_pack.descriptors.load_flat_input`),
+so derive sees exactly the descriptors the packer sees and rejects what the packer
+rejects. Which KDPs ship for `--arch` is the packer's `kdp_survives`, and which of their
+UKDs ship is the packer's `arch_matches`: an empty or absent `arch` list is a wildcard.
+
+Default mode (no `--ukd`): UKDs are partitioned into compile groups, where the group
+key is the kind plus the kernel_source fields hkp_probe_kinds.KINDS names for it:
 
     rocke (kind, source, builder), hip (kind, source, build), hsaco and
-    embedded_source (kind: compile nothing, so one UKD per KDP)
+    embedded_source (kind: compile nothing, so one group per KDP)
 
-Every field of the key must be present in kernel_source. The pick within a group is
-the first by sorted UKD `name`. Packing the derived root therefore exercises every
-compile path once instead of every variant. Authors who want more than one UKD of a
-group list them with `--ukd`.
+Every field of the key must be present in kernel_source. Within a group:
+
+  - a kind with no `sweep_field` keeps one UKD, the first by sorted UKD `name`;
+  - a kind with a `sweep_field` (rocke: `spec`) keeps a value sweep. The universe is
+    every (field, value) pair of the sweep block whose field takes more than one value
+    within the group (values compared as canonical JSON; a field absent from some UKDs
+    counts absence as one of its values). Greedily, the UKD covering the most
+    uncovered pairs is kept, ties broken by sorted UKD `name`, until every pair is
+    covered. A group in which no field varies keeps one UKD, the first by sorted name.
+
+The sweep guarantees that each value of each varying field is packed at least once; it
+does not guarantee any combination of values (e.g. fp16 together with causal). Kept
+UKDs are written in authored order. Authors who want specific UKDs packed list them
+with `--ukd`.
 
 `--ukd <name>` mode (repeatable): each KDP keeps exactly the UKDs whose `name` is
 listed. A KDP shipping for `--arch` that keeps nothing is omitted from the derived
@@ -33,15 +48,20 @@ Files are written only when their content differs and files absent from the
 derived set are removed, so deriving twice leaves every mtime of the derived root
 alone and the pack stamp stays fresh across a reconfigure.
 
-Arch rules are the packer's (`hkp_pack.descriptors.arch_matches` and
-`_arch_subset_ok`): an empty or absent `arch` list is a wildcard.
+`--list-arches --from <root>` prints, one per line and sorted, the union of the
+explicit `arch` entries of every KDP and UKD (inline and standalone) under the root.
+Descriptors with no `arch` (wildcards) contribute nothing.
+
+Standalone UKDs (a `kernelDescriptors` entry that is a bare id) are out of probe
+scope by policy: a KDP that would be trimmed and references one is refused.
 
 Exit code 0 on success. Exit code 2, with a `hkp_probe_derive: ...` message on
-stderr, when the root cannot be derived: a KDP that keeps UKDs (or, in default mode,
-any KDP shipping for `--arch`) references a standalone UKD (`kernelDescriptors` entry
-that is not an object), a kept UKD has a kind not in hkp_probe_kinds.KINDS, a
-default-mode candidate lacks a group key field, a UKD is malformed, the source is
-unreadable, or a `--ukd` name is listed twice or kept by no KDP.
+stderr, when the root cannot be derived: the packer's loader rejects the root
+(malformed or unreadable descriptor, dangling reference, UKD arch outside its KDP's),
+a KDP that keeps UKDs (or, in default mode, any KDP shipping for `--arch`) references
+a standalone UKD, a kept UKD has a kind not in hkp_probe_kinds.KINDS, a default-mode
+candidate lacks a group key field, kept UKDs share a name, or a `--ukd` name is listed
+twice or kept by no KDP.
 """
 
 from __future__ import annotations
@@ -53,28 +73,39 @@ import shutil
 import sys
 from pathlib import Path
 
-_PREFIX = "hkp_probe_derive:"
+# Put the package dir ahead of everything, including this script's own dir:
+# tools/ also holds a module literally named hkp_pack (hkp_pack.py), which would
+# otherwise shadow the hkp_pack package when tools/ is sys.path[0].
+_PKG_ROOT = str(Path(__file__).resolve().parent.parent / "python")
+while _PKG_ROOT in sys.path:
+    sys.path.remove(_PKG_ROOT)
+sys.path.insert(0, _PKG_ROOT)
 
-from hkp_probe_kinds import KINDS
+from hkp_pack.descriptors import (
+    arch_matches,
+    kdp_survives,
+    load_flat_input,
+)  # noqa: E402
+from hkp_pack.errors import HkpPackError  # noqa: E402
+from hkp_probe_kinds import KINDS  # noqa: E402
+
+_PREFIX = "hkp_probe_derive:"
 
 
 class DeriveError(Exception):
     pass
 
 
-def arch_matches(doc, arch):
-    """Port of hkp_pack.descriptors.arch_matches: empty or absent list = wildcard."""
-    archs = doc.get("arch")
-    if not archs:
-        return True
-    return arch in archs
+def _discard(*_args, **_kwargs):
+    pass
 
 
-def arch_subset_ok(ukd_arch, kdp_arch):
-    """Port of hkp_pack.descriptors._arch_subset_ok: empty on either side = wildcard."""
-    if not ukd_arch or not kdp_arch:
-        return True
-    return set(ukd_arch) <= set(kdp_arch)
+def _load(src):
+    """The packer's view of `src`; DeriveError when the packer rejects it."""
+    try:
+        return load_flat_input(src, log=_discard)
+    except HkpPackError as exc:
+        raise DeriveError(str(exc)) from exc
 
 
 def _check_kind(ukd, where):
@@ -121,43 +152,68 @@ def _check_unique_names(rel, kept):
         )
 
 
-def _check_arch_subset(ukd, kdp, where):
-    if not arch_subset_ok(ukd.get("arch") or [], kdp.get("arch") or []):
+# A field missing from a UKD's sweep block; distinct from every canonical JSON value.
+_ABSENT = object()
+
+
+def _sweep_values(ukd, field, where):
+    """Map each field of `ukd`'s kernel_source[field] object to its canonical JSON."""
+    block = ukd["kernel_source"].get(field)
+    if not isinstance(block, dict):
         raise DeriveError(
-            f"{where} arch {ukd.get('arch')} is not a subset of the KDP "
-            f"arch {kdp.get('arch')}"
+            f"{where} kernel_source field {field!r} is not an object, so its values "
+            "cannot be swept"
         )
+    return {k: json.dumps(v, sort_keys=True) for k, v in block.items()}
+
+
+def _select(members, field, rel):
+    """Return the UKDs a compile group keeps; `members` is sorted by name."""
+    if field is None:
+        return [members[0]]
+    values = [
+        _sweep_values(u, field, f"{rel}: UKD '{u.get('id', '?')}'") for u in members
+    ]
+    keys = set().union(*values)
+    pairs = [{(k, v.get(k, _ABSENT)) for k in keys} for v in values]
+    varying = {k for k in keys if len({p.get(k, _ABSENT) for p in values}) > 1}
+    uncovered = {(k, x) for p in pairs for (k, x) in p if k in varying}
+    if not uncovered:
+        return [members[0]]
+    kept = []
+    while uncovered:
+        # max() keeps the first of equal gains, i.e. the first by sorted name.
+        best = max(range(len(members)), key=lambda i: len(pairs[i] & uncovered))
+        kept.append(members[best])
+        uncovered -= pairs[best]
+    return kept
 
 
 def _derive_kdp(kdp, rel, arch):
     """Return the kept UKDs of a KDP shipping for `arch`, in authored order."""
-    entries = kdp.get("kernelDescriptors")
-    if not isinstance(entries, list):
-        raise DeriveError(f"{rel} 'kernelDescriptors' is not a list")
-    candidates = []
+    entries = kdp["kernelDescriptors"]
+    groups = {}
     for entry in entries:
         if not isinstance(entry, dict):
             raise _standalone_error(rel, entry)
         where = f"{rel}: UKD '{entry.get('id', '?')}'"
         if not isinstance(entry.get("name"), str):
             raise DeriveError(f"{where} has no string 'name'")
-        _check_arch_subset(entry, kdp, where)
         if arch_matches(entry, arch):
-            candidates.append((_group_key(entry, where), entry))
+            groups.setdefault(_group_key(entry, where), []).append(entry)
 
-    picks = {}
-    for key, entry in sorted(candidates, key=lambda c: c[1]["name"]):
-        picks.setdefault(key, entry)
-    kept = [e for e in entries if any(e is p for p in picks.values())]
+    picked = []
+    for key, members in groups.items():
+        members.sort(key=lambda e: e["name"])
+        picked += _select(members, KINDS[key[0]].sweep_field, rel)
+    kept = [e for e in entries if any(e is p for p in picked)]
     _check_unique_names(rel, kept)
     return kept
 
 
 def _derive_kdp_listed(kdp, rel, arch, wanted):
     """Return the UKDs of a KDP shipping for `arch` whose name is in `wanted`."""
-    entries = kdp.get("kernelDescriptors")
-    if not isinstance(entries, list):
-        raise DeriveError(f"{rel} 'kernelDescriptors' is not a list")
+    entries = kdp["kernelDescriptors"]
     kept = [
         e
         for e in entries
@@ -169,10 +225,7 @@ def _derive_kdp_listed(kdp, rel, arch, wanted):
         if not isinstance(entry, dict):
             raise _standalone_error(rel, entry)
     for entry in kept:
-        where = f"{rel}: UKD '{entry.get('id', '?')}'"
-        # The packer rejects this root; a listed UKD must not be dropped silently.
-        _check_arch_subset(entry, kdp, where)
-        _check_kind(entry, where)
+        _check_kind(entry, f"{rel}: UKD '{entry.get('id', '?')}'")
     _check_unique_names(rel, kept)
     return kept
 
@@ -180,7 +233,7 @@ def _derive_kdp_listed(kdp, rel, arch, wanted):
 def _plan(src, arch, ukds=None):
     """Return (files, expect): files maps relative posix path -> source Path or bytes.
 
-    `ukds` is the list of UKD names to keep, or None for one UKD per compile group.
+    `ukds` is the list of UKD names to keep, or None for the default selection.
     """
     if ukds is not None:
         dupes = sorted({n for n in ukds if ukds.count(n) > 1})
@@ -188,38 +241,27 @@ def _plan(src, arch, ukds=None):
             raise DeriveError(f"--ukd lists {dupes} more than once")
         wanted = set(ukds)
 
+    flat = _load(src)
     files = {}
     for p in sorted(src.rglob("*")):
         if p.is_file():
             files[p.relative_to(src).as_posix()] = p
 
     expect = []
-    for rel in sorted(files):
-        if not rel.endswith(".kdp.json"):
-            continue
-        # The packer skips dot-prefixed paths; so does derive.
-        if any(part.startswith(".") for part in rel.split("/")):
-            continue
-        try:
-            kdp = json.loads(files[rel].read_text(encoding="utf-8"))
-        except (OSError, ValueError) as exc:
-            raise DeriveError(f"{rel} is unreadable: {type(exc).__name__}: {exc}")
-        if not isinstance(kdp, dict):
-            raise DeriveError(f"{rel} is not a JSON object")
-        if not arch_matches(kdp, arch):
+    kdps = {d.path.relative_to(src).as_posix(): d.doc for d in flat.kdps()}
+    for rel in sorted(kdps):
+        kdp = kdps[rel]
+        if not kdp_survives(kdp, flat, arch):
             continue
         if ukds is None:
             kept = _derive_kdp(kdp, rel, arch)
         else:
             kept = _derive_kdp_listed(kdp, rel, arch, wanted)
         if not kept:
-            if ukds is not None:
-                # Only listed UKDs are packed, so this KDP must not ship in full.
-                del files[rel]
-            # Default mode: every UKD filters out for this arch, so the packer drops
-            # the whole KDP.
+            # Only listed UKDs are packed, so this KDP must not ship in full.
+            del files[rel]
             continue
-        kdp["kernelDescriptors"] = kept
+        kdp = dict(kdp, kernelDescriptors=kept)
         files[rel] = (json.dumps(kdp, indent=2) + "\n").encode("utf-8")
         for u in kept:
             entry = {"kdp": rel, "name": u["name"], "kind": u["kernel_source"]["kind"]}
@@ -237,6 +279,20 @@ def _plan(src, arch, ukds=None):
                 "probe derive)"
             )
     return files, expect
+
+
+def list_arches(src: Path) -> list[str]:
+    """Sorted union of the explicit `arch` entries of every KDP and UKD under `src`."""
+    flat = _load(src)
+    arches = set()
+    for kdp in flat.kdps():
+        arches.update(kdp.doc.get("arch") or [])
+        for entry in kdp.doc["kernelDescriptors"]:
+            if isinstance(entry, dict):
+                arches.update(entry.get("arch") or [])
+    for ukd in flat.ukds():
+        arches.update(ukd.doc.get("arch") or [])
+    return sorted(arches)
 
 
 def _same(dest, content):
@@ -282,7 +338,7 @@ def derive_root(
 ) -> str | None:
     """Write the derived root to `out`; return an error message, or None on success.
 
-    `ukds` lists the UKD names to keep (`--ukd`); None keeps one per compile group.
+    `ukds` lists the UKD names to keep (`--ukd`); None selects per compile group.
     """
     if not src.is_dir():
         return f"{_PREFIX} {src} is not a directory"
@@ -306,18 +362,39 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--from", dest="src", type=Path, required=True)
     parser.add_argument(
-        "--arch", required=True, help="architecture to probe, e.g. gfx950"
+        "--list-arches",
+        action="store_true",
+        help="print the explicit arches of the root's KDPs and UKDs, one per line",
     )
-    parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--arch", help="architecture to probe, e.g. gfx950")
+    parser.add_argument("--out", type=Path)
     parser.add_argument(
         "--ukd",
         dest="ukds",
         action="append",
         metavar="NAME",
-        help="keep the UKD with this name (repeatable); default: one per compile group",
+        help="keep the UKD with this name (repeatable); default: per compile group, "
+        "one UKD or a value sweep (see the module docstring)",
     )
     args = parser.parse_args(argv)
 
+    if args.list_arches:
+        if args.arch or args.out or args.ukds:
+            parser.error("--list-arches takes only --from")
+        if not args.src.is_dir():
+            print(f"{_PREFIX} {args.src} is not a directory", file=sys.stderr)
+            return 2
+        try:
+            arches = list_arches(args.src)
+        except DeriveError as exc:
+            print(f"{_PREFIX} {exc}", file=sys.stderr)
+            return 2
+        for a in arches:
+            print(a)
+        return 0
+
+    if not args.arch or args.out is None:
+        parser.error("--arch and --out are required unless --list-arches is given")
     error = derive_root(args.src, args.arch, args.out, args.ukds)
     if error is not None:
         print(error, file=sys.stderr)

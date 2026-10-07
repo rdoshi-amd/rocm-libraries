@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: MIT
 #include "hipblaslt-jit-gemm-internal.hpp"
 #include "hipblaslt-jit-hipkittens.hpp"
+#include "test_helpers.hpp"
 #include <hip/hip_runtime.h>
 #include <hipblaslt/hipblaslt-ext.hpp>
+#include <catch2/catch_test_macros.hpp>
 
 #include <chrono>
 #include <cstdint>
@@ -22,20 +24,10 @@ namespace hk  = hipblaslt_ext::experimental::jit::hipkittens;
 
 namespace
 {
-    void require(bool condition, const std::string& message)
-    {
-        if(!condition)
-        {
-            std::cerr << "FAIL " << message << std::endl;
-            std::exit(1);
-        }
-    }
+    using hipblaslt_jit_test::require;
+    using hipblaslt_jit_test::Device;
 
-    void hip(hipError_t status, const char* expression)
-    {
-        require(status == hipSuccess, std::string(expression) + ": " + hipGetErrorString(status));
-    }
-#define HIP(expression) hip((expression), #expression)
+#define HIP(expression) hipblaslt_jit_test::checkHip((expression), #expression)
 #define BLAS(expression)                                                         \
     do                                                                           \
     {                                                                            \
@@ -49,21 +41,6 @@ namespace
     constexpr uint16_t bf16One = 0x3f80;
     constexpr uint16_t bf16K   = 0x4300;
     constexpr int      M = 256, N = 256, K = 128;
-
-    struct Device
-    {
-        void* pointer{};
-        explicit Device(size_t bytes)
-        {
-            HIP(hipMalloc(&pointer, bytes));
-        }
-        ~Device()
-        {
-            static_cast<void>(hipFree(pointer));
-        }
-        Device(const Device&)            = delete;
-        Device& operator=(const Device&) = delete;
-    };
 
     void checkResources()
     {
@@ -298,7 +275,7 @@ namespace
     }
 }
 
-int main()
+TEST_CASE("the HipKittens gfx950 backend", "[jit-gpu]")
 {
     unsetenv("HIPBLASLT_JIT_TEST_REPLAY");
     int             device = -1;
@@ -330,5 +307,4 @@ int main()
     static_cast<void>(hipStreamDestroy(stream));
     hipblasLtMatmulDescDestroy(desc);
     hipblasLtDestroy(handle);
-    return 0;
 }

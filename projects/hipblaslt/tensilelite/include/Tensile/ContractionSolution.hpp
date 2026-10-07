@@ -641,6 +641,13 @@ namespace TensileLite
     // threshold is 3 (phaseC_review_fixes.md has the data).
     constexpr size_t StreamKDynamicParallelMinSplit = 3;
 
+    // Fewest parts per tile at one part per CU from which the split is sized
+    // for one part per CU (computeUnits) rather than per workgroup slot: with
+    // so few tiles the extra co-resident parts only add partial tiles
+    // (1.44-1.53x static at 2-4 workgroups per CU on 2-4 tile huge-K shapes,
+    // 1.01-1.09x at one).
+    constexpr size_t StreamKDynamicFewTilesMinSplit = 8;
+
     struct StreamKDynamicSplitInputs
     {
         // Batch-inclusive tile count, getNumTiles(sizeMapping, 1).
@@ -662,7 +669,9 @@ namespace TensileLite
         size_t numQueues = 0;
         // CUs the parts run on, one workgroup each: min(CUs, CU-count hint).
         // The alignment bounds the parallelism it gives up against
-        // min(tiles * split, computeUnits). 0 means the split slots.
+        // min(tiles * split, computeUnits), and with at most
+        // computeUnits / StreamKDynamicFewTilesMinSplit tiles the split is
+        // sized for computeUnits instead of the slots. 0 means the split slots.
         size_t computeUnits = 0;
         // The kernel can fix split tiles up by last arrival. With neither this
         // nor allowParallel every tile stays whole unless the debug overrides
@@ -704,7 +713,9 @@ namespace TensileLite
      * when unset, capped by it). Problems with at least S tiles keep every
      * tile whole (skTiles = 0, the historical packing) on a grid of up to
      * maxGrid workgroups. Fewer tiles are all split, on a grid of one
-     * workgroup per part.
+     * workgroup per part. With computeUnits set and at most
+     * computeUnits / StreamKDynamicFewTilesMinSplit tiles, S is
+     * min(S, computeUnits) for the split: one part per CU.
      *
      * With allowParallel (the kernel supports the parallel reduction) the
      * parts are reduced by a PostGSU kernel (parallel = true): skSplit is the

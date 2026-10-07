@@ -542,10 +542,23 @@ namespace TensileLite
             return split;
         };
 
+        // Few tiles, each split into StreamKDynamicFewTilesMinSplit or more
+        // parts even at one part per CU (huge K): one part per CU, not per
+        // slot. The second and third workgroup of a CU only add parts, each
+        // another partial tile to write and sum, and buy no bandwidth or
+        // compute: p1316 (4 tiles), p1112 (4), p824 (2), p1085 (2) went from
+        // 1.44-1.53x static at 2 to 4 workgroups per CU to 1.01-1.09x at
+        // one, and 30 tiles of 211 iterations from 1.17x (split 16) to
+        // 1.02x (8).
+        const size_t partSlots
+            = in.computeUnits > 0 && in.tiles * StreamKDynamicFewTilesMinSplit <= in.computeUnits
+                  ? std::min(slots, in.computeUnits)
+                  : slots;
+
         // Arrival fixup. One part per workgroup (times the over-decomposition
         // factor) ...
         auto arrival = [&]() {
-            size_t split = StreamKDynamicWorkItemsPerWorkgroup * slots / in.tiles;
+            size_t split = StreamKDynamicWorkItemsPerWorkgroup * partSlots / in.tiles;
             // ... but enough iterations per part to amortise its prologue/epilogue ...
             split = std::min(split, itersPerTile / StreamKDynamicMinItersPerWI);
             // ... and no more parts than the serial fixup can sum profitably:
@@ -575,7 +588,7 @@ namespace TensileLite
         // prologue/epilogue, within the workspace.
         if(in.allowParallel)
         {
-            size_t split = in.parallelItemsPerWorkgroup * slots / in.tiles;
+            size_t split = in.parallelItemsPerWorkgroup * partSlots / in.tiles;
             split = std::min(split, itersPerTile / std::max(size_t{1}, in.parallelMinItersPerWI));
             const size_t bytesPerSplit
                 = in.tiles * in.partialTileBytes + in.parallelBytesPerSplit;

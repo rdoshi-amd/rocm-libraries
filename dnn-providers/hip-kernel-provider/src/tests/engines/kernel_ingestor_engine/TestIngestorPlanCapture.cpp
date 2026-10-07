@@ -44,6 +44,7 @@
 #include "engines/kernel_ingestor_engine/packs/PointwiseTestGraphs.hpp"
 #include "engines/kernel_ingestor_engine/serialization/IngestorPlanCodec.hpp"
 #include "engines/kernel_ingestor_engine/serialization/IngestorPlanTestUtilities.hpp"
+#include "engines/kernel_ingestor_engine/serialization/ingestor_plan_generated.h"
 #include "utilities/Digest.hpp"
 #include "version.h"
 
@@ -272,6 +273,45 @@ INSTANTIATE_TEST_SUITE_P(
     [](const ::testing::TestParamInfo<CaptureCase>& info) {
         return std::string(info.param.packedCase->name);
     });
+
+// The damage test of the integration suite changes the middle byte of the body of a saved
+// ConvFwd plan. It expects that byte in the stored code object.
+TEST(TestIngestorPlanCapture, TheMiddleBodyByteLiesInsideTheCodeObject)
+{
+    SKIP_IF_NO_DEVICES();
+
+    const ScopedDirectory scratch = claimScratchDirectory(SCRATCH_LABEL);
+    PackedPlan built;
+    ASSERT_NO_FATAL_FAILURE(packs::buildPackedPlan(packs::CONV_FWD_PACKED_PLAN_CASE,
+                                                   packs::CONV_FWD_PACKED_PLAN_CASE.captureGraph(),
+                                                   scratch.path(),
+                                                   built));
+    if(built.plan == nullptr)
+    {
+        GTEST_SKIP() << "nothing was packed for this device (" << built.deviceProperties.gcnArchName
+                     << ")";
+    }
+
+    const Handle handle;
+    const auto encoded = serialization::encodeIngestorPlan(
+        captureIngestorPlan(*built.plan, handle, testEngineId(), ENGINE_NAME));
+    ASSERT_GT(encoded.size(), serialization::INGESTOR_PLAN_HEADER_SIZE);
+
+    const size_t bodySize = encoded.size() - serialization::INGESTOR_PLAN_HEADER_SIZE;
+    std::vector<serialization::detail::IngestorPlanAlignedBlock> storage;
+    const uint8_t* body = serialization::detail::alignedIngestorPlanBody(
+        encoded.data() + serialization::INGESTOR_PLAN_HEADER_SIZE, bodySize, storage);
+    const auto* codeObject
+        = serialization::fb::GetExecutionPlan(body)->kernel_image()->code_object();
+    ASSERT_NE(codeObject, nullptr);
+
+    const auto codeBegin = static_cast<size_t>(codeObject->data() - body);
+    const size_t codeEnd = codeBegin + codeObject->size();
+    const size_t middle = bodySize / 2;
+    EXPECT_LE(codeBegin, middle);
+    EXPECT_LT(middle, codeEnd) << "the code object holds " << codeObject->size() << " of "
+                               << bodySize << " body bytes";
+}
 
 // Saving accepts only kpack kernels: embedded_source kernels have no recorded argument
 // signature, and their code bytes are not exposed. When either fact changes, change this

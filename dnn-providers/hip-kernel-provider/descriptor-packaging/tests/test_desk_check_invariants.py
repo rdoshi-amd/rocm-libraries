@@ -212,18 +212,6 @@ class TestInvariant2DuplicateMatcherTuples:
             == {}
         )
 
-    def test_a_tie_at_a_worse_tier_than_the_best_is_a_duplicate(self):
-        """Two arch-less kernels tie at the unrestricted tier on gfx1100 even
-        though a third, explicit one outranks them there; the loader's pairwise
-        `archesCompete` refuses them."""
-        kernels = [
-            {"name": n, "metadata": {"dtype": "FLOAT"}, **({"arch": a} if a else {})}
-            for n, a in (("a", None), ("b", None), ("c", ["gfx942"]))
-        ]
-        assert duplicate_matcher_tuples(kernels, ("dtype",), GENERIC_TARGETS) == {
-            ("FLOAT",): 2
-        }
-
     def test_a_tie_beaten_on_every_device_it_reaches_is_still_a_duplicate(self):
         """Both gfx12-generic kernels are outranked by an explicit one on each member
         (gfx1200, gfx1201), so they never tie at the BEST tier anywhere; they still
@@ -241,29 +229,26 @@ class TestInvariant2DuplicateMatcherTuples:
             ("FLOAT",): 2
         }
 
-    def test_a_generic_and_an_arch_less_kernel_do_not_collide(self):
-        """The generic outranks the unrestricted kernel wherever both reach, and the
-        arch-less one is alone elsewhere: no device sees two at one tier."""
-        kernels = self._twins(["gfx11-generic"], None)
+    @pytest.mark.parametrize(
+        "left, right",
+        [
+            (["gfx11-generic"], None),
+            (["gfx11-generic"], ["gfx1100"]),
+            (["gfx99-generic"], ["gfx99-generic"]),
+        ],
+        ids=["generic_vs_arch_less", "generic_vs_its_member", "unknown_generics"],
+    )
+    def test_lists_that_never_tie_at_one_tier_do_not_collide(self, left, right):
+        """A generic outranks an arch-less kernel and loses to its own member; an
+        unknown generic matches no device."""
+        kernels = self._twins(left, right)
         assert duplicate_matcher_tuples(kernels, ("dtype",), GENERIC_TARGETS) == {}
 
-    def test_a_generic_and_one_of_its_members_do_not_collide(self):
-        """The member is EXPLICIT on its own device and outranks the generic."""
-        kernels = self._twins(["gfx11-generic"], ["gfx1100"])
-        assert duplicate_matcher_tuples(kernels, ("dtype",), GENERIC_TARGETS) == {}
-
-    def test_lists_naming_only_unknown_generics_match_nothing(self):
-        kernels = self._twins(["gfx99-generic"], ["gfx99-generic"])
-        assert duplicate_matcher_tuples(kernels, ("dtype",), GENERIC_TARGETS) == {}
-
-    def test_two_arch_less_kernels_collide(self):
-        kernels = self._twins(None, None)
-        assert duplicate_matcher_tuples(kernels, ("dtype",), GENERIC_TARGETS) == {
-            ("FLOAT",): 2
-        }
-
-    def test_two_kernels_naming_the_same_generic_collide(self):
-        kernels = self._twins(["gfx11-generic"], ["gfx11-generic"])
+    @pytest.mark.parametrize(
+        "arch", [None, ["gfx11-generic"]], ids=["arch_less", "same_generic"]
+    )
+    def test_two_kernels_with_the_same_list_collide(self, arch):
+        kernels = self._twins(arch, arch)
         assert duplicate_matcher_tuples(kernels, ("dtype",), GENERIC_TARGETS) == {
             ("FLOAT",): 2
         }

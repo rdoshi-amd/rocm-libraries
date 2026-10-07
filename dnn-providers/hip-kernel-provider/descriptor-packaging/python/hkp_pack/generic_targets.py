@@ -2,8 +2,7 @@
 
 One JSON document (projects/hipdnn/plugin_sdk/data/gpu_generic_targets.json) maps each
 generic target (`gfx11-generic`) to the concrete processors it supports. The C++ loader
-reads the same document through a generated header; this module is the Python side, and
-the two are held equal by the golden vectors in plugin_sdk/tests/data/arch_tier_vectors.json.
+reads the same document through a generated header; this module is the Python side.
 
 Membership is data, never name shape: a generic-shaped name that the table does not list
 (an "unknown generic") expands to the empty set and matches no device. Provenance of the
@@ -134,10 +133,14 @@ def list_tier(entries, device, table):
     """Best tier of @entries for @device; an empty list is UNRESTRICTED; None = no match."""
     if not entries:
         return TIER_UNRESTRICTED
-    tiers = [
-        t for t in (entry_tier(e, device, table) for e in entries) if t is not None
-    ]
-    return min(tiers) if tiers else None
+    best = None
+    for entry in entries:
+        tier = entry_tier(entry, device, table)
+        if tier == TIER_EXPLICIT:
+            return tier
+        if tier is not None:
+            best = tier
+    return best
 
 
 def expand(entries, table):
@@ -155,15 +158,6 @@ def expand(entries, table):
         else:
             devices.add(entry)
     return frozenset(devices)
-
-
-def overlaps(a, b, table):
-    """Can one device satisfy both lists? Empty overlaps everything."""
-    expanded_a = expand(a, table)
-    expanded_b = expand(b, table)
-    if expanded_a is None or expanded_b is None:
-        return True
-    return not expanded_a.isdisjoint(expanded_b)
 
 
 def covers(outer, inner, table):

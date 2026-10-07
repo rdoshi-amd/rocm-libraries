@@ -44,7 +44,7 @@ The signature changes at the llvm20 → llvm21+ boundary:
 - `llvm.amdgcn.make.buffer.rsrc.p1` → `llvm.amdgcn.make.buffer.rsrc.p8.p1`, `num_records` widened from `i32` to `i64` (LLVM PR #126828).
 - `llvm.amdgcn.mfma.f32.{16x16x32,32x32x16}.{fp8,bf8}.{fp8,bf8}` A/B operands collapsed from `<2 x i32>` to scalar `i64`.
 
-`_INTRINSIC_DECLS_LLVM23_OVERRIDES` currently copies the llvm22 intrinsic table. Both flavors use the `P8_INDEXED` generation (`p8:128:128:128:48`), but their complete datalayouts differ: `_DATALAYOUT_LLVM23` adds the ELF symbol-mangling field `m:e`, which `_DATALAYOUT_LLVM22` omits. They therefore emit different IR bytes. Python and C++ must still emit byte-identical IR for the same kernel, target, and flavor.
+`_INTRINSIC_DECLS_LLVM23_OVERRIDES` currently copies the llvm22 intrinsic table. Both flavors use the `P8_INDEXED` generation (`p8:128:128:128:48`), but their complete datalayouts differ: `_DATALAYOUT_LLVM23` adds the ELF symbol-mangling field `m:e` and address spaces `p10`–`p15`, which `_DATALAYOUT_LLVM22` omits. They therefore emit different IR bytes. Python and C++ must still emit byte-identical IR for the same kernel, target, and flavor.
 
 **The emitted IR must be compatible with the compiler loaded by COMGR.** Intrinsic declarations from the LLVM 21+ generation can fail verification when compiled by an LLVM 20 compiler. Automatic detection queries the loaded binary; distribution layout and ROCm package versions are not compiler-version evidence.
 
@@ -62,7 +62,7 @@ Python-driven C++ lowering receives the Python-resolved flavor explicitly. Stand
 
 Tests / callers who need a specific flavor pass `lower_kernel_to_llvm(kernel, llvm_flavor=LLVM_FLAVOR_LLVM20)` (or `LLVM_FLAVOR_LLVM22` / `LLVM_FLAVOR_LLVM23`). All three constants live in `core/lower_llvm.py`. Adding a new intrinsic that changes shape across versions: add the LLVM 20 signature to `_INTRINSIC_DECLS`, the LLVM 21+ override to `_INTRINSIC_DECLS_LLVM22_OVERRIDES` (and to `_INTRINSIC_DECLS_LLVM23_OVERRIDES` if LLVM 23 differs again — it currently just copies the llvm22 table), and branch on `self._flavor` inside the `_op_*` handler (see `_op_tile_buffer_rsrc` and `_lower_mfma_fp8_bf8` for working examples). Prefer `_is_modern_flavor(self._flavor)` over naming flavors in the branch: `test_no_hand_rolled_flavor_membership_lists` rejects a literal listing two or more flavor constants, because that is the shape that silently left `llvm23` out.
 
-The committed golden (`tests/golden/rocke_representative_ir_sha256.json`) holds one sub-document per flavor and `check_golden` verifies **all** of them from any host, so an llvm23 hash cannot go stale just because CI runs on ROCm 7.2.
+The committed golden (`tests/golden/rocke_representative_ir_sha256.json`) holds one sub-document per flavor and `check_golden` verifies **all** of them from any host, so an llvm23 hash cannot go stale just because CI runs on ROCm 7.2. The comparator lives in `core/ir_golden.py` and takes its flavor list straight from `LLVM_FLAVORS`, so adding a flavor fails every golden that uses it (this one and the library's gfx942 `attention_dense` fixture) until they are re-blessed, with no golden-test edit.
 
 ## Wave Size
 

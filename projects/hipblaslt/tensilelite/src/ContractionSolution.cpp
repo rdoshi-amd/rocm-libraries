@@ -7144,6 +7144,30 @@ namespace TensileLite
                 }
             }
 
+            // The dynamic work queues need a home workgroup for every
+            // non-empty queue (see assertStreamKDynamicGridCoversQueues, which
+            // stays as the final guard in the arg packers). Only a grid
+            // override or a tiny persistentMaxCUs can land below that, so
+            // raise the grid instead of failing the launch. Part of grid
+            // selection, so it runs before outSelectedGrid is captured.
+            if(grid > 0 && streamKUsesDynamicQueue(self.sizeMapping, sk5DynamicSubMode()))
+            {
+                const size_t totalItems
+                    = self.streamKDynamicDecomposition(problem, hardware, tiles).totalItems;
+                const size_t minGrid = std::min(totalItems, streamKBakedQueueCount(hardware));
+                if(grid < minGrid)
+                {
+                    if(Debug::Instance().printPropertyEvaluation())
+                    {
+                        std::cerr << "TensileLite::DEBUG: kernel '" << self.kernelName
+                                  << "' dynamic StreamK grid " << grid << " leaves work queues "
+                                  << "without a home workgroup; raising it to " << minGrid
+                                  << ".\n";
+                    }
+                    grid = minGrid;
+                }
+            }
+
             // Grid selected by the config/CU/override logic, captured before the
             // "reset to tiles" tree-fixup-bounds fallback below.
             //

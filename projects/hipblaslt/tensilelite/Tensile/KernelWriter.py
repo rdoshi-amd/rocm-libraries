@@ -59,7 +59,8 @@ from .Components.Subtile.Kernel import *
 from .Components.Subtile.SubtileLdsLayout import applyLdsLayout
 from .Components.DecouplePGR import decouplePGRBlocks, decoupledSingleBuffered, dcpLdsSide
 from .Components.DecouplePGR import tdmWaveIssueOrder, decoupledThickGateRelaxation, dcpThickGateFromTokenPasses, dcpThickGateUncoveredSites, dcpIsFillLabel, DCP_TENSORCNT_RE, DCP_THICK_GATE_TEXT, DCP_THICK_GATE_TOKENS
-from .Components.TDMRing import tdmDeepRing, tdmRingFenceShape, tdmRingNoLoadWait, tdmRingPublishWait
+from .Components.TDMRing import tdmDeepRing, tdmRingDivergent, tdmRingFenceShape, tdmRingNoLoadWait, \
+  tdmRingPrologueWait, tdmRingPublishWait, tdmRingSideStages
 from .Components.TDMFuse import tdmWavePartition
 from .SolutionStructs import Solution, isPackedIndex
 from .SolutionStructs.Utilities import getMiInputType, isSubtileIterateMode
@@ -468,10 +469,14 @@ class StateValues:
   # _ldsTokenBackEdgeMap.
   unrollLoopCopies: int                  = 1
   IncLdsBufSwitch: bool                  = False
-  # TDM LDS ring (Components/TDMRing.py): PrefetchGlobalRead 3-4 on TDM A+B, one LDS
+  # TDM LDS ring (Components/TDMRing.py): PrefetchGlobalRead >= 3 on TDM A+B, one LDS
   # slot per stage. Independent of TDMPlusLdsBuf. tdmRingFence: "fused" or "twoBarrier".
   tdmDeepRing: bool                      = False
   tdmRingFence: str                      = "fused"
+  # The ring's sides prefetch different depths; PrefetchGlobalRead is the shallower one.
+  tdmRingDivergent: bool                 = False
+  # A divergent ring whose shallower side has a single LDS slot (PrefetchGlobalRead 1).
+  tdmRingOneSlot: bool                   = False
   # First token of the TDMSplit half-1 block used when tokens rotate. Buffer
   # tokens occupy 0..numLDSBlk-1 and metadata uses memTokenLdsBufferMeta (4), so
   # the half-1 block starts past both to keep every token unambiguous.
@@ -803,6 +808,39 @@ class KernelWriter(PersistentKernelState, StreamKKernelState, metaclass=abc.ABCM
       module.add(self.tdmSwapLdsOffset(kernel, tPB))
     return module
 
+  def _tdmRingDeepPrologue(self, kernel, tPA, tPB):
+    """The deeper side's prologue stages past PrefetchGlobalRead, after the skeleton's last.
+
+    Only that side's waves run them, so the other side's tensorcnt, addresses and tokens do
+    not move. A tile past K issues a null descriptor; an early exit jumps past every stage.
+    """
+    stages = {side: tdmRingSideStages(kernel, side) for side in "AB"}
+    deep = "A" if stages["A"] > stages["B"] else "B"
+    tcEven, _ = self._tdmParityMembers(kernel, "A", "B")
+    module = Module("TDM ring deeper side prologue")
+    lblEnd = Label(self.labels.getNameInc("TdmRingDeepPrologueEnd"), "")
+    self._emitTdmWaveParitySCCAuto(module, kernel, comment="wave parity (A=even/B=odd)")
+    skip = SCBranchSCC1 if deep == tcEven else SCBranchSCC0
+    module.add(skip(labelName=lblEnd.getLabelName(), comment="only %s's waves prefetch deeper" % deep))
+    loopCounter = self.loopCounter(kernel, self.states.unrollIdx)
+    for stage in range(kernel["PrefetchGlobalRead"], stages[deep]):
+      module.addComment1("TDM ring: %s stage %u" % (deep, stage))
+      module.add(self.globalReadIncrementAB(kernel, tPA, tPB, None, 0))
+      # Every prologue moves the slots and tokens on right after tile 0; a one-slot ring
+      # leaves only its increment to stage 1 (setupNewTile).
+      if stage > 1:
+        module.add(self._tdmRingSwapLds(kernel, tPA, tPB))
+        self._dcpAdvanceTokens("Tensor", (deep,))
+      module.add(SCmpLeU32(src0=loopCounter, src1=stage, comment="tile %u past K?" % stage))
+      module.add(SCMovB32(dst=sgpr("tdmAGroup0+0"), src=0, comment="null descriptor"))
+      if "MX" in tPA:
+        module.add(SCMovB32(dst=sgpr("tdmMXSAGroup0+0"), src=0, comment="null descriptor"))
+      module.add(self.globalReadDo(kernel, 0, tPA))
+      if "MX" in tPA:
+        module.add(self.globalReadDo(kernel, 0, tPA["MX"]))
+    module.add(lblEnd)
+    return module
+
   def _tdmRingPublishWait(self, kernel, tPA, tPB):
     """Waits ahead of the TDM ring's main-loop publish barrier (see tdmRingPublishWait)."""
     module = Module("TDM ring publish wait")
@@ -810,14 +848,36 @@ class KernelWriter(PersistentKernelState, StreamKKernelState, metaclass=abc.ABCM
       # The merged fence also protects the slot refilled right after it.
       module.add(self._wait(kernel, tPA, tPB, -1, -1, 0,
                             "TDM ring fence: reads of the slot refilled next are done"))
-    module.add(self._wait(kernel, tPA, tPB, tdmRingPublishWait(kernel, self.states.tdmRingFence),
-                          -1, -1, "TDM ring: wait for the oldest of %u stages"
-                          % (kernel["PrefetchGlobalRead"] - (self.states.tdmRingFence == "fused"))))
+    fused = self.states.tdmRingFence == "fused"
+    module.add(self._tdmRingWait(kernel, tPA, tPB,
+                                 {side: tdmRingPublishWait(kernel, self.states.tdmRingFence, side)
+                                  for side in "AB"},
+                                 {side: tdmRingSideStages(kernel, side) - fused for side in "AB"}))
+    return module
+
+  def _tdmRingWait(self, kernel, tPA, tPB, waits, stages):
+    """s_wait_tensorcnt ahead of a TDM ring barrier: waits[side] on the waves issuing `side`,
+    which leaves the oldest of its stages[side] stages landed."""
+    comment = "TDM ring: wait for the oldest of %u stages"
+    if waits["A"] == waits["B"]:
+      return self._wait(kernel, tPA, tPB, waits["A"], -1, -1, comment % stages["A"])
+    tcEven, tcOdd = self._tdmParityMembers(kernel, "A", "B")
+    module = Module("TDM ring wait per side")
+    lblOdd = Label(self.labels.getNameInc("TdmRingWait%s" % tcOdd), "")
+    lblEnd = Label(self.labels.getNameInc("TdmRingWaitEnd"), "")
+    self._emitTdmWaveParitySCCAuto(module, kernel, comment="wave parity (A=even/B=odd)")
+    module.add(SCBranchSCC1(labelName=lblOdd.getLabelName(), comment="odd waves issue %s" % tcOdd))
+    module.add(self._wait(kernel, tPA, tPB, waits[tcEven], -1, -1, comment % stages[tcEven]))
+    module.add(SBranch(labelName=lblEnd.getLabelName()))
+    module.add(lblOdd)
+    module.add(self._wait(kernel, tPA, tPB, waits[tcOdd], -1, -1, comment % stages[tcOdd]))
+    module.add(lblEnd)
     return module
 
   # Move the complete single-buffered fill group after its final local read.
   def _dcpScheduleSingleBufferedFillLate(self, kernel):
-    if not self._dcpDivergent(kernel):
+    # A ring fills both sides after its fence; neither side is single-buffered.
+    if not self._dcpDivergent(kernel) or self.states.tdmRingDivergent:
       return
     src = self.codes.unrollLoopHeader
     if src is None or not src.itemsSize():
@@ -903,14 +963,14 @@ class KernelWriter(PersistentKernelState, StreamKKernelState, metaclass=abc.ABCM
     side = self._dcpTokenSide(tc)
     return getattr(self.states, "lds%sTokenIdx%s" % (kind, side))
 
-  def _dcpAdvanceTokens(self, kind):
+  def _dcpAdvanceTokens(self, kind, sides=("A", "B")):
     if not self.states.dcpTokenGate:
       return
-    for side in ("A", "B"):
+    for side in sides:
       attr = "lds%sTokenIdx%s" % (kind, side)
       stages = self.states.memTokenLdsDcp[side]
       current = getattr(self.states, attr)
-      setattr(self.states, attr, stages[1] if current == stages[0] else stages[0])
+      setattr(self.states, attr, stages[(stages.index(current) + 1) % len(stages)])
 
   def _dcpRelaxThickTextGate(self, kernel, asm):
     """Relax a shared-token DCP gate in emitted assembly.
@@ -919,7 +979,8 @@ class KernelWriter(PersistentKernelState, StreamKKernelState, metaclass=abc.ABCM
     handled by wait-count insertion.
     """
     gate = decoupledThickGateRelaxation(kernel)
-    if gate is None:
+    # A TDM ring emits its own per-side waits and has no early fill to relax.
+    if gate is None or tdmDeepRing(kernel):
       return asm
     if gate.mechanism != DCP_THICK_GATE_TEXT:
       return asm
@@ -1217,7 +1278,8 @@ class KernelWriter(PersistentKernelState, StreamKKernelState, metaclass=abc.ABCM
         # add rest of the mac here
         iterCode.addItems(macItems)
       else:
-        if(kernel["PrefetchGlobalRead"] >= 2):
+        # The TDM ring fills after the fence and swap of the slot it refills, as PGR2 does.
+        if(kernel["PrefetchGlobalRead"] >= 2 or self.states.tdmDeepRing):
           iterCode.add(waitLWCode)
           iterCode.add(syncCode)
           iterCode.add(localReadCode)
@@ -3369,7 +3431,7 @@ class KernelWriter(PersistentKernelState, StreamKKernelState, metaclass=abc.ABCM
         module.add(self.localReadInitPointers(kernel, tensorParametersA, tPM))
       module.addComment0("local read addresses: init pointers b")
       module.add(self.localReadInitPointers(kernel, tensorParametersA, tensorParametersB))
-      if self.states.IncLdsBufSwitch:
+      if self.states.IncLdsBufSwitch and not self.states.tdmRingDivergent:
         # IncLdsBufSwitch case, need to initialize local write inc register
         module.addComment0("local write addresses: reset inc")
         module.add(self.localWriteResetOffsets(kernel,  False, tensorParametersA))
@@ -3447,7 +3509,10 @@ class KernelWriter(PersistentKernelState, StreamKKernelState, metaclass=abc.ABCM
           if kernel["DirectToVgprB"]:
             tPB = None
         # Decoupled PGR advances both tensors; legality comes from late fill placement.
-        module.add(self.globalReadIncrementAB(kernel, tPA, tPB, self.states.unrollIdx, pfi))
+        # A ring increments before each fill, as PGR >= 2 does, so at PrefetchGlobalRead 1
+        # its addresses stay on tile 0 for the deeper side's stage 1 and the loop to move on.
+        if not (self.states.tdmDeepRing and kernel["PrefetchGlobalRead"] == 1):
+          module.add(self.globalReadIncrementAB(kernel, tPA, tPB, self.states.unrollIdx, pfi))
         # swap Tensor memToken
         self.states.ldsTensorTokenIdx = \
             self._nextLdsToken(self.states.ldsTensorTokenIdx)
@@ -4160,9 +4225,11 @@ class KernelWriter(PersistentKernelState, StreamKKernelState, metaclass=abc.ABCM
             if not kernel["NoLdsWriteCode"]:
               waitLWCode.add(self._wait(kernel, tensorParametersA, tensorParametersB, -1, 0, -1, "3wait for local write"))
             elif self.states.tdmDeepRing and isNGLL:
-              waitLWCode.add(self._wait(kernel, tensorParametersA, tensorParametersB,
-                                        tdmRingNoLoadWait(kernel, remainPgr), -1, -1,
-                                        "TDM ring: wait for the oldest of %u stages" % remainPgr))
+              waitLWCode.add(self._tdmRingWait(
+                kernel, tensorParametersA, tensorParametersB,
+                {side: tdmRingNoLoadWait(kernel, remainPgr, side) for side in "AB"},
+                {side: remainPgr + tdmRingSideStages(kernel, side) - kernel["PrefetchGlobalRead"]
+                 for side in "AB"}))
             elif kernel["enableTDMA"] and kernel["enableTDMB"]:
               waitLWCode.add(self._wait(kernel, tensorParametersA, tensorParametersB, 0, -1, -1, "wait for TDM tensor loads"))
             if (kernel["DirectToVgprA"] or kernel["DirectToVgprB"]) and (kernel["DirectToLdsA"] or kernel["DirectToLdsB"]):
@@ -4412,6 +4479,10 @@ class KernelWriter(PersistentKernelState, StreamKKernelState, metaclass=abc.ABCM
         tPAlocal = tensorParametersA # generate inc A code
       if PGR == 2 and kernel["DirectToVgprB"]:
         tPBlocal = tensorParametersB # generate inc B code
+      if self.states.tdmRingOneSlot:
+        # The ring's last fills leave the addresses on the tile they issued and the tail reads
+        # the next one; a PrefetchGlobalRead >= 2 ring steps there in its first NGLL.
+        tPAlocal, tPBlocal = tensorParametersA, tensorParametersB
       if PGR <= 2:
         self.codes.globalReadIncrements = self.globalReadIncrementAB(kernel, tPAlocal, tPBlocal, self.states.unrollIdx, 0)
       self.codes.localWriteA = Module()
@@ -4527,7 +4598,8 @@ class KernelWriter(PersistentKernelState, StreamKKernelState, metaclass=abc.ABCM
     self.codes.dtlsM0UpdateB = self.directToLdsM0Update(kernel, 1, tensorParameters2nd, skip2ndWaitForDtl)
     tPM = tensorParametersA["tpsMetadata"] if tensorParametersA["is_sparse"] else tensorParametersB["tpsMetadata"]
 
-    if kernel["PrefetchGlobalRead"] > 1:
+    # The TDM ring moves its slots before each fill at any PrefetchGlobalRead.
+    if kernel["PrefetchGlobalRead"] > 1 or self.states.tdmDeepRing:
       # swap Tensor memToken before doing global read
       self.states.ldsTensorTokenIdx = \
           self._nextLdsToken(self.states.ldsTensorTokenIdx)
@@ -4578,7 +4650,7 @@ class KernelWriter(PersistentKernelState, StreamKKernelState, metaclass=abc.ABCM
       self.codes.globalReadMXSA, self.codes.globalReadMXSB = \
         self.codes.globalReadMXSB, self.codes.globalReadMXSA
 
-    if kernel["PrefetchGlobalRead"] <= 1:
+    if kernel["PrefetchGlobalRead"] <= 1 and not self.states.tdmDeepRing:
       # swap Tensor memToken after doing global read
       self.states.ldsTensorTokenIdx = \
           self._nextLdsToken(self.states.ldsTensorTokenIdx)
@@ -5109,7 +5181,8 @@ class KernelWriter(PersistentKernelState, StreamKKernelState, metaclass=abc.ABCM
             # DTVA/B, DTLA/B, or TDM case: global read wait is handled above, skip force waitcnt0
             skipForceWaitcnt0 = True
           syncCode.add(self._syncThreads(kernel, "PGR, and wait until LW done to sync", skipForceWaitcnt0=skipForceWaitcnt0))
-          if kernel["enableTDMA"] and kernel["enableTDMB"] and kernel["PrefetchGlobalRead"] == 1:
+          if kernel["enableTDMA"] and kernel["enableTDMB"] and kernel["PrefetchGlobalRead"] == 1 \
+             and not self.states.tdmDeepRing:
             syncCode.add(self._syncThreads(kernel, "PGR1 and TDM, another wait to sync", skipForceWaitcnt0=skipForceWaitcnt0))
 
         if isSwapAndResetLwoIter: # ResetLroIter
@@ -5119,7 +5192,7 @@ class KernelWriter(PersistentKernelState, StreamKKernelState, metaclass=abc.ABCM
           if kernel["ExpertSchedulingMode"] > 0:
             pointerLWCode.add(SWaitAlu(vm_vsrc=0, comment="wait for local read to vgpr complete"))
           if kernel["enableTDMA"] and kernel["enableTDMB"] and kernel["_ScheduleIterAlg"] == 0 and \
-             (kernel["PrefetchGlobalRead"] == 2 or
+             ((kernel["PrefetchGlobalRead"] == 2 and not self.states.tdmDeepRing) or
               (self.states.tdmDeepRing and self.states.tdmRingFence == "twoBarrier")):
             pointerLWCode.add(self._wait(kernel, tensorParametersA, tensorParametersB, -1, -1, 0, \
               "wait for local read before cross-wave TDM swap sync"))
@@ -5892,9 +5965,18 @@ class KernelWriter(PersistentKernelState, StreamKKernelState, metaclass=abc.ABCM
           self.states.ldsDirectToLDSTokenIdx = \
             self._nextLdsToken(self.states.ldsDirectToLDSTokenIdx)
 
+        if self.states.tdmRingDivergent:
+          module.add(self._tdmRingDeepPrologue(kernel, tensorParametersA, tensorParametersB))
+
         # generate exit code
         for idxPgr in range(0, kernel["PrefetchGlobalRead"] + 1):
           module.add(self.closePrefetchGlobalRead2orMore(kernel, tensorParametersA, tensorParametersB, idxPgr))
+      elif self.states.tdmRingOneSlot:
+        # No early exit here: a K with no tile skipped the whole prologue.
+        module.add(self._tdmRingDeepPrologue(kernel, tensorParametersA, tensorParametersB))
+        module.add(self._tdmRingWait(kernel, tensorParametersA, tensorParametersB,
+                                     {side: tdmRingPrologueWait(kernel, side) for side in "AB"},
+                                     {side: tdmRingSideStages(kernel, side) for side in "AB"}))
 
       self.states.subTileIdx = 0
 
@@ -6087,8 +6169,10 @@ class KernelWriter(PersistentKernelState, StreamKKernelState, metaclass=abc.ABCM
     def _kernelBody(pack, packPre, nta, ntb):
       # open unrolled summation loop
       module.addComment2("Unrolled Loop(s) - Begin")
+      # A TDM ring protects even its single slot at its own fence.
       if kernel["enableTDMA"] and kernel["enableTDMB"] and \
-         (not kernel["PrefetchGlobalRead"] or decoupledSingleBuffered(kernel)):
+         (not kernel["PrefetchGlobalRead"] or
+          (decoupledSingleBuffered(kernel) and not self.states.tdmDeepRing)):
         primeWhy = "PGR=0" if not kernel["PrefetchGlobalRead"] else "single LDS blk"
         module.add(SBarrier(comment=f"TDM {primeWhy}: prime barrier before loop"))
       if _needsPreLoopLocalReadDrain(kernel, self.states.numItersPLR,
@@ -7726,13 +7810,18 @@ class KernelWriter(PersistentKernelState, StreamKKernelState, metaclass=abc.ABCM
 
     # set number of LDS Block
     self.states.numLDSBlk = kernel["NumLdsBlk"]
-    # use inc to switch Lds Buffers (instead of using xor)
-    self.states.IncLdsBufSwitch = kernel["NumLdsBlk"] >= 3
+    # use inc to switch Lds Buffers (instead of using xor); a divergent ring reads each side
+    # through its own inc
+    self.states.tdmRingDivergent = tdmRingDivergent(kernel)
+    self.states.IncLdsBufSwitch = kernel["NumLdsBlk"] >= 3 or self.states.tdmRingDivergent
     self.states.tdmDeepRing = tdmDeepRing(kernel)
+    self.states.tdmRingOneSlot = self.states.tdmRingDivergent and kernel["PrefetchGlobalRead"] == 1
     self.states.tdmRingFence = tdmRingFenceShape(
-      globalParameters.get("TDMRingFenceOverride", "auto")) if self.states.tdmDeepRing else "fused"
+      globalParameters.get("TDMRingFenceOverride", "auto"), kernel) if self.states.tdmDeepRing else "fused"
     assert not self.states.tdmDeepRing or self.states.numItersPLR >= 1, \
       "TDM ring: the local-read prefetch wraps (numItersPLR 0); tdmRingRejectReason must reject it"
+    assert not (self.states.tdmRingOneSlot and kernel["ExpandPointerSwap"]), \
+      "TDM ring: ExpandPointerSwap on a PrefetchGlobalRead=1 ring; tdmRingRejectReason must reject it"
     # oneBufferScheduling
     self.states.oneBufferScheduling = (kernel["1LDSBuffer"]) or \
                                       ((kernel["DirectToLdsA"] or kernel["DirectToLdsB"]) and \
@@ -7780,9 +7869,11 @@ class KernelWriter(PersistentKernelState, StreamKKernelState, metaclass=abc.ABCM
         [[blk, half1Tokens[blk]] for blk in range(self.states.numLDSBlk)]
     if self.states.tdmDeepRing:
       # One row per ring slot: the ring's tokens rotate mod numLDSBlk (_nextLdsToken). The
-      # ring rejects TDMSplit, so the half-1 column only has to stay clear of other tokens.
+      # ring rejects TDMSplit, so the half-1 column only has to stay clear of other tokens,
+      # the slot tokens included once there are more slots than memTokenLdsSplitBase.
+      splitBase = max(self.states.memTokenLdsSplitBase, self.states.numLDSBlk)
       self.states.memTokenLdsSplit = \
-        [[blk, self.states.memTokenLdsSplitBase + blk] for blk in range(self.states.numLDSBlk)]
+        [[blk, splitBase + blk] for blk in range(self.states.numLDSBlk)]
     # Separate A/B tokens let wait-count insertion relax the thick gate independently.
     _dcpGate = decoupledThickGateRelaxation(kernel)
     if _dcpGate is not None and _dcpGate.mechanism == DCP_THICK_GATE_TOKENS:
@@ -7792,6 +7883,15 @@ class KernelWriter(PersistentKernelState, StreamKKernelState, metaclass=abc.ABCM
         "B": [2, 3 if numLdsBlkB > 1 else 2],
       }
       self.states.dcpTokenGate = True
+    elif self.states.tdmRingDivergent:
+      # One token per LDS slot, A's then B's, each side rotating through its own slots.
+      stagesA = tdmRingSideStages(kernel, "A")
+      self.states.memTokenLdsDcp = {
+        "A": list(range(stagesA)),
+        "B": list(range(stagesA, stagesA + tdmRingSideStages(kernel, "B"))),
+      }
+      self.states.dcpTokenGate = True
+    if self.states.dcpTokenGate:
       self.states.ldsReadTokenIdxA = self.states.memTokenLdsDcp["A"][0]
       self.states.ldsReadTokenIdxB = self.states.memTokenLdsDcp["B"][0]
       self.states.ldsTensorTokenIdxA = self.states.memTokenLdsDcp["A"][0]
@@ -12097,6 +12197,11 @@ class KernelWriter(PersistentKernelState, StreamKKernelState, metaclass=abc.ABCM
     """
     if self.states.kernel.get("TDMPlusLdsBuf", 0) != 1 and not self.states.tdmDeepRing:
       return {}
+    if self.states.tdmRingDivergent:
+      # The per-side tokens (_dcpAdvanceTokens) each rotate through their own side's slots.
+      return {token: stages[(i + self.states.unrollLoopCopies) % len(stages)]
+              for stages in self.states.memTokenLdsDcp.values()
+              for i, token in enumerate(stages)}
     splitTable = self.states.memTokenLdsSplit
     backEdgeMap = {}
     for buf, row in enumerate(splitTable):

@@ -691,10 +691,11 @@ class Solution(collections.abc.Mapping):
   MAX_NUM_DS_LOAD_VGPRS: int = 4
   MAX_NUM_DS_LOAD_BYTES: int = 4 * MAX_NUM_DS_LOAD_VGPRS
 
-  # Written only by the LDS-capacity rejection, cleared before every DepthU
-  # attempt, and popped before the state is handed back, so no other rejection
-  # can be read as that one and it never reaches a serialized solution.
-  DCP_LDS_CAPACITY_REFUSED: str = "_DcpLdsCapacityRefused"
+  # Written only by the rejections an auto PrefetchGlobalReadA/B pair steps past (LDS
+  # capacity, the TDM ring's subset and its in-flight limit), cleared before every
+  # DepthU attempt, and popped before the state is handed back, so no other rejection
+  # can be read as one of them and it never reaches a serialized solution.
+  DCP_AUTO_PAIR_REFUSED: str = "_DcpAutoPairRefused"
 
   ########################################   # need to be sure PSRR is passing to all fxns
   def __init__(
@@ -2008,11 +2009,11 @@ class Solution(collections.abc.Mapping):
       pristine = copy.deepcopy(state) if pgrAutoPairRequested(state) else None
       attempt = 0
       while True:
-        # A retried attempt stays quiet: its LDS refusal is not the verdict.
+        # A retried attempt stays quiet: its refusal is not the verdict.
         Solution.assignDerivedParameters(
           state, splitGSU, printRejectionReason and pristine is None,
           printIndexAssignmentInfo, isaInfoMap, rocmVersion, dcpAutoSkip=attempt)
-        refused = state.pop(Solution.DCP_LDS_CAPACITY_REFUSED, None)
+        refused = state.pop(Solution.DCP_AUTO_PAIR_REFUSED, None)
         if refused is None or pristine is None:
           break
         attempt += 1
@@ -2024,7 +2025,7 @@ class Solution(collections.abc.Mapping):
         Solution.assignDerivedParameters(
           state, splitGSU, True, printIndexAssignmentInfo, isaInfoMap,
           rocmVersion, dcpAutoSkip=attempt)
-        state.pop(Solution.DCP_LDS_CAPACITY_REFUSED, None)
+        state.pop(Solution.DCP_AUTO_PAIR_REFUSED, None)
       return
 
     isa = tuple(state["ISA"])
@@ -3406,7 +3407,7 @@ class Solution(collections.abc.Mapping):
       state["VectorWidthA"] = _savedVWA
       state["VectorWidthB"] = _savedVWB
       state["ValidDepthU"] = True
-      state.pop(Solution.DCP_LDS_CAPACITY_REFUSED, None)
+      state.pop(Solution.DCP_AUTO_PAIR_REFUSED, None)
       state["DepthU"]      = depthuList[index[0]]
       Solution.depthUIteration(
         state,
@@ -6157,14 +6158,17 @@ class Solution(collections.abc.Mapping):
                  "groups different strides, so the persistent tail cannot normalize LDS to "
                  "buffer 0" % (numLdsBlkA, numLdsBlkB))
           return
-        dcpUnsupported = divergentPairUnsupportedReason(state)
+        # A side at 3 or more makes a TDM LDS ring, which emits its own per-side fences and waits
+        # and is checked by tdmRingRejectReason instead.
+        ring = max(pgrA, pgrB) >= 3
+        dcpUnsupported = None if ring else divergentPairUnsupportedReason(state)
         if dcpUnsupported:
           reject(state, printRejectionReason,
                  "PrefetchGlobalReadA/B: divergent LDS blocks (A=%u, B=%u) need a "
                  "single-buffered fill slot: %s"
                  % (numLdsBlkA, numLdsBlkB, dcpUnsupported))
           return
-        dcpGate = decoupledThickGateRelaxation(state)
+        dcpGate = None if ring else decoupledThickGateRelaxation(state)
         if dcpGate is not None and dcpGate.mechanism == DCP_THICK_GATE_TEXT and \
            not state["_StinkyTofuOptLevel"]:
           reject(state, printRejectionReason,
@@ -6327,8 +6331,9 @@ class Solution(collections.abc.Mapping):
       _segAligned = False
       _segReason = "not supported with PrefetchGlobalReadA/B"
       ldsNumBytesAB = setLdsOffsetsDecoupled(ldsNumBytesB)
-      # Packed layout has no power-of-two swap stride, so force StoreSwapAddr.
-      state["StoreSwapAddr"] = True
+      # Packed layout has no power-of-two swap stride, so force StoreSwapAddr; a ring (a side
+      # at 3 or more) rotates its reads through IncLdsBufSwitch and never reads the swap address.
+      state["StoreSwapAddr"] = max(pgrA, pgrB) < 3
     elif state["PrefetchGlobalRead"]:
       offsetBlk = state["LdsOffsetB"] + ldsNumBytesAlignedB
       # Aligned interleave grows the per-buffer block; keep it only if it still double-buffers
@@ -6400,6 +6405,7 @@ class Solution(collections.abc.Mapping):
     tdmInflightReason = tdmInflightRejectReason(state)
     if tdmInflightReason:
       reject(state, printRejectionReason, tdmInflightReason)
+      state[Solution.DCP_AUTO_PAIR_REFUSED] = tdmInflightReason
       return
 
     # Defer resolving if the oracle only blocked on an unresolved 1LDSBuffer(-1) (resolved later, then re-evaluated).
@@ -6788,7 +6794,7 @@ class Solution(collections.abc.Mapping):
     if ldsSize > state["MaxLDS"]:
       reject(state, printRejectionReason, "Kernel Uses %u > %u bytes of LDS" % ( ldsSize, state["MaxLDS"]))
       state["ValidDepthU"] = False
-      state[Solution.DCP_LDS_CAPACITY_REFUSED] = ldsSize
+      state[Solution.DCP_AUTO_PAIR_REFUSED] = ldsSize
       return
 
     # LoopUnroll  = DepthU / LocalSplitU
@@ -6938,6 +6944,7 @@ class Solution(collections.abc.Mapping):
     tdmRingReason = tdmRingRejectReason(state)
     if tdmRingReason:
       reject(state, printRejectionReason, tdmRingReason)
+      state[Solution.DCP_AUTO_PAIR_REFUSED] = tdmRingReason
       return
     if state["PrefetchGlobalRead"] >= 3 and not tdmDeepRing(state):
       # DTLA + DTLB only

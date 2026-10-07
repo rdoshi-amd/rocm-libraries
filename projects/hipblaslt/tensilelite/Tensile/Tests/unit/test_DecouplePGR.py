@@ -1815,7 +1815,7 @@ def test_acceptance_does_not_depend_on_how_many_waits_were_retagged():
 
 
 # ---------------------------------------------------------------------------
-# Auto retries only DCP_LDS_CAPACITY_REFUSED.
+# Auto retries only DCP_AUTO_PAIR_REFUSED.
 # ---------------------------------------------------------------------------
 def test_auto_pair_ranking_is_ordered_by_estimate_and_holds_only_feasible_pairs():
     state = _postConversionState()
@@ -1953,7 +1953,7 @@ def test_solution_derivation_leaves_no_capacity_marker_behind(
         sol, _ = _derive(gfx1250_iim, assembler, capsys, **_bbsWitness(
             MatrixInstruction=[16, 16, 32, 1, 1, 8, 4, 2, 2], MaxLDS=maxLds,
             PrefetchGlobalReadA=-1, PrefetchGlobalReadB=-1))
-        assert Solution.DCP_LDS_CAPACITY_REFUSED not in sol
+        assert Solution.DCP_AUTO_PAIR_REFUSED not in sol
 
 
 # ---------------------------------------------------------------------------

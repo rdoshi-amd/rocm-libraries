@@ -539,7 +539,7 @@ def noSchedGlobalRead(writer, kernel, globalReadIncACode, globalReadIncBCode):
         # The two-barrier ring fills between its protect and publish barriers.
         tdmLoadIter = localWriteEndIter
 
-    # The TDM ring (PGR 3-4) issues its fills like PGR2: after the fence of the slot they refill.
+    # The TDM ring (PGR >= 3) issues its fills like PGR2: after the fence of the slot they refill.
     if kernel["PrefetchGlobalRead"] == 2 or writer.states.tdmDeepRing:
         # SIA0 does not schedule GR/LW instruction-by-instruction. If global reads
         # are emitted at iter 0, they clobber vgprG2L* before the later local-write

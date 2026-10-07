@@ -80,7 +80,7 @@ from .Components.GlobalWriteBatch import GlobalWriteBatchWriter, emitFusedA2AGat
 from .KernelWriterModules import *
 from .AsmMemoryHelpers import dsStore, dsLoad, _vgprOffset
 from .Components.DecouplePGR import decouplePGRBlocks, decoupledSingleBuffered, dcpLdsSide
-from .Components.TDMRing import tdmRingPrologueWait
+from .Components.TDMRing import tdmRingPrologueWait, tdmRingSideStages
 from .Components.TDMFuse import tdmFusePaired, tdmGroupPartner, \
                                 tdmSeparateABDescriptors, tdmWaveSeparated, \
                                 tdmSharedScaleSetOwner, tdmSetOwner, tdmSetGroup, \
@@ -1043,7 +1043,12 @@ class KernelWriterAssembly(KernelWriter):
       module.add(self.defineSgpr("GlobalReadIncsMetadata", self.states.m.numSgprGlobalReadIncs))
     if self.states.IncLdsBufSwitch:
       module.add(self.defineSgpr("LDSBufferReadInc", 1))
-      module.add(self.defineSgpr("LDSBufferWriteInc", 1))
+      if self.states.tdmRingDivergent:
+        # The TDM writes rotate in each side's descriptor (_tdmSwapLdsOffsetDecoupled).
+        module.add(self.defineSgpr("LDSBufferReadIncB", 1))
+        module.add(self.defineSgpr("TdmRingStages", 1))
+      else:
+        module.add(self.defineSgpr("LDSBufferWriteInc", 1))
 
     needPackK16  = False
     needPackK8Lw = False
@@ -2030,7 +2035,13 @@ class KernelWriterAssembly(KernelWriter):
       module.add(ValueSet("MTOffset", reductionOffsetLow32, format=1))
       module.add(ValueSet("MTOffsetH32", reductionOffsetHigh32, format=1))
 
-    if self.states.IncLdsBufSwitch or self.states.useCommonSgprSwap:
+    if self.states.tdmRingDivergent:
+      for side, suffix in (("A", ""), ("B", "B")):
+        stages = tdmRingSideStages(kernel, side)
+        module.addComment0("%d LDS Blocks for PrefetchGlobalRead%s %d" % (stages, side, stages))
+        module.add(ValueSet("LdsOneBlockSize" + suffix, kernel["LdsOffsetBlk" + side]))
+        module.add(ValueSet("LdsBlockEndSize" + suffix, kernel["LdsOffsetBlk" + side] * stages))
+    elif self.states.IncLdsBufSwitch or self.states.useCommonSgprSwap:
       module.addComment0("%d LDS Blocks for PGR %d"%(self.states.numLDSBlk, kernel["PrefetchGlobalRead"]))
       module.add(ValueSet("LdsOneBlockSize", kernel["LdsOffsetA_Blk"]))
       module.add(ValueSet("LdsBlockEndSize", kernel["LdsOffsetA_Blk"] * self.states.numLDSBlk))
@@ -6544,6 +6555,8 @@ class KernelWriterAssembly(KernelWriter):
           dst=sgpr("LDSBufferReadInc"), \
           src=0, \
           comment="init LRAddr inc Sgpr"))
+        if self.states.tdmRingDivergent:
+          module.add(SMovB32(dst=sgpr("LDSBufferReadIncB"), src=0, comment="init LRAddr inc Sgpr (B side)"))
       # 3 or more LDS block case, need to keep original LocalReadAddr
       # need to copy to LocalReadAddrOrig after all init calculation for LocalReadAddr is done
       if initVreg:
@@ -6921,7 +6934,8 @@ class KernelWriterAssembly(KernelWriter):
                 src1=(1), \
                 comment="Subtract (PGR-1); StaggerUIter now contains target iteration to wrap"))
       # Convert passed in S' to S for easy loop comparison.  S=S-(PGR-1)'
-      pf = 2 if kernel["PrefetchGlobalRead"] else 1
+      # A PGR1 TDM ring increments before each fill, so its NLL makes the increment that wraps.
+      pf = 2 if kernel["PrefetchGlobalRead"] and not self.states.tdmRingOneSlot else 1
       if kernel["PrefetchGlobalRead"] >= 3:
         pf = kernel["PrefetchGlobalRead"]
         imod.add(SAddU32(dst=sgpr(staggerTmp), src0=sgpr("StaggerUIter"), \
@@ -7100,7 +7114,8 @@ class KernelWriterAssembly(KernelWriter):
       tmp = tmpSgprInfo.idx
       tmpIncSparse = tmpSgprInfo.idx + 2
       # might be able to refactor this to eliminate signed math
-      pf = 3 if kernel["PrefetchGlobalRead"] else 2
+      # Keep at calculateStagger's pf + 1.
+      pf = 3 if kernel["PrefetchGlobalRead"] and not self.states.tdmRingOneSlot else 2
       if kernel["PrefetchGlobalRead"] >= 3:
         pf = kernel["PrefetchGlobalRead"] + 1
       imod.add(SSubI32(dst=sgpr(tmp), src0=pf, \
@@ -8112,6 +8127,29 @@ class KernelWriterAssembly(KernelWriter):
               module.add(self.setTailSrd(tP, sgpr(tmpSgpr+0)))
               module.addSpaceLine()
 
+        if self.states.tdmRingDivergent:
+          # The deeper side's sets were nulled past K, and its addresses lead the skeleton's by
+          # the stages it issued past PrefetchGlobalRead, unless an early exit skipped them.
+          module.addComment0("TDM ring: re-enable the deeper side and rewind its lead")
+          module.add(SMovB32(dst=sgpr("tdmAGroup0+0"), src=1, comment=""))
+          if kernel["ProblemType"]["MXBlockA"]:
+            module.add(SMovB32(dst=sgpr("tdmMXSAGroup0+0"), src=1, comment=""))
+          module.add(SSubU32(dst=sgpr(tmpSgpr), src0=sgpr("TdmRingStages"), src1=kernel["PrefetchGlobalRead"],
+                             comment="tiles this wave's side leads"))
+          module.add(SCmpLtU32(src0=sgpr("OrigLoopCounter"), src1=kernel["PrefetchGlobalRead"],
+                               comment="early exit?"))
+          module.add(SCMovB32(dst=sgpr(tmpSgpr), src=0, comment="no lead"))
+          leads = [("tdmAGroup0", "tdmABIncs")]
+          if kernel["ProblemType"]["MXBlockA"]:
+            leads.append(("tdmMXSAGroup0", "tdmMXSAMXSBIncs"))
+          for group, inc in leads:
+            module.add(self.s_mul_u64_u32(sgpr(tmpSgpr+2), sgpr(tmpSgpr+3), sgpr(tmpSgpr), sgpr(inc),
+                                          comment="lead in bytes"))
+            module.add(SSubU32(dst=sgpr(f"{group}+2"), src0=sgpr(f"{group}+2"), src1=sgpr(tmpSgpr+2),
+                               comment="rewind the lead"))
+            module.add(SSubBU32(dst=sgpr(f"{group}+3"), src0=sgpr(f"{group}+3"), src1=sgpr(tmpSgpr+3),
+                                comment="rewind the lead (hi)"))
+
         # LOCAL_SPLITU * min(sizeL % LOCAL_DEPTHU, DEPTHU / LOCAL_SPLITU)
         module.addComment("numIter%s = LOCAL_SPLITU * min(size%s %% LOCAL_DEPTHU, DEPTHU / LOCAL_SPLITU)" \
             % (self.states.unrollChar, self.states.unrollChar))
@@ -8533,8 +8571,10 @@ class KernelWriterAssembly(KernelWriter):
       loopCounter = self.loopCounter(kernel, loopIdx)
       module.addComment1("closeLoop loop%s finalLoop=%d tailLoop=%d" % (loopChar, finalLoop, tailLoop))
 
+      # A TDM ring protects even its single slot at its own fence.
       if kernel["enableTDMA"] and kernel["enableTDMB"] and \
-         (not kernel["PrefetchGlobalRead"] or decoupledSingleBuffered(kernel)):
+         (not kernel["PrefetchGlobalRead"] or
+          (decoupledSingleBuffered(kernel) and not self.states.tdmDeepRing)):
         # Distinguish scalar PGR=0 from a per-tensor single-buffered side.
         warWhy = "PGR=0" if not kernel["PrefetchGlobalRead"] else "single LDS blk"
         module.add(SWaitCnt(dscnt=0, comment=f"TDM {warWhy}: wait all ds_reads before TDM overwrite"))
@@ -11892,6 +11932,17 @@ class KernelWriterAssembly(KernelWriter):
           imod.header.add(SCMovB32(
                 dst=sgpr("SrdB+2"), src=0,
                 comment="Set limit to 0 for last iteration"))
+    if self.states.tdmRingDivergent and mode == 1 and tP["isA"]:
+      # LoopCounter counts the tiles left including this body, and the shallower side's
+      # depth is the loop's exit count, so only the deeper side's waves match.
+      imod.header.addComment0("TDM ring: null the deeper side's descriptors past K")
+      imod.header.add(SCmpLeI32(
+        src0=self.loopCounter(kernel, loopIdx), \
+        src1=sgpr("TdmRingStages"), \
+        comment="this side's next tile past K?"))
+      imod.header.add(SCMovB32(dst=sgpr("tdmAGroup0+0"), src=0, comment=""))
+      if kernel["ProblemType"]["MXBlockA"]:
+        imod.header.add(SCMovB32(dst=sgpr("tdmMXSAGroup0+0"), src=0, comment=""))
 
     if tc == "A" and kernel["enableTDMA"]:
       comp: TensorDataMoverLoad = TensorDataMoverLoad.find(self)
@@ -11998,7 +12049,10 @@ class KernelWriterAssembly(KernelWriter):
       if self.tdmDescriptorSetOwner(kernel, "MXSA") != "MXSA":
         return imod
       comp: TensorDataMoverLoad = TensorDataMoverLoad.find(self)
-      comp.setMemToken([self.states.ldsTensorTokenIdx])
+      if self.states.tdmRingDivergent:
+        comp.setMemToken(self._dcpTdmIssueTokens(kernel, "MXSA"))
+      else:
+        comp.setMemToken([self.states.ldsTensorTokenIdx])
       if kernel["ProblemType"]["MXBlockA"]:
         if self.states.inTailLoop and not kernel["1LDSBuffer"] and isPersistent(kernel):
           ldsAddrSgprName = comp.getLdsAddrSgprName("tdmMXSAGroup0")
@@ -12402,12 +12456,23 @@ class KernelWriterAssembly(KernelWriter):
     return stride if numBlk >= 2 else 0
 
   def _tdmDecoupledSwapArm(self, kernel, tc, ldsAddrSgprName, tmpSgprIdx) -> Module:
-    """Toggle a descriptor using its tensor's second-copy base."""
+    """Move a descriptor to its tensor's next LDS copy, the last wrapping to the first."""
     numBlk, stride = self._tdmDecoupledBlocks(kernel, tc)
     module = Module(f"TDM LDS swap {tc}")
     # A single-block tensor has no second copy to swap into.
     if numBlk < 2:
       module.addComment0(f"TDM decoupled swap {tc}: single-buffered, no swap")
+      return module
+    if numBlk > 2:
+      # The address carries this wave's offset inside the copy, so the wrap steps back
+      # rather than reloading the first copy's base.
+      lastCopyBase = kernel[f"LdsOffset{tc}"] + (numBlk - 1) * stride
+      module.addComment0(f"TDM decoupled ring {tc}: stride={stride} lastCopyBase={lastCopyBase}")
+      module.add(SCmpLtU32(sgpr(ldsAddrSgprName), lastCopyBase,
+                           f"{tc}: below last-copy base {lastCopyBase}?"))
+      module.add(SMovB32(sgpr(tmpSgprIdx), -(numBlk - 1) * stride, "Init as -(numBlk-1)*blk"))
+      module.add(SCSelectB32(sgpr(tmpSgprIdx), stride, sgpr(tmpSgprIdx), "<: +blk, >=: back to the first copy"))
+      module.add(SAddI32(sgpr(ldsAddrSgprName), sgpr(ldsAddrSgprName), sgpr(tmpSgprIdx), "Do rotate"))
       return module
     secondCopyBase = kernel[f"LdsOffset{tc}"] + stride
     # A is exempt: LdsOffsetA_Blk is the overloaded whole-block swap stride, not
@@ -13691,23 +13756,28 @@ class KernelWriterAssembly(KernelWriter):
       # IncLdsBufSwitch case, we do not use xor. Instead, use add and max check for round back
       # (numLDSBlk>=3 is for DTL (and LocalWriteUseSgpr) and the non-DTL TDM TDMPlusLdsBuf path)
       is1st = tc == "A" # so far, A is always first
+      inc, blockSize, endSize = "LDSBufferReadInc", "LdsOneBlockSize", "LdsBlockEndSize"
+      if self.states.tdmRingDivergent and dcpLdsSide(tc) == "B":
+        # B's side rotates through its own slot count; MXSB is swapped ahead of B.
+        is1st = tc == ("MXSB" if kernel["ProblemType"]["MXBlockB"] else "B")
+        inc, blockSize, endSize = "LDSBufferReadIncB", "LdsOneBlockSizeB", "LdsBlockEndSizeB"
       # LDSBufferReadInc is common for A and B. Add this only for the first one (tc=="A")
       if is1st:
         module.add(SAddU32(
-          dst=sgpr("LDSBufferReadInc"), \
-          src0="LdsOneBlockSize", \
-          src1=sgpr("LDSBufferReadInc"), \
+          dst=sgpr(inc), \
+          src0=blockSize, \
+          src1=sgpr(inc), \
           comment="add LDS block size to incSgpr"))
         module.add(SCmpEQU32(
-          src0=sgpr("LDSBufferReadInc"), \
-          src1="LdsBlockEndSize", \
-          comment="LDSBufferReadInc == End ?"))
+          src0=sgpr(inc), \
+          src1=endSize, \
+          comment="%s == End ?" % inc))
         module.add(SCMovB32(
-          dst=sgpr("LDSBufferReadInc"), \
-          src=0, comment="LDSBufferReadInc loop back to 0"))
+          dst=sgpr(inc), \
+          src=0, comment="%s loop back to 0" % inc))
       module.add(VAddU32(
         dst=vgpr("LocalReadAddr%s"%(tc)), \
-        src0=sgpr("LDSBufferReadInc"), \
+        src0=sgpr(inc), \
         src1=vgpr("LocalReadAddrOrig%s"%(tc)), \
         comment="LocalReadAddr = Inc + Orig"))
     elif internalPointerSwap or kernel["StoreSwapAddr"]:
@@ -13772,8 +13842,11 @@ class KernelWriterAssembly(KernelWriter):
     if self.states.IncLdsBufSwitch:
       # 3 or more LDS block case, round back to 0 and set LocalReadAddrOrig to LocalReadAddr
       # (numLDSBlk>=3 is for DTL (and LocalWriteUseSgpr) and the non-DTL TDM TDMPlusLdsBuf path)
+      inc = "LDSBufferReadInc"
+      if self.states.tdmRingDivergent and dcpLdsSide(tc) == "B":
+        inc = "LDSBufferReadIncB"
       module.add(SMovB32(
-        dst=sgpr("LDSBufferReadInc"), \
+        dst=sgpr(inc), \
         src=0, \
         comment="reset incSgpr"))
       module.add(VMovB32(
@@ -18099,9 +18172,9 @@ class KernelWriterAssembly(KernelWriter):
       elif self.states.tdmDeepRing:
         # All PGR stages are in flight, or an early exit drained them: the barrier after
         # this publishes tile 0, the oldest.
-        imod.add(self._wait(kernel, tensorParametersA, tensorParametersB,
-                            tdmRingPrologueWait(kernel), -1, -1,
-                            "TDM ring: wait for the oldest of %u stages" % PGR))
+        imod.add(self._tdmRingWait(kernel, tensorParametersA, tensorParametersB,
+                                   {side: tdmRingPrologueWait(kernel, side) for side in "AB"},
+                                   {side: tdmRingSideStages(kernel, side) for side in "AB"}))
     return imod
 
   ########################################
@@ -19244,8 +19317,8 @@ class KernelWriterAssembly(KernelWriter):
       # (because wait is for local write code in PGR>=2 case)
       return module
     if self.states.tdmDeepRing:
-      # The TDM ring keeps stage 0 in flight while it issues the others and waits for it at
-      # skipPGR{PGR}_{PGR} (closePrefetchGlobalRead2orMore).
+      # The TDM ring keeps stage 0 in flight while it issues the others and waits for it
+      # after the last (closePrefetchGlobalRead2orMore, or the one-slot ring's prologue).
       return module
     count = 0
     if kernel["DirectToVgprA"]:
@@ -21109,22 +21182,41 @@ class KernelWriterAssembly(KernelWriter):
     blkOffset: int = kernel["LdsOffsetA_Blk"]
     if blkOffset == 0:
       return mod
+
+    def normalize(base, stride, numBlk):
+      for blk in range(numBlk - 1, 0, -1):
+        inBuffer0 = Label(self.labels.getNameInc("TdmTailDescriptorInBuffer0"), "")
+        cmpComment = "TDM tail descriptor already in buffer 0?" if blk == 1 else \
+                     "TDM tail descriptor below buffer %u?"%blk
+        mod.add(SCmpLtU32(src0=sgpr(ldsAddrSgprName), src1=base + stride * blk,
+                          comment=cmpComment))
+        mod.add(SCBranchSCC1(labelName=inBuffer0.getLabelName(), comment="skip buffer normalization"))
+        mod.add(SSubU32(dst=sgpr(ldsAddrSgprName), src0=sgpr(ldsAddrSgprName), src1=stride * blk,
+                        comment="TDM writes to buffer 0, same half as tail local reads"))
+        mod.add(inBuffer0)
+
+    if self.states.tdmRingDivergent:
+      # A wave's descriptor sets hold its own side, whose slots start at the side's base.
+      sides = {"A": (kernel["LdsOffsetA"], kernel["LdsOffsetBlkA"], tdmRingSideStages(kernel, "A")),
+               "B": (kernel["LdsOffsetMXSB"], kernel["LdsOffsetBlkB"], tdmRingSideStages(kernel, "B"))}
+      tcEven, tcOdd = self._tdmParityMembers(kernel, "A", "B")
+      lblOdd = Label(self.labels.getNameInc("TdmTailDescriptorSide%s" % tcOdd), "")
+      lblEnd = Label(self.labels.getNameInc("TdmTailDescriptorSideEnd"), "")
+      self._emitTdmWaveParitySCCAuto(mod, kernel, comment="wave parity (A=even/B=odd)")
+      mod.add(SCBranchSCC1(labelName=lblOdd.getLabelName(), comment="odd waves hold %s's side" % tcOdd))
+      normalize(*sides[tcEven])
+      mod.add(SBranch(labelName=lblEnd.getLabelName()))
+      mod.add(lblOdd)
+      normalize(*sides[tcOdd])
+      mod.add(lblEnd)
+      return mod
     # A divergent pair has two block strides and the two groups do not start at a
     # common multiple of either, so normalizing everything by LdsOffsetA_Blk would
     # land the second group inside the first group's allocation. Refuse instead.
     if self._dcpDivergent(kernel):
       self.states.overflowedResources = 12
       return mod
-    for blk in range(self.states.numLDSBlk - 1, 0, -1):
-      inBuffer0 = Label(self.labels.getNameInc("TdmTailDescriptorInBuffer0"), "")
-      cmpComment = "TDM tail descriptor already in buffer 0?" if blk == 1 else \
-                   "TDM tail descriptor below buffer %u?"%blk
-      mod.add(SCmpLtU32(src0=sgpr(ldsAddrSgprName), src1=blkOffset * blk,
-                        comment=cmpComment))
-      mod.add(SCBranchSCC1(labelName=inBuffer0.getLabelName(), comment="skip buffer normalization"))
-      mod.add(SSubU32(dst=sgpr(ldsAddrSgprName), src0=sgpr(ldsAddrSgprName), src1=blkOffset * blk,
-                      comment="TDM writes to buffer 0, same half as tail local reads"))
-      mod.add(inBuffer0)
+    normalize(0, blkOffset, self.states.numLDSBlk)
     return mod
 
   def papTdmShiftTailLdsBank(self, kernel: Mapping, tPA: Mapping, tPB: Mapping) -> Module:
@@ -21529,6 +21621,9 @@ class KernelWriterAssembly(KernelWriter):
       srcEven = sgpr(incSgprName)
     mod.add(SBitcmp1B32(sgpr("WaveIdx"), 0, "Check parity of wId"))
     mod.add(SCSelectB32(sgpr(incSgprName), srcOdd, srcEven))
+    if self.states.tdmRingDivergent and tcA == "A":
+      mod.add(SCSelectB32(sgpr("TdmRingStages"), tdmRingSideStages(kernel, dcpLdsSide(tcOdd)),
+                          tdmRingSideStages(kernel, dcpLdsSide(tcEven)), "stages of this wave's side"))
     return mod
 
   def resetTDMDescriptorForTail(self, kernel: Mapping, tP: Mapping, tmpSgprWaveOffset = None) -> Module:

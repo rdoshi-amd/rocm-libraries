@@ -4,7 +4,7 @@
 #
 # SPDX-License-Identifier: MIT
 ################################################################################
-"""Solution derivation of the deep TDM LDS ring (PrefetchGlobalRead 3-4 on TDM A+B)."""
+"""Solution derivation of the deep TDM LDS ring (PrefetchGlobalRead >= 3 on TDM A+B)."""
 from copy import deepcopy
 from types import SimpleNamespace
 
@@ -12,7 +12,7 @@ import pytest
 
 from Tensile.Common.GlobalParameters import defaultSolution, globalParameters
 from Tensile.Common.Types import IsaInfo, IsaVersion, SemanticVersion
-from Tensile.Components.TDMRing import _TDM_RING_UNSUPPORTED_FLAGS, tdmDeepRing
+from Tensile.Components.TDMRing import _TDM_RING_UNSUPPORTED_FLAGS, tdmDeepRing, tdmRingDivergent
 from Tensile.SolutionStructs.Solution import Solution
 
 pytestmark = pytest.mark.unit
@@ -110,7 +110,7 @@ def test_two_wave_tdm_pgr2_base_is_valid(capsys):
     assert not tdmDeepRing(solution)
 
 
-@pytest.mark.parametrize("pgr", [3, 4])
+@pytest.mark.parametrize("pgr", [3, 4, 6])
 def test_ring_takes_one_lds_block_per_stage(capsys, pgr):
     solution = _solution(PrefetchGlobalRead=pgr)
     out = capsys.readouterr().out
@@ -124,6 +124,31 @@ def test_ring_takes_one_lds_block_per_stage(capsys, pgr):
     for flag in _TDM_RING_UNSUPPORTED_FLAGS:
         assert solution.get(flag, 0) in (0, False), (flag, solution.get(flag))
     assert solution["LDSSegmentInterleave"] == 0
+    assert "TDM LDS ring" not in out
+
+
+@pytest.mark.parametrize("overrides, pgr", [
+    pytest.param({"PrefetchGlobalRead": 8}, 6, id="lds-holds-six-slots"),
+    pytest.param({"PrefetchGlobalRead": 16, "DepthU": 32}, 11, id="inflight-holds-eleven-slots"),
+])
+def test_ring_auto_pair_steps_down_to_the_deepest_valid_pair(capsys, overrides, pgr):
+    """Auto walks (N, N) down past pairs the ring refuses; the equal pair it lands on is
+    the scalar PrefetchGlobalRead."""
+    solution = _solution(PrefetchGlobalReadA=-1, PrefetchGlobalReadB=-1, **overrides)
+    out = capsys.readouterr().out
+    assert solution["Valid"] is True, out
+    assert solution["PrefetchGlobalRead"] == pgr
+    assert "PrefetchGlobalReadA" not in solution
+
+
+@pytest.mark.parametrize("pgrA, pgrB", [(4, 2), (2, 3), (4, 1)])
+def test_divergent_ring_pins_the_loop_to_the_shallower_side(capsys, pgrA, pgrB):
+    solution = _solution(PrefetchGlobalReadA=pgrA, PrefetchGlobalReadB=pgrB, ExpandPointerSwap=False)
+    out = capsys.readouterr().out
+    assert solution["Valid"] is True, out
+    assert tdmRingDivergent(solution)
+    assert solution["PrefetchGlobalRead"] == min(pgrA, pgrB)
+    assert not solution["StoreSwapAddr"]
     assert "TDM LDS ring" not in out
 
 

@@ -11,7 +11,6 @@ import pytest
 
 from Tensile.Components.TDMRing import (
     TDM_INFLIGHT_PER_WAVE_LIMIT,
-    TDM_RING_STAGES,
     _TDM_RING_UNSUPPORTED_FLAGS,
     tdmDeepRing,
     tdmInflightPerWaveBound,
@@ -22,6 +21,7 @@ from Tensile.Components.TDMRing import (
     tdmRingPrologueWait,
     tdmRingPublishWait,
     tdmRingRejectReason,
+    tdmRingSideStages,
     tdmWaveIssueMembers,
 )
 
@@ -205,7 +205,7 @@ def _ringState(**overrides):
                       _ScheduleIterAlg=0, _StinkyTofuOptLevel=0, PrefetchLocalRead=1,
                       LoopIters=2, EnableMatrixInstruction=True, MIInputPerThread=16,
                       LocalReadVectorWidthA=16, ClusterDim=[1, 1], UseCustomMainLoopSchedule=-1,
-                      **{"1LDSBuffer": 0})
+                      DepthU=256, AssertSummationElementMultiple=1, **{"1LDSBuffer": 0})
     state.update(overrides)
     return state
 
@@ -215,6 +215,7 @@ def _ringState(**overrides):
     [
         pytest.param({}, 8, id="ring4-mx"),
         pytest.param({"PrefetchGlobalRead": 3, "NumLdsBlk": 3}, 6, id="ring3-mx"),
+        pytest.param({"PrefetchGlobalRead": 5, "NumLdsBlk": 5}, 10, id="ring5-mx"),
         pytest.param({"ProblemType": dict(_DENSE)}, 4, id="ring4-dense"),
         pytest.param({"PrefetchGlobalRead": 3, "NumLdsBlk": 3, "ProblemType": dict(_DENSE)}, 3,
                      id="ring3-dense"),
@@ -233,10 +234,13 @@ def test_ring_supported_subset(overrides, bound):
 @pytest.mark.parametrize(
     "overrides, what",
     [
-        pytest.param({"PrefetchGlobalRead": 3, "NumLdsBlk": 3, "PrefetchGlobalReadA": 3,
-                      "PrefetchGlobalReadB": 4},
-                     "PrefetchGlobalReadA=3 with PrefetchGlobalReadB=4", id="divergent"),
-        pytest.param({"PrefetchGlobalRead": 5, "NumLdsBlk": 5}, "3 or 4 slots", id="pgr5"),
+        pytest.param({"PrefetchGlobalRead": 1, "PrefetchGlobalReadA": 4, "PrefetchGlobalReadB": 0},
+                     "PrefetchGlobalReadA=4 with PrefetchGlobalReadB=0", id="side-at-level-0"),
+        pytest.param({"PrefetchGlobalRead": 2, "PrefetchGlobalReadA": 4, "PrefetchGlobalReadB": 2,
+                      "StaggerU": 32}, "StaggerU=32", id="divergent-stagger"),
+        pytest.param({"PrefetchGlobalRead": 2, "PrefetchGlobalReadA": 4, "PrefetchGlobalReadB": 2,
+                      "StaggerU": 0, "AssertSummationElementMultiple": 512, "DepthU": 256},
+                     "AssertSummationElementMultiple=512", id="divergent-asem"),
         pytest.param({"DirectToLdsA": 1}, "DirectToLds or DirectToVgpr", id="dtl"),
         pytest.param({"NumWaves": 1}, "NumWaves=1", id="one-wave"),
         pytest.param({"ScheduleIterAlg": 4, "_StinkyTofuOptLevel": 3}, "ScheduleIterAlg=4",
@@ -293,6 +297,7 @@ _RING_FLAGS_ON = {
     "UsePLRPack": 1,
     "ExpertSchedulingMode": 2,
     "TDMPlusLdsBuf": 1,
+    "ExpandPointerSwap": True,
 }
 _RING_FLAGS = [pytest.param(flag, id=flag) for flag in sorted(_RING_FLAGS_ON)]
 
@@ -430,46 +435,64 @@ def _ringReplay(state, tiles, fence, earlyExitDrain=True, prologueWait=None):
     S tiles remain. NoGlobalLoadLoop r >= 2 decrements the counter and, below S-1, leaves
     for toPGR1 at 1 (closeSumAtLeastUnroll). A fence publishes the tile the local-read
     prefetch reads next; the NoLoadLoop drains before the tail loop.
+
+    The waves issuing A and those issuing B each wait on their own side's S_A or S_B slots.
+    S above is the skeleton, PrefetchGlobalRead: the shallower side. Unless the prologue left
+    early, the deeper side then issues the rest of its stages, and each of its fills past K is
+    a null descriptor that still counts on tensorcnt. Fence counts are those of A's waves.
     """
     stages = state["PrefetchGlobalRead"]
     perStage = tdmRingIssuesPerStage(state)
+    slots = {side: tdmRingSideStages(state, side) for side in ("A", "B")}
     if prologueWait is None:
-        prologueWait = tdmRingPrologueWait(state)
-    inFlight = collections.deque()
+        prologueWaits = {side: tdmRingPrologueWait(state, side) for side in slots}
+    else:
+        prologueWaits = dict.fromkeys(slots, prologueWait)
+    inFlight = {side: collections.deque() for side in slots}
+    issued = dict.fromkeys(slots, 0)
     fences, unsafe = [], []
-    issued = peak = 0
+    peak = 0
 
-    def issue(computing=None):
-        nonlocal issued, peak
+    def issue(side, computing=None):
+        nonlocal peak
         # A main-loop fill reuses the slot of the tile whose reads its fence protected.
-        assert computing is None or issued == computing + stages
-        inFlight.append(issued)
-        issued += 1
-        peak = max(peak, len(inFlight) * perStage)
+        assert computing is None or issued[side] == computing + slots[side]
+        inFlight[side].append(issued[side] if issued[side] < tiles else None)
+        issued[side] += 1
+        peak = max(peak, len(inFlight[side]) * perStage)
 
-    def wait(count):
-        while len(inFlight) * perStage > count:
-            inFlight.popleft()
+    def issueBoth(computing=None):
+        for side in slots:
+            issue(side, computing)
 
-    def publish(site, tile, count):
-        fences.append((site, len(inFlight)))
-        wait(count)
-        if tile in inFlight:
+    def wait(counts):
+        for side, count in counts.items():
+            while len(inFlight[side]) * perStage > count:
+                inFlight[side].popleft()
+
+    def publish(site, tile, counts):
+        fences.append((site, len(inFlight["A"])))
+        wait(counts)
+        if any(tile in inFlight[side] for side in slots):
             unsafe.append((site, tile))
 
     counter = tiles
-    issue()
+    issueBoth()
     leftEarly = False
     for stage in range(1, stages):
         if counter == stage:
             leftEarly = True
             break
-        issue()
+        issueBoth()
     if leftEarly:
-        fences.append(("EarlyExit", len(inFlight)))
+        fences.append(("EarlyExit", len(inFlight["A"])))
         if earlyExitDrain:
-            wait(0)
-    publish("Prologue", 0, prologueWait)
+            wait(dict.fromkeys(slots, 0))
+    else:
+        for side in slots:
+            while issued[side] < slots[side]:
+                issue(side)
+    publish("Prologue", 0, prologueWaits)
     computing = 0
     if counter == 1:
         first = 0
@@ -478,37 +501,47 @@ def _ringReplay(state, tiles, fence, earlyExitDrain=True, prologueWait=None):
     elif counter <= stages:
         first = stages - 1
     else:
-        publishWait = tdmRingPublishWait(state, fence)
+        publishWaits = {side: tdmRingPublishWait(state, fence, side) for side in slots}
         while counter > stages:
             if fence == "twoBarrier":
-                issue(computing)
-            publish("MainLoop", computing + 1, publishWait)
+                issueBoth(computing)
+            publish("MainLoop", computing + 1, publishWaits)
             if fence == "fused":
-                issue(computing)
+                issueBoth(computing)
             computing += 1
             counter -= 1
         first = stages - 1
     for remainPgr in range(first, 0, -1):
         publish("NoGlobalLoadLoop_%u" % remainPgr, computing + 1,
-                tdmRingNoLoadWait(state, remainPgr))
+                {side: tdmRingNoLoadWait(state, remainPgr, side) for side in slots})
         computing += 1
         if remainPgr >= 2:
             counter -= 1
             if remainPgr < stages - 1 and counter == 1:
                 break
-    fences.append(("NoLoadLoop", len(inFlight)))
-    wait(0)
-    fences.append(("TailLoop", len(inFlight)))
+    fences.append(("NoLoadLoop", len(inFlight["A"])))
+    wait(dict.fromkeys(slots, 0))
+    fences.append(("TailLoop", len(inFlight["A"])))
     assert computing == tiles - 1, "the NoLoadLoop computes the last tile"
     return fences, unsafe, peak
 
 
+def _ringStageCases():
+    """Every (S, name, problem type) of the supported ring the in-flight limit admits."""
+    for name, problemType in (("mx", _MX), ("dense", _DENSE)):
+        for stages in range(3, TDM_INFLIGHT_PER_WAVE_LIMIT + 1):
+            state = _ringState(PrefetchGlobalRead=stages, NumLdsBlk=stages,
+                               ProblemType=dict(problemType))
+            if tdmInflightRejectReason(state) is None:
+                yield stages, name, problemType
+
+
 _RING_REPLAYS = [
     pytest.param(stages, fence, problemType, id="s%u-%s-%s" % (stages, fence, name))
-    for stages in TDM_RING_STAGES
+    for stages, name, problemType in _ringStageCases()
     for fence in ("fused", "twoBarrier")
-    for name, problemType in (("mx", _MX), ("dense", _DENSE))
 ]
+_RING_STAGES = sorted({stages for stages, _, _ in _ringStageCases()})
 
 
 @pytest.mark.parametrize("stages, fence, problemType", _RING_REPLAYS)
@@ -540,30 +573,31 @@ def test_ring_control_flow_lands_every_tile_it_publishes(stages, fence, problemT
 
 
 def _ringRaces(**replay):
-    """Every unsafe fence as (S, tiles, site, tile), over S = 3, 4, both fences, MX and dense.
-    A callable `prologueWait` is given the state."""
+    """Every unsafe fence as (S, tiles, site, tile), over every supported S, both fences, MX
+    and dense. A callable `prologueWait` is given the state."""
     races = set()
-    for stages in TDM_RING_STAGES:
+    for stages, _, problemType in _ringStageCases():
         for fence in ("fused", "twoBarrier"):
-            for problemType in (_MX, _DENSE):
-                state = _ringState(PrefetchGlobalRead=stages, NumLdsBlk=stages,
-                                   ProblemType=dict(problemType))
-                kwargs = dict(replay)
-                if callable(kwargs.get("prologueWait")):
-                    kwargs["prologueWait"] = kwargs["prologueWait"](state)
-                for tiles in range(1, 2 * stages + 2):
-                    races.update((stages, tiles) + race
-                                 for race in _ringReplay(state, tiles, fence, **kwargs)[1])
+            state = _ringState(PrefetchGlobalRead=stages, NumLdsBlk=stages,
+                               ProblemType=dict(problemType))
+            kwargs = dict(replay)
+            if callable(kwargs.get("prologueWait")):
+                kwargs["prologueWait"] = kwargs["prologueWait"](state)
+            for tiles in range(1, 2 * stages + 2):
+                races.update((stages, tiles) + race
+                             for race in _ringReplay(state, tiles, fence, **kwargs)[1])
     return races
 
 
 def test_ring_control_flow_without_the_early_exit_drain_races():
     """Positive control: without the drain an early exit has fewer than S stages in flight, so
-    the prologue's wait for the oldest of S stages returns before tile 0 lands. S=4 with 2 tiles
-    also enters NoGlobalLoadLoop_2 with tile 1 in flight."""
+    the prologue's wait for the oldest of S stages returns before tile 0 lands. 2..S-2 tiles
+    also count down from NoGlobalLoadLoop_{S-2} with every tile they publish in flight."""
     assert _ringRaces(earlyExitDrain=False) == \
-        {(stages, tiles, "Prologue", 0) for stages in TDM_RING_STAGES
-         for tiles in range(1, stages)} | {(4, 2, "NoGlobalLoadLoop_2", 1)}
+        {(stages, tiles, "Prologue", 0) for stages in _RING_STAGES
+         for tiles in range(1, stages)} | \
+        {(stages, tiles, "NoGlobalLoadLoop_%u" % (stages - 1 - tile), tile)
+         for stages in _RING_STAGES for tiles in range(2, stages - 1) for tile in range(1, tiles)}
 
 
 def test_ring_control_flow_with_a_prologue_wait_that_retires_nothing_races():
@@ -572,5 +606,46 @@ def test_ring_control_flow_with_a_prologue_wait_that_retires_nothing_races():
     def allStages(state):
         return state["PrefetchGlobalRead"] * tdmRingIssuesPerStage(state)
     assert _ringRaces(prologueWait=allStages) == \
-        {(stages, tiles, "Prologue", 0) for stages in TDM_RING_STAGES
+        {(stages, tiles, "Prologue", 0) for stages in _RING_STAGES
          for tiles in range(stages, 2 * stages + 2)}
+
+
+@pytest.mark.parametrize("pgrA, pgrB", [(3, 2), (2, 4), (5, 3), (4, 5)])
+@pytest.mark.parametrize("fence", ["fused", "twoBarrier"])
+def test_divergent_ring_control_flow_lands_every_tile_it_publishes(pgrA, pgrB, fence):
+    """K = 1..2*S_hi+2 tiles with S_A != S_B: each side's waits land the tile its fence
+    publishes, and the deeper side peaks at all of its stages, null descriptors included,
+    once the prologue does not leave early. Positive control: without the early-exit drain
+    one tile races."""
+    shallow, deep = sorted((pgrA, pgrB))
+    state = _ringState(PrefetchGlobalRead=shallow, NumLdsBlk=shallow,
+                       PrefetchGlobalReadA=pgrA, PrefetchGlobalReadB=pgrB)
+    assert tdmRingRejectReason(state) is None
+    perStage = tdmRingIssuesPerStage(state)
+    assert tdmInflightPerWaveBound(state) == deep * perStage <= TDM_INFLIGHT_PER_WAVE_LIMIT
+    for tiles in range(1, 2 * deep + 3):
+        _, unsafe, peak = _ringReplay(state, tiles, fence)
+        assert unsafe == [], (tiles, unsafe)
+        assert peak == (tiles if tiles < shallow else deep) * perStage, (tiles, peak)
+    assert _ringReplay(state, 1, fence, earlyExitDrain=False)[1]
+
+
+@pytest.mark.parametrize("pgrA, pgrB", [(4, 1), (1, 3), (5, 1)])
+def test_one_slot_side_ring_lands_every_tile_it_publishes(pgrA, pgrB):
+    """A side with one slot runs a PrefetchGlobalRead=1 loop under two barriers whatever the
+    override: it refills its slot after the protect and waits for that fill before the publish,
+    while the deeper side keeps all of its stages in flight. Positive control: a prologue wait
+    that retires nothing races."""
+    deep = max(pgrA, pgrB)
+    state = _ringState(PrefetchGlobalRead=1, NumLdsBlk=1,
+                       PrefetchGlobalReadA=pgrA, PrefetchGlobalReadB=pgrB)
+    assert tdmRingRejectReason(state) is None
+    fence = tdmRingFenceShape("fused", state)
+    assert fence == "twoBarrier"
+    perStage = tdmRingIssuesPerStage(state)
+    assert tdmInflightPerWaveBound(state) == deep * perStage
+    for tiles in range(1, 2 * deep + 3):
+        _, unsafe, peak = _ringReplay(state, tiles, fence)
+        assert unsafe == [], (tiles, unsafe)
+        assert peak == deep * perStage, (tiles, peak)
+    assert _ringReplay(state, 1, fence, prologueWait=deep * perStage)[1]

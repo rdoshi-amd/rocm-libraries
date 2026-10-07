@@ -22,7 +22,6 @@ namespace jit = hipblaslt_ext::experimental::jit;
 namespace
 {
     namespace fs = std::filesystem;
-    using hipblaslt_jit_test::require;
 
     // data is the committed assembly tree. A path that already holds plain-pair
     // is a staged replay directory, which the second process receives.
@@ -43,9 +42,11 @@ namespace
     do                                                                           \
     {                                                                            \
         const auto status_ = (expression);                                       \
-        require(status_ == HIPBLAS_STATUS_SUCCESS,                               \
-                std::string(#expression) + ": status " + std::to_string(status_) \
-                    + diagnostics.message);                                      \
+        { \
+            INFO(( \
+                std::string(#expression) + ": status " + std::to_string(status_) + diagnostics.message)); \
+            REQUIRE((status_ == HIPBLAS_STATUS_SUCCESS)); \
+        } \
     } while(false)
 
     // FP16 NN GEMMs with FP32 compute, which the plain kernel solves.
@@ -85,27 +86,41 @@ namespace
                                   request,
                                   diagnostics));
         BLAS(jit::getJitAlgo(device, request, backend, 64 << 20, solution, diagnostics));
-        require(diagnostics.message != "1 of 1 solutions came from the JIT solution library",
-                label + " did not build a solution: " + diagnostics.message);
+        {
+            INFO((label + " did not build a solution: " + diagnostics.message));
+            REQUIRE((diagnostics.message != "1 of 1 solutions came from the JIT solution library"));
+        }
         hipblasLtMatmulHeuristicResult_t result{};
         BLAS(jit::getGemmAlgo(solution, result, diagnostics));
         const int index = hipblaslt_ext::getIndexFromAlgo(result.algo);
-        require(index >= (1 << 30),
-                label + " returned " + std::to_string(index) + ", not a JIT library index");
+        {
+            INFO((label + " returned " + std::to_string(index) + ", not a JIT library index"));
+            REQUIRE((index >= (1 << 30)));
+        }
         jit::Solution again;
         BLAS(jit::getJitAlgo(device, request, backend, 64 << 20, again, diagnostics));
-        require(diagnostics.message == "1 of 1 solutions came from the JIT solution library",
-                label + " generated on the second lookup: " + diagnostics.message);
+        {
+            INFO((label + " generated on the second lookup: " + diagnostics.message));
+            REQUIRE((diagnostics.message == "1 of 1 solutions came from the JIT solution library"));
+        }
         hipblasLtMatmulHeuristicResult_t repeat{};
         BLAS(jit::getGemmAlgo(again, repeat, diagnostics));
-        require(hipblaslt_ext::getIndexFromAlgo(repeat.algo) == index,
-                label + " published a different index on the second lookup");
+        {
+            INFO((label + " published a different index on the second lookup"));
+            REQUIRE((hipblaslt_ext::getIndexFromAlgo(repeat.algo) == index));
+        }
         Device     workspace(result.workspaceSize);
         const auto name   = hipblaslt_ext::getSolutionNameFromAlgo(handle, result.algo);
         const auto kernel = hipblaslt_ext::getKernelNameFromAlgo(handle, result.algo);
-        require(hipblaslt_jit_test::endsWith(name, suffix),
-                label + " selected the solution '" + name + "', not the one ending in " + suffix);
-        require(kernel.rfind("Cijk_", 0) == 0, "Unexpected kernel name '" + kernel + "'");
+        {
+            INFO((
+                label + " selected the solution '" + name + "', not the one ending in " + suffix));
+            REQUIRE((hipblaslt_jit_test::endsWith(name, suffix)));
+        }
+        {
+            INFO(("Unexpected kernel name '" + kernel + "'"));
+            REQUIRE((kernel.rfind("Cijk_", 0) == 0));
+        }
         std::cout << "PASS " << label << " published index " << index
                   << " for the solution ending in " << suffix
                   << " and a second lookup reused it\n";
@@ -136,7 +151,10 @@ namespace
                              matrices.layoutD));
         size_t needed = 0;
         BLAS(gemm.isAlgoSupported(result.algo, needed));
-        require(needed == result.workspaceSize, "isAlgoSupported returned another workspace size");
+        {
+            INFO(("isAlgoSupported returned another workspace size"));
+            REQUIRE((needed == result.workspaceSize));
+        }
         HIP(hipMemset(matrices.D.pointer, 0xff, static_cast<size_t>(M) * N * sizeof(__half)));
         BLAS(gemm.initialize(result.algo, workspace.pointer, true, stream));
         BLAS(gemm.run(stream));
@@ -156,8 +174,10 @@ namespace
     void test(const std::string& root)
     {
         const char* libraryRoot = std::getenv("HIPBLASLT_JIT_LIBRARY_PATH");
-        require(libraryRoot && *libraryRoot,
-                "Set HIPBLASLT_JIT_LIBRARY_PATH to a scratch directory");
+        {
+            INFO(("Set HIPBLASLT_JIT_LIBRARY_PATH to a scratch directory"));
+            REQUIRE((libraryRoot && *libraryRoot));
+        }
         std::filesystem::remove_all(std::filesystem::u8path(libraryRoot));
         hipblaslt_jit_test::ReplayFixture fixture(root);
         jit::Diagnostics                  diagnostics;
@@ -185,9 +205,11 @@ namespace
         jit::Solution unsolved;
         BLAS(jit::makeGemmRequest(handle, tn, &alpha, A.pointer, lt, B.pointer, lb, &beta,
                                   C.pointer, lc, D.pointer, lc, transposed, diagnostics));
-        require(jit::getJitAlgo(device, transposed, fixture.backend, 64 << 20, unsolved, diagnostics)
-                    == HIPBLAS_STATUS_NOT_SUPPORTED,
-                "The replay backend accepted a problem its bundle does not solve");
+        {
+            INFO(("The replay backend accepted a problem its bundle does not solve"));
+            REQUIRE((jit::getJitAlgo(device, transposed, fixture.backend, 64 << 20, unsolved, diagnostics)
+                == HIPBLAS_STATUS_NOT_SUPPORTED));
+        }
         std::cout << "PASS a problem the bundle does not solve is not supported\n";
         hipblasLtMatrixLayoutDestroy(lt);
         hipblasLtMatrixLayoutDestroy(lb);
@@ -233,8 +255,10 @@ namespace
         BLAS(jit::getLibraryAlgos(
             device, request, backend, count, 64 << 20, indices, diagnostics));
         for(const auto index : indices)
-            require(index >= (1 << 30),
-                    "Index " + std::to_string(index) + " is outside the reserved JIT range");
+        {
+            INFO(("Index " + std::to_string(index) + " is outside the reserved JIT range"));
+            REQUIRE((index >= (1 << 30)));
+        }
         return indices;
     }
 
@@ -250,11 +274,16 @@ namespace
         std::vector<int> wanted{index};
         std::vector<hipblasLtMatmulHeuristicResult_t> results;
         BLAS(hipblaslt_ext::getAlgosFromIndex(handle, wanted, results));
-        require(results.size() == 1 && hipblaslt_ext::getIndexFromAlgo(results[0].algo) == index,
-                label + " did not resolve");
+        {
+            INFO((label + " did not resolve"));
+            REQUIRE((
+                results.size() == 1 && hipblaslt_ext::getIndexFromAlgo(results[0].algo) == index));
+        }
         const auto name = hipblaslt_ext::getSolutionNameFromAlgo(handle, results[0].algo);
-        require(hipblaslt_jit_test::endsWith(name, suffix),
-                label + " is the solution '" + name + "', not the one ending in " + suffix);
+        {
+            INFO((label + " is the solution '" + name + "', not the one ending in " + suffix));
+            REQUIRE((hipblaslt_jit_test::endsWith(name, suffix)));
+        }
         Fp16Gemm matrices(K);
         float    alpha = 1.25f, beta = 0.5f;
         size_t   bytes = 0;
@@ -286,8 +315,10 @@ namespace
     void library(const std::string& root, const std::vector<int32_t>& published)
     {
         const char* libraryRoot = std::getenv("HIPBLASLT_JIT_LIBRARY_PATH");
-        require(libraryRoot && *libraryRoot,
-                "Set HIPBLASLT_JIT_LIBRARY_PATH to a scratch directory");
+        {
+            INFO(("Set HIPBLASLT_JIT_LIBRARY_PATH to a scratch directory"));
+            REQUIRE((libraryRoot && *libraryRoot));
+        }
         jit::Diagnostics diagnostics;
         std::vector<int32_t> indices = published;
         {
@@ -297,12 +328,16 @@ namespace
                 std::filesystem::remove_all(std::filesystem::u8path(libraryRoot));
                 const auto first
                     = libraryAlgos(fixture.handle, fixture.desc, fixture.backend, 512, 1, diagnostics);
-                require(first.size() == 1,
-                        "K=512 published " + text(first) + ": " + diagnostics.message);
+                {
+                    INFO(("K=512 published " + text(first) + ": " + diagnostics.message));
+                    REQUIRE((first.size() == 1));
+                }
                 const auto second
                     = libraryAlgos(fixture.handle, fixture.desc, fixture.backend, 256, 1, diagnostics);
-                require(second.size() == 1 && second[0] != first[0],
-                        "K=256 published " + text(second) + ": " + diagnostics.message);
+                {
+                    INFO(("K=256 published " + text(second) + ": " + diagnostics.message));
+                    REQUIRE((second.size() == 1 && second[0] != first[0]));
+                }
                 indices = {first[0], second[0]};
                 std::cout << "PASS getLibraryAlgos published " << text(indices) << '\n';
             }
@@ -310,16 +345,20 @@ namespace
             runIndex(fixture.handle, fixture.desc, fixture.stream, 256, indices[1], "_WGM1");
             std::cout << "PASS each index ran through getAlgosFromIndex and hipblasLtMatmul\n";
 
-            require(libraryAlgos(fixture.handle, fixture.desc, fixture.backend, 512, 1, diagnostics)
-                            == std::vector<int32_t>{indices[0]}
-                        && diagnostics.message
-                               == "1 of 1 solutions came from the JIT solution library",
-                    "K=512 did not come from the library: " + diagnostics.message);
-            require(libraryAlgos(fixture.handle, fixture.desc, fixture.backend, 256, 1, diagnostics)
-                            == std::vector<int32_t>{indices[1]}
-                        && diagnostics.message
-                               == "1 of 1 solutions came from the JIT solution library",
-                    "K=256 did not come from the library: " + diagnostics.message);
+            {
+                INFO(("K=512 did not come from the library: " + diagnostics.message));
+                REQUIRE((libraryAlgos(fixture.handle, fixture.desc, fixture.backend, 512, 1, diagnostics)
+                        == std::vector<int32_t>{indices[0]}
+                    && diagnostics.message
+                           == "1 of 1 solutions came from the JIT solution library"));
+            }
+            {
+                INFO(("K=256 did not come from the library: " + diagnostics.message));
+                REQUIRE((libraryAlgos(fixture.handle, fixture.desc, fixture.backend, 256, 1, diagnostics)
+                        == std::vector<int32_t>{indices[1]}
+                    && diagnostics.message
+                           == "1 of 1 solutions came from the JIT solution library"));
+            }
             std::cout << "PASS later queries found the published solutions without generating\n";
         }
         if(!published.empty())
@@ -328,7 +367,10 @@ namespace
         std::cout.flush();
         const auto packed = text(indices);
         const auto child  = fork();
-        require(child >= 0, "fork failed");
+        {
+            INFO(("fork failed"));
+            REQUIRE((child >= 0));
+        }
         if(child == 0)
         {
             if(setenv("HIPBLASLT_JIT_E2E_MODE", "library-reader", 1) != 0
@@ -341,8 +383,11 @@ namespace
             _exit(127);
         }
         int status = 0;
-        require(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0,
-                "The second process failed (wait status " + std::to_string(status) + ")");
+        {
+            INFO(("The second process failed (wait status " + std::to_string(status) + ")"));
+            REQUIRE((
+                waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0));
+        }
         std::cout << "PASS a second process ran the indices before any query and found them\n";
     }
 }
@@ -350,7 +395,10 @@ namespace
 TEST_CASE("replayed JIT GEMM solutions run end to end", "[jit-gpu]")
 {
     const char* mode = std::getenv("HIPBLASLT_JIT_E2E_MODE");
-    require(mode && *mode, "Set HIPBLASLT_JIT_E2E_MODE");
+    {
+        INFO(("Set HIPBLASLT_JIT_E2E_MODE"));
+        REQUIRE((mode && *mode));
+    }
     const std::string which = mode;
     if(which == "run")
         test(replayRoot(HIPBLASLT_JIT_DATA, "end-to-end").u8string());
@@ -360,14 +408,22 @@ TEST_CASE("replayed JIT GEMM solutions run end to end", "[jit-gpu]")
     {
         const char* root   = std::getenv("HIPBLASLT_JIT_E2E_ROOT");
         const char* packed = std::getenv("HIPBLASLT_JIT_E2E_INDICES");
-        require(root && *root && packed, "library-reader is missing its root or indices");
+        {
+            INFO(("library-reader is missing its root or indices"));
+            REQUIRE((root && *root && packed));
+        }
         const std::string indices = packed;
         const auto        comma   = indices.find(',');
-        require(comma != std::string::npos && indices.find(',', comma + 1) == std::string::npos,
-                "library-reader indices");
+        {
+            INFO(("library-reader indices"));
+            REQUIRE((
+                comma != std::string::npos && indices.find(',', comma + 1) == std::string::npos));
+        }
         library(root,
                 {std::stoi(indices.substr(0, comma)), std::stoi(indices.substr(comma + 1))});
     }
     else
-        require(false, "Unknown mode " + which);
+    {
+        FAIL(("Unknown mode " + which));
+    }
 }

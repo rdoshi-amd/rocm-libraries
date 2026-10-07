@@ -8,9 +8,7 @@
 #include <hipblaslt/hipblaslt-ext.hpp>
 
 #include <cmath>
-#ifdef HIPBLASLT_JIT_CATCH2
 #include <catch2/catch_test_macros.hpp>
-#endif
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -19,21 +17,9 @@
 #include <string>
 #include <vector>
 
-// Helpers the JIT tests share. Catch2 tests assert through Catch2. The other
-// JIT tests throw, because they have their own main.
+// Helpers the JIT tests share. Assertions go through Catch2.
 namespace hipblaslt_jit_test
 {
-    inline void require(bool condition, const std::string& message)
-    {
-#ifdef HIPBLASLT_JIT_CATCH2
-        INFO(message);
-        REQUIRE(condition);
-#else
-        if(!condition)
-            throw std::runtime_error(message);
-#endif
-    }
-
     // Requires that f throws.
     inline void reject(const std::function<void()>& f, const std::string& message)
     {
@@ -46,20 +32,29 @@ namespace hipblaslt_jit_test
         {
             failed = true;
         }
-        require(failed, message);
+        {
+            INFO((message));
+            REQUIRE((failed));
+        }
     }
 
     inline std::string readFile(const std::filesystem::path& path)
     {
         std::ifstream input(path, std::ios::binary);
-        require(bool(input), "Cannot read " + path.u8string());
+        {
+            INFO(("Cannot read " + path.u8string()));
+            REQUIRE((bool(input)));
+        }
         return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
     }
 
     inline void writeFile(const std::filesystem::path& path, const std::string& bytes)
     {
         std::ofstream file(path, std::ios::binary);
-        require(bool(file.write(bytes.data(), bytes.size())), "Cannot write " + path.u8string());
+        {
+            INFO(("Cannot write " + path.u8string()));
+            REQUIRE((bool(file.write(bytes.data(), bytes.size()))));
+        }
     }
 
     // The written bundles of the processor in a device's gcnArchName, such as
@@ -68,8 +63,10 @@ namespace hipblaslt_jit_test
                                                const std::string&           gcnArchName)
     {
         const auto bundles = root / gcnArchName.substr(0, gcnArchName.find(':'));
-        require(std::filesystem::is_directory(bundles),
-                "No JIT test bundles for " + gcnArchName + " in " + root.u8string());
+        {
+            INFO(("No JIT test bundles for " + gcnArchName + " in " + root.u8string()));
+            REQUIRE((std::filesystem::is_directory(bundles)));
+        }
         return bundles;
     }
 
@@ -82,13 +79,18 @@ namespace hipblaslt_jit_test
 
     inline void checkHip(hipError_t status, const char* expression)
     {
-        require(status == hipSuccess, std::string(expression) + ": " + hipGetErrorString(status));
+        {
+            INFO((std::string(expression) + ": " + hipGetErrorString(status)));
+            REQUIRE((status == hipSuccess));
+        }
     }
 
     inline void checkBlas(hipblasStatus_t status, const char* expression)
     {
-        require(status == HIPBLAS_STATUS_SUCCESS,
-                std::string(expression) + ": status " + std::to_string(status));
+        {
+            INFO((std::string(expression) + ": status " + std::to_string(status)));
+            REQUIRE((status == HIPBLAS_STATUS_SUCCESS));
+        }
     }
 
     struct Device
@@ -141,10 +143,12 @@ namespace hipblaslt_jit_test
                     __float2half(alpha * sum + beta * __half2float(c[i])));
                 const auto actual = __half2float(out[i]);
                 const auto where = label.empty() ? std::string("D[") : label + ": D[";
-                require(std::isfinite(actual)
-                            && std::abs(actual - expected) <= 0.0005f + 0.001f * std::abs(expected),
-                        where + std::to_string(i) + "] is " + std::to_string(actual)
-                            + ", expected " + std::to_string(expected));
+                {
+                    INFO((where + std::to_string(i) + "] is " + std::to_string(actual)
+                        + ", expected " + std::to_string(expected)));
+                    REQUIRE((std::isfinite(actual)
+                        && std::abs(actual - expected) <= 0.0005f + 0.001f * std::abs(expected)));
+                }
             }
         if(!label.empty())
             std::cout << "PASS " << label << '\n';
@@ -259,9 +263,11 @@ namespace hipblaslt_jit_test
             hipblaslt_ext::experimental::jit::Diagnostics diagnostics;
             const auto status = hipblaslt_ext::experimental::jit::replay::createBackend(
                 {{(bundles / "plain-pair").u8string()}}, backend, diagnostics);
-            require(status == HIPBLAS_STATUS_SUCCESS,
-                    std::string("replay::createBackend: status ") + std::to_string(status)
-                        + diagnostics.message);
+            {
+                INFO((std::string("replay::createBackend: status ") + std::to_string(status)
+                    + diagnostics.message));
+                REQUIRE((status == HIPBLAS_STATUS_SUCCESS));
+            }
         }
 
         ~ReplayFixture()

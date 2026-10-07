@@ -40,11 +40,13 @@ namespace
 {
     constexpr int32_t base = hj::jitIndexBase;
 
-    using hipblaslt_jit_test::require;
 
     void ok(const hj::Status& status, const std::string& what)
     {
-        require(status.ok(), what + ": " + status.message);
+        {
+            INFO((what + ": " + status.message));
+            REQUIRE((status.ok()));
+        }
     }
     template <class T>
     std::string text(const std::vector<T>& values)
@@ -80,7 +82,10 @@ namespace
         const auto handle
             = msgpack::unpack(reinterpret_cast<const char*>(entry.bytes.data()), entry.bytes.size());
         const auto field = [](const msgpack::object& map, const std::string& key) {
-            require(map.type == msgpack::type::MAP, "Expected a map");
+            {
+                INFO(("Expected a map"));
+                REQUIRE((map.type == msgpack::type::MAP));
+            }
             for(uint32_t i = 0; i < map.via.map.size; ++i)
             {
                 auto& member = map.via.map.ptr[i];
@@ -90,8 +95,10 @@ namespace
             throw std::runtime_error("Missing " + key);
         };
         const auto* solutions = field(handle.get(), "solutions");
-        require(solutions->type == msgpack::type::ARRAY && solutions->via.array.size == 1,
-                "Expected one solution");
+        {
+            INFO(("Expected one solution"));
+            REQUIRE((solutions->type == msgpack::type::ARRAY && solutions->via.array.size == 1));
+        }
         auto*      name   = field(solutions->via.array.ptr[0], "kernelName");
         const auto kernel = entry.kernel + suffix;
         name->via.str.ptr  = kernel.data();
@@ -162,7 +169,10 @@ namespace
         const auto path   = (directory / lazyMaster(arch)).string();
         auto       master = std::dynamic_pointer_cast<hj::GemmMaster>(
             TensileLite::LoadLibraryFilePreload<ContractionProblemGemm>(path, {}));
-        require(master && master->initLibraryMapping(path), "The stock loader cannot read " + path);
+        {
+            INFO(("The stock loader cannot read " + path));
+            REQUIRE((master && master->initLibraryMapping(path)));
+        }
         return master;
     }
 
@@ -178,18 +188,34 @@ namespace
         std::set<std::string>    mapped;
         for(const auto& [index, prefix] : master->libraryMapping)
         {
-            require(hj::isJitIndex(index), "Mapped index outside the JIT range");
-            require(mapped.insert(prefix).second, "Two indices map " + prefix);
-            require(fs::is_regular_file(directory / (prefix + ".co")), "Missing " + prefix + ".co");
+            {
+                INFO(("Mapped index outside the JIT range"));
+                REQUIRE((hj::isJitIndex(index)));
+            }
+            {
+                INFO(("Two indices map " + prefix));
+                REQUIRE((mapped.insert(prefix).second));
+            }
+            {
+                INFO(("Missing " + prefix + ".co"));
+                REQUIRE((fs::is_regular_file(directory / (prefix + ".co"))));
+            }
             const auto solution = master->getSolutionByIndex(hardware, index);
-            require(solution && solution->index == index
-                        && solution->codeObjectFilename.load() == prefix + ".co",
-                    "Mapped index " + std::to_string(index) + " does not load");
+            {
+                INFO(("Mapped index " + std::to_string(index) + " does not load"));
+                REQUIRE((solution && solution->index == index
+                    && solution->codeObjectFilename.load() == prefix + ".co"));
+            }
         }
-        require(std::set<std::string>(rows.begin(), rows.end()).size() == rows.size(),
-                "Duplicate master rows");
+        {
+            INFO(("Duplicate master rows"));
+            REQUIRE((std::set<std::string>(rows.begin(), rows.end()).size() == rows.size()));
+        }
         for(const auto& row : rows)
-            require(mapped.count(row), "Master row " + row + " is not mapped");
+        {
+            INFO(("Master row " + row + " is not mapped"));
+            REQUIRE((mapped.count(row)));
+        }
     }
 
     // Names, modes, sizes and modification times of everything under root.
@@ -199,7 +225,10 @@ namespace
         for(const auto& entry : fs::recursive_directory_iterator(root))
         {
             struct stat info{};
-            require(::lstat(entry.path().c_str(), &info) == 0, "lstat failed");
+            {
+                INFO(("lstat failed"));
+                REQUIRE((::lstat(entry.path().c_str(), &info) == 0));
+            }
             lines.push_back(entry.path().lexically_relative(root).string() + " "
                             + std::to_string(info.st_mode) + " " + std::to_string(info.st_size)
                             + " " + std::to_string(info.st_mtim.tv_sec) + "."
@@ -215,7 +244,10 @@ namespace
     unsigned mode(const fs::path& path)
     {
         struct stat info{};
-        require(::lstat(path.c_str(), &info) == 0, "lstat " + path.string());
+        {
+            INFO(("lstat " + path.string()));
+            REQUIRE((::lstat(path.c_str(), &info) == 0));
+        }
         return info.st_mode & 07777;
     }
     std::string octal(unsigned value)
@@ -260,7 +292,10 @@ namespace
             solutions.push_back(built(entry));
         std::vector<int32_t> indices;
         ok(library.publish(key, 0, problem, solutions, indices), "publish");
-        require(indices.size() == entries.size(), "Publish returned " + text(indices));
+        {
+            INFO(("Publish returned " + text(indices)));
+            REQUIRE((indices.size() == entries.size()));
+        }
         return indices;
     }
 
@@ -284,17 +319,21 @@ namespace
     void keys(const Context& ctx)
     {
         const auto key = testKey(ctx);
-        require(key.canonicalJson()
-                    == std::string(R"({"backend":{"id":"test","version":"1"},"code_object_version":4,)")
-                           + R"("comgr":"3.0:/opt/rocm/lib/libamd_comgr.so:1:2",)"
-                           + R"("compiler_environment":{"LLVM_PATH":"/opt/rocm/llvm"},)"
-                           + R"("rocm_path":"/opt/rocm","schema":1,"target":{"isa":")" + ctx.arch
-                           + R"(","library_arch":")" + ctx.arch + R"(","target_id":")" + ctx.arch
-                           + R"(:sramecc+:xnack-","wavefront_size":64}})",
-                "Unexpected cache key " + key.canonicalJson());
+        {
+            INFO(("Unexpected cache key " + key.canonicalJson()));
+            REQUIRE((key.canonicalJson()
+                == std::string(R"({"backend":{"id":"test","version":"1"},"code_object_version":4,)")
+                       + R"("comgr":"3.0:/opt/rocm/lib/libamd_comgr.so:1:2",)"
+                       + R"("compiler_environment":{"LLVM_PATH":"/opt/rocm/llvm"},)"
+                       + R"("rocm_path":"/opt/rocm","schema":1,"target":{"isa":")" + ctx.arch
+                       + R"(","library_arch":")" + ctx.arch + R"(","target_id":")" + ctx.arch
+                       + R"(:sramecc+:xnack-","wavefront_size":64}})"));
+        }
         const auto name = key.directoryName();
-        require(name.size() == ctx.arch.size() + 17 && name.rfind(ctx.arch + "-", 0) == 0,
-                "Unexpected directory " + name);
+        {
+            INFO(("Unexpected directory " + name));
+            REQUIRE((name.size() == ctx.arch.size() + 17 && name.rfind(ctx.arch + "-", 0) == 0));
+        }
         // An ISA different from the device, so this field still changes the key.
         const auto otherIsa = ctx.arch == "gfx942" ? "gfx950" : "gfx942";
         const std::vector<std::function<void(hj::CacheKey&)>> changes{
@@ -316,7 +355,10 @@ namespace
             change(changed);
             names.insert(changed.directoryName());
         }
-        require(names.size() == changes.size() + 1, "A cache key field does not change the key");
+        {
+            INFO(("A cache key field does not change the key"));
+            REQUIRE((names.size() == changes.size() + 1));
+        }
 
         const char* environment[] = {"HIP_PATH=/hip",
                                      "LLVM_PATH=/llvm",
@@ -342,29 +384,42 @@ namespace
             {"AMD_COMGR_HOTSWAP_PLUGIN", "/plugin.so"},
             {"HIP_PATH", "/hip"},
             {"LLVM_PATH", "/llvm"}};
-        require(hj::compilerEnvironment(environment) == expected,
-                "compilerEnvironment kept the wrong variables");
+        {
+            INFO(("compilerEnvironment kept the wrong variables"));
+            REQUIRE((hj::compilerEnvironment(environment) == expected));
+        }
 
         const auto problem = gemm(256);
-        require(hj::problemSizes(problem) == std::vector<size_t>{256, 128, 1, 512},
-                "Unexpected problem sizes " + text(hj::problemSizes(problem)));
+        {
+            INFO(("Unexpected problem sizes " + text(hj::problemSizes(problem))));
+            REQUIRE((hj::problemSizes(problem) == std::vector<size_t>{256, 128, 1, 512}));
+        }
         const auto type = hj::problemTypeKey(problem);
-        require(type == hj::problemTypeKey(gemm(512, 64, 128, 3)),
-                "Sizes changed the ProblemType key");
+        {
+            INFO(("Sizes changed the ProblemType key"));
+            REQUIRE((type == hj::problemTypeKey(gemm(512, 64, 128, 3))));
+        }
         auto accumulate = gemm(256);
         accumulate.setHighPrecisionAccumulate(false);
-        require(type != hj::problemTypeKey(accumulate), "HPA did not change the ProblemType key");
+        {
+            INFO(("HPA did not change the ProblemType key"));
+            REQUIRE((type != hj::problemTypeKey(accumulate)));
+        }
 
         const std::vector<size_t> sizes{256, 128, 1, 512};
         const auto                prefix = hj::entryPrefix(type, "kernel", sizes);
-        require(prefix.size() == 52 && prefix.rfind("TensileLibrary_JIT_", 0) == 0,
-                "Unexpected entry prefix " + prefix);
-        require(prefix == hj::entryPrefix(type, "kernel", sizes)
-                    && prefix != hj::entryPrefix(type + " ", "kernel", sizes)
-                    && prefix != hj::entryPrefix(type, "kernel2", sizes)
-                    && prefix != hj::entryPrefix(type, "kernel", {256, 128, 1, 1024})
-                    && hj::entryPrefix(type, "kernel", sizes, 2) == prefix + "_2",
-                "Entry prefixes are not a function of their content");
+        {
+            INFO(("Unexpected entry prefix " + prefix));
+            REQUIRE((prefix.size() == 52 && prefix.rfind("TensileLibrary_JIT_", 0) == 0));
+        }
+        {
+            INFO(("Entry prefixes are not a function of their content"));
+            REQUIRE((prefix == hj::entryPrefix(type, "kernel", sizes)
+                && prefix != hj::entryPrefix(type + " ", "kernel", sizes)
+                && prefix != hj::entryPrefix(type, "kernel2", sizes)
+                && prefix != hj::entryPrefix(type, "kernel", {256, 128, 1, 1024})
+                && hj::entryPrefix(type, "kernel", sizes, 2) == prefix + "_2"));
+        }
         std::cout << "PASS cache keys, compiler environment, ProblemType keys and entry names\n";
     }
 
@@ -381,39 +436,72 @@ namespace
         {
             const auto root = base / ("mode-" + octal(rejected));
             fs::create_directory(root);
-            require(::chmod(root.c_str(), rejected) == 0, "chmod failed");
+            {
+                INFO(("chmod failed"));
+                REQUIRE((::chmod(root.c_str(), rejected) == 0));
+            }
             const auto status = attempt(root);
-            require(!status.ok() && status.stage == hj::Stage::Lookup
-                        && status.message.find("JIT solution library disabled") == 0,
-                    "A writable root was accepted: " + status.message);
-            require(fs::is_empty(root), "A rejected root was written to");
+            {
+                INFO(("A writable root was accepted: " + status.message));
+                REQUIRE((!status.ok() && status.stage == hj::Stage::Lookup
+                    && status.message.find("JIT solution library disabled") == 0));
+            }
+            {
+                INFO(("A rejected root was written to"));
+                REQUIRE((fs::is_empty(root)));
+            }
         }
         for(unsigned accepted : {0700u, 0750u, 0755u})
         {
             const auto root = base / ("mode-" + octal(accepted));
             fs::create_directory(root);
-            require(::chmod(root.c_str(), accepted) == 0, "chmod failed");
+            {
+                INFO(("chmod failed"));
+                REQUIRE((::chmod(root.c_str(), accepted) == 0));
+            }
             ok(attempt(root), "private root");
-            require(mode(root / "v1") == 0700
-                        && mode(root / "v1" / testKey(ctx).directoryName()) == 0700,
-                    "Library directories are not private");
+            {
+                INFO(("Library directories are not private"));
+                REQUIRE((mode(root / "v1") == 0700
+                    && mode(root / "v1" / testKey(ctx).directoryName()) == 0700));
+            }
         }
         const auto missing = base / "missing" / "nested";
         ok(attempt(missing), "missing root");
-        require(mode(missing) == 0700, "A created root is not private");
+        {
+            INFO(("A created root is not private"));
+            REQUIRE((mode(missing) == 0700));
+        }
 
         fs::create_directory_symlink(base / "mode-700", base / "link");
-        require(!attempt(base / "link").ok(), "A symbolic link root was accepted");
+        {
+            INFO(("A symbolic link root was accepted"));
+            REQUIRE((!attempt(base / "link").ok()));
+        }
         std::ofstream(base / "file") << "not a directory";
-        require(!attempt(base / "file").ok(), "A file root was accepted");
+        {
+            INFO(("A file root was accepted"));
+            REQUIRE((!attempt(base / "file").ok()));
+        }
 
         const auto shared = base / "mode-700" / "v1" / testKey(ctx).directoryName();
-        require(::chmod(shared.c_str(), 0770) == 0, "chmod failed");
-        require(!attempt(base / "mode-700").ok(), "A group-writable key directory was accepted");
-        require(::chmod(shared.c_str(), 0700) == 0
-                    && ::chmod((base / "mode-700" / "v1").c_str(), 0707) == 0,
-                "chmod failed");
-        require(!attempt(base / "mode-700").ok(), "An other-writable schema directory was accepted");
+        {
+            INFO(("chmod failed"));
+            REQUIRE((::chmod(shared.c_str(), 0770) == 0));
+        }
+        {
+            INFO(("A group-writable key directory was accepted"));
+            REQUIRE((!attempt(base / "mode-700").ok()));
+        }
+        {
+            INFO(("chmod failed"));
+            REQUIRE((::chmod(shared.c_str(), 0700) == 0
+                && ::chmod((base / "mode-700" / "v1").c_str(), 0707) == 0));
+        }
+        {
+            INFO(("An other-writable schema directory was accepted"));
+            REQUIRE((!attempt(base / "mode-700").ok()));
+        }
         std::cout << "PASS group- and other-writable, linked and non-directory roots are rejected; "
                      "created directories are 0700\n";
     }
@@ -424,9 +512,15 @@ namespace
         hj::JitLibrary library(root);
         const auto     key     = testKey(ctx);
         const auto     problem = gemm(256);
-        require(ctx.find(library, key, problem).empty(), "An empty library returned solutions");
+        {
+            INFO(("An empty library returned solutions"));
+            REQUIRE((ctx.find(library, key, problem).empty()));
+        }
         const auto indices = publish(library, key, problem, {ctx.entry});
-        require(indices == std::vector<int32_t>{base}, "First index " + text(indices));
+        {
+            INFO(("First index " + text(indices)));
+            REQUIRE((indices == std::vector<int32_t>{base}));
+        }
 
         const auto directory = library.directory(key);
         const auto prefix    = hj::entryPrefix(
@@ -434,65 +528,108 @@ namespace
         std::set<std::string> names;
         for(const auto& entry : fs::directory_iterator(directory))
             names.insert(entry.path().filename().string());
-        require(names
-                    == std::set<std::string>{lazyMaster(ctx.arch),
-                                             lazyMapping(ctx.arch),
-                                             "cache-key.json",
-                                             "staging",
-                                             prefix + ".co",
-                                             prefix + ".dat"},
-                "Unexpected key directory contents");
+        {
+            INFO(("Unexpected key directory contents"));
+            REQUIRE((names
+                == std::set<std::string>{lazyMaster(ctx.arch),
+                                         lazyMapping(ctx.arch),
+                                         "cache-key.json",
+                                         "staging",
+                                         prefix + ".co",
+                                         prefix + ".dat"}));
+        }
         names.clear();
         for(const auto& entry : fs::directory_iterator(root / "v1"))
             names.insert(entry.path().filename().string());
-        require(names == std::set<std::string>{"allocator.dat", "lock", key.directoryName()},
-                "Unexpected schema directory contents");
-        require(fs::is_empty(directory / "staging"), "Publishing left temporary files");
-        require(readText(directory / "cache-key.json") == key.canonicalJson(),
-                "cache-key.json does not hold the key");
-        require(read(directory / (prefix + ".co")) == built(ctx.entry).first.object.bytes,
-                "The code object was not stored unchanged");
+        {
+            INFO(("Unexpected schema directory contents"));
+            REQUIRE((names == std::set<std::string>{"allocator.dat", "lock", key.directoryName()}));
+        }
+        {
+            INFO(("Publishing left temporary files"));
+            REQUIRE((fs::is_empty(directory / "staging")));
+        }
+        {
+            INFO(("cache-key.json does not hold the key"));
+            REQUIRE((readText(directory / "cache-key.json") == key.canonicalJson()));
+        }
+        {
+            INFO(("The code object was not stored unchanged"));
+            REQUIRE((read(directory / (prefix + ".co")) == built(ctx.entry).first.object.bytes));
+        }
         int64_t next = 0;
         ok(hj::msgpack_io::readAllocator(read(root / "v1" / "allocator.dat"), next), "allocator");
-        require(next == base + 1, "The allocator did not advance");
+        {
+            INFO(("The allocator did not advance"));
+            REQUIRE((next == base + 1));
+        }
 
         const auto master = stock(directory, ctx.arch);
-        require(master->libraryMapping == std::map<int, std::string>{{base, prefix}},
-                "Unexpected index mapping");
+        {
+            INFO(("Unexpected index mapping"));
+            REQUIRE((master->libraryMapping == std::map<int, std::string>{{base, prefix}}));
+        }
         const auto best = master->findBestSolution(problem, ctx.hardware);
-        require(best && best->index == base && best->kernelName == ctx.entry.kernel
-                    && best->codeObjectFilename.load() == prefix + ".co",
-                "The stock loader did not find the published solution");
+        {
+            INFO(("The stock loader did not find the published solution"));
+            REQUIRE((best && best->index == base && best->kernelName == ctx.entry.kernel
+                && best->codeObjectFilename.load() == prefix + ".co"));
+        }
         const auto byIndex = master->getSolutionByIndex(ctx.hardware, base);
-        require(byIndex == best, "The stock loader did not resolve the published index");
+        {
+            INFO(("The stock loader did not resolve the published index"));
+            REQUIRE((byIndex == best));
+        }
 
         // The solution itself accepts these problems; only the row's sizes reject them.
         for(const auto& other : {gemm(264), gemm(256, 136), gemm(256, 128, 1024), gemm(256, 128, 512, 2)})
         {
-            require((*best->problemPredicate)(other), "The solution rejects a nearby size");
-            require(!master->findBestSolution(other, ctx.hardware)
-                        && ctx.find(library, key, other).empty(),
-                    "An entry matched a size it was not published for");
+            {
+                INFO(("The solution rejects a nearby size"));
+                REQUIRE(((*best->problemPredicate)(other)));
+            }
+            {
+                INFO(("An entry matched a size it was not published for"));
+                REQUIRE((!master->findBestSolution(other, ctx.hardware)
+                    && ctx.find(library, key, other).empty()));
+            }
         }
         // Each hit still runs the solution's own predicates.
         auto accumulate = gemm(256);
         accumulate.setHighPrecisionAccumulate(false);
-        require(ctx.find(library, key, accumulate).empty(), "A hit skipped the solution predicates");
-        require(ctx.find(library, key, problem) == indices, "Lookup missed the published entry");
+        {
+            INFO(("A hit skipped the solution predicates"));
+            REQUIRE((ctx.find(library, key, accumulate).empty()));
+        }
+        {
+            INFO(("Lookup missed the published entry"));
+            REQUIRE((ctx.find(library, key, problem) == indices));
+        }
 
         hj::Status why;
         const auto view = library.resolve(0, base, why);
-        require(view.master && view.adapter, "resolve: " + why.message);
+        {
+            INFO(("resolve: " + why.message));
+            REQUIRE((view.master && view.adapter));
+        }
         const auto solution = library.solutionByIndex(0, ctx.hardware, base, why);
-        require(solution && solution->codeObjectFilename.load() == prefix + ".co",
-                "solutionByIndex: " + why.message);
-        require(!library.resolve(1, base, why).master && !why.ok(),
-                "An index resolved on a device that never used the library");
-        require(!library.resolve(0, 5, why).master
-                    && why.message.find("outside the reserved JIT range") != std::string::npos,
-                "A prebuilt index resolved in the JIT library");
-        require(!library.resolve(0, base + 1, why).master && !why.ok(),
-                "An unpublished index resolved");
+        {
+            INFO(("solutionByIndex: " + why.message));
+            REQUIRE((solution && solution->codeObjectFilename.load() == prefix + ".co"));
+        }
+        {
+            INFO(("An index resolved on a device that never used the library"));
+            REQUIRE((!library.resolve(1, base, why).master && !why.ok()));
+        }
+        {
+            INFO(("A prebuilt index resolved in the JIT library"));
+            REQUIRE((!library.resolve(0, 5, why).master
+                && why.message.find("outside the reserved JIT range") != std::string::npos));
+        }
+        {
+            INFO(("An unpublished index resolved"));
+            REQUIRE((!library.resolve(0, base + 1, why).master && !why.ok()));
+        }
         std::cout << "PASS the stock loader reads the published library; exact sizes only, and "
                      "solution predicates still run\n";
     }
@@ -506,27 +643,49 @@ namespace
         const auto     a = renamed(ctx.entry, "_A"), b = renamed(ctx.entry, "_B"),
                    c    = renamed(ctx.entry, "_C");
         const auto first = publish(library, key, problem, {a, b, a});
-        require(first == std::vector<int32_t>{base, base + 1, base}, "Batch indices " + text(first));
+        {
+            INFO(("Batch indices " + text(first)));
+            REQUIRE((first == std::vector<int32_t>{base, base + 1, base}));
+        }
         const auto before = tree(root);
-        require(publish(library, key, problem, {b, a}) == std::vector<int32_t>{base + 1, base},
-                "Republishing changed indices");
-        require(tree(root) == before, "Republishing published entries wrote files");
-        require(publish(library, key, problem, {c}) == std::vector<int32_t>{base + 2},
-                "A new entry did not take the next index");
-        require(ctx.find(library, key, problem) == std::vector<int32_t>{base, base + 1, base + 2},
-                "Lookup is not in publication order");
-        require(ctx.find(library, key, problem, 2) == std::vector<int32_t>{base, base + 1},
-                "Lookup ignored the count");
-        require(ctx.find(library, key, problem, 4, {a.kernel})
-                    == std::vector<int32_t>{base + 1, base + 2},
-                "Lookup returned an excluded kernel");
-        require(ctx.find(library, key, problem, 1, {a.kernel, b.kernel})
-                    == std::vector<int32_t>{base + 2},
-                "Exclusions reduced the count");
-        require(publish(library, key, gemm(512), {a}) == std::vector<int32_t>{base + 3}
-                    && ctx.find(library, key, gemm(512)) == std::vector<int32_t>{base + 3}
-                    && ctx.find(library, key, problem).size() == 3,
-                "Another size did not get its own entry");
+        {
+            INFO(("Republishing changed indices"));
+            REQUIRE((
+                publish(library, key, problem, {b, a}) == std::vector<int32_t>{base + 1, base}));
+        }
+        {
+            INFO(("Republishing published entries wrote files"));
+            REQUIRE((tree(root) == before));
+        }
+        {
+            INFO(("A new entry did not take the next index"));
+            REQUIRE((publish(library, key, problem, {c}) == std::vector<int32_t>{base + 2}));
+        }
+        {
+            INFO(("Lookup is not in publication order"));
+            REQUIRE((
+                ctx.find(library, key, problem) == std::vector<int32_t>{base, base + 1, base + 2}));
+        }
+        {
+            INFO(("Lookup ignored the count"));
+            REQUIRE((ctx.find(library, key, problem, 2) == std::vector<int32_t>{base, base + 1}));
+        }
+        {
+            INFO(("Lookup returned an excluded kernel"));
+            REQUIRE((ctx.find(library, key, problem, 4, {a.kernel})
+                == std::vector<int32_t>{base + 1, base + 2}));
+        }
+        {
+            INFO(("Exclusions reduced the count"));
+            REQUIRE((ctx.find(library, key, problem, 1, {a.kernel, b.kernel})
+                == std::vector<int32_t>{base + 2}));
+        }
+        {
+            INFO(("Another size did not get its own entry"));
+            REQUIRE((publish(library, key, gemm(512), {a}) == std::vector<int32_t>{base + 3}
+                && ctx.find(library, key, gemm(512)) == std::vector<int32_t>{base + 3}
+                && ctx.find(library, key, problem).size() == 3));
+        }
 
         std::vector<int32_t>     seen(4, -1);
         std::vector<std::string> errors(4);
@@ -545,7 +704,10 @@ namespace
         for(auto& thread : threads)
             thread.join();
         for(size_t i = 0; i < seen.size(); ++i)
-            require(seen[i] == base + 4, "Concurrent thread " + std::to_string(i) + ": " + errors[i]);
+        {
+            INFO(("Concurrent thread " + std::to_string(i) + ": " + errors[i]));
+            REQUIRE((seen[i] == base + 4));
+        }
         consistent(library.directory(key), ctx.hardware, ctx.arch);
 
         // A published name whose entry holds another kernel is a hash collision.
@@ -559,8 +721,10 @@ namespace
            "replace entry");
         hj::JitLibrary reopened(root);
         const auto     renamedIndex = publish(reopened, key, gemm(2048), {a})[0];
-        require(renamedIndex == base + 6 && fs::exists(directory / (prefix + "_1.dat")),
-                "A hash collision reused another kernel's entry");
+        {
+            INFO(("A hash collision reused another kernel's entry"));
+            REQUIRE((renamedIndex == base + 6 && fs::exists(directory / (prefix + "_1.dat"))));
+        }
         consistent(directory, ctx.hardware, ctx.arch);
         std::cout << "PASS deduplication, collisions, publication order, top-N and exclusions\n";
     }
@@ -576,11 +740,15 @@ namespace
         const auto snapshot  = tree(directory);
         {
             hj::JitLibrary library(root);
-            require(ctx.find(library, testKey(ctx, "2"), gemm(256)).empty(),
-                    "Another backend version reused an entry");
-            require(publish(library, testKey(ctx, "2"), gemm(256), {ctx.entry})
-                        == std::vector<int32_t>{base + 1},
-                    "Indices are not unique across keys");
+            {
+                INFO(("Another backend version reused an entry"));
+                REQUIRE((ctx.find(library, testKey(ctx, "2"), gemm(256)).empty()));
+            }
+            {
+                INFO(("Indices are not unique across keys"));
+                REQUIRE((publish(library, testKey(ctx, "2"), gemm(256), {ctx.entry})
+                    == std::vector<int32_t>{base + 1}));
+            }
             const std::vector<std::function<void(hj::CacheKey&)>> changes{
                 [](auto& k) { k.comgr = "3.1"; },
                 [](auto& k) { k.rocmPath = "/opt/rocm-other"; },
@@ -592,11 +760,16 @@ namespace
             {
                 auto changed = testKey(ctx, "1");
                 change(changed);
-                require(ctx.find(library, changed, gemm(256)).empty(),
-                        "A mismatched key reused an entry");
+                {
+                    INFO(("A mismatched key reused an entry"));
+                    REQUIRE((ctx.find(library, changed, gemm(256)).empty()));
+                }
             }
         }
-        require(tree(directory) == snapshot, "Another key changed this key's directory");
+        {
+            INFO(("Another key changed this key's directory"));
+            REQUIRE((tree(directory) == snapshot));
+        }
 
         std::ofstream(directory / "cache-key.json", std::ios::trunc) << "{}";
         fs::create_directories(root / "v2" / (ctx.arch + "-0000000000000000"));
@@ -606,16 +779,26 @@ namespace
             hj::JitLibrary       library(root);
             std::vector<int32_t> indices;
             auto status = library.lookup(testKey(ctx, "1"), 0, gemm(256), ctx.hardware, 1, {}, indices);
-            require(!status.ok() && indices.empty() && status.stage == hj::Stage::Lookup
-                        && status.message.find("cache key") != std::string::npos,
-                    "A tampered cache key was accepted: " + status.message);
+            {
+                INFO(("A tampered cache key was accepted: " + status.message));
+                REQUIRE((!status.ok() && indices.empty() && status.stage == hj::Stage::Lookup
+                    && status.message.find("cache key") != std::string::npos));
+            }
             status = library.publish(testKey(ctx, "1"), 0, gemm(256), {built(ctx.entry)}, indices);
-            require(!status.ok() && status.stage == hj::Stage::Publish,
-                    "Publishing into a tampered directory was accepted");
-            require(ctx.find(library, testKey(ctx, "2"), gemm(256)) == std::vector<int32_t>{base + 1},
-                    "A tampered directory affected another key");
+            {
+                INFO(("Publishing into a tampered directory was accepted"));
+                REQUIRE((!status.ok() && status.stage == hj::Stage::Publish));
+            }
+            {
+                INFO(("A tampered directory affected another key"));
+                REQUIRE((
+                    ctx.find(library, testKey(ctx, "2"), gemm(256)) == std::vector<int32_t>{base + 1}));
+            }
         }
-        require(tree(root) == tampered, "A mismatched directory was modified or deleted");
+        {
+            INFO(("A mismatched directory was modified or deleted"));
+            REQUIRE((tree(root) == tampered));
+        }
         std::cout << "PASS mismatched and tampered keys are ignored and left untouched; other "
                      "schemas are never read\n";
     }
@@ -631,21 +814,30 @@ namespace
         ok(hj::msgpack_io::writeAllocator(INT32_MAX, bytes), "allocator");
         ok(hj::files::writeAtomically(directory / "staging", root / "v1" / "allocator.dat", bytes),
            "allocator");
-        require(publish(library, key, gemm(264), {ctx.entry}) == std::vector<int32_t>{INT32_MAX},
-                "The last reserved index was not allocated");
+        {
+            INFO(("The last reserved index was not allocated"));
+            REQUIRE((
+                publish(library, key, gemm(264), {ctx.entry}) == std::vector<int32_t>{INT32_MAX}));
+        }
         std::vector<int32_t> indices;
         const auto status = library.publish(key, 0, gemm(272), {built(ctx.entry)}, indices);
-        require(!status.ok() && status.message.find("exhausted") != std::string::npos,
-                "An exhausted range allocated an index: " + status.message);
-        require(publish(library, key, gemm(264), {ctx.entry}) == std::vector<int32_t>{INT32_MAX}
-                    && ctx.find(library, key, gemm(264)) == std::vector<int32_t>{INT32_MAX},
-                "Published entries stopped resolving when the range was exhausted");
+        {
+            INFO(("An exhausted range allocated an index: " + status.message));
+            REQUIRE((!status.ok() && status.message.find("exhausted") != std::string::npos));
+        }
+        {
+            INFO(("Published entries stopped resolving when the range was exhausted"));
+            REQUIRE((publish(library, key, gemm(264), {ctx.entry}) == std::vector<int32_t>{INT32_MAX}
+                && ctx.find(library, key, gemm(264)) == std::vector<int32_t>{INT32_MAX}));
+        }
 
         ok(hj::msgpack_io::writeAllocator(base - 1, bytes), "allocator");
         ok(hj::files::writeAtomically(directory / "staging", root / "v1" / "allocator.dat", bytes),
            "allocator");
-        require(!library.publish(key, 0, gemm(272), {built(ctx.entry)}, indices).ok(),
-                "An allocator below the reserved range was used");
+        {
+            INFO(("An allocator below the reserved range was used"));
+            REQUIRE((!library.publish(key, 0, gemm(272), {built(ctx.entry)}, indices).ok()));
+        }
 
         const auto prefix = hj::entryPrefix(
             hj::problemTypeKey(gemm(256)), ctx.entry.kernel, hj::problemSizes(gemm(256)));
@@ -653,8 +845,10 @@ namespace
         ok(hj::files::writeAtomically(directory / "staging", directory / (prefix + ".dat"), bytes),
            "tamper");
         hj::JitLibrary reopened(root);
-        require(ctx.find(reopened, key, gemm(256)).empty(),
-                "Lookup returned an index outside the reserved range");
+        {
+            INFO(("Lookup returned an index outside the reserved range"));
+            REQUIRE((ctx.find(reopened, key, gemm(256)).empty()));
+        }
         std::cout << "PASS index allocation up to INT32_MAX, exhaustion, and out-of-range entries "
                      "dropped\n";
     }
@@ -683,7 +877,10 @@ namespace
             }
             std::cout.flush();
             const auto child = ::fork();
-            require(child >= 0, "fork failed");
+            {
+                INFO(("fork failed"));
+                REQUIRE((child >= 0));
+            }
             if(child == 0)
             {
                 crashStep          = step;
@@ -697,28 +894,40 @@ namespace
                 ::_exit(4);
             }
             int status = 0;
-            require(::waitpid(child, &status, 0) == child && WIFEXITED(status)
-                        && WEXITSTATUS(status) == 3,
-                    std::string("The publisher did not stop after ") + name);
+            {
+                INFO((std::string("The publisher did not stop after ") + name));
+                REQUIRE((::waitpid(child, &status, 0) == child && WIFEXITED(status)
+                    && WEXITSTATUS(status) == 3));
+            }
 
             const auto directory = hj::JitLibrary(root).directory(key);
             consistent(directory, ctx.hardware, ctx.arch);
             hj::JitLibrary library(root);
-            require(ctx.find(library, key, gemm(256)) == std::vector<int32_t>{base},
-                    std::string("A crash after ") + name + " lost a published entry");
+            {
+                INFO((std::string("A crash after ") + name + " lost a published entry"));
+                REQUIRE((ctx.find(library, key, gemm(256)) == std::vector<int32_t>{base}));
+            }
             const bool visible = step >= Step::Master;
-            require(ctx.find(library, key, gemm(512)).size() == (visible ? 1u : 0u),
-                    std::string("A crash after ") + name + " left the wrong lookup result");
+            {
+                INFO((std::string("A crash after ") + name + " left the wrong lookup result"));
+                REQUIRE((ctx.find(library, key, gemm(512)).size() == (visible ? 1u : 0u)));
+            }
             const int32_t expected = step < Step::Allocated ? base + 1
                                      : step < Step::Mapping ? base + 2
                                                             : base + 1;
             const auto again = publish(library, key, gemm(512), {ctx.entry});
-            require(again == std::vector<int32_t>{expected},
-                    std::string("Republishing after ") + name + " returned " + text(again));
-            require(ctx.find(library, key, gemm(512)) == again,
-                    std::string("Republishing after ") + name + " is not found");
-            require(publish(library, key, gemm(1024), {ctx.entry})[0] == expected + 1,
-                    std::string("The lock was not released after ") + name);
+            {
+                INFO((std::string("Republishing after ") + name + " returned " + text(again)));
+                REQUIRE((again == std::vector<int32_t>{expected}));
+            }
+            {
+                INFO((std::string("Republishing after ") + name + " is not found"));
+                REQUIRE((ctx.find(library, key, gemm(512)) == again));
+            }
+            {
+                INFO((std::string("The lock was not released after ") + name));
+                REQUIRE((publish(library, key, gemm(1024), {ctx.entry})[0] == expected + 1));
+            }
             consistent(directory, ctx.hardware, ctx.arch);
         }
         std::cout << "PASS a publisher killed after every step leaves a consistent library that "
@@ -730,19 +939,31 @@ namespace
         const auto     root = ctx.fresh("refresh");
         const auto     key  = testKey(ctx);
         hj::JitLibrary reader(root), writer(root);
-        require(ctx.find(reader, key, gemm(256)).empty(), "An empty library returned solutions");
+        {
+            INFO(("An empty library returned solutions"));
+            REQUIRE((ctx.find(reader, key, gemm(256)).empty()));
+        }
         const auto first = publish(writer, key, gemm(256), {ctx.entry});
-        require(ctx.find(reader, key, gemm(256)) == first,
-                "A reader did not see another instance's entry");
+        {
+            INFO(("A reader did not see another instance's entry"));
+            REQUIRE((ctx.find(reader, key, gemm(256)) == first));
+        }
         hj::Status why;
         const auto old = reader.resolve(0, first[0], why);
-        require(old.master != nullptr, "resolve: " + why.message);
+        {
+            INFO(("resolve: " + why.message));
+            REQUIRE((old.master != nullptr));
+        }
         const auto second = publish(writer, key, gemm(512), {ctx.entry});
         const auto view   = reader.resolve(0, second[0], why);
-        require(view.master && view.master != old.master && view.adapter == old.adapter,
-                "resolve did not reload for a newer index: " + why.message);
-        require(old.master->getSolutionByIndex(ctx.hardware, first[0]) != nullptr,
-                "A superseded snapshot lost its solution");
+        {
+            INFO(("resolve did not reload for a newer index: " + why.message));
+            REQUIRE((view.master && view.master != old.master && view.adapter == old.adapter));
+        }
+        {
+            INFO(("A superseded snapshot lost its solution"));
+            REQUIRE((old.master->getSolutionByIndex(ctx.hardware, first[0]) != nullptr));
+        }
 
         const auto deviceKey = [&ctx](std::string comgr) {
             return [&ctx, comgr](int, hj::CacheKey& k) {
@@ -752,11 +973,15 @@ namespace
             };
         };
         hj::JitLibrary discovering(root, deviceKey(""));
-        require(discovering.solutionByIndex(0, ctx.hardware, second[0], why) != nullptr,
-                "An index was not found without a lookup: " + why.message);
+        {
+            INFO(("An index was not found without a lookup: " + why.message));
+            REQUIRE((discovering.solutionByIndex(0, ctx.hardware, second[0], why) != nullptr));
+        }
         hj::JitLibrary other(root, deviceKey("3.1"));
-        require(!other.resolve(0, second[0], why).master && !why.ok(),
-                "An index resolved from a directory for another toolchain");
+        {
+            INFO(("An index resolved from a directory for another toolchain"));
+            REQUIRE((!other.resolve(0, second[0], why).master && !why.ok()));
+        }
         std::cout << "PASS readers reload on change, keep superseded snapshots, and find indices "
                      "in any backend's directory for their toolchain\n";
     }
@@ -777,13 +1002,20 @@ namespace
         {
             hj::JitLibrary library(root);
             auto status = library.lookup(key, 0, fused, ctx.hardware, 1, {}, indices);
-            require(rejected(status, hj::Stage::Lookup) && indices.empty(),
-                    "A fused all-to-all lookup was not rejected: " + status.message);
+            {
+                INFO(("A fused all-to-all lookup was not rejected: " + status.message));
+                REQUIRE((rejected(status, hj::Stage::Lookup) && indices.empty()));
+            }
             status = library.publish(key, 0, fused, {built(ctx.entry)}, indices);
-            require(rejected(status, hj::Stage::Publish) && indices.empty(),
-                    "A fused all-to-all publication was not rejected: " + status.message);
+            {
+                INFO(("A fused all-to-all publication was not rejected: " + status.message));
+                REQUIRE((rejected(status, hj::Stage::Publish) && indices.empty()));
+            }
         }
-        require(!fs::exists(root), "Rejecting fused all-to-all touched the library");
+        {
+            INFO(("Rejecting fused all-to-all touched the library"));
+            REQUIRE((!fs::exists(root)));
+        }
         std::string reason;
         try
         {
@@ -793,15 +1025,22 @@ namespace
         {
             reason = e.what();
         }
-        require(reason.find("fused GEMM and all-to-all") != std::string::npos,
-                "A fused all-to-all problem has a JIT ProblemType: " + reason);
+        {
+            INFO(("A fused all-to-all problem has a JIT ProblemType: " + reason));
+            REQUIRE((reason.find("fused GEMM and all-to-all") != std::string::npos));
+        }
 
         hj::JitLibrary library(root);
         const auto     plain  = publish(library, key, gemm(256), {ctx.entry});
         const auto     status = library.lookup(key, 0, fused, ctx.hardware, 1, {}, indices);
-        require(rejected(status, hj::Stage::Lookup) && indices.empty(),
-                "A plain solution of the same sizes served fused all-to-all");
-        require(ctx.find(library, key, gemm(256)) == plain, "The plain problem lost its solution");
+        {
+            INFO(("A plain solution of the same sizes served fused all-to-all"));
+            REQUIRE((rejected(status, hj::Stage::Lookup) && indices.empty()));
+        }
+        {
+            INFO(("The plain problem lost its solution"));
+            REQUIRE((ctx.find(library, key, gemm(256)) == plain));
+        }
         std::cout << "PASS fused GEMM and all-to-all is neither served nor stored, even beside a "
                      "plain solution of the same sizes\n";
     }
@@ -813,12 +1052,18 @@ namespace
         const auto done = ctx.scratch / "concurrency-writers-done";
         fs::remove(done);
         int start[2];
-        require(::pipe(start) == 0, "pipe failed");
+        {
+            INFO(("pipe failed"));
+            REQUIRE((::pipe(start) == 0));
+        }
         std::vector<pid_t> children;
         const auto         spawn = [&](const std::function<void()>& body) {
             std::cout.flush();
             const auto child = ::fork();
-            require(child >= 0, "fork failed");
+            {
+                INFO(("fork failed"));
+                REQUIRE((child >= 0));
+            }
             if(child == 0)
             {
                 ::close(start[1]);
@@ -864,29 +1109,42 @@ namespace
             for(bool last = false; !last;)
             {
                 last = fs::exists(done);
-                require(std::chrono::steady_clock::now() < deadline, "The writers did not finish");
+                {
+                    INFO(("The writers did not finish"));
+                    REQUIRE((std::chrono::steady_clock::now() < deadline));
+                }
                 for(int j = 0; j < perWriter; ++j)
                 {
                     const auto found = ctx.find(library, key, shared(j), 1);
-                    require(found.size() <= 1 && (seen[j] < 0 || found == std::vector{seen[j]}),
-                            "A reader saw an entry disappear or change");
+                    {
+                        INFO(("A reader saw an entry disappear or change"));
+                        REQUIRE((
+                            found.size() <= 1 && (seen[j] < 0 || found == std::vector{seen[j]})));
+                    }
                     if(found.empty())
                         continue;
                     seen[j] = found[0];
                     hj::Status why;
-                    require(library.solutionByIndex(0, ctx.hardware, found[0], why) != nullptr,
-                            "A reader could not load a found entry: " + why.message);
+                    {
+                        INFO(("A reader could not load a found entry: " + why.message));
+                        REQUIRE((
+                            library.solutionByIndex(0, ctx.hardware, found[0], why) != nullptr));
+                    }
                 }
                 if(fs::exists(root / "v1" / key.directoryName() / lazyMaster(ctx.arch)))
                     consistent(root / "v1" / key.directoryName(), ctx.hardware, ctx.arch);
             }
-            require(std::find(seen.begin(), seen.end(), -1) == seen.end(),
-                    "The reader never saw every shared entry");
+            {
+                INFO(("The reader never saw every shared entry"));
+                REQUIRE((std::find(seen.begin(), seen.end(), -1) == seen.end()));
+            }
         });
         ::close(start[0]);
         const std::string go(children.size(), 'g');
-        require(::write(start[1], go.data(), go.size()) == static_cast<ssize_t>(go.size()),
-                "Cannot start the children");
+        {
+            INFO(("Cannot start the children"));
+            REQUIRE((::write(start[1], go.data(), go.size()) == static_cast<ssize_t>(go.size())));
+        }
         ::close(start[1]);
         const auto wait = [](pid_t child) {
             int status = 0;
@@ -898,7 +1156,10 @@ namespace
             passed = wait(children[w]) && passed;
         std::ofstream(done) << "done";
         passed = wait(children.back()) && passed;
-        require(passed, "A concurrent publisher or reader failed");
+        {
+            INFO(("A concurrent publisher or reader failed"));
+            REQUIRE((passed));
+        }
 
         std::map<int, std::set<int32_t>> sharedIndices;
         std::set<int32_t>                all;
@@ -915,36 +1176,58 @@ namespace
                     sharedIndices[j].insert(index);
                 else
                 {
-                    require(!all.count(index), "Two writers got the same index");
+                    {
+                        INFO(("Two writers got the same index"));
+                        REQUIRE((!all.count(index)));
+                    }
                     ++owned;
                 }
                 all.insert(index);
             }
         }
-        require(owned == size_t(writers) * perWriter && sharedIndices.size() == size_t(perWriter),
-                "A writer did not record every result");
+        {
+            INFO(("A writer did not record every result"));
+            REQUIRE((
+                owned == size_t(writers) * perWriter && sharedIndices.size() == size_t(perWriter)));
+        }
         for(const auto& [j, indices] : sharedIndices)
-            require(indices.size() == 1, "Writers got different indices for one entry");
+        {
+            INFO(("Writers got different indices for one entry"));
+            REQUIRE((indices.size() == 1));
+        }
         const auto directory = root / "v1" / key.directoryName();
         const auto master    = stock(directory, ctx.arch);
         std::set<int32_t> mapped;
         for(const auto& [index, prefix] : master->libraryMapping)
             mapped.insert(index);
-        require(mapped == all, "The mapping does not hold exactly the returned indices");
+        {
+            INFO(("The mapping does not hold exactly the returned indices"));
+            REQUIRE((mapped == all));
+        }
         int64_t next = 0;
         ok(hj::msgpack_io::readAllocator(read(root / "v1" / "allocator.dat"), next), "allocator");
-        require(next == base + static_cast<int64_t>(all.size()) && *all.rbegin() == next - 1,
-                "Deduplicated entries consumed indices");
-        require(fs::is_empty(directory / "staging"), "Publishers left temporary files");
+        {
+            INFO(("Deduplicated entries consumed indices"));
+            REQUIRE((next == base + static_cast<int64_t>(all.size()) && *all.rbegin() == next - 1));
+        }
+        {
+            INFO(("Publishers left temporary files"));
+            REQUIRE((fs::is_empty(directory / "staging")));
+        }
         consistent(directory, ctx.hardware, ctx.arch);
         hj::JitLibrary library(root);
         for(int j = 0; j < perWriter; ++j)
         {
-            require(ctx.find(library, key, shared(j))
-                        == std::vector<int32_t>{*sharedIndices[j].begin()},
-                    "A shared entry has more than one row");
+            {
+                INFO(("A shared entry has more than one row"));
+                REQUIRE((ctx.find(library, key, shared(j))
+                    == std::vector<int32_t>{*sharedIndices[j].begin()}));
+            }
             for(int w = 0; w < writers; ++w)
-                require(ctx.find(library, key, own(w, j)).size() == 1, "A writer's entry is lost");
+            {
+                INFO(("A writer's entry is lost"));
+                REQUIRE((ctx.find(library, key, own(w, j)).size() == 1));
+            }
         }
         std::cout << "PASS " << writers << " processes published " << perWriter
                   << " shared and " << perWriter
@@ -956,14 +1239,19 @@ namespace
 TEST_CASE("the JIT solution library", "[jit-gpu]")
 {
     const char* scratchEnv = std::getenv("HIPBLASLT_JIT_LIBRARY_SCRATCH");
-    require(scratchEnv && *scratchEnv, "Set HIPBLASLT_JIT_LIBRARY_SCRATCH");
+    {
+        INFO(("Set HIPBLASLT_JIT_LIBRARY_SCRATCH"));
+        REQUIRE((scratchEnv && *scratchEnv));
+    }
     int writers = 0, perWriter = 0;
     if(const char* value = std::getenv("HIPBLASLT_JIT_LIBRARY_WRITERS"))
         writers = std::atoi(value);
     if(const char* value = std::getenv("HIPBLASLT_JIT_LIBRARY_PER_WRITER"))
         perWriter = std::atoi(value);
-    require((writers == 0 && perWriter == 0) || (writers > 0 && perWriter > 0),
-            "writers and per-writer must both be set");
+    {
+        INFO(("writers and per-writer must both be set"));
+        REQUIRE(((writers == 0 && perWriter == 0) || (writers > 0 && perWriter > 0)));
+    }
     Context ctx;
     ctx.scratch = fs::absolute(scratchEnv);
     fs::remove_all(ctx.scratch);
@@ -971,24 +1259,34 @@ TEST_CASE("the JIT solution library", "[jit-gpu]")
 
     int             device = 0;
     hipDeviceProp_t properties{};
-    require(hipGetDevice(&device) == hipSuccess
-                && hipGetDeviceProperties(&properties, device) == hipSuccess,
-            "Cannot query the current HIP device");
+    {
+        INFO(("Cannot query the current HIP device"));
+        REQUIRE((hipGetDevice(&device) == hipSuccess
+            && hipGetDeviceProperties(&properties, device) == hipSuccess));
+    }
     const std::string gcnArchName = properties.gcnArchName;
     ctx.arch                      = gcnArchName.substr(0, gcnArchName.find(':'));
     const auto processor          = TensileLite::AMDGPU::toProcessor(ctx.arch);
-    require(TensileLite::AMDGPU::toString(processor) == ctx.arch,
-            "No TensileLite processor for " + ctx.arch);
+    {
+        INFO(("No TensileLite processor for " + ctx.arch));
+        REQUIRE((TensileLite::AMDGPU::toString(processor) == ctx.arch));
+    }
     ctx.hardware = TensileLite::AMDGPU(processor, 256, ctx.arch);
     const auto prepared = hipblaslt_jit_test::prepareSolutions(fs::u8path(HIPBLASLT_JIT_DATA));
     const auto plain    = std::find_if(prepared.begin(), prepared.end(), [&](const auto& item) {
         return item.arch == ctx.arch && item.name == "plain";
     });
-    require(plain != prepared.end(), "No plain entry for " + ctx.arch);
+    {
+        INFO(("No plain entry for " + ctx.arch));
+        REQUIRE((plain != prepared.end()));
+    }
     ctx.entry.bytes = plain->solution.entry;
     const auto library = std::dynamic_pointer_cast<hj::GemmMaster>(
         TensileLite::LoadLibraryData<ContractionProblemGemm>(ctx.entry.bytes));
-    require(library && library->solutions.count(0), "The replay has no solution 0");
+    {
+        INFO(("The replay has no solution 0"));
+        REQUIRE((library && library->solutions.count(0)));
+    }
     const auto& replayed = *library->solutions.at(0);
     ctx.entry.kernel     = replayed.kernelName;
     if(!(*replayed.problemPredicate)(gemm(256)))

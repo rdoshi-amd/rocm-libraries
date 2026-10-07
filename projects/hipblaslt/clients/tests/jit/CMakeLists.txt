@@ -46,7 +46,6 @@ endfunction()
 
 # Catch2 tests take no arguments. Paths are compile definitions.
 function(hipblaslt_jit_catch_test name label test_target)
-    target_compile_definitions(${test_target} PRIVATE HIPBLASLT_JIT_CATCH2)
     target_link_libraries(${test_target} PRIVATE Catch2::Catch2WithMain)
     hipblaslt_jit_executable(${name} ${label} ${test_target})
 endfunction()

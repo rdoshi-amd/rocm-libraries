@@ -57,8 +57,11 @@ namespace hipblaslt_jit_test
             else if(after(line, "    PersistentLoopArgsVersion: ", rest))
                 result.persistentLoopArgsVersion = std::stoi(rest);
         }
-        require(!result.kernel.empty() && !result.target.empty() && result.kernArgsVersion >= 0,
-                "The assembly names no kernel, target or KernArgsVersion");
+        {
+            INFO(("The assembly names no kernel, target or KernArgsVersion"));
+            REQUIRE((
+                !result.kernel.empty() && !result.target.empty() && result.kernArgsVersion >= 0));
+        }
         return result;
     }
 
@@ -332,8 +335,10 @@ namespace hipblaslt_jit_test
                 continue;
             const auto text   = readFile(file.path());
             const auto kernel = readAssembly(text);
-            require(kernel.target.substr(0, kernel.target.find(':')) == target,
-                    file.path().filename().u8string() + " is not " + target + " assembly");
+            {
+                INFO((file.path().filename().u8string() + " is not " + target + " assembly"));
+                REQUIRE((kernel.target.substr(0, kernel.target.find(':')) == target));
+            }
             assembly.emplace(kernel.kernel, kernel);
             units.push_back({file.path().filename().u8string(),
                              std::vector<uint8_t>(text.begin(), text.end()),
@@ -349,8 +354,10 @@ namespace hipblaslt_jit_test
             const auto found = solution.kernel.empty() && assembly.size() == 1
                                    ? assembly.begin()
                                    : assembly.find(solution.kernel);
-            require(found != assembly.end(),
-                    "No assembly of kernel '" + solution.kernel + "' in " + sources.u8string());
+            {
+                INFO(("No assembly of kernel '" + solution.kernel + "' in " + sources.u8string()));
+                REQUIRE((found != assembly.end()));
+            }
             kernels.push_back(found->second);
         }
 
@@ -389,13 +396,15 @@ namespace hipblaslt_jit_test
             for(const auto& sources : fs::directory_iterator(target))
             {
                 const auto used = sources.path().filename().u8string();
-                require(std::any_of(bundles.begin(),
-                                    bundles.end(),
-                                    [&](const auto& bundle) {
-                                        return bundle.first.first == name
-                                               && bundle.second.sources == used;
-                                    }),
-                        "No description of the committed sources " + name + '/' + used);
+                {
+                    INFO(("No description of the committed sources " + name + '/' + used));
+                    REQUIRE((std::any_of(bundles.begin(),
+                        bundles.end(),
+                        [&](const auto& bundle) {
+                            return bundle.first.first == name
+                                   && bundle.second.sources == used;
+                        })));
+                }
             }
         }
         std::vector<Prepared> prepared;
@@ -435,17 +444,21 @@ namespace hipblaslt_jit_test
             const auto entry = bundle / "library" / "TensileLibrary.dat";
             {
                 std::ofstream out(entry, std::ios::binary);
-                require(bool(out.write(reinterpret_cast<const char*>(item.solution.entry.data()),
-                                       static_cast<std::streamsize>(item.solution.entry.size()))),
-                        "Cannot write " + entry.u8string());
+                {
+                    INFO(("Cannot write " + entry.u8string()));
+                    REQUIRE((bool(out.write(reinterpret_cast<const char*>(item.solution.entry.data()),
+                        static_cast<std::streamsize>(item.solution.entry.size())))));
+                }
             }
             for(const auto& unit : item.solution.units)
             {
                 const auto path = bundle / "sources" / fs::u8path(unit.name);
                 std::ofstream out(path, std::ios::binary);
-                require(bool(out.write(reinterpret_cast<const char*>(unit.bytes.data()),
-                                       static_cast<std::streamsize>(unit.bytes.size()))),
-                        "Cannot write " + path.u8string());
+                {
+                    INFO(("Cannot write " + path.u8string()));
+                    REQUIRE((bool(out.write(reinterpret_cast<const char*>(unit.bytes.data()),
+                        static_cast<std::streamsize>(unit.bytes.size())))));
+                }
             }
         }
     }

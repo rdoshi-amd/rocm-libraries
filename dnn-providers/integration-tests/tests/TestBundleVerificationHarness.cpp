@@ -7,9 +7,11 @@
 #include <gtest/gtest-spi.h>
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -57,6 +59,17 @@ protected:
     std::shared_ptr<IntegrationTestBundle> loadRunnableBundle(const std::string& name) const
     {
         return fixtures::loadBundle(_tempDir, name, /*includeGoldenOutput=*/true);
+    }
+
+    /// Writes and loads the ragged bundle with `goldenOutput` as y. Its offsets
+    /// {0, 20, 60} give batch 0 one sequence row and batch 1 two.
+    std::shared_ptr<IntegrationTestBundle>
+        loadRunnableRaggedBundle(const std::string& name,
+                                 const std::vector<float>& goldenOutput) const
+    {
+        const auto dir = _tempDir / name;
+        fixtures::writeRaggedBundleFiles(dir, name, {0, 20, 60}, goldenOutput);
+        return fixtures::loadWrittenBundle(dir, name);
     }
 
     /// Builds the real harness on top of `mocks`, drives it through one bundle, and
@@ -409,6 +422,54 @@ TEST_F(TestGoldenHarnessFixture, MismatchingOutputYieldsFail)
 
     ::testing::TestPartResultArray results;
     runCapturing(mocks, loadRunnableBundle("mismatch"), &results);
+
+    EXPECT_TRUE(testing_support::anyFailed(results));
+    EXPECT_FALSE(testing_support::anySkipped(results));
+}
+
+TEST_F(TestGoldenHarnessFixture, RaggedMatchingOutputYieldsPass)
+{
+    testing_support::HarnessMocks mocks;
+    testing_support::engineWrites(
+        mocks.engineRunner, &fixtures::writeRaggedOutput, fixtures::K_OUTPUT_VALUE);
+
+    const std::vector<float> golden(fixtures::K_RAGGED_OUTPUT_ELEMS, fixtures::K_OUTPUT_VALUE);
+
+    ::testing::TestPartResultArray results;
+    runCapturing(mocks, loadRunnableRaggedBundle("ragged_match", golden), &results);
+
+    EXPECT_FALSE(testing_support::anyFailed(results)) << testing_support::allMessages(results);
+    EXPECT_FALSE(testing_support::anySkipped(results));
+}
+
+TEST_F(TestGoldenHarnessFixture, RaggedNaNGoldenRowIsNotCompared)
+{
+    testing_support::HarnessMocks mocks;
+    testing_support::engineWrites(
+        mocks.engineRunner, &fixtures::writeRaggedOutput, fixtures::K_OUTPUT_VALUE);
+
+    std::vector<float> golden(fixtures::K_RAGGED_OUTPUT_ELEMS, fixtures::K_OUTPUT_VALUE);
+    const auto batch1FirstRow = golden.begin() + 20;
+    std::fill(batch1FirstRow, batch1FirstRow + 20, std::numeric_limits<float>::quiet_NaN());
+
+    ::testing::TestPartResultArray results;
+    runCapturing(mocks, loadRunnableRaggedBundle("ragged_nan_row", golden), &results);
+
+    EXPECT_FALSE(testing_support::anyFailed(results)) << testing_support::allMessages(results);
+    EXPECT_FALSE(testing_support::anySkipped(results));
+}
+
+TEST_F(TestGoldenHarnessFixture, RaggedInBlockMismatchYieldsFail)
+{
+    testing_support::HarnessMocks mocks;
+    testing_support::engineWrites(
+        mocks.engineRunner, &fixtures::writeRaggedOutput, fixtures::K_OUTPUT_VALUE);
+
+    std::vector<float> golden(fixtures::K_RAGGED_OUTPUT_ELEMS, fixtures::K_OUTPUT_VALUE);
+    golden[45] = fixtures::K_OUTPUT_VALUE + 100.0f;
+
+    ::testing::TestPartResultArray results;
+    runCapturing(mocks, loadRunnableRaggedBundle("ragged_mismatch", golden), &results);
 
     EXPECT_TRUE(testing_support::anyFailed(results));
     EXPECT_FALSE(testing_support::anySkipped(results));

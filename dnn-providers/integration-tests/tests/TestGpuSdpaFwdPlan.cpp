@@ -92,7 +92,7 @@ TEST(TestGpuSdpaFwdPlanBuilder, IsApplicable)
 }
 
 // Ragged tensors are not yet supported by the GPU SDPA reference.
-// TODO(ALMIOPEN-2202): remove once supported.
+// TODO: remove once supported.
 TEST(TestGpuSdpaFwdPlanBuilder, IsNotApplicableForRaggedTensors)
 {
     const GpuSdpaFwdPlanBuilder<DataType::FLOAT, DataType::FLOAT, DataType::FLOAT, DataType::FLOAT>

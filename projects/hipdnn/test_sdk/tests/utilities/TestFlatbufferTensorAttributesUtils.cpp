@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 #include <memory>
 #include <stdexcept>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -244,7 +245,8 @@ TEST(TestFlatbufferTensorAttributesUtils, IsSubByteDataType)
 namespace
 {
 
-const std::vector<int64_t> RAGGED_DIMS = {2, 4, 1, 2};
+// Logical [B, H=1, S_max=4, D=2] with BSHD strides; the sequence stride is 2.
+const std::vector<int64_t> RAGGED_DIMS = {2, 1, 4, 2};
 const std::vector<int64_t> RAGGED_STRIDES = {8, 2, 2, 1};
 
 std::shared_ptr<ITensor> makeInt32Offsets(const std::vector<int32_t>& offsets)
@@ -354,4 +356,65 @@ TEST(TestFlatbufferTensorAttributesUtils, CreateRaggedTensorFromAttributeAndOffs
     EXPECT_EQ(ragged->strides(), RAGGED_STRIDES);
     EXPECT_EQ(ragged->raggedOffset(), offsets.get());
     EXPECT_EQ(ragged->raggedIterationInfo()->rowOffsets, (std::vector<int64_t>{0, 4, 8}));
+    EXPECT_EQ(ragged->raggedIterationInfo()->seqAxis, hipdnn_data_sdk::utilities::SDPA_SEQ_AXIS);
+}
+
+TEST(TestFlatbufferTensorAttributesUtils, CreateRaggedTensorAddressesLogicalBhsdDims)
+{
+    constexpr int64_t HEADS = 2;
+    constexpr int64_t HEAD_DIM = 2;
+    const std::vector<int64_t> dims = {2, HEADS, 3, HEAD_DIM};
+    const std::vector<int64_t> strides = {12, HEAD_DIM, HEADS * HEAD_DIM, 1};
+    auto tokenOffsets = makeInt32Offsets({0, 2, 5});
+
+    auto tensor
+        = createRaggedTensor(DataType::FLOAT, dims, strides, tokenOffsets, HEADS * HEAD_DIM);
+
+    const auto info = tensor->raggedIterationInfo();
+    ASSERT_TRUE(info.has_value());
+    EXPECT_EQ(info->seqAxis, 2);
+    EXPECT_EQ(info->rowOffsets, (std::vector<int64_t>{0, 8, 20}));
+    EXPECT_EQ(info->seqExtent(0), 2);
+    EXPECT_EQ(info->seqExtent(1), 3);
+    EXPECT_EQ(tensor->elementCount(), 20u);
+
+    EXPECT_EQ(tensor->getIndex(0, 0, 0, 0), 0);
+    EXPECT_EQ(tensor->getIndex(0, 1, 1, 0), 6);
+    EXPECT_EQ(tensor->getIndex(0, 1, 1, 1), 7);
+    EXPECT_EQ(tensor->getIndex(1, 0, 0, 0), 8);
+    EXPECT_EQ(tensor->getIndex(1, 1, 0, 1), 11);
+    EXPECT_EQ(tensor->getIndex(1, 0, 2, 0), 16);
+    EXPECT_EQ(tensor->getIndex(1, 1, 2, 1), 19);
+}
+
+TEST(TestFlatbufferTensorAttributesUtils, CreateRaggedTensorRejectsPhysicalBhsdStrides)
+{
+    const std::vector<int64_t> dims = {2, 2, 3, 2};
+    const std::vector<int64_t> bhsdStrides = {12, 6, 2, 1};
+
+    try
+    {
+        createRaggedTensor(DataType::FLOAT, dims, bhsdStrides, makeInt32Offsets({0, 4, 10}));
+        FAIL() << "Expected createRaggedTensor to reject a non sequence-outermost layout";
+    }
+    catch(const std::invalid_argument& e)
+    {
+        EXPECT_NE(std::string(e.what()).find("sequence-outermost"), std::string::npos) << e.what();
+    }
+}
+
+TEST(TestFlatbufferTensorAttributesUtils, CreateRaggedTensorRejectsNonRank4)
+{
+    const std::vector<int64_t> dims = {2, 3, 2};
+    const std::vector<int64_t> strides = {6, 2, 1};
+
+    try
+    {
+        createRaggedTensor(DataType::FLOAT, dims, strides, makeInt32Offsets({0, 4, 10}));
+        FAIL() << "Expected createRaggedTensor to reject a rank-3 tensor";
+    }
+    catch(const std::invalid_argument& e)
+    {
+        EXPECT_NE(std::string(e.what()).find("must be rank 4"), std::string::npos) << e.what();
+    }
 }

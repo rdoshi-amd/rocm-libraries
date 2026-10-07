@@ -83,8 +83,19 @@ struct GraphAndTensorMap
         auto tensorAttributeMap = createGraphWrapper().getTensorMap();
         for(const int64_t uid : outputTensorUids)
         {
-            auto dataType = tensorAttributeMap[uid]->data_type();
+            const auto* attributes = tensorAttributeMap[uid];
             auto& outputTensorPtr = tensorMap[uid];
+
+            if(const auto offsetUid = attributes->ragged_offset_tensor_uid(); offsetUid.has_value())
+            {
+                std::shared_ptr<hipdnn_data_sdk::utilities::ITensor> zeroedTensorPtr
+                    = hipdnn_test_sdk::detail::createRaggedTensorFromAttributeAndOffset(
+                        *attributes, tensorMap.at(offsetUid.value()));
+                zeroedTensorPtr->fillTensorWithValue(0.f);
+                std::swap(zeroedTensorPtr, outputTensorPtr);
+                outputTensorMap[uid] = std::move(zeroedTensorPtr);
+                continue;
+            }
 
             auto zeroedTensorPtr = std::visit(
                 [&](auto dataType) {
@@ -95,7 +106,7 @@ struct GraphAndTensorMap
                     tensorPtr->fillTensorWithValue(0.f);
                     return tensorPtr;
                 },
-                hipdnn_test_sdk::utilities::datatypeToNativeVariant(dataType));
+                hipdnn_test_sdk::utilities::datatypeToNativeVariant(attributes->data_type()));
 
             std::swap(zeroedTensorPtr, outputTensorPtr);
 

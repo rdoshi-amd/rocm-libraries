@@ -62,12 +62,17 @@ from torch.nn.attention import SDPBackend, sdpa_kernel
 #         Added --ragged-offsets (packed RFC-0014 BSHD; requires --layout bshd)
 #         seq_len tensors emit actual per-batch counts [B,1,1,1] (RFC 0014), not
 #         cumulative; mode derived from --seq-lens-*/--ragged-offsets (no
-#         --variable-seq-lens); ragged+seq-lens packs compactly with small
-#         trailing padding so ragged_offset spacing differs from seq_lens
+#         --variable-seq-lens)
+#         Ragged primaries keep logical dims [B,H,S,D] with BSHD strides, like
+#         every other SDPA tensor; the sequence axis is SDPA_SEQ_AXIS (2)
 #         Ragged offsets step in TOKEN units (not elements); Q/O share one aux
 #         offset tensor and K/V share another (uids 10/11 only); each ragged
-#         primary emits ragged_offset_multiplier = strides[1] (H*D) to scale
-#         tokens to elements
+#         primary emits ragged_offset_multiplier = strides[SDPA_SEQ_AXIS] (H*D)
+#         to scale tokens to elements
+#         ragged+seq-lens packs each block with small trailing padding so
+#         ragged_offset spacing differs from seq_lens; a config with no such
+#         headroom is rejected. The in-block O pad rows hold the NaN sentinel
+#         (RFC 0014 §4.11.4) because kernels may leave them undefined
 #         mma_core_mode is "unset" (was "float"); it is the MMA operand
 #         precision, and a float request on bf16/fp16/fp8 inputs is a mismatch
 #         that ASM_SDPA_ENGINE declines (see #12844)
@@ -106,6 +111,9 @@ UID_RAGGED_OFFSET_KV = 11
 # the strides change, so BSHD swaps the H and S ranks relative to BHSD.
 LAYOUT_STRIDE_ORDER = {"bhsd": [3, 2, 1, 0], "bshd": [3, 1, 2, 0]}
 
+# Sequence axis of the logical [B, H, S, D] dims (cuDNN convention).
+SDPA_SEQ_AXIS = 2
+
 # Extra trailing sequence rows added to each ragged block beyond its valid
 # seq_len (capped at S_max). This makes ragged_offset spacing differ from
 # seq_lens so a bundle can catch a kernel that derives lengths from the offsets
@@ -134,12 +142,6 @@ def compute_strides(dims, layout="bhsd"):
         stride[idx] = acc
         acc *= dims[idx]
     return stride
-
-
-def to_bshd_dims(dims):
-    """Reorder logical BHSD dims [B, H, S, D] to physical BSHD order [B, S, H, D]."""
-    b, h, s, d = dims
-    return [b, s, h, d]
 
 
 def to_physical_layout(tensor, layout):
@@ -317,25 +319,20 @@ def build_graph_json(
         (UID_O, "O", o_dims, o_dtype, UID_RAGGED_OFFSET_QO),
     ]
     for uid, name, dims, dt, ragged_offset_uid in primaries:
-        # Ragged primaries declare padded BSHD dims [B, S_max, H, D] (seqAxis=1)
-        # with contiguous strides; the packed .bin is sized by ragged_offset[B].
-        entry_dims = to_bshd_dims(dims) if ragged else dims
-        entry_strides = (
-            compute_contiguous_strides(entry_dims)
-            if ragged
-            else compute_strides(dims, layout)
-        )
+        # Ragged primaries declare padded logical dims [B, H, S_max, D] with BSHD
+        # strides; the packed .bin is sized by ragged_offset[B].
+        strides = compute_strides(dims, layout)
         entry = {
             "uid": uid,
             "name": name,
-            "dims": entry_dims,
-            "strides": entry_strides,
+            "dims": dims,
+            "strides": strides,
             "data_type": dt,
             "virtual": False,
         }
         if ragged:
             entry["ragged_offset_tensor_uid"] = ragged_offset_uid
-            entry["ragged_offset_multiplier"] = entry_strides[1]
+            entry["ragged_offset_multiplier"] = strides[SDPA_SEQ_AXIS]
         tensors.append(entry)
 
     if stats:
@@ -792,11 +789,24 @@ def generate_forward_bundle(
             "--seq-lens-q and --seq-lens-kv must be provided together (got only one)"
         )
     if has_seq_lens:
-        errors += _validate_group_args(B, seq_lens_q, seq_lens_kv, S_q, S_kv)
+        group_errors = _validate_group_args(B, seq_lens_q, seq_lens_kv, S_q, S_kv)
+        errors += group_errors
+        if (
+            ragged
+            and not group_errors
+            and physical_seqlens(seq_lens_q, S_q) == seq_lens_q
+            and physical_seqlens(seq_lens_kv, S_kv) == seq_lens_kv
+        ):
+            errors.append(
+                "--ragged-offsets with --seq-lens-q/--seq-lens-kv needs headroom: "
+                "every seq_len equals S_max, so ragged_offset spacing would equal "
+                "seq_lens and a length-from-offsets regression could not be caught "
+                "(use a max seq_len < S_max)"
+            )
     if ragged and layout != "bshd":
         errors.append(
-            "--ragged-offsets requires --layout bshd (RFC 0014 packed memory "
-            "is BSHD with seqAxis=1 and a single sequence stride)"
+            "--ragged-offsets requires --layout bshd (RFC 0014 packed memory is "
+            "sequence-outermost within a batch, with a single sequence stride)"
         )
     if errors:
         for e in errors:
@@ -885,13 +895,11 @@ def generate_forward_bundle(
     valid_kv = seq_lens_kv if has_seq_lens else [S_kv] * B
     physical_q = physical_seqlens(valid_q, S_q) if ragged else None
     physical_kv = physical_seqlens(valid_kv, S_kv) if ragged else None
-    if ragged and has_seq_lens and physical_q == valid_q and physical_kv == valid_kv:
-        print(
-            "  WARNING: no batch received ragged padding (every seq_len == S_max "
-            "after the +RAGGED_PAD_ROWS cap); ragged_offset spacing equals "
-            "seq_lens, so a length-from-offsets regression cannot be caught. "
-            "Use a config with headroom (max seq_len < S_max) to exercise padding."
-        )
+    if ragged and has_seq_lens:
+        # RFC 0014 §4.11.4 sentinel: kernels may leave in-block pad rows
+        # undefined, so comparators skip NaN golden positions.
+        for b in range(B):
+            O[b, :, valid_q[b] : physical_q[b], :] = float("nan")
 
     # Write raw tensor data as .bin files (one per tensor UID). Q/K/V/O are
     # packed (ragged) or reordered to physical BSHD bytes (bshd layout); LSE,
@@ -1114,8 +1122,8 @@ def main():
         dest="ragged",
         help="Emit a packed RFC-0014 ragged bundle (BSHD) with a ragged_offset aux "
         "tensor per primary. Requires --layout bshd. Optional --seq-lens-q/"
-        "--seq-lens-kv add compact per-batch padding; without them blocks are full "
-        "uniform S_max.",
+        "--seq-lens-kv add compact per-batch padding (needs max seq_len < S_max); "
+        "without them blocks are full uniform S_max.",
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--min", type=float, default=-1.0, dest="min_val")

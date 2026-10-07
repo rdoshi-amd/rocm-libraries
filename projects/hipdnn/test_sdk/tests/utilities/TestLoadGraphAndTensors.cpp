@@ -3,7 +3,6 @@
 
 #include <gtest/gtest.h>
 
-#include <hipdnn_data_sdk/logging/Logger.hpp>
 #include <hipdnn_data_sdk/types.hpp>
 #include <hipdnn_data_sdk/utilities/PlatformUtils.hpp>
 #include <hipdnn_data_sdk/utilities/RaggedTensor.hpp>
@@ -201,24 +200,20 @@ TEST(TestLoadGraphAndTensors, Valid)
 {
     SKIP_IF_NO_DEVICES();
 
-    const std::filesystem::path filepath = getCurrentExecutableDirectory()
-                                           / "../lib/integration-test-bundles/quick/"
-                                             "BatchnormFwdInference/nchw/fp32/Small/Small.json";
-
-    // TODO: Temporary fix until reference data can be properly installed
-    if(!std::filesystem::exists(filepath))
+    const auto bundleRoot = getCurrentExecutableDirectory() / "../lib/integration-test-bundles";
+    if(!std::filesystem::exists(bundleRoot))
     {
-        HIPDNN_SDK_LOG_WARN("Could not find " << filepath.string());
-        GTEST_SKIP();
+        GTEST_SKIP() << "Integration test bundles are not installed (standalone hipDNN build)";
     }
+
+    const auto filepath = bundleRoot / "quick/BatchnormFwdInference/nchw/fp32/Small/Small.json";
+    ASSERT_TRUE(std::filesystem::exists(filepath)) << filepath.string();
 
     auto basePath = filepath;
     basePath.replace_extension();
-    const std::filesystem::path tensor0Path = basePath.string() + ".tensor0.bin";
-    if(!std::filesystem::exists(tensor0Path))
+    if(!std::filesystem::exists(basePath.string() + ".tensor0.bin"))
     {
-        HIPDNN_SDK_LOG_WARN("Could not find " << tensor0Path.string());
-        GTEST_SKIP();
+        GTEST_SKIP() << "DVC data not pulled";
     }
 
     auto res = loadGraphAndTensors(filepath);
@@ -253,24 +248,20 @@ TEST(TestLoadGraphAndTensors, Valid)
 
 TEST(TestLoadGraphAndTensors, ExtractAndClearOutputTensorData)
 {
-    const std::filesystem::path filepath = getCurrentExecutableDirectory()
-                                           / "../lib/integration-test-bundles/quick/"
-                                             "BatchnormFwdInference/nchw/fp32/Small/Small.json";
-
-    // TODO: Temporary fix until reference data can be properly installed
-    if(!std::filesystem::exists(filepath))
+    const auto bundleRoot = getCurrentExecutableDirectory() / "../lib/integration-test-bundles";
+    if(!std::filesystem::exists(bundleRoot))
     {
-        HIPDNN_SDK_LOG_WARN("Could not find " << filepath.string());
-        GTEST_SKIP();
+        GTEST_SKIP() << "Integration test bundles are not installed (standalone hipDNN build)";
     }
+
+    const auto filepath = bundleRoot / "quick/BatchnormFwdInference/nchw/fp32/Small/Small.json";
+    ASSERT_TRUE(std::filesystem::exists(filepath)) << filepath.string();
 
     auto basePath = filepath;
     basePath.replace_extension();
-    const std::filesystem::path tensor0Path = basePath.string() + ".tensor0.bin";
-    if(!std::filesystem::exists(tensor0Path))
+    if(!std::filesystem::exists(basePath.string() + ".tensor0.bin"))
     {
-        HIPDNN_SDK_LOG_WARN("Could not find " << tensor0Path.string());
-        GTEST_SKIP();
+        GTEST_SKIP() << "DVC data not pulled";
     }
 
     auto res = loadGraphAndTensors(filepath);
@@ -315,24 +306,21 @@ TEST(TestLoadGraphAndTensors, ExtractAndClearOutputTensorData)
 
 TEST(TestLoadGraphAndTensors, LoadsRaggedBundle)
 {
-    const std::filesystem::path filepath
-        = getCurrentExecutableDirectory()
-          / "../lib/integration-test-bundles/quick/"
-            "SdpaFwd/bshd/bf16/hd192_nomask_ragged/Small/Small.json";
-
-    if(!std::filesystem::exists(filepath))
+    const auto bundleRoot = getCurrentExecutableDirectory() / "../lib/integration-test-bundles";
+    if(!std::filesystem::exists(bundleRoot))
     {
-        HIPDNN_SDK_LOG_WARN("Could not find " << filepath.string());
-        GTEST_SKIP();
+        GTEST_SKIP() << "Integration test bundles are not installed (standalone hipDNN build)";
     }
+
+    const auto filepath
+        = bundleRoot / "quick/SdpaFwd/bshd/bf16/hd192_nomask_ragged/Small/Small.json";
+    ASSERT_TRUE(std::filesystem::exists(filepath)) << filepath.string();
 
     auto basePath = filepath;
     basePath.replace_extension();
-    const std::filesystem::path tensor0Path = basePath.string() + ".tensor0.bin";
-    if(!std::filesystem::exists(tensor0Path))
+    if(!std::filesystem::exists(basePath.string() + ".tensor0.bin"))
     {
-        HIPDNN_SDK_LOG_WARN("Could not find " << tensor0Path.string());
-        GTEST_SKIP();
+        GTEST_SKIP() << "DVC data not pulled";
     }
 
     constexpr int64_t Q_UID = 0;
@@ -380,12 +368,30 @@ TEST(TestLoadGraphAndTensors, LoadsRaggedBundle)
         EXPECT_EQ(tensor->dims(),
                   hipdnn_flatbuffers_sdk::utilities::convertFlatBufferVectorToStdVector(
                       attributes->dims()));
-        EXPECT_TRUE(tensor->raggedIterationInfo().has_value());
+        ASSERT_TRUE(tensor->raggedIterationInfo().has_value());
+        EXPECT_EQ(tensor->raggedIterationInfo()->seqAxis, SDPA_SEQ_AXIS);
 
         const auto* raggedTensor
             = dynamic_cast<const RaggedTensorBase<hipdnn_data_sdk::types::bfloat16>*>(tensor.get());
         ASSERT_NE(raggedTensor, nullptr);
         EXPECT_EQ(raggedTensor->raggedOffset(), res.tensorMap.at(raggedOffsetUid).get());
+    }
+
+    const auto loadedOutputLayout = res.tensorMap.at(O_UID)->raggedIterationInfo();
+    auto outputMap = res.extractAndClearOutputTensorData();
+
+    ASSERT_EQ(outputMap.count(O_UID), 1u);
+    EXPECT_EQ(outputMap.at(O_UID)->raggedIterationInfo(), loadedOutputLayout);
+
+    const auto* clearedOutput
+        = dynamic_cast<const RaggedTensorBase<hipdnn_data_sdk::types::bfloat16>*>(
+            res.tensorMap.at(O_UID).get());
+    ASSERT_NE(clearedOutput, nullptr);
+    EXPECT_EQ(clearedOutput->raggedOffset(), res.tensorMap.at(QO_RAGGED_OFFSET_UID).get());
+    EXPECT_EQ(clearedOutput->raggedIterationInfo(), loadedOutputLayout);
+    for(const auto value : TensorView<hipdnn_data_sdk::types::bfloat16>(*res.tensorMap.at(O_UID)))
+    {
+        EXPECT_EQ(static_cast<float>(value), 0.0f);
     }
 }
 
@@ -399,7 +405,7 @@ constexpr int64_t RAGGED_OFFSET_UID = 6;
 std::string raggedTensorJson(int64_t uid, int64_t raggedOffsetUid)
 {
     return R"({"name": "", "uid": )" + std::to_string(uid)
-           + R"(, "strides": [8, 2, 2, 1], "dims": [2, 4, 1, 2], "data_type": "float", )"
+           + R"(, "strides": [8, 2, 2, 1], "dims": [2, 1, 4, 2], "data_type": "float", )"
              R"("virtual": false, "ragged_offset_tensor_uid": )"
            + std::to_string(raggedOffsetUid) + "}";
 }
@@ -468,7 +474,7 @@ TEST(TestLoadGraphAndTensors, LoadsRaggedTensorsDeclaredBeforeTheirOffset)
             = dynamic_cast<const RaggedTensorBase<float>*>(res.tensorMap.at(uid).get());
         ASSERT_NE(ragged, nullptr) << "uid " << uid;
         EXPECT_EQ(ragged->raggedOffset(), offsetTensor.get()) << "uid " << uid;
-        EXPECT_EQ(ragged->dims(), (std::vector<int64_t>{2, 4, 1, 2})) << "uid " << uid;
+        EXPECT_EQ(ragged->dims(), (std::vector<int64_t>{2, 1, 4, 2})) << "uid " << uid;
         EXPECT_EQ(ragged->raggedIterationInfo()->rowOffsets, (std::vector<int64_t>{0, 4, 6}))
             << "uid " << uid;
         ASSERT_EQ(ragged->elementSpace(), raggedValues.size()) << "uid " << uid;
@@ -477,6 +483,37 @@ TEST(TestLoadGraphAndTensors, LoadsRaggedTensorsDeclaredBeforeTheirOffset)
         EXPECT_EQ(std::vector<float>(data, data + raggedValues.size()), raggedValues)
             << "uid " << uid;
     }
+}
+
+TEST(TestLoadGraphAndTensors, ExtractAndClearOutputTensorDataKeepsRaggedLayout)
+{
+    const ScopedDirectory dir = claimScratchDirectory("extract_ragged");
+    const auto jsonPath = dir.path() / "Ragged.json";
+    const std::vector<float> raggedValues{0.5f, 1.5f, 2.5f, 3.5f, 4.5f, 5.5f};
+    writeRaggedBatchnormBundle(jsonPath, RAGGED_OFFSET_UID, {0, 4, 6}, raggedValues);
+
+    auto res = loadGraphAndTensors(jsonPath);
+    const auto loadedLayout = res.tensorMap.at(RAGGED_Y_UID)->raggedIterationInfo();
+    ASSERT_TRUE(loadedLayout.has_value());
+
+    auto outputMap = res.extractAndClearOutputTensorData();
+
+    ASSERT_EQ(outputMap.count(RAGGED_Y_UID), 1u);
+    const auto* extracted = static_cast<const float*>(outputMap.at(RAGGED_Y_UID)->rawHostData());
+    EXPECT_EQ(std::vector<float>(extracted, extracted + raggedValues.size()), raggedValues);
+
+    const auto& offsetTensor = res.tensorMap.at(RAGGED_OFFSET_UID);
+    const auto* cleared
+        = dynamic_cast<const RaggedTensorBase<float>*>(res.tensorMap.at(RAGGED_Y_UID).get());
+    ASSERT_NE(cleared, nullptr);
+    EXPECT_EQ(cleared->raggedOffset(), offsetTensor.get());
+    EXPECT_EQ(cleared->raggedIterationInfo(), loadedLayout);
+    ASSERT_EQ(cleared->elementSpace(), raggedValues.size());
+
+    const auto* clearedData
+        = static_cast<const float*>(res.tensorMap.at(RAGGED_Y_UID)->rawHostData());
+    EXPECT_EQ(std::vector<float>(clearedData, clearedData + raggedValues.size()),
+              std::vector<float>(raggedValues.size(), 0.0f));
 }
 
 TEST(TestLoadGraphAndTensors, ThrowsWhenRaggedOffsetTensorMissing)

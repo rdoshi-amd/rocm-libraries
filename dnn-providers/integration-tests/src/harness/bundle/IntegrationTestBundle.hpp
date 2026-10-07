@@ -349,8 +349,15 @@ inline std::optional<LoadError> loadTensorDataIfPresent(IntegrationTestBundle& b
         {
             const auto* attributes = attrByUid.at(uid);
             const int64_t offsetUid = attributes->ragged_offset_tensor_uid().value();
+            const auto offsetIt = into.find(offsetUid);
+            if(offsetIt == into.end())
+            {
+                throw std::runtime_error("ragged tensor " + std::to_string(uid)
+                                         + " references missing offset tensor "
+                                         + std::to_string(offsetUid));
+            }
             into[uid] = hipdnn_test_sdk::utilities::raggedTensorFromFileAndAttributes(
-                blobPathForUid(uid), *attributes, into.at(offsetUid));
+                blobPathForUid(uid), *attributes, offsetIt->second);
         }
     };
 
@@ -365,8 +372,9 @@ inline std::optional<LoadError> loadTensorDataIfPresent(IntegrationTestBundle& b
         }
         bundle.tensors = std::move(tensorMap);
     }
-    catch(const std::exception&)
+    catch(const std::exception& e)
     {
+        HIPDNN_SDK_LOG_WARN("Failed to load tensor data: " << e.what());
         return LoadError::TENSOR_LOAD_FAILED;
     }
 

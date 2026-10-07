@@ -316,6 +316,23 @@ namespace TensileLite
                    || (sizeMapping.hasHybridAssignment() && effectiveDynamic);
         }
 
+        // Work item i sits in queue i % numQueues, and a workgroup only pops
+        // its home queue (rank % numQueues) or, with stealing, the next one.
+        // Every non-empty queue therefore needs at least one home workgroup,
+        // or its items are never processed (and a tile whose parts are spread
+        // over queues never completes its fixup). The queue counters' auto-
+        // reset bound assumes the same. Only debug overrides
+        // (TENSILE_STREAMK_FIXED_GRID / _TILES / _SPLIT) can break it today.
+        inline void assertStreamKDynamicGridCoversQueues(Hardware const& hardware,
+                                                         size_t          grid,
+                                                         size_t          totalItems)
+        {
+            const size_t numQueues = streamKBakedQueueCount(hardware);
+            TENSILE_ASSERT_EXC(grid >= std::min(totalItems, numQueues)
+                               && "dynamic StreamK grid leaves a non-empty work queue "
+                                  "without a home workgroup");
+        }
+
         // The dynamic-queue fetch / work stealing is only correct when the
         // device's runtime NUM_XCD is a power of two AND equals the baked
         // per-XCD queue count. Returns true (UNSUPPORTED) when the hardware is
@@ -1388,6 +1405,7 @@ namespace TensileLite
                 args.template append<uint32_t>("SKSplit", skSplit);
                 args.template append<uint32_t>("SKItersPerWI", skItersPerWI);
                 args.template append<uint32_t>("SKGrid", launch.grid);
+                assertStreamKDynamicGridCoversQueues(*hardware, launch.grid, totalItems);
             }
             else if(sizeMapping.hasHybridAssignment())
             {
@@ -1447,6 +1465,8 @@ namespace TensileLite
                     args.template append<uint32_t>("SKItersPerWI",
                                                    sk4_skItersPerWI);
                     args.template append<uint32_t>("SKGrid", launch.grid);
+                    assertStreamKDynamicGridCoversQueues(
+                        *hardware, launch.grid, sk4_totalItems);
                 }
                 else
                 {

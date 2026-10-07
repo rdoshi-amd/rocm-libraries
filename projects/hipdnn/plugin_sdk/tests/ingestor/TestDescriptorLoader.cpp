@@ -1987,7 +1987,8 @@ const std::vector<std::string> BOTH{"test:candidate", "test:intact"};
 
 nlohmann::json arch(std::initializer_list<std::string> entries)
 {
-    return nlohmann::json(std::vector<std::string>(entries));
+    const nlohmann::json list = std::vector<std::string>(entries);
+    return list;
 }
 
 /// Authors the candidate's first kernel with @p kernelArch under a pack listing

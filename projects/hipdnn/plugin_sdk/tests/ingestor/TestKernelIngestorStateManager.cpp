@@ -333,7 +333,7 @@ TEST(TestKernelIngestorStateManager, KeepsOnlyTheBestArchTierOfASharedTuplePerDe
     member.id = testId(0x96);
     member.kernels = {makeKernel(testId(0x97), "kernel_gfx1151", 64, "FLOAT")};
 
-    std::vector<std::vector<KernelDescriptorPack>> orders{
+    const std::vector<std::vector<KernelDescriptorPack>> orders{
         {anywhere, generic, member}, {member, generic, anywhere}, {generic, member, anywhere}};
     uint8_t graphIndex = 0x25;
     for(const auto& packs : orders)

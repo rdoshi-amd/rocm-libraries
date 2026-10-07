@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <ostream>
 #include <set>
 #include <stdexcept>
 #include <vector>
@@ -25,6 +26,22 @@
 
 using namespace hipdnn_flatbuffers_sdk::data_objects;
 using namespace hipdnn_integration_tests;
+
+namespace hipdnn_integration_tests
+{
+
+// Lets EXPECT_EQ on recipes print both sides on failure.
+static void PrintTo(const FillRecipe& f, std::ostream* os)
+{
+    if(f.kind == FillRecipe::Kind::FIXED)
+    {
+        *os << "FIXED(" << f.value << ")";
+        return;
+    }
+    *os << "FREE[" << f.lo << ", " << f.hi << "]";
+}
+
+} // namespace hipdnn_integration_tests
 
 namespace
 {
@@ -928,7 +945,7 @@ TEST(TestFillInputs, NarrowDtypeOnGenericOpGetsDtypeDefault)
     const auto result = fillInputs(*gr.graph, inputs, leafUids, recipes, nullptr);
 
     ASSERT_TRUE(result.filled) << result.reason;
-    EXPECT_TRUE(recipes.fill(1) == FillRecipe::free(-6.0f, 6.0f));
+    EXPECT_EQ(recipes.fill(1), FillRecipe::free(-6.0f, 6.0f));
     EXPECT_EQ(recipes.fills().count(2), 0u);
 }
 
@@ -950,8 +967,8 @@ TEST(TestFillInputs, FloatGraphRecordsNoDtypeDefaults)
 // ── Block-scale dequantize (MX matmul) ──────────────────────────────────────
 
 // Scale is 2^-floor(log2(amax)) * [0.5, 2] against the operand's range, so the
-// dequantized block peaks near 4 for every element format. FP8 keeps today's
-// [-1, 1] / [0.5, 2].
+// dequantized FP4/FP6 block peaks at 3 to 3.75. FP8 keeps today's [-1, 1] /
+// [0.5, 2], and its generic operand range is not recorded.
 TEST(TestFillInputs, BlockScaleDequantizeScaleNormalized)
 {
     struct Case
@@ -972,9 +989,10 @@ TEST(TestFillInputs, BlockScaleDequantizeScaleNormalized)
     {
         SCOPED_TRACE(EnumNameDataType(c.xType));
         const auto recipes = fillBlockScaleDequantizeMatmul(c.xType);
-        EXPECT_TRUE(recipes.fill(1) == c.x);
-        EXPECT_TRUE(recipes.fill(2) == c.scale);
-        EXPECT_TRUE(recipes.fill(3) == FillRecipe{});
+        EXPECT_EQ(recipes.fill(1), c.x);
+        EXPECT_EQ(recipes.fills().count(1), c.x != FillRecipe{} ? 1u : 0u);
+        EXPECT_EQ(recipes.fill(2), c.scale);
+        EXPECT_EQ(recipes.fills().count(3), 0u);
     }
 }
 
@@ -986,8 +1004,8 @@ TEST(TestFillInputs, TestOverrideOfOperandRenormalizesScale)
 
     const auto recipes = fillBlockScaleDequantizeMatmul(DataType::FP4_E2M1, overrides);
 
-    EXPECT_TRUE(recipes.fill(1) == FillRecipe::free(-2.0f, 2.0f));
-    EXPECT_TRUE(recipes.fill(2) == FillRecipe::free(0.25f, 1.0f));
+    EXPECT_EQ(recipes.fill(1), FillRecipe::free(-2.0f, 2.0f));
+    EXPECT_EQ(recipes.fill(2), FillRecipe::free(0.25f, 1.0f));
 }
 
 // Recaptured bundles carry the operand and scale ranges in metadata.inputs.

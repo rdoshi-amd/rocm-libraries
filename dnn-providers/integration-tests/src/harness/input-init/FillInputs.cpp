@@ -206,18 +206,25 @@ void setBlockScaleDequantizeInitDefaults(const hipdnn_flatbuffers_sdk::data_obje
         return;
     }
 
+    // Recorded only when non-generic, like any dtype default: a recorded entry
+    // replays as an override and would pin the operand range.
     const auto xType = dataTypes.find(a->x_tensor_uid());
     if(xType != dataTypes.end())
     {
-        recipes.setDefault(a->x_tensor_uid(), defaultFillFor(xType->second));
+        const auto xRecipe = defaultFillFor(xType->second);
+        if(xRecipe != FillRecipe{})
+        {
+            recipes.setDefault(a->x_tensor_uid(), xRecipe);
+        }
     }
 
     // Scale is normalized against the operand range in effect (default or a
-    // test override), as OCP MX does: scale ~ 2^-floor(log2(amax)). The
-    // dequantized block then peaks near 4 whatever the element format, so
-    // products stay within FP16 range. UE8M0 has no mantissa bits, so the
-    // [0.5, 2] * 2^-e draw discretizes to three powers of two. An operand in
-    // [-1, 1] gives e = 0, i.e. [0.5, 2].
+    // test override), as OCP MX does: scale ~ 2^-floor(log2(amax)) for
+    // amax >= 1. The dequantized block then peaks between 2 and 4 (FP4/FP6:
+    // 3 to 3.75), so products stay within FP16 range; an operand with
+    // amax < 1 keeps e = 0 and peaks at 2 * amax. UE8M0 has no mantissa bits,
+    // so the [0.5, 2] * 2^-e draw discretizes to three powers of two. An
+    // operand in [-1, 1] gives e = 0, i.e. [0.5, 2].
     const float amax = recipeMagnitude(recipes.fill(a->x_tensor_uid()));
     const int e = amax >= 1.0f ? std::ilogb(amax) : 0;
     recipes.setDefault(a->scale_tensor_uid(),

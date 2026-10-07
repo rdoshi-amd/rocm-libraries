@@ -710,6 +710,14 @@ struct PipelineTypeTraits<ck_tile::GemmPipeline::COMPUTE_TDM_V2>
 };
 
 template <>
+struct PipelineTypeTraits<ck_tile::GemmPipeline::COMPUTE_TDM_RING>
+{
+    // Default ring: depth 3, every wave issues, wait-then-fill.
+    template <typename PipelineProblem>
+    using GemmPipeline = ck_tile::GemmPipelineAgBgCrCompTDMRing<PipelineProblem>;
+};
+
+template <>
 struct PipelineTypeTraits<ck_tile::GemmPipeline::PRESHUFFLE_TDM>
 {
     template <typename PipelineProblem>
@@ -738,6 +746,12 @@ template <typename Problem, bool UseCShuffle>
 struct EpilogueTypeTraits<ck_tile::GemmPipeline::COMPUTE_TDM_V2, Problem, UseCShuffle>
 {
     static_assert(!UseCShuffle, "COMPUTE_TDM_V2 supports only TdmEpilogue");
+    using Epilogue = ck_tile::TdmEpilogue<Problem>;
+};
+
+template <typename Problem>
+struct EpilogueTypeTraits<ck_tile::GemmPipeline::COMPUTE_TDM_RING, Problem>
+{
     using Epilogue = ck_tile::TdmEpilogue<Problem>;
 };
 

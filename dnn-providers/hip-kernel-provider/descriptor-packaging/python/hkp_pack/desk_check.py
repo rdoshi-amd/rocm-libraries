@@ -47,8 +47,7 @@ _DTYPE_ALIASES = {
 # identity can say so explicitly instead of silently shortening.
 _ABSENT = "<absent>"
 
-#: A device no table generic contains, standing in for "any device" when a list is
-#: empty (unrestricted).
+#: Stands in for "any device" when a list is empty (unrestricted).
 _SYNTHETIC_DEVICE = "<any-device>"
 
 
@@ -173,7 +172,7 @@ def metadata_identity_fields(kernels: list[dict]) -> tuple[str, ...]:
 
 
 def load_kdp_arch(kdp_path: Path) -> list[str]:
-    """The arch list a `.kdp.json` declares; what a kernel with no list inherits."""
+    """The arch list a `.kdp.json` declares (inherited by kernels with none)."""
     return list(
         json.loads(Path(kdp_path).read_text(encoding="utf-8")).get("arch") or []
     )
@@ -388,15 +387,8 @@ def metadata_spec_drift(kernels: list[dict], fields=None) -> list[tuple[str, str
 
 
 def _reachable_together(group: list[dict], generic_targets, kdp_arch=()) -> int:
-    """The largest number of kernels in `group` that tie at one arch tier on one
-    device -- the loader's rule (`archesCompete`): any two kernels sharing a tier on
-    some device collide, whether or not that tier is the best one there.
-
-    A kernel's arch is its own list, else the KDP's (`kdp_arch`), as
-    `KernelIngestorStateManager` takes it. Candidate devices are every explicit id
-    and every member of a table generic in those lists, plus one synthetic device
-    when any list is empty (an empty list is unrestricted, so it ties there at the
-    unrestricted tier). A list naming only unknown generics matches nothing.
+    """The largest number of kernels in `group` tying at one arch tier on one device
+    (the loader's `archesCompete` rule). A kernel's arch is its own list, else `kdp_arch`.
     """
     lists = [list(k.get("arch") or kdp_arch) for k in group]
     if not any(lists):
@@ -426,7 +418,6 @@ def duplicate_matcher_tuples(
     """Invariant 2: no two kernels may share a matcher tuple on the same arch --
     one is unreachable. Returns {tuple: count} for every tuple two kernels reach
     one device at the same arch tier with, the scope the runtime refuses in.
-    `kdp_arch` is the arch a kernel without its own list inherits.
 
     The compared set is the union of `fields` present in any kernel's metadata,
     never ``kernels[0]``'s, which would make the identity list-order dependent. A

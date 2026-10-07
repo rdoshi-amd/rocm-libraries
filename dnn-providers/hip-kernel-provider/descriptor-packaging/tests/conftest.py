@@ -12,8 +12,6 @@ _PKG_ROOT = _TESTS_DIR.parent / "python"
 if str(_PKG_ROOT) not in sys.path:
     sys.path.insert(0, str(_PKG_ROOT))
 
-# The in-repo generic GPU target table every pack in these tests is validated against.
-# Exported so a test names it once; a test needing a different table writes its own.
 from hkp_pack.generic_targets import DEFAULT_TABLE_PATH, GenericTargets  # noqa: E402
 
 GENERIC_TARGETS_JSON = DEFAULT_TABLE_PATH

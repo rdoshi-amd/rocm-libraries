@@ -1991,8 +1991,6 @@ nlohmann::json arch(std::initializer_list<std::string> entries)
     return list;
 }
 
-/// Authors the candidate's first kernel with @p kernelArch under a pack listing
-/// @p packArch, spelled inline or as a standalone `.ukd.json`.
 Documents candidateWithKernelArch(const nlohmann::json& packArch,
                                   const nlohmann::json& kernelArch,
                                   bool standalone)
@@ -2011,8 +2009,7 @@ Documents candidateWithKernelArch(const nlohmann::json& packArch,
     return documents;
 }
 
-/// The names of the engines that load when @p candidate sits beside an intact engine.
-/// Sorted, so a case asserts which pack survives, not the order the catalog lists it in.
+/// Sorted names of the engines that load when @p candidate sits beside an intact engine.
 std::vector<std::string> engineNames(const Documents& candidate)
 {
     const hipdnn_test_sdk::utilities::ScopedDirectory dir(uniqueDirectory("generic_arch_rule"));
@@ -2030,9 +2027,6 @@ std::vector<std::string> engineNames(const Documents& candidate)
 
 } // namespace
 
-/// An authored generic spells a bare base id with a '-' in it, which the arch validator
-/// must admit; it sits in a list beside an unrelated explicit id, and a kernel spelled
-/// with the same list keeps it.
 TEST(TestDescriptorLoader, AcceptsAGenericTargetBesideAnUnrelatedExplicitId)
 {
     const ScopedSymbols symbols;
@@ -2053,8 +2047,7 @@ TEST(TestDescriptorLoader, AcceptsAGenericTargetBesideAnUnrelatedExplicitId)
               (std::vector<std::string>{"gfx942", "gfx11-generic"}));
 }
 
-/// R1: a generic-shaped name the table does not list matches no device, so the file that
-/// names it is dropped, whether the name is the pack's or a kernel's.
+/// A generic-shaped name the table does not list matches no device, so its file is dropped.
 TEST(TestDescriptorLoader, DropsAPackNamingAGenericAbsentFromTheTable)
 {
     EXPECT_EQ(engineNames(candidateWithKernelArch(arch({"gfx99-generic"}), arch({}), false)),
@@ -2065,8 +2058,6 @@ TEST(TestDescriptorLoader, DropsAPackNamingAGenericAbsentFromTheTable)
               INTACT_ONLY);
 }
 
-/// R2: one list may not hold a generic together with a member it contains. Generics with
-/// no member in common coexist.
 TEST(TestDescriptorLoader, DropsAPackListingAGenericAndOneOfItsMembers)
 {
     EXPECT_EQ(
@@ -2080,8 +2071,7 @@ TEST(TestDescriptorLoader, DropsAPackListingAGenericAndOneOfItsMembers)
               BOTH);
 }
 
-/// R3: a kernel names a generic only when its pack lists that generic itself, even when
-/// the pack's explicit entries already cover every member.
+/// A kernel names a generic only when its pack lists that generic itself.
 TEST(TestDescriptorLoader, DropsAPackWhoseKernelNamesAGenericThePackDoesNotList)
 {
     nlohmann::json members = nlohmann::json::array();
@@ -2104,8 +2094,6 @@ TEST(TestDescriptorLoader, DropsAPackWhoseKernelNamesAGenericThePackDoesNotList)
     }
 }
 
-/// R4: under a pack listing a generic, a kernel with an arch of its own lists every
-/// generic of the pack and only entries the pack lists. A kernel with no arch inherits.
 TEST(TestDescriptorLoader, DropsAPackWhoseKernelOmitsOrExceedsTheGenericPackArch)
 {
     for(const bool standalone : {false, true})
@@ -2126,8 +2114,7 @@ TEST(TestDescriptorLoader, DropsAPackWhoseKernelOmitsOrExceedsTheGenericPackArch
     EXPECT_EQ(engineNames(candidateWithKernelArch(arch({"gfx11-generic"}), arch({}), false)), BOTH);
 }
 
-/// Unchanged loader rule: a standalone kernel id defined for the generic and for one of its
-/// members is two covered definitions under a generic pack, and nothing ranks them.
+/// A standalone kernel id defined for a generic and for one of its members is ambiguous.
 TEST(TestDescriptorLoader, StillRejectsAStandaloneKernelDefinedForAGenericAndForOneOfItsMembers)
 {
     const hipdnn_test_sdk::utilities::ScopedDirectory dir(uniqueDirectory("generic_and_member"));

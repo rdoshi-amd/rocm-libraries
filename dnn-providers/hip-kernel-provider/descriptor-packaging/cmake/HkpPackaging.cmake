@@ -12,7 +12,7 @@ include_guard(GLOBAL)
 set(HKP_PKG_DIR "${CMAKE_CURRENT_LIST_DIR}/..")
 set(HKP_PYTHON_ROOT "${HKP_PKG_DIR}/python")
 set(HKP_TOOL "${HKP_PKG_DIR}/tools/hkp_pack.py")
-# Cached so the probe path is visible to callers in sibling directory scopes.
+# Cached for callers in sibling directory scopes.
 set(HKP_ARCH_PROBE_TOOL "${HKP_PKG_DIR}/tools/hkp_arch_probe.py" CACHE INTERNAL
     "Packer arch probe used by configure-time arch gating")
 set(HKP_WHEEL_DIGEST_TOOL "${HKP_PKG_DIR}/tools/hkp_wheel_digest.py")
@@ -1027,10 +1027,7 @@ endfunction()
 
 # ---------------------------------------------------------------------------
 # _hkp_root_covers_any_arch(<out_var> <root> <arches>)
-#   TRUE when at least one non-hidden *.kdp.json under <root> would survive: its arch
-#   must admit at least one arch in <arches> (_hkp_kdp_arch_matches: an absent or empty `arch`
-#   is a wildcard; an entry admits a target it names or a table generic containing it).
-#   Consulted for the default root alone (hkp_add_packaging below).
+#   TRUE when a non-hidden *.kdp.json under <root> admits an arch in <arches>.
 #
 #   Only FALSE is authoritative. kdp_survives() tests the KDP-level arch rule first, so a
 #   root no arch reaches is provably empty; TRUE claims nothing beyond "not provably empty",
@@ -1074,12 +1071,7 @@ endfunction()
 # _hkp_kdp_arch_matches(<out> <kdp-path> <arches>)
 #   TRUE when the KDP at <kdp-path> ships for any architecture in <arches>.
 #
-#   Answered by tools/hkp_arch_probe.py, which runs the packer's own tier rule
-#   (hkp_pack.generic_targets.admits_target): a KDP naming no architecture, or an empty
-#   list, wildcards; an entry admits a target when it names it or is a generic target
-#   of the shared table that contains it. The generic table is the SDK's
-#   HIPDNN_PLUGIN_SDK_GPU_GENERIC_TARGETS_JSON, so the verdict and the packer read the
-#   same data.
+#   Answered by tools/hkp_arch_probe.py (the packer's own admits_target rule).
 #
 #   Every ambiguous case also resolves TRUE, deliberately: only FALSE is authoritative.
 #   Resolving ambiguity the other way would let a malformed declaration read as a clean
@@ -1334,8 +1326,6 @@ function(hkp_add_packaging)
             "(gpu_generic_targets.json); an older installed hipdnn_plugin_sdk lacks it. "
             "Build against a hipdnn_plugin_sdk that provides the table.")
     endif()
-    # The dormancy verdicts below turn on the table's contents, so an edit to it (a
-    # reinstalled SDK) must re-run configure, as an edit to a KDP does.
     set_property(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" APPEND PROPERTY
         CMAKE_CONFIGURE_DEPENDS "${HIPDNN_PLUGIN_SDK_GPU_GENERIC_TARGETS_JSON}")
     find_package(Python3 COMPONENTS Interpreter REQUIRED)

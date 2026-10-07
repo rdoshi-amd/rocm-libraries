@@ -45,8 +45,7 @@ test_categories:
       - "hipdnn_frontend_tests"
       - "hipdnn_test_sdk_tests"
       - "hipdnn_plugin_sdk_tests"
-      # Build tree only: these run CMake driver scripts, so they are absent from the
-      # installed CTestTestfile.cmake. See plugin_sdk/tests/CMakeLists.txt.
+      # Build tree only; see plugin_sdk/tests/CMakeLists.txt.
       - "hipdnn_gpu_generic_targets_.*"
 
   integration:

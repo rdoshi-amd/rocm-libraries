@@ -1,14 +1,10 @@
 # Copyright © Advanced Micro Devices, Inc., or its affiliates.
 # SPDX-License-Identifier:  MIT
 
-# Validates data/gpu_generic_targets.json: the schema version and the shape of the
-# generic-target -> member-processor table. Every violation is a FATAL_ERROR that names
-# the offending key or member, so a failing configure points at the line to fix.
-#
-# cmake-lint does not model foreach(... RANGE ...) and reports E1120 on its arguments.
+# Validates data/gpu_generic_targets.json; each violation is a FATAL_ERROR naming the key.
 # cmake-lint: disable=E1120
 
-# Checks the 'generics' map: names, member shape, duplicates.
+# Checks the generics map: names, member shape, duplicates.
 function(_hipdnn_gpu_generic_targets_validate_generics json json_path)
     string(JSON generics_type ERROR_VARIABLE err TYPE "${json}" generics)
     if(err OR NOT generics_type STREQUAL "OBJECT")
@@ -54,9 +50,7 @@ function(_hipdnn_gpu_generic_targets_validate_generics json json_path)
     endforeach()
 endfunction()
 
-# Validates the generic target table at <json_path>: the schema version and every generic's
-# name and member list. FATAL_ERROR naming the offending key or member on the first
-# violation.
+# Validates the schema version and every generic; FATAL_ERROR on the first violation.
 function(hipdnn_validate_gpu_generic_targets json_path)
     if(NOT EXISTS "${json_path}")
         message(FATAL_ERROR "gpu_generic_targets: cannot read '${json_path}'")

@@ -728,19 +728,14 @@ class TestCatalogIdentity:
     @pytest.mark.parametrize(
         ("pack_arch", "left_arch", "right_arch", "other_binary"),
         [
-            # Same tuple, same device, different binary.
             (["gfx942"], [], [], True),
-            # Same tuple, same binary, unequal overlapping coverage.
             (["gfx942", "gfx950"], ["gfx942"], ["gfx942", "gfx950"], False),
-            # Both select gfx1100 at the generic tier.
             (["gfx11-generic"], [], [], True),
         ],
     )
     def test_equal_tuples_tied_on_a_device_are_refused_naming_both(
         self, pack_arch, left_arch, right_arch, other_binary
     ):
-        """One tuple twice on a device drops the engine at load, so the generator
-        refuses and names both kernels."""
         config, pack, left, right = self._twin_config()
         pack.arch = pack_arch
         left.arch = left_arch
@@ -754,9 +749,7 @@ class TestCatalogIdentity:
         assert "twin.left" in message and "twin.right" in message
 
     def test_a_wildcard_arch_and_a_concrete_one_with_one_tuple_both_survive(self):
-        """An empty ``arch`` is the unrestricted tier and a concrete entry outranks it
-        on its own device, so the two never tie and the matcher never sees one tuple
-        twice."""
+        """A concrete arch outranks an empty one on its own device, so they never tie."""
         config, pack, left, right = self._twin_config()
         pack.arch = []
         left.arch = []  # every device
@@ -1039,9 +1032,7 @@ class TestEmittedInventory:
         assert inventory["total_descriptor_count"] == 1
 
     def test_inventory_gives_every_member_the_generic_rows(self):
-        """A generic pack ships in every member's folder, so each member's row holds the
-        generic's descriptors, its own, and the wildcard's; a member of no generic row
-        gets only its own and the wildcard's."""
+        """Each member's row holds the generic's descriptors, its own, and the wildcard's."""
         generic = make_pack(
             name="generic",
             arch=["gfx11-generic"],
@@ -1762,9 +1753,6 @@ class TestPackagedHsacoKdp:
     def test_hsaco_kernel_inheriting_a_generic_pack_arch_conforms_to_the_pack_rule(
         self,
     ):
-        """hkp_pack requires an own arch on an hsaco kernel, so the generator stamps the
-        whole pack list; that stamp lists every generic of the pack and only entries the
-        pack lists, which is the pack rule the config loader enforces."""
         from codegen.config_loader import _check_generic_arch
 
         kernel = make_kernel(

@@ -1,17 +1,4 @@
-"""LLVM generic GPU targets as data: the shared table and the tier algebra over it.
-
-One JSON document (projects/hipdnn/plugin_sdk/data/gpu_generic_targets.json) maps each
-generic target (`gfx11-generic`) to the concrete processors it supports. The C++ loader
-reads the same document through a generated header; this module is the Python side.
-
-Membership is data, never name shape: a generic-shaped name that the table does not list
-(an "unknown generic") expands to the empty set and matches no device. Provenance of the
-table is validated once, by the CMake validator, not here.
-
-An `arch` list ranks per device: EXPLICIT (the device's own base id) beats GENERIC (a table
-generic containing the device) beats UNRESTRICTED (an empty list, any device). Lists are
-sequences of strings.
-"""
+"""Generic GPU target table and arch-tier algebra; see descriptor-packaging/README.md."""
 
 import json
 from pathlib import Path
@@ -36,7 +23,7 @@ _GENERIC_SUFFIX = "-generic"
 
 
 class GenericTargets:
-    """The generic target table: generic name -> member processor names, document order."""
+    """Generic name -> member processor names."""
 
     def __init__(self, path, generics):
         self._path = Path(path)
@@ -94,7 +81,7 @@ class GenericTargets:
         return name in self._generics
 
     def members(self, name):
-        """Members of generic @name in document order; KeyError when it is not listed."""
+        """Members of generic @name; KeyError when unlisted."""
         return self._generics[name]
 
     def names(self):
@@ -102,7 +89,7 @@ class GenericTargets:
 
 
 def is_generic_shaped(name):
-    """Shape only (`...-generic`); use GenericTargets.has for membership."""
+    """Name shape only; GenericTargets.has tests membership."""
     return name.endswith(_GENERIC_SUFFIX)
 
 
@@ -116,10 +103,7 @@ def _prefix_match(device, entry):
 
 
 def entry_tier(entry, device, table):
-    """Tier of one list entry for @device (features allowed), or None when it admits it.
-
-    A generic-shaped entry is never EXPLICIT, so an unknown generic matches no device.
-    """
+    """Tier of one entry for @device, or None."""
     if is_generic_shaped(entry):
         if table.has(entry) and _strip_features(device) in table.members(entry):
             return TIER_GENERIC
@@ -130,7 +114,7 @@ def entry_tier(entry, device, table):
 
 
 def list_tier(entries, device, table):
-    """Best tier of @entries for @device; an empty list is UNRESTRICTED; None = no match."""
+    """Best tier of @entries for @device; None = no match."""
     if not entries:
         return TIER_UNRESTRICTED
     best = None
@@ -144,10 +128,7 @@ def list_tier(entries, device, table):
 
 
 def expand(entries, table):
-    """The set of device ids @entries admits; None (unrestricted) for an empty list.
-
-    A generic stands for its members; an unknown generic contributes nothing.
-    """
+    """Device ids @entries admits; None for an empty list."""
     if not entries:
         return None
     devices = set()
@@ -161,11 +142,7 @@ def expand(entries, table):
 
 
 def covers(outer, inner, table):
-    """Is every device @inner admits also admitted by @outer?
-
-    Empty @outer covers anything and empty @inner is covered by anything; an unknown
-    generic in @inner expands to nothing and is covered vacuously.
-    """
+    """Does @outer admit every device @inner admits?"""
     expanded_outer = expand(outer, table)
     expanded_inner = expand(inner, table)
     if expanded_outer is None or expanded_inner is None:
@@ -174,11 +151,7 @@ def covers(outer, inner, table):
 
 
 def compete(a, b, table):
-    """Do the lists tie on some candidate device (both match it at the same tier)?
-
-    Candidates are every explicit id in either list and every member of every table
-    generic in either list. Two empty lists compete.
-    """
+    """Do the lists tie at one tier on some device?"""
     if not a and not b:
         return True
     candidates = set()
@@ -196,5 +169,5 @@ def compete(a, b, table):
 
 
 def admits_target(entries, target, table):
-    """Does @entries admit @target: empty, listing it literally, or a generic containing it."""
+    """Does @entries admit @target?"""
     return list_tier(entries, target, table) is not None

@@ -127,7 +127,7 @@ class ArchResult:
     out_dir: Path
     kpack_path: Path
     skipped: bool = False
-    # Archives of the generic passes copied into this member's folder.
+    # Generic-pass archives copied into this member's folder.
     generic_kpack_paths: tuple = ()
 
 
@@ -317,6 +317,9 @@ def _compile_ukd_variant(
             "consumers": consumers,
         }
     elif kind == "hsaco":
+        # The packer never reads the object's target processor; hsaco kernels declare
+        # `arch` and are tested on device (descriptor-packaging/README.md,
+        # "hsaco kernels and arch").
         file = ks["file"]
         symbol = ks["symbol"]
         path = resolve_hsaco_file(source_root, rel_dir, file, where)
@@ -420,8 +423,7 @@ def _selected_entries(doc, arch, ukd_by_id, generic_targets):
     because the walk needs its `path.name` for the error context and for the
     shipped filename as well as its `rel_dir` for the variant key.
 
-    All three arch filters live here and nowhere else (the KDP-level one is
-    `kdp_arch_matches`, the two UKD-level ones `arch_matches`), so the prewarm and the
+    All three arch filters live here and nowhere else, so the prewarm and the
     serial walk cannot select different variant sets. `ukd_by_id` arrives as a
     parameter rather than being reached for through `flat`, which leaves the
     generator no way to enumerate a standalone UKD no KDP references: an orphan
@@ -1462,15 +1464,10 @@ def pack_arch(
 
 
 def _merge_generic_into_member(generic_dir, member_dir, staging_dir):
-    """Merge one generic pass's tree into a member shard folder, atomically.
+    """Merge a generic pass's tree into a member folder atomically via `staging_dir`.
 
-    Builds `staging_dir` as a copy of `member_dir` (when it exists) plus every
-    file of `generic_dir`, then swaps it over `member_dir`. A destination that
-    already exists is skipped when its bytes equal the source's (the shared
-    engine/dispatch/matcher/KMD descriptors both passes emit verbatim) and
-    refused when they differ: two shards whose member sets intersect would then
-    write one path with different content. Any failure removes the staging dir
-    and leaves `member_dir` exactly as it was.
+    An existing destination file is skipped when byte-identical and refused when
+    it differs. Any failure leaves `member_dir` untouched.
     """
     generic_dir, member_dir, staging_dir = (
         Path(generic_dir),
@@ -1546,16 +1543,11 @@ def run_pipeline(
     of a pass-through kind runs no producer and is emitted as authored, so a
     root that holds only pass-through UKDs writes descriptors and no archive. An
     arch with no surviving KDP is skipped cleanly (no folder, no kpack) and
-    logged with 'no kernels for <arch>, skipping' (a selected member whose KDPs are
-    all generic still gets a folder, from the generic copy); every arch skipping
+    logged with 'no kernels for <arch>, skipping'; every arch skipping
     is a failure, not a pack. Empty arch list installs nothing (exit 0).
 
-    `generic_targets_json` names the generic target table. After the concrete
-    passes, every table generic that some KDP lists and that contains a selected
-    arch is compiled and packed ONCE (a pure function of the source tree, the
-    generic's spelling, hipcc and the table), and that one tree is merged into
-    the folder of every selected member whose concrete pass did not fail. A
-    generic never gets a folder of its own under `out_root`.
+    `generic_targets_json` is the generic target table; generic passes are
+    merged into member folders (descriptor-packaging/README.md).
     """
     out_root = Path(out_root)
     results = {}

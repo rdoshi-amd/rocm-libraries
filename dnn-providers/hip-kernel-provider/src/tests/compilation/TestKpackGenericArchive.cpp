@@ -26,7 +26,6 @@ using hip_kernel_provider::testing::PackedKernelSource;
 using hip_kernel_provider::testing::readPackedKernelSource;
 using hip_kernel_provider::testing::unitKpackRoot;
 
-/// The generic named by test_descriptors/shared/conv_fwd/conv_fwd_generic.kdp.json.
 constexpr const char* GENERIC = "gfx11-generic";
 constexpr const char* GENERIC_KDP = "conv_fwd_generic.kdp.json";
 
@@ -40,8 +39,7 @@ std::vector<std::string> archivesOf(const std::filesystem::path& kpackFile)
     return arches;
 }
 
-/// Packed arch shards present in this tree: every directory of the packed set holding a
-/// kpack/ child. Enumerated from the filesystem so the test needs no device.
+/// Packed arch shards in this tree, enumerated from the filesystem (no device needed).
 std::vector<std::filesystem::path> packedShards()
 {
     std::vector<std::filesystem::path> shards;
@@ -92,16 +90,13 @@ TEST(TestPackedGenericArchive, ShardsCarryTheGenericArchiveExactlyWhenTheirArchI
         PackedKernelSource packed;
         ASSERT_NO_FATAL_FAILURE(readPackedKernelSource(shard, GENERIC_KDP, packed));
 
-        // The generic descriptor points at an archive keyed by the generic alone.
         const std::vector<std::string> keys = archivesOf(packed.archive);
         ASSERT_EQ(keys, std::vector<std::string>{GENERIC});
 
-        // KpackModuleCache serves this shard's device from that archive's generic key.
         const std::string* selected = KpackModuleCache::selectArch(keys, arch);
         ASSERT_NE(selected, nullptr);
         EXPECT_EQ(*selected, GENERIC);
 
-        // The device's own archive keeps winning when both are visible.
         std::vector<std::string> both;
         for(const auto& file : kpackFiles)
         {
@@ -115,7 +110,6 @@ TEST(TestPackedGenericArchive, ShardsCarryTheGenericArchiveExactlyWhenTheirArchI
         ASSERT_NE(preferred, nullptr);
         EXPECT_EQ(*preferred, arch);
 
-        // The generic key resolves the descriptor's own toc_key to a code object.
         KpackArchive archive;
         KpackError error;
         ASSERT_TRUE(archive.open(packed.archive, error)) << error.codeName;

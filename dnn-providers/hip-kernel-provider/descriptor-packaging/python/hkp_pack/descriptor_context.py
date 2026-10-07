@@ -209,12 +209,7 @@ def declarations(bundles: list[Bundle], schemas: dict) -> dict:
 
 
 def archive_arch(entry_arch: list, target: str, generic_targets) -> str:
-    """The spelling to read a kpack archive with for @target.
-
-    @target itself when @entry_arch lists it; otherwise the first generic in
-    @entry_arch that contains it (the archive of a generic copy is keyed by the
-    generic's name); otherwise @target.
-    """
+    """The arch spelling of the kpack archive for @target (a generic copy is keyed by its generic)."""
     if target in entry_arch:
         return target
     for entry in entry_arch:
@@ -228,9 +223,6 @@ def consumer_records(
 ) -> dict:
     """UKD id -> canonical records over EVERY consumer inside the caller root.
 
-    An entry is a consumer of @arch when its arch is empty, lists @arch, or
-    names a generic of the table that contains @arch.
-
     Shared standalone UKDs carry all KDP/engine/KMD bindings, not just the selected
     bundle's. Agreement stays the sole record-construction authority.
     """
@@ -239,8 +231,7 @@ def consumer_records(
         header = {k: v for k, v in bundle.kdp_doc.items() if k != "kernelDescriptors"}
         header["arch"] = [arch]
         for entry in bundle.entries:
-            # The literal-arch test is not subsumed by `admits_target`: a generic
-            # copy's @arch is the generic's own spelling, which names no device.
+            # Literal test kept: a generic copy's @arch is the generic's own name, no device.
             if (
                 entry.arch
                 and arch not in entry.arch

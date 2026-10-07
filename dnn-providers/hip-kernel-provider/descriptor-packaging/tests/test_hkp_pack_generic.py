@@ -1,15 +1,4 @@
-"""Generic GPU targets at pack time.
-
-A KDP whose `arch` names a table generic (`gfx11-generic`) is compiled and packed
-once, under the generic's spelling, and that one tree is copied into the folder of
-every selected member of the generic. The rules that keep that sound (a generic and
-its member in one list, a UKD's arch under a generic KDP, the reverse direction, an
-unknown name, rocKE) are validation errors; the merge into a member folder is atomic
-and refuses two shards that would write one path with different bytes.
-
-The quick tier packs `embedded_source` and authored `hsaco` UKDs, which need no
-compiler. The hipcc tier at the end compiles for real and is not quick.
-"""
+"""Generic GPU targets at pack time; see descriptor-packaging/README.md."""
 
 import copy
 import json
@@ -68,7 +57,6 @@ def _embedded(uid, arch=None):
     return ukd
 
 
-# What a producing UKD must carry: the consumer declaration its engine's KMD checks.
 _CONTRACT = {
     "specialization_contract": {
         "schema_version": 1,
@@ -100,11 +88,7 @@ def _kdp(kid, arch, ukds):
 
 
 def _root(tmp_path, empty_arch_fixture, kdps, standalone=()):
-    """A source root: the fixture's shared descriptors plus the given KDPs.
-
-    `kdps` maps a file stem to a KDP document, `standalone` maps a file stem to a
-    standalone UKD document.
-    """
+    """A source root: the fixture's shared descriptors plus KDP and standalone-UKD docs by stem."""
     root = tmp_path / "src"
     root.mkdir()
     for path in empty_arch_fixture.iterdir():
@@ -131,7 +115,6 @@ def _pack(root, tmp_path, arches, rocm_kpack_dir, table=GENERIC_TARGETS_JSON):
 
 
 def _files(folder):
-    """Relative path -> bytes of every file under `folder`."""
     return {
         p.relative_to(folder).as_posix(): p.read_bytes()
         for p in sorted(folder.rglob("*"))
@@ -141,9 +124,6 @@ def _files(folder):
 
 def _load(root, table=GENERIC_TARGETS):
     return load_flat_input(root, table, log=lambda *_: None)
-
-
-# --- layout ------------------------------------------------------------------
 
 
 @pytest.mark.quick
@@ -163,8 +143,6 @@ def test_generic_entries_land_in_every_selected_member_folder_only(
     results = _pack(root, tmp_path, ["gfx942", MEMBER_A, MEMBER_B], rocm_kpack_dir)
 
     out = tmp_path / "out"
-    # One folder per selected arch: none for the generic or an unselected member, and no
-    # staging directory left beside them.
     assert sorted(p.name for p in out.iterdir()) == [MEMBER_A, MEMBER_B, "gfx942"]
     assert not (out / UNSELECTED_MEMBER).exists()
     assert not (out / GENERIC).exists()
@@ -172,7 +150,6 @@ def test_generic_entries_land_in_every_selected_member_folder_only(
         arch: out / arch for arch in ("gfx942", MEMBER_A, MEMBER_B)
     }
 
-    # The generic KDP ships verbatim into each member; a nonmember never gets it.
     for member in (MEMBER_A, MEMBER_B):
         kdp = _read(out / member / "g.kdp.json")
         assert kdp["arch"] == [GENERIC]
@@ -183,18 +160,15 @@ def test_generic_entries_land_in_every_selected_member_folder_only(
     ).read_bytes()
     assert not (out / "gfx942" / "g.kdp.json").exists()
 
-    # Concrete content stays with its own arch.
     assert (out / "gfx942" / "c.kdp.json").is_file()
     assert not (out / MEMBER_A / "c.kdp.json").exists()
     assert (out / MEMBER_B / "explicit.kdp.json").is_file()
     assert not (out / MEMBER_A / "explicit.kdp.json").exists()
 
-    # An empty-arch KDP is not part of the generic pass.
     generic_tree = tmp_path / "inter" / ".generic-out" / GENERIC
     assert (generic_tree / "g.kdp.json").is_file()
     assert not (generic_tree / "wild.kdp.json").exists()
 
-    # Shared engine/dispatch/matcher files are identical in every folder.
     shared = [p for p in root.iterdir() if p.name.endswith(_SHARED_SUFFIXES)]
     assert shared
     for arch in ("gfx942", MEMBER_A, MEMBER_B):
@@ -222,9 +196,6 @@ def test_generic_entry_is_not_materialized_when_no_member_is_selected(
     assert not (out / "gfx942" / "g.kdp.json").exists()
     assert not (tmp_path / "inter" / ".generic-out").exists()
     assert not (tmp_path / "inter" / GENERIC).exists()
-
-
-# --- merge guard and failure policy ------------------------------------------
 
 
 @pytest.mark.quick
@@ -312,10 +283,7 @@ def test_a_failed_generic_pass_leaves_no_member_copy(
 def test_generic_copies_of_every_producer_are_equal_across_separate_builds(
     tmp_path, empty_arch_fixture, hsaco_fixture_dir, rocm_kpack_dir
 ):
-    """An embedded and an hsaco generic entry, packed once for gfx1100 and once for
-    gfx1151 from separate roots: the member folders hold identical files, so the
-    copies per-arch shard builds produce collapse to one. Nothing of the build's
-    target list may leak into the generic copy."""
+    """Generic copies from separate per-arch builds are identical; the build's targets never leak in."""
     hsaco = _hsaco_ukd("ukd-hsaco", [GENERIC])
     folders = {}
     for member in (MEMBER_A, MEMBER_B):
@@ -334,9 +302,6 @@ def test_generic_copies_of_every_producer_are_equal_across_separate_builds(
         folders[member] = _files(base / "out" / member)
     assert any(name.endswith(".kpack") for name in folders[MEMBER_A])
     assert folders[MEMBER_A] == folders[MEMBER_B]
-
-
-# --- authored hsaco under a generic ------------------------------------------
 
 
 @pytest.mark.quick
@@ -362,9 +327,6 @@ def test_hsaco_under_a_generic_packs_under_the_generic_key_into_every_member_fol
         assert bytes(archive.get_kernel(ks["toc_key"], GENERIC)) == authored
         assert archive.get_kernel(ks["toc_key"], member) is None
     assert _files(out / MEMBER_A) == _files(out / MEMBER_B)
-
-
-# --- arch rules at load -------------------------------------------------------
 
 
 def _rocke_ukd(uid, arch=None):
@@ -397,8 +359,7 @@ _OVERLAPPING_TABLE = {
     },
 }
 
-# (kdp arch, UKD form, UKD arch, table override). UKD form: "inline" puts the UKD in the
-# KDP, "standalone" is a separate .ukd.json the KDP names, "rocke" is an inline rocKE UKD.
+# (kdp arch, UKD form: inline|standalone|rocke, UKD arch, table override)
 _REJECTED = {
     "generic_beside_its_member": ([GENERIC, MEMBER_B], "inline", None, None),
     "two_generics_sharing_a_member": (
@@ -484,11 +445,7 @@ def test_a_consistent_arch_declaration_loads(tmp_path, empty_arch_fixture, case)
     _load(_arch_rule_root(tmp_path, empty_arch_fixture, kdp_arch, form, ukd_arch))
 
 
-# --- hipcc tier (not quick) ---------------------------------------------------
-
-
 def _hip_generic_root(dest, empty_arch_fixture):
-    """The empty_arch hip fixture with its KDP rewritten to the generic."""
     shutil.copytree(empty_arch_fixture, dest)
     kdp_path = dest / "solo.kdp.json"
     doc = _read(kdp_path)
@@ -533,9 +490,7 @@ def test_generic_hip_archive_is_keyed_by_the_generic_spelling(
 def test_compiled_agreement_holds_on_a_generic_copy(
     tmp_path, empty_arch_fixture, hipcc, rocm_kpack_dir
 ):
-    """A shipped generic copy carries the generic as its literal arch, which names no
-    device: `consumer_records` must still count its own entry as a consumer, or the
-    record lookup for the copy's kernel raises."""
+    """A generic copy's literal arch names no device; `consumer_records` must still count it."""
     from hkp_pack.desk_check import compiled_agreement
 
     root = _hip_generic_root(tmp_path / "src", empty_arch_fixture)
@@ -551,11 +506,7 @@ def test_compiled_agreement_holds_on_a_generic_copy(
 def test_generic_pack_is_byte_identical_across_separate_per_arch_builds(
     tmp_path, empty_arch_fixture, hipcc, rocm_kpack_dir, monkeypatch
 ):
-    """Three separate builds of one hip root -- GPU_TARGETS gfx1100 only, gfx1151
-    only, and both -- each with its own out root, inter root, cwd and absolute copy
-    of the source. Every file of the generic entry is identical across all of them
-    and across the member folders of the two-target build: the copies a real
-    per-arch shard build produces must collapse to one."""
+    """Separate per-arch builds (own roots, cwd, source copy) yield identical generic files."""
     builds = {}
     for label, arches in (
         ("only_a", [MEMBER_A]),

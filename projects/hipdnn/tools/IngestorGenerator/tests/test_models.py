@@ -120,7 +120,6 @@ class TestIngestorConfigDerivation:
         assert config.device_fixture_arch == "gfx1201"
 
     def test_device_fixture_arch_of_a_generic_pack_is_its_first_member(self):
-        """A generic names no device; a fixture claiming one matches nothing."""
         config = make_minimal_config(packs=[make_pack(arch=["gfx11-generic"])])
         assert config.device_fixture_arch == "gfx1100"
 

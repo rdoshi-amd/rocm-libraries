@@ -79,8 +79,7 @@ def compile_env():
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(text)
 
-    # GpuGenericTargetsTable.hpp: rendered as plugin_sdk/CMakeLists.txt does, from the
-    # one JSON table.
+    # GpuGenericTargetsTable.hpp is rendered from the JSON table, as plugin_sdk/CMakeLists.txt does.
     table_in = (plugin_sdk / ".." / "cmake" / "GpuGenericTargetsTable.hpp.in").resolve()
     table_json = (plugin_sdk / ".." / "data" / "gpu_generic_targets.json").resolve()
     if not (table_in.is_file() and table_json.is_file()):

@@ -346,7 +346,6 @@ class TestTheDeskCheckIdentityIsEngineWideAndArchAware:
     @pytest.mark.parametrize(
         ("left_arch", "right_arch"),
         [
-            # The better tier outranks the other on its own device: no tie.
             (None, ["gfx950"]),
             (["gfx11-generic"], ["gfx1151"]),
         ],
@@ -1228,8 +1227,7 @@ class TestRealArchiveSelectedConsumer:
 
 @pytest.mark.needs_rocm_kpack
 class TestAGenericDocumentIsReadWithItsGenericArchiveKey:
-    """The archive of a generic copy is keyed by the generic's name, so a member being
-    checked reads it under that key."""
+    """A generic copy's archive is keyed by the generic's name."""
 
     @staticmethod
     def _entry(arch):
@@ -1270,7 +1268,6 @@ class TestAGenericDocumentIsReadWithItsGenericArchiveKey:
         generic.origin_dir = str(tmp_path)
         assert payloads.read(generic, "gfx1151") == _PAYLOAD
 
-        # The control: a document naming the member has no member-keyed archive here.
         member = self._entry(["gfx1151"])
         member.origin_dir = str(tmp_path)
         with pytest.raises(gate_module.GateError):

@@ -387,12 +387,9 @@ private:
     /// than completing each kernel's metadata again on every graph.
     void validateAndIndexPacks()
     {
-        // Two kernels may share a tuple when no single device can see both at the same arch
-        // tier -- the per-arch shard layout, and an explicit or generic kernel beside a
-        // less specific one, which buildCatalog shadows per device. Uniqueness is therefore
-        // per competing-arch group, not per engine: the tuple is the catalog key, and a
-        // catalog is built for one device. Keyed by the tuple (an ordered map, so it already
-        // orders) rather than scanned, which would be quadratic.
+        // Two kernels may share a tuple when no single device sees both at the same arch
+        // tier (per-arch shards, or a more specific kernel that buildCatalog shadows
+        // per device). Uniqueness is per competing-arch group, keyed by the tuple.
         std::map<MetadataValues, std::vector<std::vector<std::string>>> archesClaimingTuple;
 
         _definitions.reserve(_packs.size());
@@ -681,11 +678,8 @@ private:
         return catalog;
     }
 
-    /// Among admitted entries sharing a metadata tuple, keeps only those whose arch list
-    /// ranks best for the device (EXPLICIT over GENERIC over UNRESTRICTED), preserving
-    /// catalog order. Runs after matcher admission, so a kernel a matcher declined never
-    /// hides a lower-tier one. Uniqueness at construction guarantees at most one entry per
-    /// tuple per tier on any device.
+    /// Per metadata tuple, keeps only the entries with the best arch tier for the device.
+    /// Runs after matcher admission, so a declined kernel never hides a lower-tier one.
     static void shadowByArchTier(Catalog& catalog, const MatchContext& context)
     {
         auto& entries = catalog.entries;
@@ -704,7 +698,6 @@ private:
         constexpr int SHADOWED = -1;
         std::vector<int> tiers;
         tiers.reserve(entries.size());
-        // Index of the best-tier entry per tuple; the keys point into entries.
         std::map<const MetadataValues*, size_t, ByMetadata> winners;
         for(size_t i = 0; i < entries.size(); ++i)
         {
@@ -718,7 +711,6 @@ private:
             }
         }
 
-        // Name every loser's winner before any entry moves.
         bool anyShadowed = false;
         for(size_t i = 0; i < entries.size(); ++i)
         {
@@ -739,8 +731,7 @@ private:
             return;
         }
 
-        // remove_if tests each element in place before any move reaches it, so its
-        // position indexes tiers.
+        // remove_if tests each element in place before moving, so its position indexes tiers.
         entries.erase(std::remove_if(entries.begin(),
                                      entries.end(),
                                      [&](const KernelDefinition& entry) {

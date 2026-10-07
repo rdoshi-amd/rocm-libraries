@@ -1,8 +1,4 @@
-"""The Python tier algebra over the shared generic target table.
-
-Literal cases per outcome class; this test locates the table itself rather than through
-conftest.py.
-"""
+"""The Python tier algebra over the shared generic target table."""
 
 import json
 from pathlib import Path

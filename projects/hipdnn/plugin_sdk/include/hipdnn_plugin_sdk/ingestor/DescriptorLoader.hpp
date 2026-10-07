@@ -684,8 +684,7 @@ inline std::string describeArch(const std::vector<std::string>& arch)
     return text + "]";
 }
 
-/// A device both table entries @p x and @p y cover when either is a table generic and the
-/// other is a member it contains or a generic sharing a member; empty when none.
+/// A device both table entries @p x and @p y cover, or empty.
 inline std::string sharedGenericMember(const std::string& x, const std::string& y)
 {
     const auto* generic = findGenericTarget(x);
@@ -708,10 +707,8 @@ inline std::string sharedGenericMember(const std::string& x, const std::string& 
     return {};
 }
 
-/// Why @p kernelArch breaks the generic rules against its pack's @p packArch, or empty.
-/// A kernel may name a generic only if the pack lists it. When the pack lists generics, a
-/// kernel with an arch of its own must list every one of them and only entries the pack
-/// lists. A kernel with no arch inherits the pack's and is never in violation.
+/// Why @p kernelArch breaks the generic rules against its pack's @p packArch, or empty: a
+/// kernel with its own arch must list every pack generic and only entries the pack lists.
 inline std::string genericArchViolation(const std::vector<std::string>& packArch,
                                         const std::vector<std::string>& kernelArch)
 {

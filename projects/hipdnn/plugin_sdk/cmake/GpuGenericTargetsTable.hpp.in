@@ -11,7 +11,7 @@
 namespace hipdnn_plugin_sdk::generated
 {
 
-/// One LLVM generic processor and the processors it supports, in document order.
+/// One LLVM generic processor and its member processors.
 struct GenericTargetRow
 {
     std::string_view name;
@@ -20,7 +20,6 @@ struct GenericTargetRow
 };
 
 // clang-format off
-// Constexpr tables of string_view; arrays keep the data in static storage with no allocation.
 // NOLINTBEGIN(modernize-avoid-c-arrays)
 @HIPDNN_GENERIC_TARGET_MEMBER_ARRAYS@
 inline constexpr GenericTargetRow GENERIC_TARGET_ROWS[] = {

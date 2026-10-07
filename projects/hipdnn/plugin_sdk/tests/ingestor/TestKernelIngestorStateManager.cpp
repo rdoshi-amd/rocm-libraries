@@ -314,11 +314,8 @@ TEST(TestKernelIngestorStateManager, OffersAnUnstampedKernelEverywhereItsPackRea
     }
 }
 
-/// Packs share a tuple whenever no device ranks them at the same arch tier. One tuple
-/// offered at all three tiers keeps, per device, only the best: EXPLICIT over GENERIC over
-/// UNRESTRICTED. Every pack order is exercised so a keep-the-first-inserted shortcut fails,
-/// and each device is asked twice, interleaved, so the second answer comes from the
-/// per-(graph, device) catalog cache and must not be another device's.
+/// One tuple offered at all three tiers keeps only the best per device. Every pack order
+/// and an interleaved second query per device (served from the catalog cache) are exercised.
 TEST(TestKernelIngestorStateManager, KeepsOnlyTheBestArchTierOfASharedTuplePerDevice)
 {
     const ScopedSymbols symbols("test.graph", acceptGraph, "test.kernel", countingFloatKernels);
@@ -364,8 +361,7 @@ TEST(TestKernelIngestorStateManager, KeepsOnlyTheBestArchTierOfASharedTuplePerDe
     }
 }
 
-/// Same generic, same tuple: every member device would rank both at the GENERIC tier, so
-/// nothing could break the tie.
+/// Same generic, same tuple: both rank GENERIC on every member, so the tie is rejected.
 TEST(TestKernelIngestorStateManager, RejectsATupleSharedByTwoPacksAtTheSameGenericTier)
 {
     const ScopedSymbols symbols("test.graph", acceptGraph, "test.kernel", countingFloatKernels);
@@ -386,8 +382,6 @@ TEST(TestKernelIngestorStateManager, RejectsATupleSharedByTwoPacksAtTheSameGener
                  std::invalid_argument);
 }
 
-/// Kernel matchers that decline the explicit kernel by name, so the better-tier kernel is
-/// never admitted.
 inline bool declineTheExplicitKernel(const MatchContext& context,
                                      const BoundTokens& bound,
                                      const KernelDefinition& kernel)
@@ -395,8 +389,7 @@ inline bool declineTheExplicitKernel(const MatchContext& context,
     return kernel.name != "kernel_gfx942" && acceptFloatKernels(context, bound, kernel);
 }
 
-/// Shadowing compares only entries a matcher admitted. A better-tier kernel the
-/// matcher declined must not hide the lower-tier one that remains.
+/// A better-tier kernel a matcher declined must not hide the lower-tier one.
 TEST(TestKernelIngestorStateManager, ADeclinedBetterTierKernelDoesNotHideALowerTierOne)
 {
     const ScopedSymbols symbols("test.graph", acceptGraph, "test.kernel", declineTheExplicitKernel);
@@ -428,9 +421,7 @@ TEST(TestKernelIngestorStateManager, ADeclinedBetterTierKernelDoesNotHideALowerT
     }
 }
 
-/// The winner cache is read back through the catalog, so a record naming a shadowed kernel
-/// cannot resurrect it: the record does not cover the surviving explicit kernel, so it is
-/// declined and the heuristic orders the catalog.
+/// A winner-cache record naming a shadowed kernel cannot resurrect it; it is declined.
 TEST(TestKernelIngestorStateManager, AWinnerRecordNamingAShadowedKernelFallsBackToHeuristicOrdering)
 {
     const ScopedSymbols symbols("test.graph", acceptGraph, "test.kernel", countingFloatKernels);
@@ -459,7 +450,6 @@ TEST(TestKernelIngestorStateManager, AWinnerRecordNamingAShadowedKernelFallsBack
     ASSERT_EQ(baseline.entries.size(), 2U);
     ASSERT_FALSE(baseline.orderedFromRecord);
 
-    // The shadowed kernel is the record's fastest; the surviving explicit kernel is absent.
     const WinnerRecord record{
         RankedEntry{testId(0x93), anywhere.id, DISPATCH_ID, 0.1},
         RankedEntry{testId(0x96), anywhere.id, DISPATCH_ID, 0.2},

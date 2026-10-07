@@ -337,8 +337,7 @@ def _dedup_key(metadata: dict, config: IngestorConfig) -> str:
     """Identity of a descriptor as the matcher sees it: the completed tuple,
     not the emitted document.
 
-    Architecture is not part of this key; `build_kdp` decides competition against
-    the arch coverage recorded beside each key.
+    Architecture is not part of this key; `build_kdp` compares arch separately.
     """
     return json.dumps(_completed_metadata(metadata, config), sort_keys=True)
 
@@ -358,11 +357,7 @@ def _candidate_identity(kernel: KernelSpec) -> str:
 
 
 def _arch_competes(left: list, right: list) -> bool:
-    """Whether two arch coverages tie on some device: both select it at the same
-    tier (explicit, generic, or unrestricted), so the matcher would see one tuple
-    twice there. A device where one outranks the other is not a collision: an
-    explicit entry beats a generic containing it, which beats an empty list.
-    Mirrors ``generic_targets.compete`` of the packer."""
+    """Whether two arch lists tie on some device at the same tier."""
     return gtmod.compete(left, right, gtmod.default_table())
 
 
@@ -454,11 +449,8 @@ def build_kdp(
     if config.is_multi_pack:
         matchers.insert(0, ids[("operation_umd", pack_index)])
     # Generation expressions targeting one engine may overlap, so a shared
-    # tuple has four outcomes: coverage that never ties on a device (disjoint,
-    # or an explicit entry against a generic or empty list it outranks) is not
-    # a duplicate; competing coverage with the same candidate and equal arch
-    # de-duplicates here; a different candidate, or unequal coverage, is
-    # refused.
+    # tuple is a duplicate only when arch coverage competes: the same candidate
+    # with equal arch de-duplicates, anything else is refused.
     kernel_descriptors = []
     if seen_metadata is None:
         seen_metadata = {}
@@ -536,9 +528,7 @@ def build_kdp(
             "priority": kernel.priority,
         }
         # hkp_pack validates the kernel's own arch for hsaco and rejects a
-        # wildcard, so the inherited pack arch is stated on the descriptor. The
-        # whole pack list is the one stamp that satisfies the generic-pack rule
-        # (list every generic of the pack, only entries the pack lists).
+        # wildcard, so the inherited pack arch is stated on the descriptor.
         if kernel.kernel_source.kind == KERNEL_SOURCE_KIND_HSACO:
             entry["arch"] = arch
         elif kernel.arch:
@@ -623,11 +613,8 @@ def emitted_inventory(config: IngestorConfig, kdp_documents: list) -> dict:
     lowered to ``kpack`` first. A descriptor with no ``arch`` is filed under
     its pack's; a pack with none under `ARCH_WILDCARD`.
 
-    A table generic's row is shared by every member of the generic: each member's
-    row is created if absent and holds its own descriptors, those of every
-    generic row containing it, and the wildcard row's. A wildcard entry ships on
-    every device too, so every non-wildcard row also takes the wildcard row.
-    These unions are one way only.
+    Each generic's descriptors also fill the rows of its members; the wildcard
+    row fills every row.
     """
     arches: dict[str, dict] = {}
 

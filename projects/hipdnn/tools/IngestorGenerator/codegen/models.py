@@ -389,8 +389,7 @@ class IngestorConfig:
     def device_fixture_arch(self) -> str:
         """Architecture named by the emitted matcher-test device fixture: the
         first pack's first arch, or `DEFAULT_FIXTURE_ARCH` when the config
-        restricts none. A generic names no device, so it stands for its first
-        table member."""
+        restricts none; a generic stands for its first member."""
         first_pack_arch = self.packs[0].arch if self.packs else []
         if not first_pack_arch:
             return DEFAULT_FIXTURE_ARCH

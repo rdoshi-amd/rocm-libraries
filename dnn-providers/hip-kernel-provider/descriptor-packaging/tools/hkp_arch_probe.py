@@ -3,14 +3,8 @@
     python3 tools/hkp_arch_probe.py --generic-targets-json <table.json> \\
         --arches "gfx1100;gfx1151" --kdp <path/to/x.kdp.json>
 
-The CMake configure step asks this to decide whether a root is dormant, so it
-must give the packer's own answer: it applies `generic_targets.admits_target`
-(an empty `arch` is a wildcard; an entry admits a target it names or a table
-generic containing it) to each selected arch.
-
-Only FALSE is authoritative. A KDP that does not parse, or whose `arch` is not
-an array of strings, or that names a generic absent from the table, prints TRUE so the packer reports what is wrong with it.
-Exits 0 whenever it answered; non-zero only when the table cannot be read.
+Only FALSE is authoritative: a malformed KDP or unknown generic prints TRUE so the
+packer reports it. Non-zero exit only when the table cannot be read.
 """
 
 import argparse
@@ -18,7 +12,7 @@ import json
 import sys
 from pathlib import Path
 
-# Same shadowing hazard hkp_pack.py's own tool guards against.
+# Same shadowing guard as hkp_pack.py.
 _PKG_ROOT = str(Path(__file__).resolve().parent.parent / "python")
 while _PKG_ROOT in sys.path:
     sys.path.remove(_PKG_ROOT)
@@ -46,8 +40,7 @@ def _covers_any(kdp_path, arches, table):
         return True
     if not entries:
         return True
-    # An unknown generic admits nothing, which would read as a clean absence; the packer
-    # names it as an error, so it must be reached.
+    # An unknown generic would read as absence; the packer must reach it to report it.
     if any(is_generic_shaped(e) and not table.has(e) for e in entries):
         return True
     return any(admits_target(entries, arch, table) for arch in arches)

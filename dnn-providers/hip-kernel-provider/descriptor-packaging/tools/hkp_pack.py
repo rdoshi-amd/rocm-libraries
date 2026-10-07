@@ -115,10 +115,7 @@ def _parse_args(argv):
     p.add_argument(
         "--generic-targets-json",
         required=True,
-        help="The generic GPU target table (gpu_generic_targets.json) shared with "
-        "the loader. GPU_TARGETS stays concrete: every table generic that a KDP "
-        "lists and that contains a selected arch is packed once and copied into "
-        "each selected member's folder.",
+        help="The generic GPU target table (gpu_generic_targets.json).",
     )
     p.add_argument(
         "--kpack-python-dir",

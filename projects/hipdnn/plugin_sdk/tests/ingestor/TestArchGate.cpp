@@ -71,10 +71,8 @@ TEST(TestIngestorArchGate, AdmitsOnlyTheMembersOfAGeneric)
 {
     EXPECT_TRUE(archSupports({"gfx11-generic"}, "gfx1151"));
     EXPECT_TRUE(archSupports({"gfx942", "gfx12-generic"}, "gfx1201"));
-    // Features on the device never change membership.
     EXPECT_TRUE(archSupports({"gfx11-generic"}, "gfx1151:sramecc+:xnack-"));
-    // gfx1154 and gfx1250 are real-looking siblings that no table row lists; membership is
-    // data, so a name that merely shares the family stem is refused.
+    // Siblings no table row lists are refused.
     EXPECT_FALSE(archSupports({"gfx11-generic"}, "gfx1154"));
     EXPECT_FALSE(archSupports({"gfx12-generic"}, "gfx1250:sramecc+"));
     EXPECT_FALSE(archSupports({"gfx9-4-generic"}, "gfx942"));

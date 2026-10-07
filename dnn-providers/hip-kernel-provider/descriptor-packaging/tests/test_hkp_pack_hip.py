@@ -772,8 +772,7 @@ def test_standalone_ukd_shared_by_two_kdps_stored_once(
     # is stored once (deduped by variant_key), not once per referencing KDP.
     src = _copy_fixture(tmp_path, main_fixture)
     # copy.kdp.json is gfx942-only; add the standalone ref to it too, so both it
-    # and pointwise.kdp.json reference the same standalone id on gfx942. The
-    # standalone declares [gfx942, gfx950], so copy.kdp.json lists both.
+    # and pointwise.kdp.json reference the same standalone id on gfx942.
     p = src / "copy.kdp.json"
     doc = _read(p)
     doc["arch"] = ["gfx942", "gfx950"]
@@ -828,9 +827,6 @@ def test_standalone_ukd_referenced_by_a_second_engine_without_declaring_it_fails
 def test_standalone_ukd_referenced_by_wildcard_kdp(
     tmp_path, main_fixture, hipcc, rocm_kpack_dir
 ):
-    # An arch-less standalone UKD (unrestricted) referenced by a wildcard KDP
-    # (arch []) ships in every shard. The fixture's own standalone is authored for
-    # gfx942, so this one is a sibling without an arch.
     src = _copy_fixture(tmp_path, main_fixture)
     wild_doc = _read(src / _STANDALONE_UKD_FILE)
     wild_doc["id"] = "ukd-pointwise-add-f32-b128-wild"

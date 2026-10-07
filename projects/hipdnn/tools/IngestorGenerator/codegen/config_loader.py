@@ -1366,7 +1366,7 @@ def _check_kernel_priority(config: IngestorConfig) -> None:
 
 
 def _generic_table() -> "gtmod.GenericTargets":
-    """The in-repo generic target table, with a read failure surfaced as a ConfigError."""
+    """The generic target table; a read failure is a ConfigError."""
     try:
         return gtmod.default_table()
     except ValueError as exc:
@@ -1374,9 +1374,7 @@ def _generic_table() -> "gtmod.GenericTargets":
 
 
 def _check_arch_list_generics(archs: list, where: str, table) -> None:
-    """Per-list generic rules: an unknown generic-shaped name is an error, and one
-    list may not hold a generic with a member it contains or two generics sharing a
-    member, as the packer does."""
+    """Per-list rules: no unknown generics, no generic beside its member or a generic sharing one."""
     for entry in archs:
         if gtmod.is_generic_shaped(entry) and not table.has(entry):
             raise ConfigError(
@@ -1407,19 +1405,7 @@ def _check_arch_list_generics(archs: list, where: str, table) -> None:
 
 
 def _check_generic_arch(config: IngestorConfig) -> None:
-    """Pre-mint check #4a: the generic-target rules, the packer's own (``hkp_pack``
-    ``validate_generic_arch``) so a config the generator accepts is one the packer
-    accepts.
-
-    Per list: unknown generic names and a generic listed beside its member (or beside
-    a generic sharing a member) are errors. Per pack of any shape: a kernel may not
-    name a generic the pack does not list, an empty pack list included, since it
-    would ship in no shard. In a pack that lists a generic, a kernel with its own
-    non-empty ``arch`` must list every generic of the KDP and only entries the pack
-    lists; a kernel with no own ``arch`` inherits the pack and is unaffected. A hsaco
-    kernel is checked on the list it is stamped with (its own, else the pack's). A
-    rocKE kernel may not sit under a generic, whether the pack's or its own.
-    """
+    """Pre-mint check #4a: the packer's generic-target rules (see descriptor-packaging/README.md)."""
     table = _generic_table()
     for pack in config.packs:
         where = f"pack '{pack.name}'"
@@ -1467,9 +1453,7 @@ def _check_generic_arch(config: IngestorConfig) -> None:
 def _check_kernel_arch_subset_of_pack(config: IngestorConfig) -> None:
     """Pre-mint check #4: a kernel's arch must be a subset of its pack's.
 
-    Mirrors ``DescriptorLoader.hpp``'s ``archCovers(pack.arch, kernel.arch)`` over
-    the expanded device sets (a generic stands for its table members). An empty
-    pack.arch covers everything; an empty kernel.arch inherits it.
+    Mirrors ``DescriptorLoader.hpp``'s ``archCovers`` over expanded device sets.
     """
     table = _generic_table()
     for pack in config.packs:
@@ -1496,8 +1480,7 @@ def _check_arch_shape(config: IngestorConfig) -> list[str]:
 
     A shape violation (``GFX942``, ``" gfx942"``, a feature suffix) is a
     ``ConfigError``, mirroring ``isPlausibleArchBaseId``; a well-formed but
-    unrecognized id (``gfx94``) is a warning; a generic named in the table is
-    recognized. Returns the warnings emitted,
+    unrecognized id (``gfx94``) is a warning. Returns the warnings emitted,
     also raised via ``warnings.warn``.
     """
     messages: list[str] = []

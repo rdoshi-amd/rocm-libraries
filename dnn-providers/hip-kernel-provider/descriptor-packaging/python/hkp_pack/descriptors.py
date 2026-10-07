@@ -66,8 +66,6 @@ class Descriptor:
 @dataclass
 class FlatInput:
     descriptors: list = field(default_factory=list)
-    # The generic target table the root was validated against; every arch rule
-    # downstream (kdp_survives, the pipeline's selection) reads it from here.
     generic_targets: object = None
 
     def by_type(self, dtype):
@@ -132,12 +130,7 @@ def arch_matches(kdp_doc, arch):
 
 
 def kdp_arch_matches(kdp_doc, arch, generic_targets):
-    """Whether a KDP is emitted into the pass for @arch.
-
-    A generic pass (@arch is a table generic) takes literal membership only: an
-    empty-arch KDP is a concrete-shard wildcard and is NOT emitted into the
-    generic copy. Any other arch follows arch_matches.
-    """
+    """Whether a KDP is emitted into the pass for @arch (a generic pass: literal membership only)."""
     if generic_targets.has(arch):
         return arch in (kdp_doc.get("arch") or [])
     return arch_matches(kdp_doc, arch)
@@ -149,8 +142,7 @@ def _arch_subset_ok(ukd_arch, kdp_arch, generic_targets):
     An empty list on either side is a wildcard: a wildcard KDP admits any UKD,
     and a wildcard UKD is admissible under any KDP. Two explicit lists require
     the UKD's expanded device set to lie within the KDP's (a generic stands for
-    its members). The stricter literal rules for generic KDPs live in
-    validate_generic_arch.
+    its members).
     """
     if not ukd_arch or not kdp_arch:
         return True
@@ -532,9 +524,7 @@ def load_flat_input(root, generic_targets, log=print):
     is not one of ours: warn and skip it rather than aborting the pack, so an
     incidental file in the source folder is tolerated. A hidden path -- any
     dot-prefixed segment, or a dot-prefixed filename -- is warned and skipped
-    the same way, so nothing the walk passes over is invisible. `generic_targets`
-    is the loaded GenericTargets table the arch rules are checked against and
-    that the returned FlatInput carries. Raises
+    the same way, so nothing the walk passes over is invisible. Raises
     HkpPackError on any malformed / missing-field / unknown-type /
     dangling-reference descriptor that IS type-tagged.
 
@@ -615,8 +605,7 @@ def _reject_unknown_generics(archs, file_name, table):
 
 
 def _reject_mixed_generic_list(archs, file_name, table):
-    """One list may not hold a generic together with a member it contains, nor
-    two generics that share a member."""
+    """A list may not hold a generic with a member it contains, nor two generics sharing a member."""
     advice = (
         "list one, or author two KDPs (an explicit override plus a generic "
         "fallback are separate packs)"
@@ -640,17 +629,7 @@ def _reject_mixed_generic_list(archs, file_name, table):
 
 
 def validate_generic_arch(flat):
-    """Generic-target rules over every KDP/UKD `arch` in the root.
-
-    Per list: names that look generic but are not in the table are errors, and a
-    list may not mix a generic with a member it contains or two generics sharing
-    a member. Per KDP holding a generic: a UKD with its own arch must list
-    every generic of the KDP and only entries the KDP lists. Per KDP of any
-    shape: a standalone UKD with an empty `arch` (unrestricted) is valid only under
-    a KDP whose `arch` is empty too (an inline UKD with none inherits the KDP's); a UKD may not
-    name a generic the KDP does not list. rocKE does not support generics yet.
-    The loader accepts the lenient forms; this is the stricter packer-side layer.
-    """
+    """Packer-side generic-target rules over every KDP/UKD `arch`; see descriptor-packaging/README.md."""
     table = flat.generic_targets
     ukd_by_id = flat.ukd_by_id()
     for desc in flat.descriptors:
@@ -673,7 +652,7 @@ def validate_generic_arch(flat):
             if isinstance(entry, str):
                 sdesc = ukd_by_id.get(entry)
                 if sdesc is None:
-                    continue  # reported by _validate_references
+                    continue
                 ukd, standalone = sdesc.doc, sdesc
             else:
                 ukd, standalone = entry, None
@@ -708,7 +687,7 @@ def validate_generic_arch(flat):
             else:
                 who = f"inline UKD '{ukd.get('name', ukd.get('id', '?'))}'"
             if standalone is None and not ukd_arch:
-                continue  # an inline UKD with no arch inherits the pack
+                continue  # inline UKD with no arch inherits the KDP's
             lists_all = all(g in ukd_arch for g in kdp_generics)
             only_listed = all(a in kdp_arch for a in ukd_arch)
             if not lists_all or not only_listed:

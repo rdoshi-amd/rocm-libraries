@@ -21,9 +21,7 @@ hipdnn_generate_version_header(hipdnn_plugin_sdk)
 
 target_link_libraries(hipdnn_plugin_sdk INTERFACE hipdnn_flatbuffers_sdk hipdnn_data_sdk)
 
-# Generic GPU target table: one JSON document is the source of truth. It is validated here,
-# turned into a constexpr C++ table at configure time, installed beside the Config for
-# the packer, and read directly by Python tools. Never keep a second copy.
+# Generic GPU target table: data/gpu_generic_targets.json is the single source of truth.
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/ValidateGpuGenericTargets.cmake")
 set(HIPDNN_GPU_GENERIC_TARGETS_JSON_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/data/gpu_generic_targets.json")
 hipdnn_validate_gpu_generic_targets("${HIPDNN_GPU_GENERIC_TARGETS_JSON_SOURCE}")
@@ -37,7 +35,6 @@ set(HIPDNN_GENERIC_TARGET_MEMBER_ARRAYS "")
 set(HIPDNN_GENERIC_TARGET_ROWS "")
 set(HIPDNN_GENERIC_TARGET_ROW_COUNT ${_generic_count})
 math(EXPR _last_generic "${_generic_count} - 1")
-# cmake-lint reports E1120 on foreach(... RANGE ...) arguments, which are valid CMake.
 # cmake-lint: disable=E1120
 foreach(_g RANGE 0 ${_last_generic})
     string(JSON _generic MEMBER "${_generic_targets_json}" generics ${_g})
@@ -60,14 +57,12 @@ configure_file(
     "${CMAKE_CURRENT_BINARY_DIR}/include/hipdnn_plugin_sdk/GpuGenericTargetsTable.hpp" @ONLY
 )
 
-# Build-tree copy next to the build-tree Config; the installed copy sits beside the
-# installed Config, so one CMAKE_CURRENT_LIST_DIR expression serves both.
+# Beside the build-tree Config, as the installed copy sits beside the installed Config.
 set(_generic_targets_build_copy
     "${CMAKE_BINARY_DIR}/${CMAKE_INSTALL_LIBDIR}/cmake/hipdnn_plugin_sdk/gpu_generic_targets.json"
 )
 configure_file("${HIPDNN_GPU_GENERIC_TARGETS_JSON_SOURCE}" "${_generic_targets_build_copy}" COPYONLY)
-# CACHE INTERNAL so sibling subdirectories (the hip-kernel-provider) see it; directory
-# scope would not reach them.
+# CACHE INTERNAL so sibling subdirectories see it.
 set(HIPDNN_PLUGIN_SDK_GPU_GENERIC_TARGETS_JSON "${_generic_targets_build_copy}"
     CACHE INTERNAL "Path to the generic GPU target table JSON shipped with the plugin SDK"
 )
@@ -142,7 +137,6 @@ install(
     COMPONENT Development
 )
 
-# Install the generic target table and its generated C++ form
 install(
     FILES "${HIPDNN_GPU_GENERIC_TARGETS_JSON_SOURCE}"
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/hipdnn_plugin_sdk

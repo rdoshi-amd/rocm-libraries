@@ -1523,8 +1523,6 @@ def _make_embedded(folder, arch=None):
         "priority": 0,
     }
     if arch:
-        # A standalone UKD without an arch is unrestricted, valid only under a KDP
-        # with none; under an arch'd KDP it declares that arch itself.
         standalone["arch"] = list(arch)
     (folder / _STANDALONE_FILE).write_text(
         json.dumps(standalone, indent=2) + "\n",

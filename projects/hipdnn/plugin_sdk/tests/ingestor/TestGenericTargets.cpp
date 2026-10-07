@@ -13,11 +13,6 @@
 #include <hipdnn_plugin_sdk/GpuGenericTargets.hpp>
 #include <hipdnn_plugin_sdk/ingestor/DeviceProperties.hpp>
 
-/**
- * @file TestGenericTargets.cpp
- * @brief The generic GPU target table and the tier algebra over it, as C++ evaluates
- *        them, on the generated constexpr table.
- */
 namespace
 {
 

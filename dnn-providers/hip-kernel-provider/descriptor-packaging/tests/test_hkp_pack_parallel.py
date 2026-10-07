@@ -519,11 +519,7 @@ def test_prewarm_jobs_are_deduped_on_variant_key(corpus):
 
 
 def _call_sites(callee):
-    """`callee` call counts in pipeline.py, keyed by enclosing function.
-
-    Parsed rather than counted as strings: an explanatory comment naming the
-    callee is not a call.
-    """
+    """`callee` call counts in pipeline.py, keyed by enclosing function."""
     tree = ast.parse(inspect.getsource(pipeline))
     counts = {}
     for node in tree.body:
@@ -548,24 +544,13 @@ def _call_sites(callee):
 
 @pytest.mark.quick
 def test_arch_matches_call_sites_are_pinned():
-    """The two UKD-level selection filters live in the generator and nowhere else.
-
-    `arch_matches` is the empty-inherits filter on a UKD. `compile_intermediate`'s
-    KDP disposition call is `kdp_arch_matches`.
-    """
+    """The UKD-level selection filters live in the generator and nowhere else."""
     assert _call_sites("arch_matches") == {"_selected_entries": 2}
 
 
 @pytest.mark.quick
 def test_kdp_arch_matches_call_sites_are_pinned():
-    """The KDP-level filter is in the generator; `compile_intermediate` keeps one call.
-
-    That call is not a filter: it decides KDP disposition -- copy the authored KDP
-    through verbatim -- before the deepcopy the generator would consume. A call in
-    any other pipeline function is a further selection site, which is the
-    divergence a single shared generator exists to make impossible. The
-    `kdp_survives` call lives in descriptors.py, not pipeline.py.
-    """
+    """The KDP-level filter lives in the generator; `compile_intermediate` only decides disposition."""
     assert _call_sites("kdp_arch_matches") == {
         "_selected_entries": 1,
         "compile_intermediate": 1,

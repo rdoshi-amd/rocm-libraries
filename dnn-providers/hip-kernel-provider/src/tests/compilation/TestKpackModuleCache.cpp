@@ -159,7 +159,7 @@ TEST(TestKpackModuleCacheLoad, ReportsAnArchTheArchiveDoesNotHold)
 
 TEST(TestKpackModuleCacheSelectArch, PrefersTheExactDeviceArchOverAGenericKey)
 {
-    // The generic key sorts first, so a first-match-wins over mixed keys would pick it.
+    // The generic key sorts first; first-match-wins would pick it.
     const std::vector<std::string> keys{"gfx11-generic", "gfx1151"};
 
     const auto* selected = KpackModuleCache::selectArch(keys, "gfx1151:sramecc+:xnack-");
@@ -180,9 +180,7 @@ TEST(TestKpackModuleCacheSelectArch, FallsBackToAGenericKeyContainingTheDevice)
 
 TEST(TestKpackModuleCacheSelectArch, DeclinesAKeyThatDoesNotNameTheDevice)
 {
-    // gfx1250 is not a gfx12-generic member however close its name is to the family, and
-    // shape never implies membership: a table-absent generic admits no device, not even the
-    // one it spells.
+    // Name shape never implies membership.
     EXPECT_EQ(KpackModuleCache::selectArch({"gfx12-generic"}, "gfx1250"), nullptr);
     EXPECT_EQ(KpackModuleCache::selectArch({"gfx11-generic", "gfx12-generic"}, "gfx942"), nullptr);
     EXPECT_EQ(KpackModuleCache::selectArch({"gfx99-generic"}, "gfx99-generic"), nullptr);

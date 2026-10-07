@@ -30,9 +30,7 @@ struct DeviceProperties
     int multiProcessorCount = 0; ///< Compute units; 0 if unresolved.
 };
 
-/// How @p arch (a KDP's supported-target list) ranks for @p deviceArch: the best tier of
-/// any entry (see entryTier), or nullopt when no entry admits the device. An empty list is
-/// UNRESTRICTED.
+/// Best entryTier of any entry of @p arch for @p deviceArch; empty list is UNRESTRICTED.
 inline std::optional<ArchTier> archTier(const std::vector<std::string>& arch,
                                         std::string_view deviceArch)
 {
@@ -52,8 +50,6 @@ inline std::optional<ArchTier> archTier(const std::vector<std::string>& arch,
     return best;
 }
 
-/// Does @p arch (a KDP's supported-target list; empty admits everything) admit
-/// @p deviceArch, by any tier?
 inline bool archSupports(const std::vector<std::string>& arch, std::string_view deviceArch)
 {
     return archTier(arch, deviceArch).has_value();
@@ -69,8 +65,7 @@ inline bool listAdmits(const std::vector<std::string>& list, std::string_view de
     });
 }
 
-/// Calls @p visit with every device id in @p entry's expansion (a generic's members, an
-/// explicit entry itself, nothing for an unknown generic) until it returns true.
+/// Calls @p visit with each device id @p entry expands to until it returns true.
 template <typename Visit>
 inline bool anyExpandedMember(std::string_view entry, Visit&& visit)
 {
@@ -93,7 +88,6 @@ inline bool anyExpandedMember(std::string_view entry, Visit&& visit)
     return false;
 }
 
-/// Does some device in the expansion of @p from get admitted by @p into?
 inline bool anyExpandedMemberAdmittedBy(const std::vector<std::string>& from,
                                         const std::vector<std::string>& into)
 {
@@ -105,9 +99,8 @@ inline bool anyExpandedMemberAdmittedBy(const std::vector<std::string>& from,
 
 } // namespace detail
 
-/// Can one device satisfy both @p a and @p b? Compared over expanded member sets: a
-/// generic stands for its table members. Empty means "every arch", so it overlaps
-/// everything; an unknown generic expands to nothing and overlaps nothing.
+/// Can one device satisfy both @p a and @p b, over generics expanded to members? Empty
+/// means every arch; an unknown generic expands to nothing.
 inline bool archOverlaps(const std::vector<std::string>& a, const std::vector<std::string>& b)
 {
     if(a.empty() || b.empty())
@@ -118,10 +111,7 @@ inline bool archOverlaps(const std::vector<std::string>& a, const std::vector<st
 }
 
 /// Is every device @p inner admits also admitted by @p outer? The asymmetric counterpart
-/// to archOverlaps, for asking whether a kernel stays within the pack that binds it.
-/// Compared over expanded member sets. Empty @p outer admits every device, so it covers
-/// anything; empty @p inner declares no restriction of its own and is covered by anything;
-/// an unknown generic in @p inner expands to nothing and is covered vacuously.
+/// to archOverlaps. Empty @p outer covers anything; empty @p inner is covered by anything.
 inline bool archCovers(const std::vector<std::string>& outer, const std::vector<std::string>& inner)
 {
     if(outer.empty())
@@ -135,11 +125,8 @@ inline bool archCovers(const std::vector<std::string>& outer, const std::vector<
     });
 }
 
-/// Do @p a and @p b tie? True when some candidate device is matched by both at the same
-/// tier, where the candidates are every explicit id in either list and every member of
-/// every table generic in either list. Two empty lists compete (both unrestricted on
-/// every device). Lists whose best tiers always differ per device do not: the better
-/// tier shadows the other, so they may coexist.
+/// Do @p a and @p b match some device at the same tier? A better tier shadows a worse one,
+/// so lists whose tiers always differ may coexist. Two empty lists compete.
 inline bool archesCompete(const std::vector<std::string>& a, const std::vector<std::string>& b)
 {
     if(a.empty() && b.empty())

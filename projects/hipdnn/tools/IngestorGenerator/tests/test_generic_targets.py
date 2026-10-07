@@ -1,8 +1,7 @@
 # Copyright (c) Advanced Micro Devices, Inc., or its affiliates.
 # SPDX-License-Identifier: MIT
 
-"""The codegen mirror of the tier algebra, over a small in-memory table so the cases
-pin the algebra rather than LLVM-owned membership data."""
+"""Tier algebra over a small in-memory table."""
 
 from pathlib import Path
 
@@ -35,19 +34,15 @@ _GENERIC = gt.TIER_GENERIC
         (["gfx942"], "gfx942:sramecc+:xnack-", _EXPLICIT),
         ([_G11], "gfx1100", _GENERIC),
         ([_G11], "gfx1151:sramecc+", _GENERIC),
-        # Explicit outranks a generic that also admits the device.
         (["gfx1151", _G11], "gfx1151", _EXPLICIT),
         (["gfx1151", _G11], "gfx1100", _GENERIC),
         (["gfx942", _G11], "gfx1100", _GENERIC),
-        # Non-matches.
         ([_G11], "gfx1154", None),
         ([_G12], "gfx1100", None),
         (["gfx942"], "gfx950", None),
-        # An id is a whole-name (or feature-suffix) match, never a prefix match.
         (["gfx94"], "gfx942", None),
         (["gfx1250"], "gfx1250-strict", None),
         (["gfx1250-strict"], "gfx1250-strict", _EXPLICIT),
-        # A generic-shaped name outside the table matches nothing, itself included.
         ([_UNKNOWN], "gfx942", None),
         ([_UNKNOWN], _UNKNOWN, None),
         ([_UNKNOWN, "gfx942"], "gfx942", _EXPLICIT),
@@ -87,15 +82,12 @@ def test_covers(outer, inner, expect):
         ([_G11], [], False),
         (["gfx942"], ["gfx942"], True),
         (["gfx942"], ["gfx950"], False),
-        # A generic and a member it contains never tie: the member outranks it.
         ([_G11], ["gfx1151"], False),
         ([_G11], ["gfx1151", "gfx1100"], False),
         ([_G11], [_G11], True),
         ([_G11], [_G12], False),
-        # Tied on the generic's other member even though gfx1151 differs in tier.
         (["gfx1151", _G11], [_G11], True),
         ([_G11], [_G11, "gfx942"], True),
-        # An unknown generic admits nothing, so it ties with nothing.
         ([_UNKNOWN], [_UNKNOWN], False),
         ([_UNKNOWN], [], False),
     ],

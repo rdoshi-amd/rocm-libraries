@@ -196,12 +196,9 @@ if(HIPDNN_ENABLE_KERNEL_INGESTOR)
                  HIPDNN_INSTALLED_CTEST_STAGING "${_disk_cache_installed_tests}")
 endif()
 
-# Validator tests for data/gpu_generic_targets.json. Build tree only: no staging into the
-# installed CTestTestfile.cmake, so installed-tree runs never read the source tree.
-# Each negative case mutates the real table in memory and must fail with the validator's
-# text. PASS_REGULAR_EXPRESSION, never WILL_FAIL, so a crash or a missing input does not
-# pass; FAIL_REGULAR_EXPRESSION catches a validator that downgrades the error. CMake wraps
-# long messages at spaces, so every space in the expected text matches any whitespace run.
+# Validator tests for data/gpu_generic_targets.json; build tree only (not staged into the
+# installed CTestTestfile.cmake). PASS_REGULAR_EXPRESSION rather than WILL_FAIL so a crash
+# does not pass. CMake wraps messages at spaces, so spaces match any whitespace run.
 set(_generic_targets_check "${CMAKE_CURRENT_SOURCE_DIR}/cmake/CheckGpuGenericTargets.cmake")
 
 add_test(
@@ -215,9 +212,7 @@ set_tests_properties(
 )
 _apply_hipdnn_test_category_labels(hipdnn_gpu_generic_targets_accepts_real_table)
 
-# Registers ctest hipdnn_gpu_generic_targets_rejects_<case>: applies <op> (see
-# CheckGpuGenericTargets.cmake) with <path> and <value> to the real table and expects
-# <expected_text>.
+# Registers a build-tree test: mutate the real table, expect the validator to reject it with expected_text.
 function(_hipdnn_add_generic_targets_rejection_test case op path value expected_text)
     string(REPLACE " " "[ \n]+" expected_regex "${expected_text}")
     set(test_name hipdnn_gpu_generic_targets_rejects_${case})

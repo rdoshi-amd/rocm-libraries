@@ -193,9 +193,7 @@ class TestKernelArchSubsetOfPackCheck:
 
 
 class TestGenericArchRules:
-    """The packer's generic-target rules R1-R4 and R6, applied before a UUID is
-    minted. ``gfx11-generic`` holds gfx1100..gfx1153; ``gfx12-generic`` holds
-    gfx1200/gfx1201. Each case is judged by accept or reject only."""
+    """Generic-target rules; ``gfx11-generic`` holds gfx1100..gfx1153, ``gfx12-generic`` gfx1200/gfx1201."""
 
     @staticmethod
     def _config(pack_arch, kernel_arch, kind=None):
@@ -219,20 +217,14 @@ class TestGenericArchRules:
     @pytest.mark.parametrize(
         ("pack_arch", "kernel_arch"),
         [
-            # R1: a generic-shaped name the table does not list.
             (["gfx9-4-generic"], []),
             ([], ["gfx9-4-generic"]),
-            # R2: a generic beside a member it contains, in either order and on
-            # either list (the real table's generics are disjoint).
             (["gfx11-generic", "gfx1151"], []),
             (["gfx1151", "gfx11-generic"], []),
             (["gfx942", "gfx11-generic"], ["gfx1151", "gfx11-generic"]),
-            # R3: a kernel naming a generic its pack does not list.
             ([], ["gfx11-generic"]),
             (["gfx942"], ["gfx11-generic"]),
             (["gfx942", "gfx12-generic"], ["gfx11-generic"]),
-            # R4: a kernel with its own arch under a generic pack must list every
-            # generic of the pack and only entries the pack lists.
             (["gfx11-generic"], ["gfx1151"]),
             (["gfx942", "gfx11-generic"], ["gfx942"]),
             (["gfx11-generic", "gfx12-generic"], ["gfx11-generic"]),
@@ -266,8 +258,6 @@ class TestGenericArchRules:
     def test_an_expanded_subset_is_accepted_by_the_coverage_check(self):
         from codegen.config_loader import _check_kernel_arch_subset_of_pack
 
-        # Loader-equivalent coverage: gfx1151 is inside gfx11-generic's members, but
-        # gfx1250 is not.
         _check_kernel_arch_subset_of_pack(self._config(["gfx11-generic"], ["gfx1151"]))
         with pytest.raises(ConfigError):
             _check_kernel_arch_subset_of_pack(

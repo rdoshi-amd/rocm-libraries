@@ -197,9 +197,7 @@ class TestInvariant2DuplicateMatcherTuples:
     def test_an_arch_less_kernel_inherits_the_kdp_arch_and_collides_with_an_explicit_one(
         self,
     ):
-        """The loader gives a kernel with no arch of its own the KDP's list, so
-        under a KDP listing gfx942 the arch-less kernel and the explicit gfx942 one
-        tie at the same tier on gfx942."""
+        """An arch-less kernel inherits the KDP list, so it ties an explicit gfx942 one."""
         kernels = self._twins(None, ["gfx942"])
         assert duplicate_matcher_tuples(
             kernels, ("dtype",), GENERIC_TARGETS, ["gfx942"]
@@ -213,9 +211,7 @@ class TestInvariant2DuplicateMatcherTuples:
         )
 
     def test_a_tie_beaten_on_every_device_it_reaches_is_still_a_duplicate(self):
-        """Both gfx12-generic kernels are outranked by an explicit one on each member
-        (gfx1200, gfx1201), so they never tie at the BEST tier anywhere; they still
-        tie at the generic tier on both, which the loader refuses."""
+        """Generic kernels outranked on every member still tie at the generic tier."""
         kernels = [
             {"name": n, "metadata": {"dtype": "FLOAT"}, "arch": a}
             for n, a in (
@@ -239,8 +235,7 @@ class TestInvariant2DuplicateMatcherTuples:
         ids=["generic_vs_arch_less", "generic_vs_its_member", "unknown_generics"],
     )
     def test_lists_that_never_tie_at_one_tier_do_not_collide(self, left, right):
-        """A generic outranks an arch-less kernel and loses to its own member; an
-        unknown generic matches no device."""
+        """A generic outranks arch-less and loses to its own member; unknown matches nothing."""
         kernels = self._twins(left, right)
         assert duplicate_matcher_tuples(kernels, ("dtype",), GENERIC_TARGETS) == {}
 

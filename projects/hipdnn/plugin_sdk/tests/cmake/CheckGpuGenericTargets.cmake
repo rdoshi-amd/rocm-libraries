@@ -1,18 +1,10 @@
 # Copyright © Advanced Micro Devices, Inc., or its affiliates.
 # SPDX-License-Identifier:  MIT
 
-# Script-mode driver for hipdnn_validate_gpu_generic_targets (run with `cmake -P`):
-#   cmake -DGENERIC_TARGETS_JSON=<table.json> [-DMUTATION_OP=<op> ...] -P CheckGpuGenericTargets.cmake
-# Without MUTATION_OP the table is validated as is. With it, the table is mutated in
-# memory, written to MUTATED_JSON, and that file is validated. MUTATION_PATH is a
-# '.'-separated key/index path into the table. MUTATION_OP is one of:
-#   REMOVE      delete the value at MUTATION_PATH
-#   SET_STRING  set MUTATION_PATH to the string MUTATION_VALUE
-#   SET_JSON    set MUTATION_PATH to the JSON text MUTATION_VALUE
-#   RAW         replace the whole document with the text MUTATION_VALUE
-# Prints "gpu_generic_targets: valid" only after the table passed every rule, so a ctest
-# can require the validator's FATAL_ERROR text for a mutation and forbid that line. A
-# crash or a missing input matches neither.
+# Runs hipdnn_validate_gpu_generic_targets via `cmake -P`, optionally on a mutated copy:
+#   -DGENERIC_TARGETS_JSON=<table.json> [-DMUTATION_OP=<op> -DMUTATION_PATH=<a.b.0> -DMUTATION_VALUE=<v>]
+# MUTATION_OP: REMOVE, SET_STRING, SET_JSON, or RAW (replace the whole document).
+# Prints "gpu_generic_targets: valid" only if every rule passed.
 
 if(NOT GENERIC_TARGETS_JSON)
     message(FATAL_ERROR "CheckGpuGenericTargets: pass -DGENERIC_TARGETS_JSON=<table.json>")

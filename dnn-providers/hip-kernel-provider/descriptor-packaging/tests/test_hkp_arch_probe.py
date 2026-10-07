@@ -45,7 +45,6 @@ def test_probe_false_when_no_entry_reaches_any_selected_target(tmp_path):
 
 
 def test_probe_true_for_a_generic_absent_from_the_table(tmp_path):
-    """The packer reports it as an error; a FALSE would hide it behind a dormant root."""
     assert _probe(tmp_path, ["gfx99-generic"], "gfx942") == "TRUE"
     assert _probe(tmp_path, ["gfx99-generic", "gfx950"], "gfx942") == "TRUE"
 

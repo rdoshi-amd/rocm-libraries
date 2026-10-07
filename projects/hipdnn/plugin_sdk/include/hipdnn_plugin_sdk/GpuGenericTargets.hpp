@@ -3,15 +3,8 @@
 
 #pragma once
 
-/**
- * @file GpuGenericTargets.hpp
- * @brief LLVM generic GPU targets (`gfx11-generic`, ...) as data: which concrete
- * processors each one supports, and how an `arch` entry ranks for a device.
- *
- * Membership comes from the table generated out of data/gpu_generic_targets.json; a
- * name's shape never implies membership, so a generic-shaped name absent from the table
- * matches no device. Nothing here allocates.
- */
+/// LLVM generic GPU targets (`gfx11-generic`, ...) and how an `arch` entry ranks for a device.
+/// Membership comes only from the generated table, never from a name's shape.
 
 #include <cstddef>
 #include <optional>
@@ -23,8 +16,7 @@
 namespace hipdnn_plugin_sdk
 {
 
-/// Does @p name have the shape of a generic target (`...-generic`)? Shape only; use
-/// findGenericTarget for membership in the table.
+/// Shape only (`...-generic`); use findGenericTarget for membership.
 inline bool isGenericShapedArchName(std::string_view name)
 {
     constexpr std::string_view SUFFIX = "-generic";
@@ -32,7 +24,7 @@ inline bool isGenericShapedArchName(std::string_view name)
            && name.compare(name.size() - SUFFIX.size(), std::string_view::npos, SUFFIX) == 0;
 }
 
-/// The table row for the generic named exactly @p name, or nullptr when absent.
+/// The table row for @p name, or nullptr.
 inline const generated::GenericTargetRow* findGenericTarget(std::string_view name)
 {
     for(const auto& row : generated::GENERIC_TARGET_ROWS)
@@ -45,8 +37,7 @@ inline const generated::GenericTargetRow* findGenericTarget(std::string_view nam
     return nullptr;
 }
 
-/// Is @p baseDeviceId (features already stripped) a member of the table generic
-/// @p generic? False when @p generic is not in the table.
+/// Is @p baseDeviceId (features stripped) a member of @p generic? False if @p generic is unknown.
 inline bool genericTargetContains(std::string_view generic, std::string_view baseDeviceId)
 {
     const auto* row = findGenericTarget(generic);
@@ -72,11 +63,8 @@ enum class ArchTier : int
     UNRESTRICTED = 2, ///< An empty list: any device.
 };
 
-/// Rank of one `arch` list entry for the device @p rawDeviceArch as the device reports it
-/// (features included): EXPLICIT when the entry is the device's own base id (PREFIX
-/// match, so `gfx942` is EXPLICIT for `gfx942:sramecc+:xnack-` and never matches
-/// `gfx950`), GENERIC when a table generic containing the device's base id, else nullopt.
-/// A generic-shaped entry is never EXPLICIT, so an unknown generic matches no device.
+/// Rank of @p entry for @p rawDeviceArch (features included); nullopt when it does not
+/// admit the device. A generic-shaped entry is never EXPLICIT.
 inline std::optional<ArchTier> entryTier(std::string_view entry, std::string_view rawDeviceArch)
 {
     if(isGenericShapedArchName(entry))

@@ -105,11 +105,8 @@ public:
                + "::" + std::to_string(deviceOrdinal) + "::" + expectedSha256;
     }
 
-    /// The archive key whose binary serves @p deviceArch: the first key ranking best by
-    /// entryTier (the device's own id, features ignored, over a table generic containing
-    /// it), ties in archive order, else nullptr. A generic-shaped key absent from the
-    /// table matches nothing. The caller owns what the pointer designates: it points into
-    /// @p archiveArches.
+    /// The best-tier archive key serving @p deviceArch (ties: archive order), else nullptr.
+    /// Points into @p archiveArches.
     static const std::string* selectArch(const std::vector<std::string>& archiveArches,
                                          std::string_view deviceArch)
     {

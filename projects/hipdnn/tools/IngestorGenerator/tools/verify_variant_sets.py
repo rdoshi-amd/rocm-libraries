@@ -5,8 +5,7 @@ installed trees. Exits non-zero on any failure. The numbered sections in
   1. BINARY NESTING -- the larger set can still choose every binary the
      smaller one could.
   2. LOADER-TUPLE UNIQUENESS -- with absent keys filled from the KMD
-     `default_value`, each tuple is unique per device and tier: two entries
-     collide only where both select a device at the same tier (explicit,
+     `default_value`, each tuple is unique per device and tier (explicit,
      generic, unrestricted). A duplicate rejects the whole engine at load.
   3. NO SENTINEL -- `-1` never reaches a shipped descriptor.
   4. METADATA MATCHES ITS BINARY -- the matcher selects on metadata, the spec
@@ -218,8 +217,7 @@ _TIER_NAMES = {
 
 
 def _tie(left: list, right: list, table) -> tuple[str, str]:
-    """Where two competing arch lists tie: the devices and the tier name. Two empty
-    lists tie everywhere, at the unrestricted tier."""
+    """Devices and tier name where two competing arch lists tie."""
     if not left and not right:
         return "every arch", _TIER_NAMES[gtmod.TIER_UNRESTRICTED]
     candidates = set()
@@ -303,8 +301,7 @@ class Payloads:
                 f"{entry.ukd.get('name')}: kernel_source.library resolves to "
                 f"{archive_path}, which does not exist."
             )
-        # A generic document's archive is keyed by the generic's name, not by the
-        # member being checked.
+        # A generic document's archive is keyed by the generic's name.
         if self._table is None:
             self._table = gtmod.GenericTargets.load(gtmod.DEFAULT_TABLE_PATH)
         key = descriptor_context.archive_arch(entry.arch, arch, self._table)
@@ -652,9 +649,7 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--generic-targets-json",
         default=str(gtmod.DEFAULT_TABLE_PATH),
-        help="The generic GPU target table (gpu_generic_targets.json). Tuple "
-        "collisions are judged per arch tier and a generic stands for its table "
-        "members. Defaults to the table in this checkout.",
+        help="The generic GPU target table (gpu_generic_targets.json).",
     )
     args = parser.parse_args(argv)
 

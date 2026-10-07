@@ -130,7 +130,6 @@ def _semantic_fields(problem: UnifiedAttentionProblem) -> dict:
         "has_softcap": bool(problem.softcap > 0),
         "use_alibi": bool(problem.use_alibi),
         "use_qq_bias": bool(problem.use_qq_bias),
-        "use_additive_bias": bool(problem.use_additive_bias),
         "num_seqs": int(problem.num_seqs),
         "kv_storage_dtype": kv_storage_dtype,
         "use_i64_kv_addr": use_i64,
@@ -178,6 +177,8 @@ def make_explicit_attention_2d_spec(
         raise ValueError(
             f"explicit 2D attention tuning requires gfx942/gfx950, got {arch}"
         )
+    if problem.use_additive_bias:
+        raise ValueError("explicit 2D attention tuning does not support additive bias")
     validate_explicit_fp8_encoding(
         arch=arch, use_fp8=problem.use_fp8, fp8_fnuz=problem.fp8_fnuz
     )
@@ -213,7 +214,6 @@ def make_explicit_attention_2d_spec(
         num_queries_per_kv=problem.num_queries_per_kv,
         use_alibi=problem.use_alibi,
         use_qq_bias=problem.use_qq_bias,
-        use_additive_bias=problem.use_additive_bias,
         use_fp8=problem.use_fp8,
         q_dtype=problem.q_dtype,
         num_warps=spec.num_warps,
@@ -252,6 +252,8 @@ def make_explicit_attention_3d_specs(
         raise ValueError(
             f"explicit 3D attention tuning requires gfx942/gfx950, got {arch}"
         )
+    if problem.use_additive_bias:
+        raise ValueError("explicit 3D attention tuning does not support additive bias")
     validate_explicit_fp8_encoding(
         arch=arch, use_fp8=problem.use_fp8, fp8_fnuz=problem.fp8_fnuz
     )
@@ -290,7 +292,6 @@ def make_explicit_attention_3d_specs(
         num_queries_per_kv=problem.num_queries_per_kv,
         use_alibi=problem.use_alibi,
         use_qq_bias=problem.use_qq_bias,
-        use_additive_bias=problem.use_additive_bias,
         use_fp8=problem.use_fp8,
         q_dtype=problem.q_dtype,
         kv_storage_dtype=segment.kv_storage_dtype,

@@ -1109,6 +1109,59 @@ class TestAttentionHelpers(unittest.TestCase):
         # Kernel name carries the "addb" token.
         self.assertIn("addb", k.name)
 
+    def test_unified_attention_additive_bias_abi_matches_signature(self):
+        """gfx950 kernel param order must equal the launcher signature order.
+
+        KernelLauncher packs kernargs positionally from the signature, so any
+        drift silently feeds the wrong pointer/stride. Also pins that the
+        non-bias ABI carries no additive-bias params.
+        """
+        from kernels import (
+            UnifiedAttention2DTiledSpec,
+            UnifiedAttention3DTiledSpec,
+            build_unified_attention_2d_tiled,
+            build_unified_attention_3d_tiled,
+        )
+        from kernels.common.attention_unified import _3d_signature, _attn_signature
+
+        common = dict(
+            head_size=64,
+            block_size=32,
+            num_query_heads=32,
+            num_kv_heads=32,
+            dtype="bf16",
+            use_sinks=False,
+            sliding_window=0,
+            has_softcap=False,
+        )
+        for use_ab in (False, True):
+            with self.subTest(kind="2d", use_additive_bias=use_ab):
+                k = build_unified_attention_2d_tiled(
+                    UnifiedAttention2DTiledSpec(**common, use_additive_bias=use_ab)
+                )
+                sig = _attn_signature(
+                    "bf16",
+                    include_bt_stride=True,
+                    include_qq_bias_stride=True,
+                    include_additive_bias=use_ab,
+                )
+                self.assertEqual(
+                    [p.name for p in k.params], [a["name"] for a in sig]
+                )
+                self.assertEqual(
+                    use_ab, any("additive_bias" in p.name for p in k.params)
+                )
+            with self.subTest(kind="3d", use_additive_bias=use_ab):
+                seg = build_unified_attention_3d_tiled(
+                    UnifiedAttention3DTiledSpec(
+                        **common, num_segments=4, use_additive_bias=use_ab
+                    )
+                )
+                sig = _3d_signature("bf16", include_additive_bias=use_ab)
+                self.assertEqual(
+                    [p.name for p in seg.params], [a["name"] for a in sig]
+                )
+
     def test_unified_attention_3d_tiled_kernel_compiles(self):
         from kernels import (
             UnifiedAttention3DTiledSpec,

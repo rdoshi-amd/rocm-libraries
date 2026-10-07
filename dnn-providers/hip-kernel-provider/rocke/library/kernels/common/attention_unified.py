@@ -501,6 +501,8 @@ def supports_native_unified_attention_tiled(
     arch = _resolve_attention_arch()
     if arch == "gfx1250" and problem.softcap > 0:
         return False, "gfx1250 tiled 2D does not support softcap yet"
+    if problem.use_additive_bias and arch != "gfx950":
+        return False, "additive bias is only implemented on gfx950"
     _, _, supports_tiled_2d = _tiled_2d_impl(arch)
     gfx942_bf16_wide = _enable_gfx942_bf16_flash(problem)
     if gfx942_bf16_wide:
@@ -516,7 +518,6 @@ def supports_native_unified_attention_tiled(
             num_queries_per_kv=problem.num_queries_per_kv,
             use_alibi=problem.use_alibi,
             use_qq_bias=problem.use_qq_bias,
-            use_additive_bias=problem.use_additive_bias,
             use_fp8=problem.use_fp8,
             q_dtype=problem.q_dtype,
             num_warps=nw,
@@ -548,7 +549,6 @@ def supports_native_unified_attention_tiled(
         num_queries_per_kv=problem.num_queries_per_kv,
         use_alibi=problem.use_alibi,
         use_qq_bias=problem.use_qq_bias,
-        use_additive_bias=problem.use_additive_bias,
         use_fp8=problem.use_fp8,
         q_dtype=problem.q_dtype,
         num_warps=num_warps,
@@ -582,6 +582,12 @@ def supports_native_unified_attention_tiled(
             if arch == "gfx942"
             else {}
         ),
+        # Additive bias is gfx950-only for now; same #10126 rule as above.
+        **(
+            {"use_additive_bias": problem.use_additive_bias}
+            if arch == "gfx950"
+            else {}
+        ),
     )
 
 
@@ -594,6 +600,8 @@ def supports_native_unified_attention_3d_tiled(
     rejected = _reject_fp8_format_arch_mismatch(problem, arch)
     if rejected is not None:
         return rejected
+    if problem.use_additive_bias and arch != "gfx950":
+        return False, "additive bias is only implemented on gfx950"
     *_, supports_tiled_3d = _tiled_3d_impl(arch)
     return supports_tiled_3d(
         head_size=problem.head_size,
@@ -602,11 +610,15 @@ def supports_native_unified_attention_3d_tiled(
         num_queries_per_kv=problem.num_queries_per_kv,
         use_alibi=problem.use_alibi,
         use_qq_bias=problem.use_qq_bias,
-        use_additive_bias=problem.use_additive_bias,
         use_fp8=problem.use_fp8,
         q_dtype=problem.q_dtype,
         kv_storage_dtype=_kv_storage_dtype(problem),
         arch=arch,
+        **(
+            {"use_additive_bias": problem.use_additive_bias}
+            if arch == "gfx950"
+            else {}
+        ),
     )
 
 
@@ -3227,12 +3239,17 @@ def _tiled_3d_cache_key(problem: UnifiedAttentionProblem) -> Tuple:
     return base
 
 
-def _3d_signature(dtype: str, *, kv_dtype: Optional[str] = None):
+def _3d_signature(
+    dtype: str,
+    *,
+    kv_dtype: Optional[str] = None,
+    include_additive_bias: bool = False,
+):
     from rocke.helpers.spec import SignatureBuilder
 
     io_dtype = "f16" if dtype == "fp16" else "bf16"
     kv_io = kv_dtype if kv_dtype else io_dtype
-    return (
+    sb = (
         SignatureBuilder()
         .ptr("segm_output_ptr", "f32")
         .ptr("segm_max_ptr", "f32")
@@ -3245,7 +3262,6 @@ def _3d_signature(dtype: str, *, kv_dtype: Optional[str] = None):
         .ptr("seq_lens_ptr", "i32")
         .ptr("alibi_slopes_ptr", "f32")
         .ptr("qq_bias_ptr", "f32")
-        .ptr("additive_bias_ptr", "f32")
         .ptr("query_start_len_ptr", "i32")
         .scalar("scale", "f32")
         .scalar("k_scale", "f32")
@@ -3254,11 +3270,14 @@ def _3d_signature(dtype: str, *, kv_dtype: Optional[str] = None):
         .scalar("num_seqs", "i32")
         .scalar("block_table_stride", "i32")
         .scalar("qq_bias_stride_0", "i32")
-        .scalar("additive_bias_batch_stride", "i32")
-        .scalar("additive_bias_head_stride", "i32")
-        .scalar("additive_bias_sq_stride", "i32")
-        .build()
     )
+    # Appended last, matching the kernel's conditional param declarations.
+    if include_additive_bias:
+        sb.ptr("additive_bias_ptr", "f32")
+        sb.scalar("additive_bias_batch_stride", "i32")
+        sb.scalar("additive_bias_head_stride", "i32")
+        sb.scalar("additive_bias_sq_stride", "i32")
+    return sb.build()
 
 
 def _reduce_signature(dtype: str):
@@ -3281,7 +3300,7 @@ def _attn_signature(
     *,
     include_bt_stride: bool,
     include_qq_bias_stride: bool = False,
-    include_additive_bias_strides: bool = False,
+    include_additive_bias: bool = False,
     kv_dtype: Optional[str] = None,
 ):
     from rocke.helpers.spec import SignatureBuilder
@@ -3302,7 +3321,6 @@ def _attn_signature(
         .ptr("seq_lens_ptr", "i32")
         .ptr("alibi_slopes_ptr", "f32")
         .ptr("qq_bias_ptr", "f32")
-        .ptr("additive_bias_ptr", "f32")
         .ptr("query_start_len_ptr", "i32")
         .scalar("scale", "f32")
         .scalar("k_scale", "f32")
@@ -3315,7 +3333,9 @@ def _attn_signature(
         sb.scalar("block_table_stride", "i32")
     if include_qq_bias_stride:
         sb.scalar("qq_bias_stride_0", "i32")
-    if include_additive_bias_strides:
+    # Appended last, matching the kernel's conditional param declarations.
+    if include_additive_bias:
+        sb.ptr("additive_bias_ptr", "f32")
         sb.scalar("additive_bias_batch_stride", "i32")
         sb.scalar("additive_bias_head_stride", "i32")
         sb.scalar("additive_bias_sq_stride", "i32")
@@ -4104,6 +4124,7 @@ def _get_3d_pipeline(
                 if tuning_spec is not None
                 else _kv_storage_dtype(problem)
             ),
+            include_additive_bias=problem.use_additive_bias,
         ),
         cache_key=("3d_seg",) + cache_key,
     )
@@ -4278,7 +4299,7 @@ def _get_2d_launcher(
             problem.dtype,
             include_bt_stride=True,
             include_qq_bias_stride=True,
-            include_additive_bias_strides=True,
+            include_additive_bias=problem.use_additive_bias,
             kv_dtype=(
                 tuning_spec.kernel_spec.kv_storage_dtype
                 if tuning_spec is not None

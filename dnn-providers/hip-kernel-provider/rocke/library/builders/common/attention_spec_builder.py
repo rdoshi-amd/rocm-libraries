@@ -106,7 +106,6 @@ def _spec_gfx942_fp16_flash(problem: UnifiedAttentionProblem):
         has_softcap=problem.softcap > 0,
         use_alibi=problem.use_alibi,
         use_qq_bias=problem.use_qq_bias,
-        use_additive_bias=problem.use_additive_bias,
         num_seqs=problem.num_seqs,
         num_warps=num_warps,
         waves_per_eu=_select_2d_waves_per_eu(problem),
@@ -173,7 +172,6 @@ def _spec_gfx942_bf16_flash(problem: UnifiedAttentionProblem):
         has_softcap=problem.softcap > 0,
         use_alibi=problem.use_alibi,
         use_qq_bias=problem.use_qq_bias,
-        use_additive_bias=problem.use_additive_bias,
         num_seqs=problem.num_seqs,
         num_warps=nw,
         waves_per_eu=_select_2d_waves_per_eu(problem),
@@ -216,7 +214,12 @@ def _base_2d_generic_fields(problem: UnifiedAttentionProblem) -> dict:
     subflags = _enable_transposed_subflags(problem)
     scalar_state = combo or subflags
     skip_legacy_qreg = combo or subflags
-    _bias_active = problem.softcap > 0 or problem.use_alibi or problem.use_qq_bias or problem.use_additive_bias
+    _bias_active = (
+        problem.softcap > 0
+        or problem.use_alibi
+        or problem.use_qq_bias
+        or problem.use_additive_bias
+    )
     mask_opts = (combo_no_sw and not _bias_active) or subflags
     return dict(
         head_size=problem.head_size,
@@ -229,7 +232,6 @@ def _base_2d_generic_fields(problem: UnifiedAttentionProblem) -> dict:
         has_softcap=problem.softcap > 0,
         use_alibi=problem.use_alibi,
         use_qq_bias=problem.use_qq_bias,
-        use_additive_bias=problem.use_additive_bias,
         num_seqs=problem.num_seqs,
         num_warps=_select_2d_num_warps(problem),
         waves_per_eu=_select_2d_waves_per_eu(problem),
@@ -311,9 +313,11 @@ def _spec_gfx950_generic(problem: UnifiedAttentionProblem):
     if _enable_k_single_buffer(problem):
         _schedule_fields["use_k_single_buffer"] = True
     # Shared base fields + the gfx950-only schedule tail (disjoint keys).
+    # Additive bias is gfx950-only for now, so it lives in the tail too.
     _spec = UnifiedAttention2DTiledSpec(
         **_base_2d_generic_fields(problem),
         **_schedule_fields,
+        use_additive_bias=problem.use_additive_bias,
     )
     if _kau._d256_gfx950_fast(problem):
         # D256 gfx950 bf16 prefill fast route -- pins the 32x32 transposed + FA3
@@ -340,7 +344,6 @@ def _tiled_spec_from_problem(
             has_softcap=problem.softcap > 0,
             use_alibi=problem.use_alibi,
             use_qq_bias=problem.use_qq_bias,
-            use_additive_bias=problem.use_additive_bias,
             num_seqs=problem.num_seqs,
             num_warps=1,
             waves_per_eu=_select_2d_waves_per_eu(problem),
@@ -394,7 +397,6 @@ def _spec_generic_3d(problem: UnifiedAttentionProblem):
         num_segments=_num_segments(problem),
         use_alibi=problem.use_alibi,
         use_qq_bias=problem.use_qq_bias,
-        use_additive_bias=problem.use_additive_bias,
         num_seqs=problem.num_seqs,
         waves_per_eu=_select_3d_waves_per_eu(problem),
         kv_storage_dtype=_kv_storage_dtype(problem),
@@ -402,6 +404,8 @@ def _spec_generic_3d(problem: UnifiedAttentionProblem):
         use_invariant_hoist=_enable_gfx942_3d_invariant_hoist(problem),
         use_wide_kv_load=_enable_gfx942_3d_wide_kv_load(problem),
         use_i64_kv_addr=_enable_i64_kv_addr(problem),
+        # Additive bias is gfx950-only for now; gfx942's spec has no such field.
+        **({"use_additive_bias": problem.use_additive_bias} if arch == "gfx950" else {}),
     )
 
 
@@ -424,7 +428,6 @@ def _tiled_3d_spec_from_problem(
             num_segments=r.num_segments,
             use_alibi=problem.use_alibi,
             use_qq_bias=problem.use_qq_bias,
-            use_additive_bias=problem.use_additive_bias,
             num_seqs=problem.num_seqs,
             waves_per_eu=r.waves_per_eu,
             kv_storage_dtype=r.kv_storage_dtype,

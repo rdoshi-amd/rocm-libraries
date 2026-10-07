@@ -542,9 +542,15 @@ class UnifiedAttention2DTiledSpec:
                 raise ValueError(
                     "transposed softmax VALU opts require no sliding window"
                 )
-            if self.has_softcap or self.use_alibi or self.use_qq_bias:
+            if (
+                self.has_softcap
+                or self.use_alibi
+                or self.use_qq_bias
+                or self.use_additive_bias
+            ):
                 raise ValueError(
-                    "transposed softmax VALU opts do not support softcap, ALiBi, or QQ bias"
+                    "transposed softmax VALU opts do not support softcap, ALiBi, "
+                    "QQ bias, or additive bias"
                 )
             if self.use_grouped_kv2_softmax:
                 raise ValueError(
@@ -565,9 +571,15 @@ class UnifiedAttention2DTiledSpec:
                 raise ValueError(
                     "use_grouped_kv2_softmax v1 requires no sliding window"
                 )
-            if self.has_softcap or self.use_alibi or self.use_qq_bias:
+            if (
+                self.has_softcap
+                or self.use_alibi
+                or self.use_qq_bias
+                or self.use_additive_bias
+            ):
                 raise ValueError(
-                    "use_grouped_kv2_softmax v1 does not support softcap, ALiBi, or QQ bias"
+                    "use_grouped_kv2_softmax v1 does not support softcap, ALiBi, "
+                    "QQ bias, or additive bias"
                 )
             if self.kv_storage_dtype is not None:
                 raise ValueError("use_grouped_kv2_softmax v1 does not support FP8 KV")
@@ -771,8 +783,10 @@ class UnifiedAttention2DTiledSpec:
                 raise ValueError(
                     "use_register_pv v1 requires no sinks, no sliding window, and no softcap"
                 )
-            if self.use_alibi or self.use_qq_bias:
-                raise ValueError("use_register_pv v1 does not support ALiBi or QQ bias")
+            if self.use_alibi or self.use_qq_bias or self.use_additive_bias:
+                raise ValueError(
+                    "use_register_pv v1 does not support ALiBi, QQ bias, or additive bias"
+                )
         if self.tile_size is not None:
             if self.tile_size <= 0 or self.tile_size % self.block_size != 0:
                 raise ValueError(
@@ -1232,12 +1246,15 @@ def build_unified_attention_2d_tiled(
     num_seqs_p = b.param("num_seqs", I32)
     bt_stride_p = b.param("block_table_stride", I32)
     qq_bias_stride0_p = b.param("qq_bias_stride_0", I32)
-    additive_bias_ptr = b.param(
-        "additive_bias_ptr", PtrType(F32, "global"), readonly=True, align=4
-    )
-    additive_bias_batch_stride_p = b.param("additive_bias_batch_stride", I32)
-    additive_bias_head_stride_p = b.param("additive_bias_head_stride", I32)
-    additive_bias_sq_stride_p = b.param("additive_bias_sq_stride", I32)
+    # Additive-bias params are appended only when the feature is on, so the
+    # non-bias kernel ABI (and its IR) is unchanged.
+    if USE_ADDITIVE_BIAS:
+        additive_bias_ptr = b.param(
+            "additive_bias_ptr", PtrType(F32, "global"), readonly=True, align=4
+        )
+        additive_bias_batch_stride_p = b.param("additive_bias_batch_stride", I32)
+        additive_bias_head_stride_p = b.param("additive_bias_head_stride", I32)
+        additive_bias_sq_stride_p = b.param("additive_bias_sq_stride", I32)
 
     kv_head_idx = b.block_id_x()
     q_block_global_idx = b.block_id_y()
@@ -3508,20 +3525,28 @@ def build_unified_attention_2d_tiled(
                                 )
                                 score = b.fadd(score, b.fmul(qq_v, rcp_ln2))
                             if USE_ADDITIVE_BIAS:
-                                # additive_bias[seq_idx*batch_stride + kv_head_idx*head_stride
+                                # additive_bias[seq_idx*batch_stride + q_head*head_stride
                                 #               + qp_r*sq_stride + col_abs]
-                                # stride=0 broadcasts that dimension.
-                                ab_qp_safe = b.select(row_ok, qp_r, b.const_i32(0))
+                                # stride=0 broadcasts that dimension. The head is
+                                # the per-row *query* head (GQA-correct). Loading
+                                # under ``m_ok`` keeps padding rows and tail
+                                # columns (col_abs >= seq_len) off the buffer.
+                                if TRANSPOSED_INVARIANT_HOIST:
+                                    ab_qh = st_qh
+                                elif TRANSPOSED_MASK_ONCE:
+                                    ab_qh = st_qh_iter
+                                else:
+                                    ab_qh = qh_r
                                 ab_base = b.add(
                                     b.mul(additive_bias_batch_stride_p, seq_idx),
-                                    b.mul(additive_bias_head_stride_p, kv_head_idx),
+                                    b.mul(additive_bias_head_stride_p, ab_qh),
                                 )
-                                ab_row = b.add(ab_base, b.mul(additive_bias_sq_stride_p, ab_qp_safe))
+                                ab_row = b.add(ab_base, b.mul(additive_bias_sq_stride_p, qp_r))
                                 ab_idx = b.add(ab_row, col_abs)
                                 ab_v = b.masked_global_load(
                                     additive_bias_ptr,
                                     ab_idx,
-                                    row_ok,
+                                    m_ok,
                                     b.const_f32(0.0),
                                     dtype=F32,
                                     align=4,
@@ -3752,17 +3777,18 @@ def build_unified_attention_2d_tiled(
                         )
                         score = b.fadd(score, b.fmul(qq_v, rcp_ln2))
                     if USE_ADDITIVE_BIAS:
-                        ab_qp_safe = b.select(row_ok, qp_r, b.const_i32(0))
+                        # Per-row query head; ``m_ok`` guards the load (see
+                        # the transposed path above).
                         ab_base = b.add(
                             b.mul(additive_bias_batch_stride_p, seq_idx),
-                            b.mul(additive_bias_head_stride_p, kv_head_idx),
+                            b.mul(additive_bias_head_stride_p, hoist_qh_r[reg]),
                         )
-                        ab_row = b.add(ab_base, b.mul(additive_bias_sq_stride_p, ab_qp_safe))
+                        ab_row = b.add(ab_base, b.mul(additive_bias_sq_stride_p, qp_r))
                         ab_idx = b.add(ab_row, col_abs)
                         ab_v = b.masked_global_load(
                             additive_bias_ptr,
                             ab_idx,
-                            row_ok,
+                            m_ok,
                             b.const_f32(0.0),
                             dtype=F32,
                             align=4,
@@ -3854,17 +3880,18 @@ def build_unified_attention_2d_tiled(
                         )
                         score = b.fadd(score, b.fmul(qq_v, rcp_ln2))
                     if USE_ADDITIVE_BIAS:
-                        ab_qp_safe = b.select(row_ok, qp_r, b.const_i32(0))
+                        # Per-row query head; ``m_ok`` guards the load (see
+                        # the transposed path above).
                         ab_base = b.add(
                             b.mul(additive_bias_batch_stride_p, seq_idx),
-                            b.mul(additive_bias_head_stride_p, kv_head_idx),
+                            b.mul(additive_bias_head_stride_p, hoist_qh_r[reg]),
                         )
-                        ab_row = b.add(ab_base, b.mul(additive_bias_sq_stride_p, ab_qp_safe))
+                        ab_row = b.add(ab_base, b.mul(additive_bias_sq_stride_p, qp_r))
                         ab_idx = b.add(ab_row, col_abs)
                         ab_v = b.masked_global_load(
                             additive_bias_ptr,
                             ab_idx,
-                            row_ok,
+                            m_ok,
                             b.const_f32(0.0),
                             dtype=F32,
                             align=4,

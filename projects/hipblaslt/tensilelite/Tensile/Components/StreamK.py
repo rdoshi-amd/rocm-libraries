@@ -23,8 +23,8 @@
 from ..ExecutionPolicy import isPersistent, isPersistentDataParallel, hasStaticAssignment, hasDynamicAssignment, hasHybridAssignment
 from rocisa.enum import CacheScope
 from rocisa.code import Module, Label
-from rocisa.container import vgpr, sgpr, mgpr, SMEMModifiers, MUBUFModifiers, replaceHolder, EXEC, VOP3PModifiers, ContinuousRegister
-from rocisa.instruction import GlobalInv, GlobalWb, SAddCU32, SAddU32, SAndB32, SBarrier, SBitcmp1B32, SBranch, SCBranchSCC0, SCBranchSCC1, SCMovB32, SCSelectB32, SCmpEQU32, SCmpEQU64, SCmpGeU32, SCmpGtU32, SCmpLeU32, SCmpLtU32, SLShiftLeftB32, SLShiftLeftB64, SLShiftRightB32, SLoadB32, SMaxI32, SMinU32, SMovB32, SMovB64, SMulHIU32, SMulI32, SNop, SOrB32, SSleep, SStoreB32, SSubU32, SWaitCnt, SWaitXCnt, VAddF32, VAddF64, VAddPKF16, VAddU32, VLShiftRightB32, VMovB32, VReadfirstlaneB32, VCvtBF16toFP32, BufferLoadB32, BufferStoreB32, SLongBranch, SLongBranchPositive
+from rocisa.container import vgpr, sgpr, mgpr, SMEMModifiers, MUBUFModifiers, DSModifiers, replaceHolder, EXEC, VOP3PModifiers, ContinuousRegister
+from rocisa.instruction import GlobalInv, GlobalWb, SAddCU32, SAddU32, SAndB32, SBarrier, SBitcmp1B32, SBranch, SCBranchSCC0, SCBranchSCC1, SCMovB32, SCSelectB32, SCmpEQU32, SCmpEQU64, SCmpGeU32, SCmpGtU32, SCmpLeU32, SCmpLtU32, SLShiftLeftB32, SLShiftLeftB64, SLShiftRightB32, SLoadB32, SMaxI32, SMinU32, SMovB32, SMovB64, SMulHIU32, SMulI32, SNop, SOrB32, SSleep, SStoreB32, SSubU32, SWaitCnt, SWaitXCnt, VAddF32, VAddF64, VAddPKF16, VAddU32, VLShiftRightB32, VMovB32, VReadfirstlaneB32, VCvtBF16toFP32, BufferLoadB32, BufferStoreB32, SLongBranch, SLongBranchPositive, SLongBranchNegative, SAtomicInc, DSLoadB32, DSStoreB32, VAndB32, VLShiftLeftB32
 from rocisa.functions import scalarStaticDivideAndRemainder, sMagicDiv2, vectorStaticMultiply, BranchIfNotZero, scalarUInt24DivideAndRemainder, scalarUInt32DivideAndRemainder
 
 from .Subtile.SubtileLREmit import localReadResetOffsetsSubtile
@@ -1557,9 +1557,16 @@ class StreamK(TileProcessingStrategy):
 
         return module
 
+    def usesArrivalFixup(self, writer, kernel):
+        """True when the dynamic sub-path fixes partial tiles up by last
+        arrival (StreamKHybrid.emitArrival) instead of per-part ready flags.
+        Only StreamKHybrid implements it."""
+        return False
+
     def partialsWriteProcedure(self, writer, kernel, vectorWidths, elements, alpha, beta, edge, tmpVgpr, cvtVgprStruct, endLabel):
         module = Module("StreamK Common partialsWriteProcedure")
         memOrder = Component.StreamKMemoryOrdering.find(writer)
+        arrivalDone = None
 
         # PreLoopVmcntCaseStr = ""
         # # not generate Case 2 if StoreCInUnroll with StoreVectorWidth==1 (Case 2 will be same as Case 3)
@@ -1823,6 +1830,11 @@ class StreamK(TileProcessingStrategy):
                                      comment="SK5: mode bit == 0 -> SK3 (static) flag offset"))
                 module.add(SCBranchSCC1(labelName=sk5FlagStatic.getLabelName(),
                                         comment="SK5: branch to static flag offset"))
+                if self.usesArrivalFixup(writer, kernel):
+                    # SK4 (dynamic): no per-part flag. The last part to arrive
+                    # fixes the tile up; everyone else is done.
+                    arrivalDone = Label(writer.labels.getNameInc("SK_ArrivalDone"), "")
+                    module.add(self.emitArrival(writer, kernel, arrivalDone))
                 # SK4 (dynamic) flag offset
                 module.add(self.calculatePartialIdx(tmpSgpr))
                 module.add(SLShiftLeftB32(dst=sgpr(tmpSgpr), src=sgpr(tmpSgpr), shiftHex=log2(4),
@@ -1854,6 +1866,9 @@ class StreamK(TileProcessingStrategy):
                 module.add(skipFlagSet)
             if memOrder.useSmemFlags():
                 module.add(SWaitCnt(kmcnt=0, comment="wait for flag")) # TODO just for testing
+
+        if arrivalDone is not None:
+            module.add(arrivalDone)
 
         if "Deferred" in endLabel.getLabelName():
             posLabel = writer.labels.getNameInc("PartialsDeferredReturnDir")
@@ -4106,6 +4121,115 @@ class StreamKHybrid(StreamK):
         return module
 
     # ------------------------------------------------------------------
+    # Dynamic fixup by last arrival.
+    #
+    # Every part of a split tile writes its partial to its own workspace slot,
+    # releases it, and then counts itself in on a per-tile arrival counter
+    # (one int in the flag region, indexed by partial tile). The part that
+    # completes the count owns the tile: it sums the other parts' partials into
+    # its accumulators and runs the regular store. Nobody waits on a part that
+    # has not run yet, which the old scheme did (the part finishing the tile
+    # spun on the ready flag of each earlier part, possibly not dispatched).
+    #
+    # The counter is an s_atomic_inc with bound SKSplit-1, so the arriving part
+    # reads SKSplit-1 and wraps it back to 0: the region is left clean with no
+    # separate reset. Summation order depends on which part arrives last.
+    # ------------------------------------------------------------------
+    def usesArrivalFixup(self, writer, kernel):
+        # The arrival broadcast borrows LDS[0, 64*4) and restores it, which is
+        # only safe when nothing in LDS is in flight across the epilogue (no
+        # PAP prefetch of the next tile). DebugStreamK keeps the old protocol.
+        return (kernel["DebugStreamK"] == 0
+                and writer.states.asmCaps["HasSAtomic"]
+                and not writer.isPrefetchAcrossPersistentEnabled(kernel))
+
+    def emitArrival(self, writer, kernel, arrivalDone):
+        """Count this part in on its tile; branch to the fixup if it is last.
+
+        Runs on the partials path after the partial has been written, fenced
+        and the workgroup barrier passed. Falls through to nothing: either
+        branches to ``arrivalDone`` (not last) or to the fixup entry emitted by
+        storeBranches (last).
+        """
+        module = Module("StreamK Hybrid arrival")
+        memOrder = Component.StreamKMemoryOrdering.find(writer)
+        fixupEntry = writer.states.skArrivalFixupLabel
+        mask = kernel["WavefrontSize"] - 1
+
+        sTicket = writer.sgprPool.checkOut(1, "ArrivalTicket", preventOverflow=False)
+        vAddr = writer.vgprPool.checkOut(1, "ArrivalLdsAddr")
+        vVal = writer.vgprPool.checkOut(1, "ArrivalVal")
+        vSave = writer.vgprPool.checkOut(1, "ArrivalLdsSave")
+
+        # LDS slot per lane: (Serial % wavefront) * 4. Wave 0 writes it, every
+        # wave reads the slot of its own lane id.
+        module.add(VAndB32(dst=vgpr(vAddr), src0=hex(mask), src1=vgpr("Serial"), comment="lane id"))
+        module.add(VLShiftLeftB32(dst=vgpr(vAddr), src=vgpr(vAddr), shiftHex=log2(4), comment="arrival mailbox slot"))
+        module.add(SWaitCnt(dscnt=0, comment="this wave's LDS traffic done before wave 0 borrows the mailbox"))
+        module.add(SBarrier(comment="all waves: partial stored and LDS idle"))
+
+        skipAtomic = Label(writer.labels.getNameInc("SK_ArrivalSkipAtomic"), "")
+        with writer.allocTmpSgpr(3, tag="StreamKHybrid_arrival") as tmp:
+            sTmp = tmp.idx
+            module.add(VReadfirstlaneB32(dst=sgpr(sTmp), src=vgpr("Serial"), comment="Wave 0 counts the part in"))
+            module.add(SCmpEQU32(src0=sgpr(sTmp), src1=0, comment="Check for wave 0"))
+            module.add(SCBranchSCC0(labelName=skipAtomic.getLabelName(), comment="Other waves wait for the ticket"))
+            # Counter address: AddressFlags + flagsBase + 4 * partialTile.
+            # sTmp+1:sTmp+2 is the 64-bit address (aligned pair not required by
+            # allocTmpSgpr, so build it in an aligned checkout).
+            sAddr = writer.sgprPool.checkOutAligned(2, 2, "ArrivalAddr", preventOverflow=False)
+            module.add(self.computeTotalTiles(writer, kernel, sTmp))
+            module.add(SSubU32(dst=sgpr(sTmp), src0=sgpr(sTmp), src1=sgpr("SKTiles"), comment="full tiles"))
+            module.add(SSubU32(dst=sgpr(sTmp), src0=sgpr("StreamKTileIdx"), src1=sgpr(sTmp), comment="partial tile"))
+            module.add(SLShiftLeftB32(dst=sgpr(sTmp), src=sgpr(sTmp), shiftHex=log2(4), comment="arrival counter offset"))
+            module.add(SAddU32(dst=sgpr(sTmp), src0=sgpr(sTmp),
+                               src1=Component.WorkAssignment.find(writer).flagsBaseOffset(writer, kernel),
+                               comment="counters come after the work queues"))
+            module.add(SAddU32(dst=sgpr(sAddr), src0=sgpr("AddressFlags+0"), src1=sgpr(sTmp)))
+            module.add(SAddCU32(dst=sgpr(sAddr+1), src0=sgpr("AddressFlags+1"), src1=0))
+            module.add(SSubU32(dst=sgpr(sTicket), src0=sgpr("SKSplit"), src1=1, comment="wrap bound = SKSplit-1"))
+            module.add(SAtomicInc(dst=sgpr(sTicket), base=sgpr(sAddr, 2), soffset=0,
+                                  smem=SMEMModifiers(glc=True),
+                                  comment="arrive: ticket = parts in before us; wraps to 0 on the last"))
+            module.add(SWaitCnt(kmcnt=0, comment="wait for arrival ticket"))
+            writer.sgprPool.checkIn(sAddr)
+            # Borrow the mailbox: save what is there, publish the ticket.
+            loadInst = DSLoadB32(dst=vgpr(vSave), src=vgpr(vAddr), ds=DSModifiers(offset=0), comment="save LDS under the mailbox")
+            module.add(loadInst)
+            module.add(VMovB32(dst=vgpr(vVal), src=sgpr(sTicket), comment="ticket"))
+            module.add(SWaitCnt(dscnt=0))
+            module.add(DSStoreB32(dstAddr=vgpr(vAddr), src=vgpr(vVal), ds=DSModifiers(offset=0), comment="publish ticket"))
+            module.add(SWaitCnt(dscnt=0))
+            module.add(skipAtomic)
+            module.add(SBarrier(comment="ticket visible to all waves"))
+            module.add(DSLoadB32(dst=vgpr(vVal), src=vgpr(vAddr), ds=DSModifiers(offset=0), comment="read ticket"))
+            module.add(SWaitCnt(dscnt=0))
+            module.add(VReadfirstlaneB32(dst=sgpr(sTicket), src=vgpr(vVal), comment="ticket"))
+            module.add(SBarrier(comment="every wave has read the ticket"))
+            # Wave 0 restores the borrowed LDS.
+            skipRestore = Label(writer.labels.getNameInc("SK_ArrivalSkipRestore"), "")
+            module.add(VReadfirstlaneB32(dst=sgpr(sTmp), src=vgpr("Serial"), comment="Wave 0 restores the mailbox"))
+            module.add(SCmpEQU32(src0=sgpr(sTmp), src1=0, comment="Check for wave 0"))
+            module.add(SCBranchSCC0(labelName=skipRestore.getLabelName(), comment="Skip restore"))
+            module.add(DSStoreB32(dstAddr=vgpr(vAddr), src=vgpr(vSave), ds=DSModifiers(offset=0), comment="restore LDS under the mailbox"))
+            module.add(SWaitCnt(dscnt=0))
+            module.add(skipRestore)
+            module.add(SBarrier(comment="mailbox restored before LDS is read again"))
+            module.add(SSubU32(dst=sgpr(sTmp), src0=sgpr("SKSplit"), src1=1))
+            module.add(SCmpEQU32(src0=sgpr(sTicket), src1=sgpr(sTmp), comment="last part in?"))
+        writer.vgprPool.checkIn(vSave)
+        writer.vgprPool.checkIn(vVal)
+        writer.vgprPool.checkIn(vAddr)
+        writer.sgprPool.checkIn(sTicket)
+
+        module.add(writer.longBranchScc0(arrivalDone, posNeg=1, comment="not last: this part is done"))
+        # Last: every other part released its partial before counting in.
+        module.add(memOrder.acquireFence(writer))
+        with writer.allocTmpSgpr(3, tag="StreamKHybrid_arrivalFixup") as tmp:
+            module.add(SLongBranchNegative(fixupEntry, tmp, comment="last: fix the tile up and store it"))
+        return module
+
+    # ------------------------------------------------------------------
     # storeBranches: runtime dispatch between SK4 inlined body and SK3
     # storeBranchesCommon. Both paths terminate with their own internal
     # SK_Store label and fall through to the actual store sequence, so we
@@ -4119,7 +4243,53 @@ class StreamKHybrid(StreamK):
         if kernel["StreamKAtomic"]:
             return module
 
+        def emitArrivalDynamicStore(mod):
+            # Full tile: regular store. Any part of a split tile: write the
+            # partial and count in (writePartials -> emitArrival). The last
+            # part in comes back to SK_ArrivalFixup, adds the other parts and
+            # falls through to the regular store.
+            skStoreLabel = Label(writer.labels.getNameInc("SK_Store"), "")
+            fixupEntry = Label(writer.labels.getNameInc("SK_ArrivalFixup"), "")
+            fixupLoop = Label(writer.labels.getNameInc("SK_Fixup"), "")
+            fixupNext = Label(writer.labels.getNameInc("SK_FixupNext"), "")
+            writer.states.skArrivalFixupLabel = fixupEntry
+
+            mod.add(SCmpEQU32(src0=sgpr("StreamKLocalStart"), src1=0, comment="does wg start tile?"))
+            mod.add(writer.longBranchScc0(skPartialsLabel, posNeg=1))
+            mod.add(SCmpEQU32(src0=sgpr("StreamKLocalEnd"), src1=sgpr("ItersPerTile"), comment="does wg finish tile?"))
+            mod.add(writer.longBranchScc0(skPartialsLabel, posNeg=1))
+            mod.add(SBranch(labelName=skStoreLabel.getLabelName(), comment="full tile: regular store"))
+
+            mod.add(fixupEntry)
+            sPartialIdx = writer.sgprPool.checkOut(1, "PartialIdx")
+            sFixupEnd = writer.sgprPool.checkOut(1, "FixupEnd")
+            sOwnIdx = writer.sgprPool.checkOut(1, "OwnPartialIdx")
+            mod.add(self.calculateFirstPartialIdx(sPartialIdx))
+            mod.add(SAddU32(dst=sgpr(sFixupEnd), src0=sgpr(sPartialIdx), src1=sgpr("SKSplit"),
+                            comment="one past the tile's last partial"))
+            mod.add(SAddU32(dst=sgpr(sOwnIdx), src0=sgpr(sPartialIdx), src1=sgpr("StreamKPartialIdx"),
+                            comment="own partial is already in the accumulators"))
+            mod.add(fixupLoop)
+            mod.add(SCmpEQU32(src0=sgpr(sPartialIdx), src1=sgpr(sOwnIdx), comment="own part?"))
+            mod.add(SCBranchSCC1(labelName=fixupNext.getLabelName(), comment="skip own partial"))
+            mod.add(self.fixupStep(writer, kernel, vectorWidths, elements,
+                                   [False], tmpVgpr, cvtVgprStruct, sPartialIdx))
+            mod.add(fixupNext)
+            mod.add(SAddU32(dst=sgpr(sPartialIdx), src0=sgpr(sPartialIdx), src1=1,
+                            comment="next partial tile index"))
+            mod.add(SCmpLtU32(src0=sgpr(sPartialIdx), src1=sgpr(sFixupEnd),
+                              comment="done loading partial tiles?"))
+            mod.add(SCBranchSCC1(labelName=fixupLoop.getLabelName(),
+                                 comment="Branch to continue fixup loop"))
+            writer.sgprPool.checkIn(sOwnIdx)
+            writer.sgprPool.checkIn(sFixupEnd)
+            writer.sgprPool.checkIn(sPartialIdx)
+            mod.add(skStoreLabel)
+
         def emitDynamicStore(mod):
+            if self.usesArrivalFixup(writer, kernel):
+                emitArrivalDynamicStore(mod)
+                return
             skStoreLabel = Label(writer.labels.getNameInc("SK_Store"), "")
             skFixupLabel = Label(writer.labels.getNameInc("SK_Fixup"), "")
 

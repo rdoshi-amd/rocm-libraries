@@ -8,6 +8,9 @@
 #include <hipblaslt/hipblaslt-ext.hpp>
 
 #include <cmath>
+#ifdef HIPBLASLT_JIT_CATCH2
+#include <catch2/catch_test_macros.hpp>
+#endif
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -16,13 +19,19 @@
 #include <string>
 #include <vector>
 
-// Helpers the JIT tests share.
+// Helpers the JIT tests share. Catch2 tests assert through Catch2. The other
+// JIT tests throw, because they have their own main.
 namespace hipblaslt_jit_test
 {
     inline void require(bool condition, const std::string& message)
     {
+#ifdef HIPBLASLT_JIT_CATCH2
+        INFO(message);
+        REQUIRE(condition);
+#else
         if(!condition)
             throw std::runtime_error(message);
+#endif
     }
 
     // Requires that f throws.

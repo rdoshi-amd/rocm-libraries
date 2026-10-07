@@ -1,6 +1,6 @@
 // Copyright Advanced Micro Devices, Inc., or its affiliates.
 // SPDX-License-Identifier: MIT
-#include "test_helpers.hpp"
+#include "solution_entry.hpp"
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 #include <hipblaslt/hipblaslt-ext.hpp>
@@ -13,10 +13,12 @@
 #include <unistd.h>
 
 // Heuristic queries under HIPBLASLT_JIT. The mode is a process environment
-// variable, so each CTest entry runs one mode. The test lists the device's
-// plain-pair bundle in HIPBLASLT_JIT_TEST_REPLAY before the first query.
+// variable, so each CTest entry runs one mode. The test stages the device's
+// plain-pair sources and lists that directory in HIPBLASLT_JIT_TEST_REPLAY
+// before the first query.
 namespace
 {
+    namespace fs = std::filesystem;
     using hipblaslt_jit_test::require;
     using hipblaslt_jit_test::Device;
     using hipblaslt_jit_test::endsWith;
@@ -320,11 +322,16 @@ namespace
         hipDeviceProp_t properties{};
         HIP(hipGetDevice(&device));
         HIP(hipGetDeviceProperties(&properties, device));
+        std::string replayRoot = root;
         if(mode == "ignored")
             require(setenv("HIPBLASLT_JIT_TEST_REPLAY", "ignored", 1) == 0, "setenv");
         else
         {
-            const auto bundles = hipblaslt_jit_test::deviceBundles(root, properties.gcnArchName);
+            const auto stage = fs::u8path(HIPBLASLT_JIT_REPLAY_ROOT) / mode;
+            hipblaslt_jit_test::stageDescribedSources(fs::u8path(root), stage);
+            replayRoot       = stage.u8string();
+            const auto bundles
+                = hipblaslt_jit_test::deviceBundles(stage, properties.gcnArchName);
             require(setenv("HIPBLASLT_JIT_TEST_REPLAY", (bundles / "plain-pair").u8string().c_str(), 1)
                         == 0,
                     "setenv");
@@ -381,7 +388,7 @@ namespace
             std::cout << "PASS K=512 first result\n";
             auto      algo  = c512.results.front().algo;
             const int index = hipblaslt_ext::getIndexFromAlgo(algo);
-            requireSameIndexInChild(root, index);
+            requireSameIndexInChild(replayRoot, index);
         }
         else
         {
@@ -477,7 +484,7 @@ int main(int argc, char** argv)
 {
     if(argc < 2 || (std::string(argv[1]) != "ignored" && argc != 3))
     {
-        std::cerr << "Usage: " << argv[0] << " off|fallback|forced|ignored|reuse [BUNDLES]\n";
+        std::cerr << "Usage: " << argv[0] << " off|fallback|forced|ignored|reuse [DATA]\n";
         return 2;
     }
     const std::string mode = argv[1];

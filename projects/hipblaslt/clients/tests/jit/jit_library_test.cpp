@@ -7,11 +7,10 @@
 // concurrent publishers in separate processes, and the rejection of fused GEMM
 // and all-to-all.
 
-#include "test_helpers.hpp"
+#include "solution_entry.hpp"
 #include "hipblaslt-jit-fs.hpp"
 #include "hipblaslt-jit-library.hpp"
 #include "hipblaslt-jit-msgpack.hpp"
-#include "hipblaslt-jit-source-bundle.hpp"
 #include <Tensile/AMDGPU.hpp>
 #include <Tensile/Tensile.hpp>
 #include <msgpack.hpp>
@@ -30,9 +29,8 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-namespace hj        = hipblaslt_jit;
-namespace fs        = std::filesystem;
-namespace artifacts = hipblaslt_jit::source_bundle;
+namespace hj = hipblaslt_jit;
+namespace fs = std::filesystem;
 using TensileLite::ContractionProblemGemm;
 
 namespace
@@ -958,7 +956,7 @@ int main(int argc, char** argv)
     if((argc != 3 && argc != 7) || (argc == 7 && (writers < 1 || perWriter < 1)))
     {
         std::cerr << "Usage: " << argv[0]
-                  << " BUNDLES SCRATCH [--writers N --per-writer M]\n";
+                  << " DATA SCRATCH [--writers N --per-writer M]\n";
         return 2;
     }
     try
@@ -979,10 +977,12 @@ int main(int argc, char** argv)
         require(TensileLite::AMDGPU::toString(processor) == ctx.arch,
                 "No TensileLite processor for " + ctx.arch);
         ctx.hardware = TensileLite::AMDGPU(processor, 256, ctx.arch);
-        const auto plain
-            = hipblaslt_jit_test::deviceBundles(fs::u8path(argv[1]), gcnArchName) / "plain";
-        require(fs::is_directory(plain), "No plain bundle for " + ctx.arch);
-        ctx.entry.bytes = artifacts::readSourceBundle(plain).library;
+        const auto prepared = hipblaslt_jit_test::prepareSolutions(fs::u8path(argv[1]));
+        const auto plain    = std::find_if(prepared.begin(), prepared.end(), [&](const auto& item) {
+            return item.arch == ctx.arch && item.name == "plain";
+        });
+        require(plain != prepared.end(), "No plain entry for " + ctx.arch);
+        ctx.entry.bytes = plain->solution.entry;
         const auto library = std::dynamic_pointer_cast<hj::GemmMaster>(
             TensileLite::LoadLibraryData<ContractionProblemGemm>(ctx.entry.bytes));
         require(library && library->solutions.count(0), "The replay has no solution 0");
@@ -998,7 +998,7 @@ int main(int argc, char** argv)
             replayed.hardwarePredicate->debugEval(ctx.hardware, std::cerr);
             throw std::runtime_error("The " + ctx.arch + " plain solution rejects this device");
         }
-        std::cout << "PASS " << ctx.arch << " plain bundle matches the test problem\n";
+        std::cout << "PASS " << ctx.arch << " plain entry matches the test problem\n";
         if(writers)
             concurrency(ctx, writers, perWriter);
         else

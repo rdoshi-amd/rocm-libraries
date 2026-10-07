@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 #include "hipblaslt-jit-source-bundle.hpp"
 #include "test_helpers.hpp"
+#include <catch2/catch_test_macros.hpp>
 #include <functional>
 #include <iostream>
 
@@ -23,8 +24,7 @@ std::vector<std::string> names(const std::vector<a::SourceFile>& files)
     return result;
 }
 
-int main(int argc, char** argv)
-try
+TEST_CASE("the source bundle reader accepts only a contained directory", "[jit-cpu]")
 {
     require(hipblaslt_jit_test::endsWith("solution_WGM1", "_WGM1"), "a proper suffix");
     require(hipblaslt_jit_test::endsWith("abc", "abc"), "a string ends with itself");
@@ -32,8 +32,7 @@ try
     require(hipblaslt_jit_test::endsWith("", ""), "empty ends with empty");
     require(!hipblaslt_jit_test::endsWith("ab", "abc"), "a longer suffix does not match");
     require(!hipblaslt_jit_test::endsWith("", "a"), "empty does not end with a letter");
-    require(argc == 2, "Usage: hipblaslt-jit-source-bundle-test SCRATCH");
-    const auto root = fs::u8path(argv[1]);
+    const auto root = fs::u8path(HIPBLASLT_JIT_SCRATCH);
     fs::remove_all(root);
     fs::create_directories(root);
 
@@ -144,10 +143,4 @@ try
         [&] { fs::remove(bundle / "sources/outside.h"); });
 #endif
     std::cout << "PASS source bundle convention, containment, file and count caps\n";
-    return 0;
-}
-catch(const std::exception& error)
-{
-    std::cerr << "FAIL: " << error.what() << '\n';
-    return 1;
 }

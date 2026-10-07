@@ -6,11 +6,11 @@ Every part of a split tile writes its partial and counts itself in on a
 per-tile counter with ``s_atomic_inc`` bounded by ``SKSplit-1``; the part that
 reads ``SKSplit-1`` (and so wraps the counter back to 0) fixes the tile up.
 These tests pin the shape of that protocol on a fake writer: one atomic, its
-bound, the LDS ticket broadcast that restores what it borrowed, and that no
-per-part ready flag is stored or polled.
+bound, the LDS ticket broadcast that restores what it borrowed, that no
+per-part ready flag is stored or polled, and that the last part sums the
+partials in part order.
 """
 
-import inspect
 import itertools
 from contextlib import contextmanager
 from types import SimpleNamespace
@@ -29,9 +29,13 @@ from rocisa.instruction import (
     DSStoreB32,
     SAtomicInc,
     SBarrier,
+    SCBranchSCC1,
+    SLoadB32,
+    SStoreB32,
     SSubU32,
 )
 
+from Tensile.Components import StreamK as StreamKModule
 from Tensile.Components.StreamK import StreamK, StreamKHybrid
 
 pytestmark = pytest.mark.unit
@@ -138,9 +142,68 @@ def test_base_strategy_keeps_flags():
     assert StreamK.usesArrivalFixup(StreamKHybrid(), _writer(), _KERNEL) is False
 
 
-def test_dynamic_store_has_no_flag_spin_when_arriving():
-    # The arrival store body must not poll a ready flag (readFlag) in the loop.
-    src = inspect.getsource(StreamKHybrid.storeBranches)
-    body = src.split("def emitArrivalDynamicStore", 1)[1].split("def emitDynamicStore", 1)[0]
-    assert "readFlag" not in body and "emitFlagStore" not in body
-    assert "skArrivalFixupLabel" in body
+def _recording_hybrid():
+    """StreamKHybrid whose fixup step only records how it was asked to run.
+
+    Patched on the instance: a subclass would register as a second
+    TileProcessingStrategy implementation for later tests.
+    """
+    sk = StreamKHybrid()
+    sk.steps = []
+
+    def fixupStep(writer, kernel, vectorWidths, elements, edges, tmpVgpr,
+                  cvtVgprStruct, sPartialIdx, overwrite=False):
+        sk.steps.append(overwrite)
+        return Module("fixupStep overwrite=%s" % overwrite)
+
+    sk.fixupStep = fixupStep
+    return sk
+
+
+def _arrival_store(monkeypatch):
+    class _WA:
+        def dispatch(self, writer, module, name, dynamic, static):
+            dynamic(module)
+
+        def flagsBaseOffset(self, writer, kernel):
+            return 1024
+
+    realComponent = StreamKModule.Component
+
+    class _Component:
+        WorkAssignment = SimpleNamespace(find=lambda writer: _WA())
+
+        def __getattr__(self, name):
+            return getattr(realComponent, name)
+
+    # Swap the module's Component reference, not the registry's classes.
+    monkeypatch.setattr(StreamKModule, "Component", _Component())
+    sk = _recording_hybrid()
+    w = _writer()
+    kernel = dict(_KERNEL, StreamKAtomic=0)
+    module = sk.storeBranches(w, kernel, Label("SK_Partials_test", ""), {False: 1},
+                              {False: []}, 0, None)
+    return sk, w, list(module.flatitems())
+
+
+def test_dynamic_store_has_no_flag_spin_when_arriving(monkeypatch):
+    _, w, items = _arrival_store(monkeypatch)
+    assert not any(isinstance(i, (BufferStoreB32, BufferLoadB32, SLoadB32, SStoreB32))
+                   for i in items), "the arrival fixup polls and resets no ready flag"
+    assert any(isinstance(i, Label) and i.getLabelName() == w.states.skArrivalFixupLabel.getLabelName()
+               for i in items), "storeBranches emits the fixup entry emitArrival jumps to"
+
+
+def test_fixup_sums_partials_in_part_order(monkeypatch):
+    # The sum is ((p0 + p1) + p2) + ... whichever part arrived last. A last
+    # part >= 2 replaces its accumulators with p0 (the overwrite step) and
+    # adds p1.. in a loop that includes its own partial; a last part 0 or 1
+    # starts from its accumulators (p0 + p1 == p1 + p0) and adds the other.
+    sk, _, items = _arrival_store(monkeypatch)
+    assert sk.steps == [True, False], "one overwrite step, one accumulating loop body"
+    text = "".join(str(i) for i in items)
+    assert "s_cmp_ge_u32 s[sgprStreamKPartialIdx], 2" in text
+    assert "s_max_u32" in text, "after p0/p1 the loop continues at p2"
+    assert "s_cmp_le_u32" in text, "the loop runs through the tile's last partial"
+    loopBranches = [i for i in items if isinstance(i, SCBranchSCC1)]
+    assert len(loopBranches) == 1, "one fixup loop, no skip-own-part branch"

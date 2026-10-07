@@ -24,7 +24,7 @@ from ..ExecutionPolicy import isPersistent, isPersistentDataParallel, hasStaticA
 from rocisa.enum import CacheScope
 from rocisa.code import Module, Label
 from rocisa.container import vgpr, sgpr, mgpr, SMEMModifiers, MUBUFModifiers, DSModifiers, replaceHolder, EXEC, VOP3PModifiers, ContinuousRegister
-from rocisa.instruction import GlobalInv, GlobalWb, SAddCU32, SAddU32, SAndB32, SBarrier, SBitcmp1B32, SBranch, SCBranchSCC0, SCBranchSCC1, SCMovB32, SCSelectB32, SCmpEQU32, SCmpEQU64, SCmpGeU32, SCmpGtU32, SCmpLeU32, SCmpLtU32, SLShiftLeftB32, SLShiftLeftB64, SLShiftRightB32, SLoadB32, SMaxI32, SMinU32, SMovB32, SMovB64, SMulHIU32, SMulI32, SNop, SOrB32, SSleep, SStoreB32, SSubU32, SWaitCnt, SWaitXCnt, VAddF32, VAddF64, VAddPKF16, VAddU32, VLShiftRightB32, VMovB32, VReadfirstlaneB32, VCvtBF16toFP32, BufferLoadB32, BufferStoreB32, SLongBranch, SLongBranchPositive, SLongBranchNegative, SAtomicInc, DSLoadB32, DSStoreB32, VAndB32, VLShiftLeftB32
+from rocisa.instruction import GlobalInv, GlobalWb, SAddCU32, SAddU32, SAndB32, SBarrier, SBitcmp1B32, SBranch, SCBranchSCC0, SCBranchSCC1, SCMovB32, SCSelectB32, SCmpEQU32, SCmpEQU64, SCmpGeU32, SCmpGtU32, SCmpLeU32, SCmpLtU32, SLShiftLeftB32, SLShiftLeftB64, SLShiftRightB32, SLoadB32, SMaxI32, SMaxU32, SMinU32, SMovB32, SMovB64, SMulHIU32, SMulI32, SNop, SOrB32, SSleep, SStoreB32, SSubU32, SWaitCnt, SWaitXCnt, VAddF32, VAddF64, VAddPKF16, VAddU32, VLShiftRightB32, VMovB32, VReadfirstlaneB32, VCvtBF16toFP32, BufferLoadB32, BufferStoreB32, SLongBranch, SLongBranchPositive, SLongBranchNegative, SAtomicInc, DSLoadB32, DSStoreB32, VAndB32, VLShiftLeftB32
 from rocisa.functions import scalarStaticDivideAndRemainder, sMagicDiv2, vectorStaticMultiply, BranchIfNotZero, scalarUInt24DivideAndRemainder, scalarUInt32DivideAndRemainder
 
 from .Subtile.SubtileLREmit import localReadResetOffsetsSubtile
@@ -2207,7 +2207,12 @@ class StreamK(TileProcessingStrategy):
 
         return module
 
-    def fixupStep(self, writer, kernel, vectorWidths, elements, edges, tmpVgpr, cvtVgprStruct, sPartialIdx):
+    def fixupStep(self, writer, kernel, vectorWidths, elements, edges, tmpVgpr, cvtVgprStruct, sPartialIdx, overwrite=False):
+        """Add partial tile ``sPartialIdx`` into the accumulators.
+
+        ``overwrite``: replace the accumulators with the partial instead (the
+        first step of a fixed-order sum; see fixupBatch).
+        """
         module = Module("StreamK Common fixupStep")
 
         fixupLabels = {}
@@ -2454,7 +2459,7 @@ class StreamK(TileProcessingStrategy):
                             elementsThisBatch, writer.vgprs.addrD, writer.vgprs.addrC, \
                             tmpVgpr, cvtVgprStruct, \
                             elementSgprs, tmpSgpr, codeAccVgprRead, codeAccVgprWrite,
-                            elementStartIdx, clsLoop=useCLS))
+                            elementStartIdx, clsLoop=useCLS, overwrite=overwrite))
 
                 if useCLS:
                     self._skCLSLoopClose(writer, module, clsCounter, clsM0Base, clsLabel)
@@ -2472,8 +2477,28 @@ class StreamK(TileProcessingStrategy):
     def fixupBatch(self, writer, kernel, ss, batchIdx, edge, gwvw, \
             batchElements, addrD, addrC, \
             tmpVgpr, cvtVgprStruct, batchElementSgprs, tmpSgpr, codeAccVgprRead, codeAccVgprWrite,
-            elementStartIdx=0, clsLoop=False):
+            elementStartIdx=0, clsLoop=False, overwrite=False):
         module = Module("StreamK Common fixupBatch")
+
+        # overwrite: the accumulators become the partial rather than
+        # accumulator + partial. Each add below first sets the registers it
+        # accumulates into to -0.0 (0 for integers), the additive identity:
+        # -0 + x == x bit for bit, including x == +0. This keeps every add
+        # path (packed, mixed, 64-bit) and its register mapping unchanged.
+        def prefill(regIdx, numRegs=1, isInt=False, isPackedHalf=False, is64=False):
+            if not overwrite:
+                return
+            for r in range(numRegs):
+                if isInt:
+                    val = 0
+                elif isPackedHalf:
+                    val = "0x80008000"
+                elif is64:
+                    val = "0x80000000" if r % 2 else 0
+                else:
+                    val = "0x80000000"
+                module.add(VMovB32(dst=vgpr("ValuC+%u" % (regIdx + r)), src=val,
+                                   comment="fixed-order fixup: start from the first partial"))
 
         module.addComment0("optSingleColVgpr=%u optSharedColVgpr=%u optSGPRUsage=%s optSrdIncForRow=%u" % \
             (ss.optSingleColVgpr, ss.optSharedColVgpr, ss.optSGPRUsage, ss.optSrdIncForRow))
@@ -2717,6 +2742,7 @@ class StreamK(TileProcessingStrategy):
                                 module.add(VLShiftRightB32(dst=vgpr(dataV), shiftHex=16, src=vgpr(dataV), \
                                     comment="shift 16bit to get next half of packed ValueC"))
                             # dataV+0 = new c = old c*beta + rC
+                            prefill(sumIdxV, isPackedHalf=True)
                             module.add(VAddPKF16(dst=vgpr("ValuC+%u"%(sumIdxV)), src0=vgpr(dataV), src1=vgpr("ValuC+%u"%(sumIdxV)), \
                                 comment="sum*alpha + C*beta"))
                         elif sumIdxV%2==0 or (not ss.cfg.halfDataRegPerVI and gwvw==1):
@@ -2725,6 +2751,7 @@ class StreamK(TileProcessingStrategy):
                             # kStr += inst("v_pk_mul_f16", vgpr(dataV), sgpr("Beta"), vgpr(dataV+0), \
                             #         "%s = C*beta ei=%u vi=%u"%(vgpr(dataV),elementIdx, vi))
                             # dataV+0 = new c = old c*beta + rC
+                            prefill(newSumIdxV, isPackedHalf=True)
                             module.add(VAddPKF16(dst=vgpr("ValuC+%u"%(newSumIdxV)), src0=vgpr(dataV), src1=vgpr("ValuC+%u"%(newSumIdxV)), \
                                 comment="sum*alpha + C*beta"))
                         else:
@@ -2743,6 +2770,7 @@ class StreamK(TileProcessingStrategy):
                         #     src1=vgpr(dataCExternal), src2=vgpr("ValuC+%u"%newSumIdxV), \
                         #     vop3=VOP3PModifiers(op_sel=[0,hi16,0], op_sel_hi=[0,1,0]),
                         #     comment="//C*=beta"))
+                        prefill(newSumIdxV)
                         module.add(writer.states.mixinst(dst=vgpr("ValuC+%u"%newSumIdxV), src0=1, \
                             src1=vgpr(dataCExternal), src2=vgpr("ValuC+%u"%newSumIdxV), \
                             vop3=VOP3PModifiers(op_sel=[0,hi16,0], op_sel_hi=[0,1,0]),
@@ -2765,36 +2793,43 @@ class StreamK(TileProcessingStrategy):
                         #     kStr += inst("v_lshlrev_b32", vgpr(tmpVgpr), "16", vgpr(dataCExternal), "convert bf16 to fp32" )
                         module.add(VCvtBF16toFP32(dst=vgpr(tmpVgpr), src=vgpr(dataCExternal), vgprMask=vgpr(cvtVgprStruct.vgprBf16Mask), vi=(vi)))
                         newSumIdxV = sumIdxV - writer.states.c.startVgprValu
+                        prefill(sumIdxV)
                         module.add(VAddF32(dst=vgpr("ValuC+%u"%sumIdxV), src0=vgpr("ValuC+%u"%sumIdxV), src1=vgpr(tmpVgpr), comment="accum partials"))
 
                 elif kernel["ProblemType"]["ComputeDataType"].isSingle():
                     if kernel["ProblemType"]["DataType"].isInt8():
                         newSumIdxV = sumIdxV - writer.states.c.startVgprValu
+                        prefill(newSumIdxV, isInt=True)
                         module.add(VAddU32(dst=vgpr("ValuC+%u"%newSumIdxV), src0=vgpr(dataV+0), src1=vgpr("ValuC+%u"%newSumIdxV), comment="accum partials"))
                     else:
                         newSumIdxV = sumIdxV - writer.states.c.startVgprValu
+                        prefill(newSumIdxV)
                         module.add(VAddF32(dst=vgpr("ValuC+%u"%newSumIdxV), src0=vgpr("ValuC+%u"%newSumIdxV), src1=vgpr(dataV+0), comment="accum partials"))
 
                 elif kernel["ProblemType"]["ComputeDataType"].isInt32():
                     newSumIdxV = sumIdxV - writer.states.c.startVgprValu
                     # assume we will need to replace v_mac_f32 with v_add_u32 and s_mul_lo_i32
                     # v_mad_i32_i24
+                    prefill(newSumIdxV, isInt=True)
                     module.add(VAddU32(dst=vgpr("ValuC+%u"%newSumIdxV), src0=vgpr(dataV+0), src1=vgpr("ValuC+%u"%newSumIdxV), comment="accum partials"))
 
                 elif kernel["ProblemType"]["ComputeDataType"].isDouble():
                     newSumIdxV = sumIdxV * 2 - writer.states.c.startVgprValu
                     # dataV+0 = new c = old c*beta
+                    prefill(newSumIdxV, 2, is64=True)
                     module.add(VAddF64(dst=vgpr("ValuC+%u"%(newSumIdxV),2), src0=vgpr("ValuC+%u"%(newSumIdxV),2), src1=vgpr(dataV+0,2), comment="accum partials"))
 
                 # single precision complex
                 elif kernel["ProblemType"]["ComputeDataType"].isSingleComplex():
                     newSumIdxV = sumIdxV * 2 - writer.states.c.startVgprValu
+                    prefill(newSumIdxV, 2)
                     module.add(VAddF32(dst=vgpr("ValuC+%u"%(newSumIdxV)), src0=vgpr("ValuC+%u"%(newSumIdxV)), src1=vgpr(dataV+0), comment="accum partials real"))
                     module.add(VAddF32(dst=vgpr("ValuC+%u"%(newSumIdxV+1)), src0=vgpr("ValuC+%u"%(newSumIdxV+1)), src1=vgpr(dataV+1), comment="accum partials imag"))
 
                 # double precision complex
                 elif kernel["ProblemType"]["ComputeDataType"].isDoubleComplex():
                     newSumIdxV = sumIdxV * 4 - writer.states.c.startVgprValu
+                    prefill(newSumIdxV, 4, is64=True)
                     module.add(VAddF64(dst=vgpr("ValuC+%u"%(newSumIdxV+0),2), src0=vgpr("ValuC+%u"%(newSumIdxV+0),2), src1=vgpr(dataV+0,2), comment="accum partials real"))
                     module.add(VAddF64(dst=vgpr("ValuC+%u"%(newSumIdxV+2),2), src0=vgpr("ValuC+%u"%(newSumIdxV+2),2), src1=vgpr(dataV+2,2), comment="accum partials imag"))
 
@@ -4136,7 +4171,9 @@ class StreamKHybrid(StreamK):
     #
     # The counter is an s_atomic_inc with bound SKSplit-1, so the arriving part
     # reads SKSplit-1 and wraps it back to 0: the region is left clean with no
-    # separate reset. Summation order depends on which part arrives last.
+    # separate reset. The last part sums the partials in part order
+    # (((p0 + p1) + p2) + ...), so the result does not depend on which part
+    # arrived last.
     # ------------------------------------------------------------------
     def usesArrivalFixup(self, writer, kernel):
         # The arrival broadcast borrows LDS[0, 64*4) and restores it, which is
@@ -4249,12 +4286,11 @@ class StreamKHybrid(StreamK):
         def emitArrivalDynamicStore(mod):
             # Full tile: regular store. Any part of a split tile: write the
             # partial and count in (writePartials -> emitArrival). The last
-            # part in comes back to SK_ArrivalFixup, adds the other parts and
+            # part in comes back to SK_ArrivalFixup, sums the tile's parts and
             # falls through to the regular store.
             skStoreLabel = Label(writer.labels.getNameInc("SK_Store"), "")
             fixupEntry = Label(writer.labels.getNameInc("SK_ArrivalFixup"), "")
             fixupLoop = Label(writer.labels.getNameInc("SK_Fixup"), "")
-            fixupNext = Label(writer.labels.getNameInc("SK_FixupNext"), "")
             writer.states.skArrivalFixupLabel = fixupEntry
 
             mod.add(SCmpEQU32(src0=sgpr("StreamKLocalStart"), src1=0, comment="does wg start tile?"))
@@ -4264,28 +4300,49 @@ class StreamKHybrid(StreamK):
             mod.add(SBranch(labelName=skStoreLabel.getLabelName(), comment="full tile: regular store"))
 
             mod.add(fixupEntry)
+            # Sum the tile's partials in part order, ((p0 + p1) + p2) + ...,
+            # whichever part arrived last: the result is the same bits on
+            # every launch. fp add is commutative, so a last part 0 or 1 starts
+            # from its own accumulators and adds the other of the two. A later
+            # last part replaces its accumulators with p0 and re-reads its own
+            # partial from the workspace (written before counting in) in turn:
+            # one extra partial read. SKSplit >= 2 here.
+            fixupOwn01 = Label(writer.labels.getNameInc("SK_FixupOwn01"), "")
             sPartialIdx = writer.sgprPool.checkOut(1, "PartialIdx")
-            sFixupEnd = writer.sgprPool.checkOut(1, "FixupEnd")
-            sOwnIdx = writer.sgprPool.checkOut(1, "OwnPartialIdx")
+            sFixupLast = writer.sgprPool.checkOut(1, "FixupLast")
+            sFixupThird = writer.sgprPool.checkOut(1, "FixupThird")
             mod.add(self.calculateFirstPartialIdx(writer, kernel, sPartialIdx))
-            mod.add(SAddU32(dst=sgpr(sFixupEnd), src0=sgpr(sPartialIdx), src1=sgpr("SKSplit"),
+            mod.add(SAddU32(dst=sgpr(sFixupLast), src0=sgpr(sPartialIdx), src1=sgpr("SKSplit"),
                             comment="one past the tile's last partial"))
-            mod.add(SAddU32(dst=sgpr(sOwnIdx), src0=sgpr(sPartialIdx), src1=sgpr("StreamKPartialIdx"),
-                            comment="own partial is already in the accumulators"))
+            mod.add(SSubU32(dst=sgpr(sFixupLast), src0=sgpr(sFixupLast), src1=1,
+                            comment="the tile's last partial"))
+            mod.add(SAddU32(dst=sgpr(sFixupThird), src0=sgpr(sPartialIdx), src1=2,
+                            comment="the tile's partial 2"))
+            mod.add(SCmpGeU32(src0=sgpr("StreamKPartialIdx"), src1=2, comment="own part is 0 or 1?"))
+            mod.add(SCBranchSCC0(labelName=fixupOwn01.getLabelName(),
+                                 comment="own part 0/1: start from the accumulators"))
+            mod.add(self.fixupStep(writer, kernel, vectorWidths, elements,
+                                   [False], tmpVgpr, cvtVgprStruct, sPartialIdx, overwrite=True))
+            mod.add(SAddU32(dst=sgpr(sPartialIdx), src0=sgpr(sPartialIdx), src1=1,
+                            comment="then add p1, p2, ..."))
+            mod.add(SBranch(labelName=fixupLoop.getLabelName(), comment="add the rest in order"))
+            mod.add(fixupOwn01)
+            mod.add(SSubU32(dst=sgpr(sPartialIdx), src0=sgpr(sFixupThird), src1=1))
+            mod.add(SSubU32(dst=sgpr(sPartialIdx), src0=sgpr(sPartialIdx), src1=sgpr("StreamKPartialIdx"),
+                            comment="the other of p0/p1"))
             mod.add(fixupLoop)
-            mod.add(SCmpEQU32(src0=sgpr(sPartialIdx), src1=sgpr(sOwnIdx), comment="own part?"))
-            mod.add(SCBranchSCC1(labelName=fixupNext.getLabelName(), comment="skip own partial"))
             mod.add(self.fixupStep(writer, kernel, vectorWidths, elements,
                                    [False], tmpVgpr, cvtVgprStruct, sPartialIdx))
-            mod.add(fixupNext)
             mod.add(SAddU32(dst=sgpr(sPartialIdx), src0=sgpr(sPartialIdx), src1=1,
                             comment="next partial tile index"))
-            mod.add(SCmpLtU32(src0=sgpr(sPartialIdx), src1=sgpr(sFixupEnd),
+            mod.add(SMaxU32(dst=sgpr(sPartialIdx), src0=sgpr(sPartialIdx), src1=sgpr(sFixupThird),
+                            comment="after p0/p1 comes p2"))
+            mod.add(SCmpLeU32(src0=sgpr(sPartialIdx), src1=sgpr(sFixupLast),
                               comment="done loading partial tiles?"))
             mod.add(SCBranchSCC1(labelName=fixupLoop.getLabelName(),
                                  comment="Branch to continue fixup loop"))
-            writer.sgprPool.checkIn(sOwnIdx)
-            writer.sgprPool.checkIn(sFixupEnd)
+            writer.sgprPool.checkIn(sFixupThird)
+            writer.sgprPool.checkIn(sFixupLast)
             writer.sgprPool.checkIn(sPartialIdx)
             mod.add(skStoreLabel)
 

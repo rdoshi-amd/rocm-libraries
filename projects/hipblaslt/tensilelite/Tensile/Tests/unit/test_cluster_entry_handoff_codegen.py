@@ -109,3 +109,17 @@ def test_nonpersistent_cluster_entry_reuses_prefetch_join(tmp_path, sia, depth_u
                        if instructions[i] == "s_barrier_signal -3")
     assert any(instructions[i:i + 2] == ["s_barrier_signal -1", "s_barrier_wait -1"]
                for i in range(entry_wait + 1, next_signal - 1)), name
+
+
+@pytest.mark.parametrize("arch, skipped", [
+    ("gfx942", True), ("gfx1250", False), ("gfx1250-strict", False),
+])
+def test_cluster_regression_arch_selection(monkeypatch, arch, skipped):
+    common = _CONFIG.parents[2]
+    monkeypatch.syspath_prepend(str(common))
+    from config_helpers import configMarks
+    marks = configMarks(str(_CONFIG),
+                        str(common.parent), [arch])
+    assert any(mark.name == "skip" for mark in marks) == skipped
+    assert any(mark.name == "common" for mark in marks)
+    assert any(mark.name == "gfx1250-strict" for mark in marks)

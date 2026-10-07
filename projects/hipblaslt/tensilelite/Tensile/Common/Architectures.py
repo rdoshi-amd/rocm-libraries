@@ -156,6 +156,7 @@ ARCH_CAP_OVERRIDES = {
             "HasTDMMulticast": False,
             # RequiresXCntForVolatileVMEM is deliberately absent: gfx1250-strict
             # still needs the XNACK-replay xcnt drain, so it inherits the probed True.
+            "RequiresScaledLowPrecisionWMMA": True,  # low-precision WMMA must use the _scale form
         },
     },
 }

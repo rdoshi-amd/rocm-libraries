@@ -68,7 +68,7 @@ from .Common import printWarning, roundUp, print2, DebugConfig, DataDirection, \
   INDEX_CHARS, IsaVersion, log2, clusterEnabled, \
   swizzleGeometry
 from .Common.GlobalParameters import globalParameters
-from .Common.Architectures import ARCH_CAP_OVERRIDES
+from .Common.Architectures import ARCH_CAP_OVERRIDES, tuningArchOf
 from .Common.ValidParameters import resolveSwInstructionPrefetch, \
   SW_INSTRUCTION_PREFETCH_AUTO
 from .SolutionStructs.Naming import getKernelNameMin
@@ -7322,12 +7322,6 @@ class KernelWriter(PersistentKernelState, StreamKKernelState, metaclass=abc.ABCM
     isgfx950 = kernel["ISA"][:2] == (9, 5)
     ti = rocIsa.getInstance()
     ti.setKernel(version, kernel["WavefrontSize"])
-    # gfx1250 low-precision WMMA scaled-form workaround applies only to the V0/strict
-    # steppings (gfx1250-strict / gfx1250v0), not the base gfx1250 build. All three
-    # share ISA (12,5,0), so gate on the concrete arch name instead. Persists across
-    # later setKernel calls (e.g. activation codegen); see rocIsa::setForceScaledWMMA.
-    _stArchName = globalParameters.get("StinkyTofuArchName") or ""
-    ti.setForceScaledWMMA(_stArchName in ("gfx1250-strict", "gfx1250v0"))
 
     self.consts = ConstValues()
     self.states = StateValues(version=version, kernel=kernel, kernelName=getKernelNameMin(kernel, self.debugConfig.splitGSU))
@@ -7375,9 +7369,11 @@ class KernelWriter(PersistentKernelState, StreamKKernelState, metaclass=abc.ABCM
     # the build's arch name is the only signal here (empty for v1). Rebuild the
     # dict rather than mutate: some backends return the live cached cap dict.
     archName = globalParameters.get("StinkyTofuArchName") or ""
-    archCapDeltas = ARCH_CAP_OVERRIDES.get(archName, {}).get("archCaps", {})
+    archCapDeltas = ARCH_CAP_OVERRIDES.get(tuningArchOf(archName), {}).get("archCaps", {})
     if archCapDeltas:
       self.states.archCaps = {**self.states.archCaps, **archCapDeltas}
+    # Persists across later setKernel calls (e.g. activation codegen); see rocIsa::setForceScaledWMMA.
+    ti.setForceScaledWMMA(bool(self.states.archCaps.get("RequiresScaledLowPrecisionWMMA", False)))
 
     self.asmAssert = Assert(self.states.laneSGPRCount, kernel["WavefrontSize"], self.db["EnableAsserts"])
 

@@ -4,7 +4,9 @@
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 #include <hipblaslt/hipblaslt-ext.hpp>
+#include <catch2/catch_test_macros.hpp>
 
+#include <cstdlib>
 #include <iostream>
 #include <set>
 #include <string>
@@ -293,11 +295,15 @@ namespace
                 _exit(127);
             close(pipes[0]);
             close(pipes[1]);
+            if(setenv("HIPBLASLT_JIT_TEST_MODE", "reuse", 1) != 0
+               || setenv("HIPBLASLT_JIT_REUSE_ROOT", root.c_str(), 1) != 0)
+                _exit(127);
+            // Catch2's reporter must not share the pipe that carries INDEX.
             execl("/proc/self/exe",
                   "hipblaslt-jit-heuristic-test",
-                  "reuse",
-                  root.c_str(),
-                  nullptr);
+                  "--out",
+                  "/dev/null",
+                  static_cast<char*>(nullptr));
             _exit(127);
         }
         close(pipes[1]);
@@ -480,31 +486,21 @@ namespace
     }
 }
 
-int main(int argc, char** argv)
+TEST_CASE("heuristic queries under HIPBLASLT_JIT", "[jit-gpu]")
 {
-    if(argc < 2 || (std::string(argv[1]) != "ignored" && argc != 3))
+    const char* mode = std::getenv("HIPBLASLT_JIT_TEST_MODE");
+    require(mode && *mode, "Set HIPBLASLT_JIT_TEST_MODE");
+    const std::string which = mode;
+    if(which == "reuse")
     {
-        std::cerr << "Usage: " << argv[0] << " off|fallback|forced|ignored|reuse [DATA]\n";
-        return 2;
+        const char* root = std::getenv("HIPBLASLT_JIT_REUSE_ROOT");
+        require(root && *root, "reuse is missing its data directory");
+        reuse(root);
     }
-    const std::string mode = argv[1];
-    if(mode != "off" && mode != "fallback" && mode != "forced" && mode != "ignored"
-       && mode != "reuse")
-    {
-        std::cerr << "Unknown mode " << mode << '\n';
-        return 2;
-    }
-    try
-    {
-        if(mode == "reuse")
-            reuse(argv[2]);
-        else
-            test(mode, argc == 3 ? argv[2] : "");
-    }
-    catch(const std::exception& error)
-    {
-        std::cerr << "FAIL: " << error.what() << '\n';
-        return 1;
-    }
-    return 0;
+    else if(which == "ignored")
+        test(which, "");
+    else if(which == "off" || which == "fallback" || which == "forced")
+        test(which, HIPBLASLT_JIT_DATA);
+    else
+        require(false, "Unknown mode " + which);
 }

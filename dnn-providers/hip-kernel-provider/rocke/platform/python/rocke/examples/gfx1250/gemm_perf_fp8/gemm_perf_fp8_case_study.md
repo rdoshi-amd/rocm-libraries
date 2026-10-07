@@ -353,9 +353,20 @@ output indicating anything had been missed.
 5. Investigate *why* the wider load helps, before generalising it to other
    1-byte paths — notably `moe_gemm_fused`, which still passes the default
    width and would inherit the same halving.
-6. The DirectToLDS load path in the C++ engine hardcodes 2 bytes per element
-   (`a_half_bytes = block_m * block_k * 2`), which is a separate latent fp8
-   bug in the same area. Out of scope here; not yet filed.
+6. The DirectToLDS load path hardcodes 2 bytes per element, in **both** engines
+   (`_DTL_HALVES = _DTL_DWORDS * 2` with `_DTL_BYTES_PER_LANE = _DTL_DWORDS * 4`;
+   `a_half_bytes = block_m * block_k * 2` in `gemm_build_load.cpp`). For a
+   1-byte operand it budgets 16 bytes per lane chunk while moving 8, and it
+   disagrees with its own LDS allocation, which *is* sized correctly from
+   `_ab_dtype_bytes`.
+
+   It is **not** reachable from this path — `direct_to_lds` is rejected on the
+   gfx1250 WMMA pipeline — but it **is** reachable with fp8/bf8 on gfx950 and
+   gfx942, so this is a live defect on CDNA rather than a latent one. It is not
+   fixed here because the arches that can reach it are not the arch this work
+   has hardware for: changing both engines would turn the byte-identity gate
+   GREEN by making them agree, without any numeric check that they agree on the
+   *right* answer — which is how the defect arose in the first place.
 
 ---
 

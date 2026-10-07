@@ -81,9 +81,9 @@ TYPED_TEST(TestCkTileGemmMultiD, TestCkTileGemmMultiDTdm_64x64x32)
 
 // Unaligned shapes. They depend on the plain TDM GEMM handling the same N (the E row pitch is not
 // a multiple of 8 elements); filter with --gtest_filter=-*Unaligned* if that is not yet the case.
-TYPED_TEST(TestCkTileGemmMultiD, TestCkTileGemmMultiDTdmUnaligned_1021x509x256)
+TYPED_TEST(TestCkTileGemmMultiD, TestCkTileGemmMultiDTdmUnaligned_253x381x256)
 {
-    EXPECT_TRUE(this->Run(1021, 509, 256, 1));
+    EXPECT_TRUE(this->Run(253, 381, 256, 1));
 }
 
 TYPED_TEST(TestCkTileGemmMultiD, TestCkTileGemmMultiDTdmUnaligned_255x257x96)

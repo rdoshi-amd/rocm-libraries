@@ -39,13 +39,14 @@ TYPED_TEST(TEST_CKTILE_GGEMM_TDM_SUITE_NAME, RaggedMN)
 
 // Long K loops exercise the TDM ping-pong LDS schedule. Every K is a multiple of the K block
 // tile; K = 1024 + K_Tile and 4096 + K_Tile give an odd number of K iterations for every dtype
-// (16-bit: 33 and 129, 8-bit: 9 and 33).
+// (16-bit: 33 and 129, 8-bit: 9 and 33). The K schedule does not depend on M and N, so each group
+// is one or two 64x64 tiles to keep the CPU reference cheap.
 TYPED_TEST(TEST_CKTILE_GGEMM_TDM_SUITE_NAME, LargeK)
 {
     constexpr int KTile       = TestFixture::ActiveKernelParam::K_Tile;
     const int group_count     = 4;
-    const std::vector<int> Ms = {256, 256, 256, 256};
-    const std::vector<int> Ns = {256, 256, 256, 256};
+    const std::vector<int> Ms = {128, 64, 64, 64};
+    const std::vector<int> Ns = {64, 64, 64, 64};
     const std::vector<int> Ks = {1024, 1024 + KTile, 4096, 4096 + KTile};
 
     this->RunOnDevice(Ms, Ns, Ks, group_count);

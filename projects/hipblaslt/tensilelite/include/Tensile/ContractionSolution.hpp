@@ -32,6 +32,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -505,6 +506,29 @@ namespace TensileLite
         std::array<int, 2> waveGroup;
     };
 
+    /**
+     * Work decomposition of the dynamic work-queue StreamK path (SK4 and the
+     * dynamic sub-path of SK5): the first tiles - skTiles work items are whole
+     * tiles, the remaining skTiles tiles are each cut into skSplit parts of
+     * skItersPerWI iterations, for totalItems work items in all. grid is the
+     * workgroup count the dynamic grid policy launches for it.
+     */
+    struct StreamKDynamicSplit
+    {
+        uint32_t skTiles      = 0;
+        uint32_t skSplit      = 0;
+        uint32_t skItersPerWI = 0;
+        uint32_t totalItems   = 0;
+        size_t   grid         = 0;
+
+        // Workspace partial-tile slots (and, on the flag-protocol kernels, ready
+        // flags) the kernel indexes: one per part of every split tile.
+        size_t partialSlots() const
+        {
+            return static_cast<size_t>(skTiles) * skSplit;
+        }
+    };
+
     struct PersistentLaunchSettings
     {
         TileProcessingStrategy tileProcessingStrategy = TileProcessingStrategy::None;
@@ -520,6 +544,11 @@ namespace TensileLite
         // StreamK=5 tri-state (0=OFF default/SK3, 1=ON/SK4, 2=AUTO); see
         // hipblasLtStreamKTileSchedulingMode_t. Ignored when streamK != 5.
         int                  smCountTarget = 0; // 0 = use all device CUs; >0 engages origami heuristic when mode is OFF
+        // Dynamic work-queue launches (SK4, SK5 dynamic sub-path): the
+        // decomposition the grid, workspace and kernel arguments of this launch
+        // were sized from, computed once by resolveStreamKSettings(). Empty for
+        // every other launch; consumers recompute it if absent.
+        std::optional<StreamKDynamicSplit> dynamicSplit;
     };
 
     // Source compatibility for consumers using the former launch type.
@@ -569,40 +598,15 @@ namespace TensileLite
     TENSILELITEHOST_EXPORT StreamKStaticSplit streamKStaticSplit(
         size_t tiles, size_t itersPerTile, size_t skGrid, int skFullTiles, bool forceDPOnly);
 
-    /**
-     * Work decomposition of the dynamic work-queue StreamK path (SK4 and the
-     * dynamic sub-path of SK5): the first tiles - skTiles work items are whole
-     * tiles, the remaining skTiles tiles are each cut into skSplit parts of
-     * skItersPerWI iterations, for totalItems work items in all. grid is the
-     * workgroup count the dynamic grid policy launches for it.
-     */
-    struct StreamKDynamicSplit
-    {
-        uint32_t skTiles      = 0;
-        uint32_t skSplit      = 0;
-        uint32_t skItersPerWI = 0;
-        uint32_t totalItems   = 0;
-        size_t   grid         = 0;
-
-        // Workspace partial-tile slots (and, on the flag-protocol kernels, ready
-        // flags) the kernel indexes: one per part of every split tile.
-        size_t partialSlots() const
-        {
-            return static_cast<size_t>(skTiles) * skSplit;
-        }
-    };
-
     struct StreamKDynamicSplitInputs
     {
         // Batch-inclusive tile count, getNumTiles(sizeMapping, 1).
         size_t tiles = 0;
         // getItersPerTile(sizeMapping), clamped to at least 1.
         size_t itersPerTile = 1;
-        // Workgroups the dynamic grid policy may launch (CUs x occupancy).
+        // Workgroups the dynamic grid policy may launch (CUs x occupancy,
+        // capped by persistentMaxCUs and a fixed grid).
         size_t maxGrid = 0;
-        // Target work items per launched workgroup when splitting few-tile
-        // problems (over-decomposition factor).
-        size_t overDecomposition = 1;
         // False keeps every tile whole unless the debug overrides ask otherwise.
         bool allowSplit = true;
         // Flag-region entries left after the per-XCD queue counters.
@@ -618,6 +622,13 @@ namespace TensileLite
     // Fewest main-loop iterations a split part may get.
     constexpr size_t StreamKDynamicMinItersPerWI = 8;
 
+    // Work items per launched workgroup when splitting few-tile problems
+    // (over-decomposition factor f: tiles*skSplit <= f*maxGrid). f = 1: two per
+    // workgroup measured slower on most few-tile shapes without a cotenant and
+    // mixed with one, because the serial fixup makes extra parts cost more than
+    // the rebalancing buys. Revisit once the fixup is parallel.
+    constexpr size_t StreamKDynamicWorkItemsPerWorkgroup = 1;
+
     /**
      * Choose the dynamic StreamK work decomposition. Single source of truth for
      * the packed SKTiles/SKSplit/SKItersPerWI/TotalItems, the dynamic grid, the
@@ -625,8 +636,8 @@ namespace TensileLite
      *
      * Problems with at least maxGrid tiles keep every tile whole (skTiles = 0,
      * the historical packing). Fewer tiles are all split: skSplit is the largest
-     * value with tiles*skSplit <= overDecomposition*maxGrid, at least
-     * StreamKDynamicMinItersPerWI iterations per part, at most sqrt(I/2) parts
+     * value with tiles*skSplit <= StreamKDynamicWorkItemsPerWorkgroup*maxGrid,
+     * at least StreamKDynamicMinItersPerWI iterations per part, at most sqrt(I/2) parts
      * (the fixup sums the parts serially, so beyond that it costs more than the
      * split saves), within flagSlots and within the workspace. A split below 2
      * keeps the tiles whole. The debug overrides replace the policy; if the
@@ -1096,10 +1107,12 @@ namespace TensileLite
                                                             Hardware const& hardware) const;
         size_t               partialTileSize(size_t skGrid) const;
         // streamKDynamicSplit() fed from this solution, problem and hardware.
-        // Every consumer of the dynamic decomposition calls it (arg packers,
-        // grid, workspace query, launch settings, decisions, uniform summation
-        // order gate), so they cannot disagree. Only meaningful on the dynamic
-        // work-queue path.
+        // Every consumer of the dynamic decomposition gets it from here (arg
+        // packers, grid, workspace query, launch settings, decisions, uniform
+        // summation order gate), so they cannot disagree. A launch computes it
+        // once in resolveStreamKSettings() and carries it in
+        // PersistentLaunchSettings::dynamicSplit. Only meaningful on the
+        // dynamic work-queue path.
         StreamKDynamicSplit  streamKDynamicDecomposition(Problem const&  problem,
                                                          Hardware const& hardware,
                                                          size_t          tiles) const;

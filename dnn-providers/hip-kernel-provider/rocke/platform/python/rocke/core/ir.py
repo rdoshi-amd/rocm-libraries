@@ -2101,7 +2101,9 @@ class IRBuilder:
         This preserves an intermediate rounding boundary; it does not disable
         optimization within the producer or consumer expression.
 
-        Supports numeric scalars and i1 predicates. AMDGPU uses an empty
+        Supports directly lowerable numeric scalars and i1 predicates. Packed
+        FP4/FP6 and scale formats use their integer storage/carrier values.
+        AMDGPU uses an empty
         tied-VGPR asm: no instruction is emitted by the barrier itself, but it
         can require register moves and prevent profitable instruction combines.
         It has no memory/thread ordering or side effects; unused results may
@@ -2115,7 +2117,9 @@ class IRBuilder:
             narrow = self.trunc(wide, raw.type)
             return narrow if raw is value else self.bitcast(narrow, value.type)
         if value.type not in (I8, I16, I32, I64, BF16, F16, F32, FP8E4M3, BF8E5M2):
-            raise ValueError("optimization_barrier requires a numeric scalar or i1")
+            raise ValueError(
+                "optimization_barrier requires a directly lowerable scalar or i1"
+            )
         return self.inline_asm("", "=v,0", [value], value.type, sideeffect=False)
 
     def inline_asm(

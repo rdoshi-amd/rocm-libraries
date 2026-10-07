@@ -33,6 +33,17 @@ For these types, the helper widens the value to `i32`, applies the barrier,
 then restores the original type. Pointers and vectors are rejected. For a
 vector, extract its elements and apply the barrier to each element as needed.
 
+FP4/FP6/BF6 and E8M0/E5M3 have logical dtype identities, but do not have
+representations for direct scalar lowering. Apply the barrier to their integer
+storage bytes or packed carrier words. For example, after loading a scale byte:
+
+```python
+scale_bits = ir.optimization_barrier(ir.global_load_i8(scale_ptr, index))
+```
+
+This preserves the encoded byte; it does not decode the scale or introduce a
+floating-point rounding step. The C API admits the same types as Python.
+
 ### How this differs from `sched_barrier`
 
 | API | What it controls |

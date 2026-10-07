@@ -968,7 +968,8 @@ rocke_value_t* rocke_b_mma(rocke_ir_builder_t* b,
                            int num_extra);
 
 /* ----- inline asm ----- */
-/* Value-preserving optimization boundary for numeric scalars and i1 predicates.
+/* Value-preserving optimization boundary for i1/i8/i16/i32/i64/bf16/f16/f32/
+ * fp8e4m3/bf8e5m2. Packed FP4/FP6 and scale formats use integer storage/carriers.
  * Use the returned value; unused results may be eliminated. Empty tied
  * VGPR asm hides the producer from consumers without memory/thread ordering.
  * Predicates and byte storage bridge through i32. Pointers/vectors are rejected. Register moves

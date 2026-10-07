@@ -3,6 +3,7 @@
 """Real GPU tests for scalar bit preservation and a separate FP32 rounding step."""
 
 import ctypes
+import importlib
 import os
 import struct
 
@@ -22,6 +23,7 @@ from rocke.core.ir import (
     IRBuilder,
     PtrType,
 )
+from rocke.core.lower_hip import lower_kernel_to_hip
 from rocke.helpers import compile_kernel
 from rocke.helpers.compile import compile_kernel_via_hipcc
 from rocke.runtime.hip_module import Runtime, get_device_arch
@@ -39,9 +41,29 @@ def arch():
     return target
 
 
+@pytest.fixture(params=["comgr", "hip", "hip_native"])
+def route(request, monkeypatch):
+    if request.param == "comgr":
+        return compile_kernel
+    if request.param == "hip":
+        return compile_kernel_via_hipcc
+    native_lower = request.getfixturevalue("native_barrier_hip")
+
+    def compile_native(kernel, *, arch):
+        source = native_lower(kernel, arch)
+        assert source == lower_kernel_to_hip(kernel, arch=arch)
+        module = importlib.import_module("rocke.helpers.compile")
+        with monkeypatch.context() as context:
+            context.setattr(
+                module, "lower_kernel_to_hip", lambda *args, **kwargs: source
+            )
+            return compile_kernel_via_hipcc(kernel, arch=arch)
+
+    return compile_native
+
+
 def _run(kernel, data, arch, route):
-    compile_fn = compile_kernel if route == "comgr" else compile_kernel_via_hipcc
-    art = compile_fn(kernel, arch=arch)
+    art = route(kernel, arch=arch)
     rt = Runtime()
     module = rt.load_module(art.hsaco)
     ptr = rt.alloc(len(data))
@@ -62,7 +84,6 @@ def _run(kernel, data, arch, route):
         module.unload()
 
 
-@pytest.mark.parametrize("route", ["comgr", "hip"])
 @pytest.mark.parametrize(
     "dtype,width",
     [
@@ -92,7 +113,6 @@ def test_barrier_preserves_scalar_bits(arch, route, dtype, width):
     assert _run(b.kernel, data, arch, route) == data
 
 
-@pytest.mark.parametrize("route", ["comgr", "hip"])
 def test_barrier_rounds_product_before_add(arch, route):
     b = IRBuilder("barrier_product")
     p = b.param("p", PtrType(F32, "global"))
@@ -101,18 +121,19 @@ def test_barrier_rounds_product_before_add(arch, route):
     other = b.add(tid, b.const_i32(64))
     bb = b.global_load(p, other, F32)
     product = b.optimization_barrier(b.fmul(a, bb))
-    value = b.fadd(product, b.const_f32(-1.0))
+    addend = b.global_load(p, b.add(tid, b.const_i32(128)), F32)
+    value = b.fadd(product, addend)
     b.global_store(p, tid, value)
     b.ret()
     # (1+2^-13)*(1-2^-13) rounds to FP32 1.0; a fused FMA returns -2^-26.
     a = np.full(64, 1 + 2**-13, dtype=np.float32)
     bb = np.full(64, 1 - 2**-13, dtype=np.float32)
-    data = np.concatenate((a, bb)).tobytes()
+    addend = np.full(64, -1.0, dtype=np.float32)
+    data = np.concatenate((a, bb, addend)).tobytes()
     result = np.frombuffer(_run(b.kernel, data, arch, route), dtype=np.float32)
     np.testing.assert_array_equal(result[:64], np.zeros(64, dtype=np.float32))
 
 
-@pytest.mark.parametrize("route", ["comgr", "hip"])
 def test_barrier_preserves_lane_predicates(arch, route):
     b = IRBuilder("barrier_predicate")
     p = b.param("p", PtrType(I32, "global"))
@@ -129,7 +150,6 @@ def test_barrier_preserves_lane_predicates(arch, route):
     np.testing.assert_array_equal(result, (values < 0).astype(np.int32))
 
 
-@pytest.mark.parametrize("route", ["comgr", "hip"])
 def test_barrier_rounds_product_before_fp16(arch, route):
     b = IRBuilder("barrier_fp16")
     p = b.param("p", PtrType(F32, "global"))

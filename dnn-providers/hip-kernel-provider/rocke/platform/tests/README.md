@@ -119,3 +119,19 @@ An explicit `ROCKE_STORAGE_TEST` overrides discovery and must name an existing
 executable; it does not skip the configured build. With no configured build or
 explicit override, the runner reports native storage parity as skipped; direct
 pytest invocations can use the same override.
+
+
+### Native optimization-barrier coverage
+
+`run_all.py --build-root <build>` also discovers `rocke_optimization_barrier`
+through CTest and supplies `ROCKE_OPTIMIZATION_BARRIER_TEST` to both pytest
+passes. Direct pytest can use the same explicit executable override. Installed
+CTest runs discover it through their registered metadata, including relocated
+and provider-named binaries. Tests never build an absent fixture; absent native
+capability skips only native cases, while a supplied missing or failing executable
+fails the test.
+
+The native executable checks scalar admission and HIP lowering. Its serialized-IR
+input mode supplies the core source-parity tests and the numerical suite's
+`hip_native` route. Source equality establishes engine agreement; the numerical
+route compiles that native source and checks payloads and rounding on a GPU.

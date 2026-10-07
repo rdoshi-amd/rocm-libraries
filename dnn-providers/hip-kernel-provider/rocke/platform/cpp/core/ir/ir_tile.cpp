@@ -702,10 +702,10 @@ rocke_value_t* rocke_b_optimization_barrier(rocke_ir_builder_t* b, rocke_value_t
         return NULL;
     }
     if(!value || !value->type || value->type->kind != ROCKE_TYPE_SCALAR
-       || value->type->scalar < ROCKE_SCALAR_I1 || value->type->scalar >= ROCKE_SCALAR__COUNT)
+       || value->type->scalar < ROCKE_SCALAR_I1 || value->type->scalar > ROCKE_SCALAR_BF8E5M2)
     {
         return (rocke_value_t*)rocke_i_set_err(
-            b, ROCKE_ERR_VALUE, "optimization_barrier requires a numeric scalar or i1");
+            b, ROCKE_ERR_VALUE, "optimization_barrier requires a directly lowerable scalar or i1");
     }
     if(value->type->scalar == ROCKE_SCALAR_I1 || value->type->scalar == ROCKE_SCALAR_I8
        || value->type->scalar == ROCKE_SCALAR_FP8E4M3

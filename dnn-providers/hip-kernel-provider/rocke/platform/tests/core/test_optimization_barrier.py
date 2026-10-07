@@ -54,5 +54,126 @@ def test_scalar_barrier_roundtrip(dtype):
 def test_rejects_non_numeric_scalar(dtype):
     b = IRBuilder("invalid_barrier")
     value = b.param("value", dtype)
-    with pytest.raises(ValueError, match="numeric scalar"):
+    before = serialize(b.kernel)
+    with pytest.raises(ValueError, match="directly lowerable scalar"):
         b.optimization_barrier(value)
+    assert serialize(b.kernel) == before
+
+
+@pytest.mark.parametrize("dtype", ["fp4", "fp6", "bf6", "e8m0", "e5m3"])
+def test_logical_types_use_storage_barriers(dtype):
+    from rocke.core.ir import dtype_to_ir_type
+    from rocke.helpers.mma_io import storage_ir_type
+
+    logical = dtype_to_ir_type(dtype)
+    b = IRBuilder("logical_barrier")
+    value = b.param("value", logical)
+    before = serialize(b.kernel)
+    with pytest.raises(ValueError, match="directly lowerable scalar"):
+        b.optimization_barrier(value)
+    assert serialize(b.kernel) == before
+    storage = storage_ir_type(dtype)
+    assert storage == I8
+    assert b.optimization_barrier(b.param("bits", storage)).type == storage
+
+
+@pytest.mark.parametrize("arch", ["gfx950", "gfx1250"])
+@pytest.mark.parametrize(
+    "dtype", [I1, I8, I16, I32, I64, BF16, F16, F32, FP8E4M3, BF8E5M2]
+)
+def test_native_hip_matches_python(native_barrier_hip, arch, dtype):
+    b = IRBuilder("barrier_native")
+    ptr = b.param("p", PtrType(dtype, "global"))
+    tid = b.thread_id_x()
+    value = b.global_load(ptr, tid, dtype)
+    b.global_store(ptr, tid, b.optimization_barrier(value))
+    b.ret()
+    original = serialize(b.kernel)
+    expected = lower_kernel_to_hip(parse(original), arch=arch)
+    assert native_barrier_hip(b.kernel, arch) == expected
+    assert native_barrier_hip(parse(original), arch) == expected
+    assert 'asm ("" : "=v"' in expected
+    assert "asm volatile" not in expected
+    assert '"memory"' not in expected
+
+
+@pytest.mark.parametrize("arch", ["gfx950", "gfx1250"])
+def test_native_predicate_producer(native_barrier_hip, arch):
+    b = IRBuilder("barrier_predicate")
+    ptr = b.param("p", PtrType(I32, "global"))
+    tid = b.thread_id_x()
+    value = b.global_load(ptr, tid, I32)
+    predicate = b.cmp_lt(value, b.const_i32(0))
+    result = b.optimization_barrier(predicate)
+    b.global_store(ptr, tid, b.zext(result, I32))
+    b.ret()
+    assert native_barrier_hip(b.kernel, arch) == lower_kernel_to_hip(
+        b.kernel, arch=arch
+    )
+
+
+@pytest.mark.parametrize("failure", ["missing", "metadata", "command"])
+def test_native_fixture_errors_are_not_skips(monkeypatch, tmp_path, failure):
+    import conftest
+    import json
+    import subprocess
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("ROCKE_OPTIMIZATION_BARRIER_TEST", raising=False)
+    if failure == "missing":
+        monkeypatch.setenv("ROCKE_OPTIMIZATION_BARRIER_TEST", "missing")
+        with pytest.raises(ValueError, match="does not exist"):
+            conftest._optimization_barrier_executable()
+    else:
+        (tmp_path / "CTestTestfile.cmake").touch()
+
+        def run(command, **kwargs):
+            if failure == "metadata":
+                raise subprocess.CalledProcessError(1, command)
+            return subprocess.CompletedProcess(
+                command, 0, stdout=json.dumps({"tests": [{"command": []}]})
+            )
+
+        monkeypatch.setattr(conftest.subprocess, "run", run)
+        with pytest.raises((ValueError, subprocess.CalledProcessError)):
+            conftest._optimization_barrier_executable()
+
+
+def test_native_fixture_discovers_installed_executable(monkeypatch, tmp_path):
+    import conftest
+    import json
+    import subprocess
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("ROCKE_OPTIMIZATION_BARRIER_TEST", raising=False)
+    (tmp_path / "CTestTestfile.cmake").touch()
+    executable = tmp_path / "provider_rocke_optimization_barrier_test.exe"
+    executable.touch()
+    listing = {"tests": [{"command": [str(executable)]}]}
+    monkeypatch.setattr(
+        conftest.subprocess,
+        "run",
+        lambda command, **kwargs: subprocess.CompletedProcess(
+            command, 0, stdout=json.dumps(listing)
+        ),
+    )
+    assert conftest._optimization_barrier_executable() == executable
+
+
+def test_native_fixture_preserves_lowering_failure(monkeypatch, tmp_path):
+    import conftest
+    import subprocess
+
+    executable = tmp_path / "broken_native_test"
+    executable.touch()
+    monkeypatch.setenv("ROCKE_OPTIMIZATION_BARRIER_TEST", str(executable))
+
+    def fail(command, **kwargs):
+        raise subprocess.CalledProcessError(1, command, stderr="lowering failed")
+
+    monkeypatch.setattr(conftest.subprocess, "run", fail)
+    lower = conftest.native_barrier_hip.__wrapped__()
+    b = IRBuilder("broken_native")
+    b.ret()
+    with pytest.raises(subprocess.CalledProcessError):
+        lower(b.kernel, "gfx950")

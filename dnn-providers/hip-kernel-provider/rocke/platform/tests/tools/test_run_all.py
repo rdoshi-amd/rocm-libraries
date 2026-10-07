@@ -18,6 +18,7 @@ def runner(monkeypatch):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     monkeypatch.delenv("ROCKE_STORAGE_TEST", raising=False)
+    monkeypatch.delenv("ROCKE_OPTIMIZATION_BARRIER_TEST", raising=False)
     monkeypatch.delenv("ROCKE_BACKEND", raising=False)
     return module
 
@@ -38,11 +39,17 @@ def test_runner_passes_registered_fixture_to_both_backends(
     if override:
         selected.touch()
         monkeypatch.setenv("ROCKE_STORAGE_TEST", str(selected))
+        monkeypatch.setenv("ROCKE_OPTIMIZATION_BARRIER_TEST", str(selected))
     calls = []
 
     def run(command, **kwargs):
         calls.append((command, kwargs))
-        listing = {"tests": [{"name": "rocke_storage", "command": [str(executable)]}]}
+        listing = {
+            "tests": [
+                {"name": target, "command": [str(executable)]}
+                for target in ("rocke_storage", "rocke_optimization_barrier")
+            ]
+        }
         return subprocess.CompletedProcess(command, 0, stdout=json.dumps(listing))
 
     monkeypatch.setattr(runner.subprocess, "run", run)
@@ -65,6 +72,9 @@ def test_runner_passes_registered_fixture_to_both_backends(
     ]
     assert len(children) == 3  # default pytest, extension import probe, both pytest
     assert all(env["ROCKE_STORAGE_TEST"] == str(selected) for _, env in children)
+    assert all(
+        env["ROCKE_OPTIMIZATION_BARRIER_TEST"] == str(selected) for _, env in children
+    )
     assert "ROCKE_BACKEND" not in children[0][1]
     assert children[-1][1]["ROCKE_BACKEND"] == "both"
     assert calls[0][0] == [
@@ -217,8 +227,10 @@ def test_fresh_build_prepares_entire_ctest_suite(
         "add_library(rocke_core STATIC main.c)\n"
         "add_executable(rocke_storage main.c)\n"
         "add_executable(rocke_dtypes main.c)\n"
+        "add_executable(rocke_optimization_barrier main.c)\n"
         "add_test(NAME rocke_storage COMMAND rocke_storage)\n"
         "add_test(NAME rocke_dtypes COMMAND rocke_dtypes)\n"
+        "add_test(NAME rocke_optimization_barrier COMMAND rocke_optimization_barrier)\n"
     )
     build = tmp_path / "build"
     subprocess.run(["cmake", "-S", str(source), "-B", str(build)], check=True)
@@ -233,6 +245,7 @@ def test_fresh_build_prepares_entire_ctest_suite(
         monkeypatch.setenv("ROCKE_STORAGE_TEST", str(executable))
     env = runner.native_pytest_env(build, "Release")
     assert Path(env["ROCKE_STORAGE_TEST"]).is_file()
+    assert Path(env["ROCKE_OPTIMIZATION_BARRIER_TEST"]).is_file()
     if override:
         assert env["ROCKE_STORAGE_TEST"] == str(executable)
     assert runner.ctest_ready(build, "Release")
@@ -240,3 +253,34 @@ def test_fresh_build_prepares_entire_ctest_suite(
         ["ctest", "--test-dir", str(build), "-C", "Release", "--output-on-failure"],
         check=True,
     )
+
+
+@pytest.mark.parametrize("failure", ["registration", "executable", "override"])
+def test_barrier_fixture_failure_prevents_pytest(
+    runner, monkeypatch, tmp_path, failure
+):
+    (tmp_path / "CMakeCache.txt").touch()
+    storage = tmp_path / "storage"
+    storage.touch()
+    monkeypatch.setenv("ROCKE_STORAGE_TEST", str(storage))
+    if failure == "override":
+        monkeypatch.setenv("ROCKE_OPTIMIZATION_BARRIER_TEST", str(tmp_path / "missing"))
+
+    def run(command, **kwargs):
+        listing = {
+            "tests": (
+                []
+                if failure == "registration"
+                else [
+                    {
+                        "name": "rocke_optimization_barrier",
+                        "command": [str(tmp_path / "missing")],
+                    }
+                ]
+            )
+        }
+        return subprocess.CompletedProcess(command, 0, stdout=json.dumps(listing))
+
+    monkeypatch.setattr(runner.subprocess, "run", run)
+    with pytest.raises(ValueError):
+        runner.native_pytest_env(tmp_path, "Release")

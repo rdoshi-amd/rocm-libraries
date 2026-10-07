@@ -27,8 +27,16 @@ estimates, shipping order, and acceptance checklists are maintained separately.
 
 ## 1. The canonical dtype set
 
-rocKE's compiler knows exactly **10 scalar IR types**, defined identically in
-both engines:
+**Current clarification (2026-10-07).** The table below records the ten scalar
+representations supported by direct LLVM/HIP lowering. The dtype registry also
+recognizes `fp4e2m1`, `fp6e2m3`, `fp6e3m2`, `e8m0`, and `e5m3` as logical `Type`
+identities, and serialization preserves them. Their packed-data paths use `i8`
+storage and integer carrier registers; logical recognition does not provide
+direct scalar arithmetic, conversion, or lowering. This clarification updates
+the terminology in this section; the coverage scores and atom tables retain
+the historical basis stated above.
+
+The ten directly lowerable scalar representations are defined in both engines:
 
 - Python: `platform/python/rocke/core/ir.py:43-52`
 - C++: `platform/cpp/include/rocke/ir.h:93-108`,
@@ -52,9 +60,10 @@ LLVM mapping: `lower_llvm.py:1093-1129` (Python, `_llvm_type`) ↔
 storage and materialized through `llvm.amdgcn.cvt.*` intrinsics — there is no
 native `<8 x fp8>` LLVM type in the emitter.
 
-**Sub-byte / block formats are NOT scalar IR types.** `i4`, `fp4`, `fp6`, and
-the `e8m0` MX scale exist only as *packed encodings* consumed by dedicated
-helpers/atoms, never as first-class `Type` objects (see §4).
+**Packed formats use a separate storage representation.** FP4/FP6/BF6 and
+E8M0/E5M3 have logical `Type` identities; dedicated helpers/atoms consume their
+encoded bytes or packed integer carriers (see §4). Logical identity alone does
+not make these formats directly lowerable scalar operands.
 
 > CK-Tile gives these formats named logical types backed by a packed storage
 > representation: `pk_fp4_t = pk_float4_e2m1_t`
@@ -64,8 +73,8 @@ helpers/atoms, never as first-class `Type` objects (see §4).
 > `e5m3.hpp:37`), and `tf32_t = tfloat32_t` (`tfloat32.hpp:68`) — each with a
 > `native_t<>` specialization mapping the logical type to its storage. This
 > separates the logical format named in an API from its storage representation.
-> rocKE's dedicated packed-format paths can provide support without a first-class
-> IR `Type`; C5 separately measures whether kernel families accept the format.
+> rocKE separates logical dtype identity from packed storage and carrier types;
+> C5 separately measures whether kernel families accept the format.
 
 **Reduced-precision compute (the "tf32 request") is a mode, not a storage type.**
 It never appears as a tensor dtype: storage stays `f32` and the *precision* is

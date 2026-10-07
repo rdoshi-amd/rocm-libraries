@@ -118,40 +118,38 @@ def ctest_ready(build_root: Path, config: str) -> bool:
 def native_pytest_env(build_root: Path, config: str) -> dict[str, str]:
     """Build the configured suite and supply native parity to both pytest passes."""
     env = dict(os.environ)
-    executable = env.get("ROCKE_STORAGE_TEST")
-    if (build_root / "CMakeCache.txt").is_file():
+    configured = (build_root / "CMakeCache.txt").is_file()
+    if configured:
         subprocess.run(
-            [
-                "cmake",
-                "--build",
-                str(build_root),
-                "--config",
-                config,
-            ],
-            check=True,
+            ["cmake", "--build", str(build_root), "--config", config], check=True
         )
-        if not executable:
-            tests = ctest_tests(build_root, config, "^rocke_storage$")
+    for target, variable, label in (
+        ("rocke_storage", "ROCKE_STORAGE_TEST", "storage parity"),
+        (
+            "rocke_optimization_barrier",
+            "ROCKE_OPTIMIZATION_BARRIER_TEST",
+            "barrier HIP parity",
+        ),
+    ):
+        executable = env.get(variable)
+        if configured and not executable:
+            tests = ctest_tests(build_root, config, f"^{target}$")
             commands = [
-                test.get("command", [])
-                for test in tests
-                if test["name"] == "rocke_storage"
+                test.get("command", []) for test in tests if test["name"] == target
             ]
             if len(commands) != 1 or not commands[0]:
-                raise ValueError(
-                    "CTest did not resolve the built rocke_storage executable"
-                )
+                raise ValueError(f"CTest did not resolve the built {target} executable")
             executable = commands[0][0]
-    if executable:
-        path = Path(executable).resolve()
-        if not path.is_file():
-            raise ValueError(f"native storage test executable does not exist: {path}")
-        env["ROCKE_STORAGE_TEST"] = str(path)
-        print(f"\n== native storage parity: {path} ==")
-    else:
-        print(
-            "\n== native storage parity: SKIPPED (no configured build or ROCKE_STORAGE_TEST) =="
-        )
+        if executable:
+            path = Path(executable).resolve()
+            if not path.is_file():
+                raise ValueError(f"native test executable does not exist: {path}")
+            env[variable] = str(path)
+            print(f"\n== native {label}: {path} ==")
+        else:
+            print(
+                f"\n== native {label}: SKIPPED (no configured build or {variable}) =="
+            )
     return env
 
 

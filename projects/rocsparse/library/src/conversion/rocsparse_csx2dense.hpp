@@ -58,7 +58,7 @@ namespace rocsparse
                 static constexpr rocsparse_int WAVEFRONT_SIZE  = 32;
                 static constexpr rocsparse_int NROWS_PER_BLOCK = 16;
 
-                const int64_t blocks = rocsparse::get_grid_size_x(
+                const uint32_t blocks = rocsparse::get_grid_size_x(
                     handle,
                     (static_cast<int64_t>(m) - 1) / NROWS_PER_BLOCK + 1,
                     WAVEFRONT_SIZE * NROWS_PER_BLOCK);
@@ -85,7 +85,7 @@ namespace rocsparse
                 static constexpr rocsparse_int WAVEFRONT_SIZE  = 64;
                 static constexpr rocsparse_int NROWS_PER_BLOCK = 16;
 
-                const int64_t blocks = rocsparse::get_grid_size_x(
+                const uint32_t blocks = rocsparse::get_grid_size_x(
                     handle,
                     (static_cast<int64_t>(m) - 1) / NROWS_PER_BLOCK + 1,
                     WAVEFRONT_SIZE * NROWS_PER_BLOCK);
@@ -118,7 +118,7 @@ namespace rocsparse
                 static constexpr rocsparse_int WAVEFRONT_SIZE     = 32;
                 static constexpr rocsparse_int NCOLUMNS_PER_BLOCK = 16;
 
-                const int64_t blocks = rocsparse::get_grid_size_x(
+                const uint32_t blocks = rocsparse::get_grid_size_x(
                     handle,
                     (static_cast<int64_t>(n) - 1) / NCOLUMNS_PER_BLOCK + 1,
                     WAVEFRONT_SIZE * NCOLUMNS_PER_BLOCK);
@@ -145,7 +145,7 @@ namespace rocsparse
                 static constexpr rocsparse_int WAVEFRONT_SIZE     = 64;
                 static constexpr rocsparse_int NCOLUMNS_PER_BLOCK = 16;
 
-                const int64_t blocks = rocsparse::get_grid_size_x(
+                const uint32_t blocks = rocsparse::get_grid_size_x(
                     handle,
                     (static_cast<int64_t>(n) - 1) / NCOLUMNS_PER_BLOCK + 1,
                     WAVEFRONT_SIZE * NCOLUMNS_PER_BLOCK);

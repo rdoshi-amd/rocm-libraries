@@ -264,7 +264,7 @@ class BaseTuner(ABC):
         try:
             tune_kernel_args = self._get_base_tune_kernel_args()
             # Run main tuning
-            results, _ = kernel_tuner.tune_kernel(**tune_kernel_args)
+            results, _ = kernel_tuner.tune_kernel(**tune_kernel_args, seed=self.seed)
             # Run default config if enabled
             self._run_default_config(tune_kernel_args)
 
@@ -331,7 +331,7 @@ class BaseTuner(ABC):
         )
 
         print(f"Found existing configuration: {default_tune_params}")
-        kernel_tuner.tune_kernel(**tune_kernel_args)
+        kernel_tuner.tune_kernel(**tune_kernel_args, seed=self.seed)
 
     def generate_wrapper(
         self,

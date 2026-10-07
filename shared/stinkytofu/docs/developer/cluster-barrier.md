@@ -82,9 +82,13 @@ including one carrying memory-token annotations. That recognition and Rule 2's
 segment, so a different predecessor cannot supply the entry wait or pair.
 
 After all cluster signals have been placed, the pass checks whether its newly
-added entry pair is redundant. It follows both successors of each branch,
-resolving direct and annotated indirect targets, and stops each path at a
-complete existing local signal/wait pair. If another cluster signal or wait is
+added entry pair is redundant. It resolves direct and annotated indirect branch
+targets and stops each feasible path at a complete existing local signal/wait pair.
+Scalar equality/inequality facts from a preceding fall-through guard are retained
+across the walk; writes invalidate them, and merges retain only common facts.
+Thus a nonzero-K entry guard can rule out a later zero-trip bypass of a prefetch
+barrier. A label between the guard and entry prevents borrowing that condition
+from a different predecessor. Unsupported conditions leave both paths possible. If another cluster signal or wait is
 reachable without such a pair, the entry pair stays. Calls, unresolved targets,
 and uncovered exits also keep it. Only the new Rule 2 pair may be removed;
 existing barriers retain their LDS synchronization responsibilities and placement.
@@ -94,6 +98,19 @@ the Python prefetch-prologue barrier after its first tensor loads. SIA4's
 LDS-token barrier reconstruction can remove that barrier and place its replacement
 after the next early cluster signal. The former reuses the existing join; the
 latter needs the added entry pair. No steady-state signal lead is shortened.
+
+Nonpersistent kernels use the same rule. With PGR2 and requested PLR1, the
+DU128 regression has effective PLR0 and needs the entry pair under both SIA0 and
+SIA4. DU256 has effective PLR1 and reuses its existing prefetch rendezvous.
+Immediate adjacency to the cluster wait is not required when a later local
+rendezvous supplies the ordering before the next cluster signal.
+
+This follows the local-before-cluster ordering used by
+[LLVM's cluster-barrier lowering](https://github.com/llvm/llvm-project/blob/main/llvm/lib/Target/AMDGPU/AMDGPULowerIntrinsics.cpp):
+all waves arrive at a local barrier, wait there, and one elected wave signals
+the cluster. The requirement here concerns ordering between phases; it does
+not depend on a claim about the hardware's internal notification storage.
+Memory readiness remains the responsibility of the existing LDS/tensor drains.
 
 The writer must ensure every local wave takes this first-load path under uniform
 tile/K/alpha guards; textual load order alone does not prove that condition.

@@ -944,6 +944,44 @@ TEST_F(InsertClusterBarrierPassTest, Rule2DoesNotReuseJoinBeyondCall) {
         << blockListing(*bb);
 }
 
+// A repeated scalar guard can bypass the prefetch join only if the counter
+// changed. At a merge, a write on either predecessor must invalidate the fact.
+class InsertClusterBarrierGuardTest : public InsertClusterBarrierPassTest,
+                                     public testing::WithParamInterface<int> {};
+
+TEST_P(InsertClusterBarrierGuardTest, ReusesJoinOnlyWhileGuardRemainsValid) {
+    appendGsu1Preheader();
+    StinkyInstruction* firstLoad = findFirstTensorLoad();
+    createGuardedBranch(GFX::s_cbranch_scc1, 90, "zero_join");
+    if (GetParam() == 2)
+        createGuardedBranch(GFX::s_cbranch_scc1, 93, "counter_unchanged");
+    if (GetParam() != 0) createSSubWritingSgprAndScc(90);
+    if (GetParam() == 2) createLabel("counter_unchanged");
+    createGuardedBranch(GFX::s_cbranch_scc1, 90, "bypass_join");
+    createBarrierSignal(kWorkgroupBarrierId);
+    createBarrierWait(kWorkgroupBarrierId);
+    createUnconditionalBranch("bypass_join");
+    createLabel("zero_join");
+    createBarrierSignal(kWorkgroupBarrierId);
+    createBarrierWait(kWorkgroupBarrierId);
+    createLabel("bypass_join");
+    openLoop();
+    buildTwoHandshakeBody();
+    closeLoop();
+
+    runPass();
+
+    ASSERT_NE(realInstBefore(firstLoad), nullptr);
+    if (GetParam() == 0)
+        EXPECT_TRUE(isClusterBarrierWithLiteral(*realInstBefore(firstLoad), false))
+            << "the unchanged nonzero counter cannot bypass the existing join:" << blockListing(*bb);
+    else
+        EXPECT_TRUE(isWorkgroupBarrierWaitInst(*realInstBefore(firstLoad)))
+            << "an overwritten counter must not justify removing the entry join:" << blockListing(*bb);
+}
+
+INSTANTIATE_TEST_SUITE_P(CounterWrites, InsertClusterBarrierGuardTest, testing::Values(0, 1, 2));
+
 TEST_F(InsertClusterBarrierPassTest, Rule2RejectsIncompleteExistingWorkgroupJoin) {
     createLabel(kGSU1LabelName);
     createWMMA(24, 0, 8);

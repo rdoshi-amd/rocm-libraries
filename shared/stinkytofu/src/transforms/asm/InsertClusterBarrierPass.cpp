@@ -24,6 +24,8 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <deque>
+#include <optional>
 #include <random>
 #include <string>
 #include <unordered_map>
@@ -32,6 +34,7 @@
 #include <vector>
 
 #include "stinkytofu/analysis/AnalysisRegistration.hpp"
+#include "stinkytofu/analysis/asm/ScalarBranchFacts.hpp"
 #include "stinkytofu/hardware/ArchHelper.hpp"
 #include "stinkytofu/ir/asm/AsmSetSymbolMap.hpp"
 #include "stinkytofu/ir/asm/StinkyAsmDirectives.hpp"
@@ -1064,79 +1067,122 @@ RunUpClusterWait findRunUpClusterWait(StinkyInstruction* firstLoad) {
     return {};
 }
 
-/// Can the entry pair be omitted because existing local joins already order
-/// the next cluster phase? Walk the final flat control flow, cutting each path
-/// at a complete local signal/wait pair. Every local signal in that cut is
-/// after the entry cluster wait, so no wave can pass its local wait until all
-/// local waves have finished the entry wait. Different uniform branches may
-/// provide different static pairs; they use the same physical workgroup ID.
-///
-/// A textual later barrier is insufficient: follow both branch successors and
-/// reject any path reaching another cluster signal/wait without a local join.
-/// Calls, unresolved transfers, and uncovered exits conservatively keep the
-/// entry pair. A cycle with no join cannot publish a new cluster phase either;
-/// visiting each instruction once suffices for this reachability question.
-/// Only the pair just added by Rule 2 is considered for removal.
+/// Can existing local joins order the next cluster phase without the new entry
+/// pair? Follow feasible paths, cutting each at a complete local signal/wait
+/// pair. Every local arrival in that cut is after the entry cluster wait, so
+/// the local waits order all waves before the next cluster signal. Distinct
+/// uniform paths may use different static pairs on the same physical barrier.
+/// Calls, unresolved transfers, another cluster operation, or an uncovered
+/// exit conservatively keep the pair. Only the pair just added by Rule 2 can go.
 bool hasLaterWorkgroupHandoff(StinkyInstruction* entryLocalWait) {
     BasicBlock* parent = entryLocalWait->getParent();
     if (parent == nullptr) return false;
 
-    std::unordered_map<std::string, StinkyInstruction*> labels;
+    std::vector<StinkyInstruction*> instructions;
+    std::unordered_map<std::string, size_t> labels;
+    size_t entry = 0;
     for (IRBase& ir : *parent) {
         auto* inst = dyn_cast<StinkyInstruction>(&ir);
-        if (inst == nullptr || !isLabel(*inst)) continue;
-        if (const auto* label = inst->getModifier<LabelData>()) {
-            if (!labels.emplace(label->label, inst).second) return false;
+        if (inst == nullptr) continue;
+        if (inst == entryLocalWait) entry = instructions.size();
+        if (isLabel(*inst)) {
+            if (const auto* label = inst->getModifier<LabelData>()) {
+                if (!labels.emplace(label->label, instructions.size()).second) return false;
+            }
         }
+        instructions.push_back(inst);
     }
 
-    std::vector<BasicBlock::iterator> paths{
-        std::next(BasicBlock::iterator(entryLocalWait))};
-    std::unordered_set<const IRBase*> visited;
+    // Seed facts from the preceding fall-through guard, without crossing a
+    // label that could admit another predecessor. Nonpersistent prefetch uses
+    // `if K == 0: skip` here, then re-tests that unchanged counter after shadow
+    // initialization. A structural walk incorrectly treats both tests as free.
+    size_t start = entry;
+    bool crossedGuard = false;
+    while (start > 0) {
+        const auto& inst = *instructions[start - 1];
+        if (isLabel(inst) || isCall(inst) || isUnconditionalBranch(inst)) break;
+        if (isBranch(inst)) {
+            const auto opcode = inst.getUnifiedOpcode();
+            if (crossedGuard || (opcode != GFX::s_cbranch_scc0 &&
+                                 opcode != GFX::s_cbranch_scc1)) break;
+            crossedGuard = true;
+        }
+        --start;
+    }
+    ScalarBranchFacts entryFacts;
+    for (size_t i = start; i <= entry; ++i) {
+        const auto& inst = *instructions[i];
+        entryFacts.transfer(inst);
+        if (isBranch(inst) &&
+            !entryFacts.assumeScc(inst.getUnifiedOpcode() == GFX::s_cbranch_scc0))
+            return false;
+    }
+
+    std::vector<std::optional<ScalarBranchFacts>> incoming(instructions.size());
+    std::deque<size_t> paths;
+    bool uncoveredExit = false;
+    auto enqueue = [&](size_t index, const ScalarBranchFacts& facts) {
+        if (index == instructions.size()) {
+            uncoveredExit = true;
+            return;
+        }
+        auto& old = incoming[index];
+        if (!old) {
+            old = facts;
+            paths.push_back(index);
+        } else if (old->merge(facts)) {
+            paths.push_back(index);
+        }
+    };
+    enqueue(entry + 1, entryFacts);
     bool foundJoin = false;
     while (!paths.empty()) {
-        auto it = paths.back();
-        paths.pop_back();
-        for (; it != parent->end(); ++it) {
-            if (!visited.insert(it.getNodePtr()).second) break;
-            auto* inst = dyn_cast<StinkyInstruction>(it.getNodePtr());
-            if (inst == nullptr) continue;
-            if (isClusterBarrierSignal(*inst) || isClusterBarrierWait(*inst) ||
-                isCall(*inst) || isEndOfFunction(*inst))
-                return false;
+        size_t index = paths.front();
+        paths.pop_front();
+        const auto& inst = *instructions[index];
+        if (isClusterBarrierSignal(inst) || isClusterBarrierWait(inst) ||
+            isCall(inst) || isEndOfFunction(inst)) return false;
 
-            if (isWorkgroupBarrierSignal(*inst)) {
-                // Accept complete straight-line pairs, including memory-token
-                // annotations and intervening drains. A wait whose signal was
-                // before the entry cluster wait cannot prove this handoff.
-                bool complete = false;
-                for (auto next = std::next(it); next != parent->end(); ++next) {
-                    auto* nextInst = dyn_cast<StinkyInstruction>(next.getNodePtr());
-                    if (nextInst == nullptr) continue;
-                    if (isSegmentBoundary(*nextInst)) break;
-                    if (isPseudoInst(nextInst) || isAnyCounterDrain(*nextInst)) continue;
-                    complete = isWorkgroupBarrierWait(*nextInst);
-                    break;
-                }
-                if (complete) {
-                    foundJoin = true;
-                    break;
-                }
+        if (isWorkgroupBarrierSignal(inst)) {
+            // Token annotations describe LDS dependencies, not participation in
+            // the physical -1 barrier. Accept complete pairs with drains only.
+            size_t next = index + 1;
+            for (; next < instructions.size(); ++next) {
+                const auto& following = *instructions[next];
+                if (isSegmentBoundary(following)) break;
+                if (isPseudoInst(&following) || isAnyCounterDrain(following)) continue;
+                break;
             }
+            if (next < instructions.size() && isWorkgroupBarrierWait(*instructions[next])) {
+                foundJoin = true;
+                continue;
+            }
+        }
 
-            if (!isBranch(*inst)) continue;
-            const auto targets = getBranchTargets(*inst);
+        ScalarBranchFacts facts = *incoming[index];
+        facts.transfer(inst);
+        if (!isBranch(inst)) {
+            enqueue(index + 1, facts);
+            continue;
+        }
+        const auto opcode = inst.getUnifiedOpcode();
+        const bool sccBranch = opcode == GFX::s_cbranch_scc0 || opcode == GFX::s_cbranch_scc1;
+        ScalarBranchFacts taken = facts;
+        if (!sccBranch || taken.assumeScc(opcode == GFX::s_cbranch_scc1)) {
+            const auto targets = getBranchTargets(inst);
             if (targets.empty()) return false;
             for (const std::string& target : targets) {
                 auto found = labels.find(target);
                 if (found == labels.end()) return false;
-                paths.push_back(BasicBlock::iterator(found->second));
+                enqueue(found->second, taken);
             }
-            if (isUnconditionalBranch(*inst)) break;
         }
-        if (it == parent->end()) return false;
+        if (!isUnconditionalBranch(inst) &&
+            (!sccBranch || facts.assumeScc(opcode == GFX::s_cbranch_scc0)))
+            enqueue(index + 1, facts);
     }
-    return foundJoin;
+    return foundJoin && !uncoveredExit;
 }
 
 struct PreLoopSignalAnchor {
@@ -1944,17 +1990,6 @@ class InsertClusterBarrierPassImpl : public Pass {
             }
         }
 
-        // Rule 2 establishes a safe handoff before signal placement. Once all
-        // signals are fixed, reuse any later all-path workgroup joins instead
-        // of paying for a second rendezvous. In particular, O0 can retain the
-        // Python prefetch-prologue barrier that O3's LDS-token rebuild removes.
-        // Do not move an existing join or shorten the chosen loop signal lead.
-        if (entryJoin.second != nullptr && hasLaterWorkgroupHandoff(entryJoin.second)) {
-            BasicBlock* parent = entryJoin.first->getParent();
-            parent->eraseIR(BasicBlock::iterator(entryJoin.first));
-            parent->eraseIR(BasicBlock::iterator(entryJoin.second));
-        }
-
         // The gates above carry placeholder indices (see makeSymbolicSgpr).
         // Resolve them here: downstream, a register is its index alone.
         std::vector<SymbolicOperandFix> fixes;
@@ -1968,6 +2003,17 @@ class InsertClusterBarrierPassImpl : public Pass {
             }
             emitRemark(passCtx, {OptimizationRemark::Kind::Analysis, getName(),
                                  "ResolvedSymbolicOperands", message});
+        }
+
+        // Rule 2 establishes a safe handoff before signal placement. Once all
+        // signals are fixed, reuse any later all-path workgroup joins instead
+        // of paying for a second rendezvous. In particular, O0 can retain the
+        // Python prefetch-prologue barrier that O3's LDS-token rebuild removes.
+        // Do not move an existing join or shorten the chosen loop signal lead.
+        if (entryJoin.second != nullptr && hasLaterWorkgroupHandoff(entryJoin.second)) {
+            BasicBlock* parent = entryJoin.first->getParent();
+            parent->eraseIR(BasicBlock::iterator(entryJoin.first));
+            parent->eraseIR(BasicBlock::iterator(entryJoin.second));
         }
 
         return PreservedAnalyses::none();

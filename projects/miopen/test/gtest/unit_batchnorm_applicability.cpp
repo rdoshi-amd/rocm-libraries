@@ -215,6 +215,7 @@ TEST_P(CPU_BatchNormFwdTrainingSpatialApplicabilityTest_NONE, IsApplicable)
                                true,
                                true,
                                1,
+                               64,
                                actDesc);
 
     BnFwdTrainingSpatial solver;
@@ -254,6 +255,7 @@ TEST_P(CPU_BatchNormFwdTrainingPerActivationApplicabilityTest_NONE, IsApplicable
                                true,
                                true,
                                1,
+                               64,
                                actDesc);
 
     BnFwdTrainingPerActivation solver;
@@ -321,6 +323,7 @@ TEST_P(CPU_BatchNormBwdTrainingSpatialApplicabilityTest_NONE, IsApplicable)
                                1e-5,
                                false,
                                1,
+                               64,
                                actDesc);
 
     BnBwdTrainingSpatial solver;
@@ -360,6 +363,7 @@ TEST_P(CPU_BatchNormBwdTrainingPerActivationApplicabilityTest_NONE, IsApplicable
                                1e-5,
                                false,
                                1,
+                               64,
                                actDesc);
 
     BnBwdTrainingPerActivation solver;

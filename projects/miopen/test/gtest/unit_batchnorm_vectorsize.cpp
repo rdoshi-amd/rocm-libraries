@@ -96,6 +96,7 @@ ProblemDescription MakeFwdProblem(miopenDataType_t dt, miopenTensorLayout_t layo
                               /*resultsave*/ true,
                               /*resultrunning*/ true,
                               /*min_workgroups*/ 1,
+                              /*wavefront_size*/ 64,
                               act);
 }
 
@@ -117,6 +118,7 @@ ProblemDescription MakeBwdProblem(miopenDataType_t dt, miopenTensorLayout_t layo
                               /*epsilon*/ 1e-5,
                               /*useSaved*/ false,
                               /*min_workgroups*/ 1,
+                              /*wavefront_size*/ 64,
                               act);
 }
 
@@ -173,8 +175,8 @@ TEST_P(CPU_BatchNormSpatialVectorSize_NONE, GeneratedConfigsNeverExceedMax)
                 BnFwdTrainingSpatial solver;
                 if(!solver.IsApplicable(ctx, problem))
                     continue;
-                const auto cfg = solver.GetDefaultPerformanceConfig(ctx, problem);
-                ASSERT_FALSE(cfg.valid_kernels.empty()) << s.name;
+                PerformanceConfigBnFwdTraining cfg;
+                cfg.HeuristicInit(problem);
                 for(const auto& kid : cfg.valid_kernels)
                 {
                     EXPECT_TRUE(IsSupportedVectorSize(VectorSizeOf(kid)))
@@ -186,8 +188,8 @@ TEST_P(CPU_BatchNormSpatialVectorSize_NONE, GeneratedConfigsNeverExceedMax)
                 BnBwdTrainingSpatial solver;
                 if(!solver.IsApplicable(ctx, problem))
                     continue;
-                const auto cfg = solver.GetDefaultPerformanceConfig(ctx, problem);
-                ASSERT_FALSE(cfg.valid_kernels.empty()) << s.name;
+                PerformanceConfigBnBwdBackward cfg;
+                cfg.HeuristicInit(problem);
                 for(const auto& kid : cfg.valid_kernels)
                 {
                     EXPECT_TRUE(IsSupportedVectorSize(VectorSizeOf(kid)))

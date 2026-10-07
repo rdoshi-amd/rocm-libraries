@@ -72,7 +72,7 @@ struct PerformanceConfigBnBwdBackward : PerfConfigBase<PerformanceConfigBnBwdBac
     }
     PerformanceConfigBnBwdBackward() : PerformanceConfigBnBwdBackward(0, "") {}
     PerformanceConfigBnBwdBackward(bool) : PerformanceConfigBnBwdBackward(0, "") {}
-    void HeuristicInit(const miopen::batchnorm::ProblemDescription& problem);
+    MIOPEN_INTERNALS_EXPORT void HeuristicInit(const miopen::batchnorm::ProblemDescription& problem);
     bool SetNextValue(const miopen::batchnorm::ProblemDescription& problem);
     bool IsValidValue() const;
     bool IsValid(const ExecutionContext&,
@@ -96,7 +96,7 @@ struct PerformanceConfigBnFwdTraining : PerfConfigBase<PerformanceConfigBnFwdTra
     }
     PerformanceConfigBnFwdTraining() : PerformanceConfigBnFwdTraining(0, "") {}
     PerformanceConfigBnFwdTraining(bool) : PerformanceConfigBnFwdTraining(0, "") {}
-    void HeuristicInit(const miopen::batchnorm::ProblemDescription& problem);
+    MIOPEN_INTERNALS_EXPORT void HeuristicInit(const miopen::batchnorm::ProblemDescription& problem);
     bool SetNextValue(const miopen::batchnorm::ProblemDescription& problem);
     bool IsValidValue() const;
     bool IsValid(const ExecutionContext&,

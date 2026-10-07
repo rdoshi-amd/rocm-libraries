@@ -1774,6 +1774,7 @@ public:
             true,
             false,
             std::max(size_t{1}, size_t(0.6f * handle.GetMaxComputeUnits())),
+            handle.GetWavefrontWidth(),
             miopen::ActivationDescriptor{miopenActivationPASTHRU, 0.0, 0.0, 0.0}};
         const auto ctx = miopen::ExecutionContext{&handle};
         const auto solver = miopen::solver::batchnorm::BnFwdTrainingSpatial{};
@@ -1973,6 +1974,7 @@ TEST(GPU_BN_Spatial_BF16, SplitBatchPaddedTile)
         true,
         false,
         std::max(size_t{1}, size_t(0.6f * handle.GetMaxComputeUnits())),
+        handle.GetWavefrontWidth(),
         miopen::ActivationDescriptor{miopenActivationPASTHRU, 0.0, 0.0, 0.0}};
     const auto ctx = miopen::ExecutionContext{&handle};
     const auto solver = miopen::solver::batchnorm::BnFwdTrainingSpatial{};
@@ -2102,6 +2104,7 @@ void RunBufferedStableVarianceAndInPlace(std::initializer_list<size_t> batch_siz
             miopenBNSpatial, input.desc, input.desc, scale.desc, shift.desc,
             scale.desc, scale.desc, MIO_BN_TEST_EXPAVGFACTOR, MIO_BN_TEST_EPSILON,
             true, false, std::max(size_t{1}, size_t(0.6f * handle.GetMaxComputeUnits())),
+            handle.GetWavefrontWidth(),
             miopen::ActivationDescriptor{miopenActivationPASTHRU, 0.0, 0.0, 0.0}};
 
         for(const int variant : variants)
@@ -2204,6 +2207,7 @@ TEST(GPU_BN_Spatial_BF16, BufferedConfigurationBounds)
             miopenBNSpatial, input.desc, input.desc, params.desc, params.desc,
             params.desc, params.desc, MIO_BN_TEST_EXPAVGFACTOR, MIO_BN_TEST_EPSILON,
             true, false, size_t{1},
+            handle.GetWavefrontWidth(),
             miopen::ActivationDescriptor{miopenActivationPASTHRU, 0.0, 0.0, 0.0}};
     };
     auto expect_rejected = [&](const auto& problem, const std::string& id) {
@@ -2319,6 +2323,7 @@ TEST(GPU_BN_Spatial_BF16, BackwardSplitBatchPaddedTile)
             MIO_BN_TEST_EPSILON,
             use_saved,
             std::max(size_t{1}, size_t(0.6f * handle.GetMaxComputeUnits())),
+            handle.GetWavefrontWidth(),
             miopen::ActivationDescriptor{miopenActivationPASTHRU, 0.0, 0.0, 0.0}};
         ASSERT_TRUE(solver.IsApplicable(ctx, problem));
         for(const int vector_size : {1, 2, 4, 8})
@@ -2459,6 +2464,7 @@ TEST(GPU_BN_Spatial_BF16, BackwardBufferedSavedActivationAndInPlace)
             miopenBNSpatial, x.desc, dy.desc, x.desc, scale.desc, bias.desc, mean.desc, inv.desc,
             MIO_BN_TEST_EPSILON, true,
             std::max(size_t{1}, size_t(0.6f * handle.GetMaxComputeUnits())),
+            handle.GetWavefrontWidth(),
             miopen::ActivationDescriptor{miopenActivationRELU, 0.0, 0.0, 0.0}};
         const auto scale_dev = handle.Write(scale.data), bias_dev = handle.Write(bias.data);
         const auto mean_dev = handle.Write(mean.data), inv_dev = handle.Write(inv.data);
@@ -2616,6 +2622,7 @@ TEST(GPU_BN_Spatial_BF16, BackwardVariant1OddSpatial)
                 miopenBNSpatial, input.desc, dy.desc, input.desc, scale.desc, shift.desc,
                 saved_mean.desc, saved_inv_var.desc, MIO_BN_TEST_EPSILON, use_saved,
                 std::max(size_t{1}, size_t(0.6f * handle.GetMaxComputeUnits())),
+                handle.GetWavefrontWidth(),
                 miopen::ActivationDescriptor{miopenActivationPASTHRU, 0.0, 0.0, 0.0}};
             const auto config =
                 miopen::solver::batchnorm::PerformanceConfigBnBwdBackward{0, "Variant1-1"};

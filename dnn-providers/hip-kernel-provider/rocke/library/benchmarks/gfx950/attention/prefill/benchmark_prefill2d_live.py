@@ -495,7 +495,7 @@ class CkVariantBench:
             use_transposed_mask_limit=flags["use_transposed_mask_limit"],
             use_fast_paged_kv_desc=flags["use_fast_paged_kv_desc"],
             use_early_v_schedule=flags["use_early_v_schedule"],
-            # A K cache over 2 GiB needs i64 addressing whatever the variant asks for.
+            # A cache past the i32 buffer range needs i64 whatever the variant asks.
             use_i64_kv_addr=flags["use_i64_kv_addr"] or _enable_i64_kv_addr(problem),
         )
         # kernel_name() does not encode the KV addressing width, so key on it too.

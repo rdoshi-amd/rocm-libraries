@@ -217,6 +217,19 @@ class TestTuningSpace(unittest.TestCase):
         with self.assertRaisesRegex(NotImplementedError, "does not support"):
             gfx942_split_specs[0].with_num_kv_blocks(65535)
 
+        # The 4-warp GQA builder has no i64 path either, but shares its spec
+        # class with the default builder, so the tuning spec refuses it.
+        _candidate, _req, fourwarp_specs = _specs_for(
+            "attention_gfx942_u2d_gfx942_4warp",
+            arch="gfx942",
+            dtype="bf16",
+            sliding_window=16,
+        )
+        fourwarp = fourwarp_specs[0]
+        self.assertFalse(fourwarp.with_num_kv_blocks(65534).kernel_spec.use_i64_kv_addr)
+        with self.assertRaisesRegex(NotImplementedError, "does not support"):
+            fourwarp.with_num_kv_blocks(65535)
+
         _candidate, _req, fp8_specs = _specs_for(
             "attention_gfx950_u2d_narrow_nw2_mw16_t4xb_llvm",
             use_fp8=True,

@@ -10,7 +10,7 @@ until every required primitive and correctness/perf path is present.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
 from typing import Any, Callable, Dict, Optional, Tuple
 
 from rocke.core.arch import validate_arch
@@ -2569,7 +2569,7 @@ _I32_KV_ELEMENTS = 0x8000_0000
 
 
 def kv_cache_needs_i64_addr(num_kv_blocks: int, block_bytes: int) -> bool:
-    """True when ``num_kv_blocks`` blocks of ``block_bytes`` each need i64 KV addressing.
+    """True when ``num_kv_blocks`` blocks of ``block_bytes`` each need i64 addressing.
 
     The single threshold for the spec builders, the dispatcher's tuning specs
     and the launch guard, so they cannot disagree. ``num_kv_blocks <= 0`` means
@@ -4409,7 +4409,7 @@ def _get_2d_launch_meta(
     spec_cls, _, _ = _tiled_2d_impl(arch)
     i64 = (
         _enable_i64_kv_addr(problem)
-        if "use_i64_kv_addr" in spec_cls.__dataclass_fields__
+        if "use_i64_kv_addr" in {f.name for f in fields(spec_cls)}
         else None
     )
     meta = _Attention2DLaunchMeta(

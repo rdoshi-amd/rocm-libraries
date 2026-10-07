@@ -6026,7 +6026,7 @@ def build_gfx942_4warp_gqa(
         # under a spec that claims i64.
         raise NotImplementedError(
             "4-warp GQA kernel does not support use_i64_kv_addr "
-            "(paged KV cache > 2 GiB)"
+            "(paged KV cache past the i32 buffer range, just under 2 GiB)"
         )
     if spec.dtype not in ("bf16", "fp16"):
         raise NotImplementedError("4-warp GQA kernel supports dtype in {bf16, fp16}")

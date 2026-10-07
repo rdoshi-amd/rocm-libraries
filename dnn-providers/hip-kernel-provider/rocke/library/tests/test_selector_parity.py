@@ -24,15 +24,20 @@ written for the CORRECT behavior (bias should block combo_2d) and are being skip
 
 from __future__ import annotations
 
-import dataclasses
 import unittest
-from dataclasses import asdict
+from dataclasses import asdict, fields, replace
 from types import SimpleNamespace
 from unittest import mock
 
 import builders.common.attention_spec_builder as _asb
 import kernels.common.attention_unified as _au
+from dispatch.attention import AttentionRequest, attention_candidates
+from dispatch.attention.common import _tuning_problem
 from kernels import UnifiedAttentionProblem
+from kernels.gfx942.attention_tiled_2d import build_gfx942_4warp_gqa
+from kernels.gfx1250.attention_tiled_2d import (
+    UnifiedAttention2DTiledSpec as Gfx1250TiledSpec,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -456,9 +461,8 @@ class TestI64KvAddr(unittest.TestCase):
         # The launch meta derives the kernel's flag from _enable_i64_kv_addr
         # rather than building the spec (100-200 us per new total_q), so the
         # spec builders must set exactly that. And a spec built from a problem
-        # with the real count must always pass the launch guard: with the old
-        # 2^31 threshold, 65535 and 65536 blocks got an i32 spec over the
-        # buffer range.
+        # with the real count must always pass the launch guard, including the
+        # counts between the i32 buffer range and 2^31 bytes.
         for arch in ("gfx942", "gfx950"):
             for n in (_AT_I32_LIMIT - 1, _AT_I32_LIMIT, _OVER_I32_LIMIT, 65536, 65537):
                 p = _combo_prob(num_kv_blocks=n)
@@ -472,7 +476,7 @@ class TestI64KvAddr(unittest.TestCase):
                     _au._check_kv_addr_width(p, _kv_cache(n, p), limit)
 
 
-def _kv_cache(num_blocks: int, problem: UnifiedAttentionProblem):
+def _kv_cache(num_blocks: int, problem: UnifiedAttentionProblem) -> SimpleNamespace:
     """Shape-only stand-in for a paged K cache tensor."""
     shape = (num_blocks, problem.block_size, problem.num_kv_heads, problem.head_size)
     return SimpleNamespace(shape=shape)
@@ -518,20 +522,13 @@ class TestKvAddrLimit(unittest.TestCase):
         self.assertEqual(meta.kv_addr_limit, 2 * 2**31)
 
     def test_gfx1250_spec_has_no_i64_field(self):
-        from kernels.gfx1250.attention_tiled_2d import UnifiedAttention2DTiledSpec
-
-        self.assertNotIn(
-            "use_i64_kv_addr",
-            {f.name for f in dataclasses.fields(UnifiedAttention2DTiledSpec)},
-        )
+        self.assertNotIn("use_i64_kv_addr", {f.name for f in fields(Gfx1250TiledSpec)})
 
     def test_4warp_builder_rejects_i64(self):
-        from kernels.gfx942.attention_tiled_2d import build_gfx942_4warp_gqa
-
         p = _prob(128, 32, 32, 8, sliding_window=128, num_kv_blocks=_BUG_BLOCKS)
         with _patch_arch("gfx942"):
             spec = _asb._tiled_spec_from_problem(p)
-        spec = dataclasses.replace(spec, use_i64_kv_addr=True)
+        spec = replace(spec, use_i64_kv_addr=True)
         with self.assertRaisesRegex(NotImplementedError, "use_i64_kv_addr"):
             build_gfx942_4warp_gqa(spec, arch="gfx942")
 
@@ -631,7 +628,7 @@ class TestProductionRouteGuard(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
 
-    def _run(self, problem, num_blocks, **kw):
+    def _run(self, problem: UnifiedAttentionProblem, num_blocks: int, **kw) -> None:
         return _au.run_unified_attention_torch(
             problem=problem,
             q=None,
@@ -661,9 +658,6 @@ class TestProductionRouteGuard(unittest.TestCase):
         self.launcher.assert_not_called()
 
     def test_tuning_spec_rebinds_to_the_real_cache(self):
-        from dispatch.attention import AttentionRequest, attention_candidates
-        from dispatch.attention.common import _tuning_problem
-
         candidate = next(
             c
             for c in attention_candidates()
@@ -692,8 +686,8 @@ class TestProductionRouteGuard(unittest.TestCase):
         self.assertTrue(bound.kernel_spec.use_i64_kv_addr)
 
     def test_scalar_fallback_is_bounded_by_element_count(self):
-        # The production count is filled, so the old problem-based check passed
-        # here while the scalar kernel's i32 element offsets wrapped.
+        # The production count is filled here, so the problem alone says i64;
+        # the scalar kernel still indexes K/V with i32 element offsets.
         p = _bug_prob()
         self._run(p, _BUG_BLOCKS, backend="scalar")  # exactly 2^31 elements
         with self.assertRaisesRegex(ValueError, "kernel itself is i32"):

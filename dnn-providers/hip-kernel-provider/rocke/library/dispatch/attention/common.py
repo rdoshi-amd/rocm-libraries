@@ -558,6 +558,15 @@ class AttentionTuningSpec:
             * elem_bytes
         )
         use_i64 = kv_cache_needs_i64_addr(count, block_stride)
+        if use_i64 and self.builder_kind == "gfx942_4warp_gqa":
+            # Its spec class is shared with the default builder, so no
+            # __post_init__ can refuse the flag the way the gfx942 3D spec does.
+            # Refuse at bind time instead of at compile.
+            raise NotImplementedError(
+                "gfx942 4-warp GQA kernel does not support use_i64_kv_addr "
+                f"({count} blocks of {block_stride} bytes is past the i32 "
+                "buffer range)"
+            )
         return replace(
             self,
             kernel_spec=replace(kernel_spec, use_i64_kv_addr=use_i64),

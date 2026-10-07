@@ -36,6 +36,13 @@ class Tuner(BaseTuner):
     def __init__(self, args: TunerArgs) -> None:
         super().__init__(args)
 
+    def _get_restrictions(self):
+        def validate(params):
+            g_size = params["grid_size"]
+            return g_size > 0 and g_size & (g_size - 1) == 0
+
+        return validate
+
 
 if __name__ == "__main__":
     Tuner.cli()

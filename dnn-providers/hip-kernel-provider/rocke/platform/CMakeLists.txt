@@ -153,7 +153,9 @@ file(GLOB_RECURSE ROCKE_CORE_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_D
 list(FILTER ROCKE_CORE_SOURCES EXCLUDE REGEX "/cpp/bindings/")
 
 add_library(rocke_core STATIC ${ROCKE_CORE_SOURCES})
-target_link_libraries(rocke_core PUBLIC ${CMAKE_DL_LIBS})
+set(THREADS_PREFER_PTHREAD_FLAG ON)
+find_package(Threads REQUIRED)
+target_link_libraries(rocke_core PUBLIC ${CMAKE_DL_LIBS} Threads::Threads)
 target_include_directories(rocke_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/cpp/include>
   $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
@@ -233,6 +235,13 @@ install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/cpp/include/"
 install(EXPORT ckcTargets
         FILE ckcTargets.cmake
         NAMESPACE ckc::
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/ckc)
+include(CMakePackageConfigHelpers)
+configure_package_config_file(
+  "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ckcConfig.cmake.in"
+  "${CMAKE_CURRENT_BINARY_DIR}/ckcConfig.cmake"
+  INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/ckc)
+install(FILES "${CMAKE_CURRENT_BINARY_DIR}/ckcConfig.cmake"
         DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/ckc)
 
 if(ROCKE_INSTALL_PYTHON_PACKAGE)
@@ -334,6 +343,7 @@ if(ROCKE_INSTALL_TESTS)
               PATTERN "*.c" EXCLUDE
               PATTERN "*.cpp" EXCLUDE
               PATTERN "differential" EXCLUDE
+              PATTERN "test_engine_linkage.py" EXCLUDE
               PATTERN "test_wavescope_sidecar.py" EXCLUDE
               PATTERN "run_all.py" EXCLUDE)
 

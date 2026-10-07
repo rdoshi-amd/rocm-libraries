@@ -541,4 +541,3 @@ void testing_csrgeam_extra(const Arguments& arg)
         unit_check_scalar(row, h_row_ptr_C[row]);
     }
 }
-

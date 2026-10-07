@@ -17,13 +17,9 @@
 #include <algorithm>
 #include <cstring>
 #include <iostream>
-#include <map>
 #include <memory>
-#include <mutex>
-#include <random>
 #include <sstream>
 #include <stdexcept>
-#include <unordered_map>
 #ifdef _WIN32
 #include <process.h>
 #else
@@ -179,19 +175,6 @@ namespace hipblaslt_ext::experimental
                 return getpid();
 #endif
             }
-            struct Registry
-            {
-                std::mutex                                                            mutex;
-                std::unordered_map<uint64_t, std::shared_ptr<const CompiledSolution>> entries;
-                std::unordered_map<const CompiledSolution*, uint64_t>                 tokens;
-                std::mt19937_64 random{std::random_device{}()};
-            };
-            Registry& registry()
-            {
-                // Copied algorithms and captured graphs can outlive their creator.
-                static auto* instance = new Registry;
-                return *instance;
-            }
 
             hipblasStatus_t toHipStatus(hipblaslt_jit::Status::Code code)
             {
@@ -207,118 +190,6 @@ namespace hipblaslt_ext::experimental
                 default:
                     return HIPBLAS_STATUS_INTERNAL_ERROR;
                 }
-            }
-
-            // support() plus the workspace bound supportJit applies to a stored algorithm.
-            hipblasStatus_t acceptBundle(const KernelBundle&     bundle,
-                                         const OperationRequest& request,
-                                         size_t                  workspaceLimit,
-                                         size_t&                 workspaceBytes,
-                                         Diagnostics&            diagnostics)
-            {
-                workspaceBytes = 0;
-                size_t     required = 0;
-                const auto status = bundle.support(request, workspaceLimit, required, diagnostics);
-                if(status != HIPBLAS_STATUS_SUCCESS)
-                    return status;
-                if(required > workspaceLimit)
-                    return HIPBLAS_STATUS_INVALID_VALUE;
-                workspaceBytes = required;
-                return HIPBLAS_STATUS_SUCCESS;
-            }
-        }
-
-        uint64_t registerBundle(std::shared_ptr<const CompiledSolution> bundle)
-        {
-            auto&                       r = registry();
-            std::lock_guard<std::mutex> lock(r.mutex);
-            auto                        existing = r.tokens.find(bundle.get());
-            if(existing != r.tokens.end())
-                return existing->second;
-            uint64_t token;
-            do
-                token = r.random() & ((uint64_t{1} << 56) - 1);
-            while(token == 0 || r.entries.count(token));
-            r.entries.emplace(token, bundle);
-            try
-            {
-                r.tokens.emplace(bundle.get(), token);
-            }
-            catch(...)
-            {
-                r.entries.erase(token);
-                throw;
-            }
-            return token;
-        }
-
-        std::shared_ptr<const CompiledSolution> resolveJitAlgo(const rocblaslt_matmul_algo& algo,
-                                                               int                          device)
-        {
-            if(!experimental::detail::isJitAlgo(algo))
-                return {};
-            int index;
-            std::memcpy(&index, algo.data, sizeof(index));
-            uint64_t token = 0;
-            std::memcpy(&token, algo.data_pad, sizeof(algo.data_pad));
-            std::shared_ptr<const CompiledSolution> entry;
-            {
-                auto&                       r = registry();
-                std::lock_guard<std::mutex> lock(r.mutex);
-                auto                        found = r.entries.find(token);
-                if(algo.fallback || found == r.entries.end()
-                   || index != found->second->bundle->solutionIndex())
-                    throw std::invalid_argument("Unknown process-local JIT algorithm");
-                entry = found->second;
-            }
-            int current = -1;
-            if(entry->process != processId() || entry->target.device != device
-               || hipGetDevice(&current) != hipSuccess || current != device)
-                throw std::invalid_argument("JIT algorithm belongs to another process or device");
-            return entry;
-        }
-
-        rocblaslt_status toRocStatus(hipblasStatus_t status)
-        {
-            switch(status)
-            {
-            case HIPBLAS_STATUS_SUCCESS:
-                return rocblaslt_status_success;
-            case HIPBLAS_STATUS_NOT_INITIALIZED:
-                return rocblaslt_status_not_initialized;
-            case HIPBLAS_STATUS_ALLOC_FAILED:
-                return rocblaslt_status_memory_error;
-            case HIPBLAS_STATUS_INVALID_VALUE:
-                return rocblaslt_status_invalid_value;
-            case HIPBLAS_STATUS_ARCH_MISMATCH:
-                return rocblaslt_status_arch_mismatch;
-            case HIPBLAS_STATUS_NOT_SUPPORTED:
-                return rocblaslt_status_not_supported;
-            case HIPBLAS_STATUS_EXECUTION_FAILED:
-                return rocblaslt_status_execution_failed;
-            default:
-                return rocblaslt_status_internal_error;
-            }
-        }
-
-        template <class F>
-        rocblaslt_status invoke(F&& f)
-        {
-            try
-            {
-                return toRocStatus(f());
-            }
-            catch(const std::bad_alloc&)
-            {
-                return rocblaslt_status_memory_error;
-            }
-            catch(const std::invalid_argument&)
-            {
-                return rocblaslt_status_invalid_value;
-            }
-            catch(...)
-            {
-                return rocblaslt_status_internal_error;
             }
         }
 
@@ -452,20 +323,6 @@ namespace hipblaslt_ext::experimental
                 diagnostics.message = std::to_string(found) + " of " + std::to_string(indices.size())
                                       + " solutions came from the JIT solution library";
             return HIPBLAS_STATUS_SUCCESS;
-        }
-
-        rocblaslt_status supportJit(rocblaslt_handle             handle,
-                                    const rocblaslt_matmul_algo& algo,
-                                    const GemmRequest&           request,
-                                    size_t&                      workspaceBytes)
-        {
-            workspaceBytes = 0;
-            return invoke([&] {
-                auto        entry = resolveJitAlgo(algo, handle->device);
-                Diagnostics diagnostics;
-                return acceptBundle(
-                    *entry->bundle, request, algo.max_workspace_bytes, workspaceBytes, diagnostics);
-            });
         }
     }
 

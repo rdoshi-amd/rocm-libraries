@@ -49,8 +49,8 @@ namespace hipblaslt_ext::experimental::jit
         friend struct detail::RequestAccess;
     };
 
-    // Owns an executable kernel bundle, including its backend and loaded modules.
-    // An operation adapter converts it to an execution API's algorithm type.
+    // Names one published JIT solution library index. An operation adapter
+    // converts it to an execution API's algorithm type.
     class Solution
     {
     public:

@@ -3,7 +3,7 @@
 #pragma once
 
 #include "hipblaslt-jit-backend.hpp"
-#include "hipblaslt-jit-gemm-tag.hpp"
+#include "rocblaslt-types.h"
 #include <array>
 #include <cstring>
 
@@ -45,14 +45,6 @@ namespace hipblaslt_ext::experimental::jit::detail
             return operation;
         }
     };
-
-    std::shared_ptr<const CompiledSolution> resolveJitAlgo(const rocblaslt_matmul_algo& algo,
-                                                           int                          device);
-    rocblaslt_status                        toRocStatus(hipblasStatus_t status);
-    rocblaslt_status                        supportJit(rocblaslt_handle             handle,
-                                                       const rocblaslt_matmul_algo& algo,
-                                                       const GemmRequest&           request,
-                                                       size_t&                      workspaceBytes);
 
     // Captures the common descriptor translation without invoking any provider.
     rocblaslt_status createGemmRequest(rocblaslt_handle                    handle,

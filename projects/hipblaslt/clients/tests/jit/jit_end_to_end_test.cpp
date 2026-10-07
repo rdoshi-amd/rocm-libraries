@@ -10,10 +10,11 @@
 #include <unistd.h>
 
 // Replays the plain-pair bundle of the current device's architecture through
-// Jit, builds it with comgr and loads its two solutions as one TensileLite
-// library. getJitAlgo returns its first solution for K=512 and its second for
-// K=256; each runs through hipblasLtMatmul and hipblaslt_ext::Gemm, and D is
-// checked against the host.
+// Jit and publishes each solution into the JIT solution library. getJitAlgo
+// returns its first solution for K=512 and its second for K=256 as library
+// indices from 2^30; each runs through hipblasLtMatmul and hipblaslt_ext::Gemm,
+// and D is checked against the host. A second lookup returns the same index
+// without generating.
 namespace jit = hipblaslt_ext::experimental::jit;
 
 namespace
@@ -50,7 +51,7 @@ namespace
         const auto       label = "K=" + std::to_string(K);
         Fp16Gemm         matrices(K);
 
-        // Generate (replay), Build (comgr), Support, then Load into a TensileLite library.
+        // Generate (replay), build with comgr, then publish a JIT library index.
         jit::Request  request;
         jit::Solution solution;
         float         alpha = 1.25f, beta = 0.5f;
@@ -69,16 +70,30 @@ namespace
                                   request,
                                   diagnostics));
         BLAS(jit::getJitAlgo(device, request, backend, 64 << 20, solution, diagnostics));
+        require(diagnostics.message != "1 of 1 solutions came from the JIT solution library",
+                label + " did not build a solution: " + diagnostics.message);
         hipblasLtMatmulHeuristicResult_t result{};
         BLAS(jit::getGemmAlgo(solution, result, diagnostics));
+        const int index = hipblaslt_ext::getIndexFromAlgo(result.algo);
+        require(index >= (1 << 30),
+                label + " returned " + std::to_string(index) + ", not a JIT library index");
+        jit::Solution again;
+        BLAS(jit::getJitAlgo(device, request, backend, 64 << 20, again, diagnostics));
+        require(diagnostics.message == "1 of 1 solutions came from the JIT solution library",
+                label + " generated on the second lookup: " + diagnostics.message);
+        hipblasLtMatmulHeuristicResult_t repeat{};
+        BLAS(jit::getGemmAlgo(again, repeat, diagnostics));
+        require(hipblaslt_ext::getIndexFromAlgo(repeat.algo) == index,
+                label + " published a different index on the second lookup");
         Device     workspace(result.workspaceSize);
         const auto name   = hipblaslt_ext::getSolutionNameFromAlgo(handle, result.algo);
         const auto kernel = hipblaslt_ext::getKernelNameFromAlgo(handle, result.algo);
         require(hipblaslt_jit_test::endsWith(name, suffix),
                 label + " selected the solution '" + name + "', not the one ending in " + suffix);
         require(kernel.rfind("Cijk_", 0) == 0, "Unexpected kernel name '" + kernel + "'");
-        std::cout << "PASS " << label << " replayed, built and loaded the solution ending in "
-                  << suffix << '\n';
+        std::cout << "PASS " << label << " published index " << index
+                  << " for the solution ending in " << suffix
+                  << " and a second lookup reused it\n";
 
         matrices.matmul(handle,
                         desc,
@@ -125,6 +140,10 @@ namespace
 
     void test(const std::string& root)
     {
+        const char* libraryRoot = std::getenv("HIPBLASLT_JIT_LIBRARY_PATH");
+        require(libraryRoot && *libraryRoot,
+                "Set HIPBLASLT_JIT_LIBRARY_PATH to a scratch directory");
+        std::filesystem::remove_all(std::filesystem::u8path(libraryRoot));
         hipblaslt_jit_test::ReplayFixture fixture(root);
         jit::Diagnostics                  diagnostics;
         auto&                             handle = fixture.handle;

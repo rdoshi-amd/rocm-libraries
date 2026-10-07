@@ -86,14 +86,14 @@ flatbuffers::FlatBufferBuilder buildSdpaGraph(const GraphSpec& spec)
     flatbuffers::FlatBufferBuilder builder;
     const std::vector<int64_t> qDims{spec.batch, spec.queryHeads, spec.queryLength, spec.headSize};
     const std::vector<int64_t> kDims{spec.batch, spec.kvHeads, spec.kvLength, spec.headSize};
-    const std::vector<int64_t> vDims = kDims;
+    const std::vector<int64_t>& vDims = kDims;
     const std::vector<int64_t> oDims{
         spec.batch, spec.queryHeads, spec.queryLength, spec.outputHeadSize.value_or(spec.headSize)};
     const std::vector<int64_t> lseDims{spec.batch, spec.queryHeads, spec.queryLength, 1};
 
     const auto qStrides = denseStrides(spec.bhsd, spec.queryHeads, spec.queryLength, spec.headSize);
     const auto kStrides = denseStrides(spec.bhsd, spec.kvHeads, spec.kvLength, spec.headSize);
-    const auto vStrides = kStrides;
+    const auto& vStrides = kStrides;
     const auto oStrides = denseStrides(
         spec.bhsd, spec.queryHeads, spec.queryLength, spec.outputHeadSize.value_or(spec.headSize));
     const auto lseStrides = denseStrides(spec.bhsd, spec.queryHeads, spec.queryLength, 1);
@@ -352,7 +352,7 @@ TEST(TestGfx1151WmmaAttentionMatchers, ScorePrefersFastTransposedKernel)
     const auto properties = testDeviceProperties();
     const MatchContext context{graph, 0, properties};
 
-    KernelSpec standard;
+    const KernelSpec standard;
     KernelSpec fast;
     fast.transposedQk = 1;
     EXPECT_GT(scorer(context, BoundTokens{}, makeKernel(fast)),

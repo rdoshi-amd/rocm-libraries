@@ -127,7 +127,8 @@ const std::vector<Container::EngineDefinition>& Container::getEngineDefinitions(
                          // Device facts are resolved per call from the handle, not from
                          // the construction-time provider.
                          return hipdnn_plugin_sdk::ingestor::makeEngine<Handle, Settings, Context>(
-                             set, kernel_ingestor_engine::deviceResolver());
+                             kernel_ingestor_engine::withComputedBehaviorNotes(set),
+                             kernel_ingestor_engine::deviceResolver());
                      }
                      catch(const std::exception& error)
                      {

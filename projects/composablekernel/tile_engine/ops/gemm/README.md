@@ -307,6 +307,11 @@ The system uses JSON configuration files to specify kernel parameters:
 }
 ```
 
+On gfx1250 the TDM pipelines (`comp_tdm`, `comp_tdm_v2`) are swept with the
+`tdm` epilogue, non-persistent. Add `"tdm_extended_traits": {"values": [true]}`
+to `trait_config` to also sweep `comp_tdm` with the `cshuffle` epilogue and the
+persistent kernel; those combinations have not been run on hardware yet.
+
 ## Scripts and Tools
 
 ### Python Scripts

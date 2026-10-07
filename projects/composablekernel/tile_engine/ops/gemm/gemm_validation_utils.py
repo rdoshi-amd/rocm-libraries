@@ -38,6 +38,18 @@ GEMM_PIPELINES = ["mem", "compv3", "compv4"]
 # the pipeline sets (and therefore generated kernels) of every other arch stay
 # exactly GEMM_PIPELINES.
 GEMM_TDM_PIPELINES = ["comp_tdm", "comp_tdm_v2"]
+# Epilogues each TDM pipeline can host. comp_tdm (V1) also runs CShuffle, whose
+# entry s_wait_tensorcnt barrier retires the pipeline's TDM loads before the
+# shuffle reuses LDS. comp_tdm_v2 keeps TdmEpilogue only.
+GEMM_TDM_EPILOGUES = {"comp_tdm": ("tdm", "cshuffle"), "comp_tdm_v2": ("tdm",)}
+# TDM pipelines that honour UsePersistentKernel. comp_tdm_v2 pins it to false
+# until its wave-specialized cross-tile TENSORcnt drain is analysed.
+GEMM_TDM_PERSISTENT_PIPELINES = ("comp_tdm",)
+# Sweeps (--list_kernels) keep the TDM pipelines at TdmEpilogue, non-persistent
+# unless the trait_config opts in with {"tdm_extended_traits": {"values": [true]}}.
+# The wider combinations above are legal, but have not run on hardware, so they
+# are opt-in for sweeps; --gen_single accepts them whenever they are legal.
+GEMM_TDM_EXTENDED_TRAITS_KEY = "tdm_extended_traits"
 GEMM_ASYNC_PIPELINES = ["comp_async"]
 GEMM_PIPELINES_BY_ARCH = {
     "gfx1250": GEMM_PIPELINES + GEMM_ASYNC_PIPELINES + GEMM_TDM_PIPELINES,
@@ -122,6 +134,51 @@ def tdm_pad_reject_reason(pipeline, epilogue, pad_m=False, pad_n=False, pad_k=Fa
         return ""
     if _is_true(pad_m) or _is_true(pad_n) or _is_true(pad_k):
         return TDM_PAD_REJECT_REASON
+    return ""
+
+
+def tdm_trait_reject_reason(pipeline, epilogue, persistent=False):
+    """Reason string if a TDM pipeline gets an epilogue or persistent mode it
+    does not support, else "". Non-TDM pipelines return "".
+
+    persistent follows the TDM trait convention: only True / "true" request
+    the persistent kernel.
+    """
+    if pipeline not in GEMM_TDM_PIPELINES:
+        return ""
+    if epilogue not in GEMM_TDM_EPILOGUES[pipeline]:
+        return (
+            f"{pipeline} supports the {'/'.join(GEMM_TDM_EPILOGUES[pipeline])} "
+            f"epilogue, got '{epilogue}'"
+        )
+    if persistent in (True, "true") and pipeline not in GEMM_TDM_PERSISTENT_PIPELINES:
+        return f"{pipeline} does not support the persistent kernel"
+    return ""
+
+
+def tdm_extended_traits_enabled(trait_config):
+    """True if a trait_config opts its sweep into the extended TDM traits
+    (see GEMM_TDM_EXTENDED_TRAITS_KEY)."""
+    entry = (trait_config or {}).get(GEMM_TDM_EXTENDED_TRAITS_KEY, {})
+    values = entry.get("values", []) if isinstance(entry, dict) else entry
+    return any(v in (True, "true") for v in values)
+
+
+def tdm_sweep_skip_reason(pipeline, epilogue, persistent=False, extended=False):
+    """Reason string if a sweep leaves out a legal TDM trait combination because
+    the config did not opt into the extended TDM traits, else "".
+
+    Without the opt-in a TDM pipeline sweeps only epilogue=tdm, non-persistent:
+    the instances every gfx1250 sweep generated before comp_tdm accepted the
+    cshuffle epilogue and the persistent kernel.
+    """
+    if extended or pipeline not in GEMM_TDM_PIPELINES:
+        return ""
+    if epilogue != "tdm" or persistent in (True, "true"):
+        return (
+            f"{pipeline} with epilogue={epilogue}, persistent={persistent} needs "
+            f'"{GEMM_TDM_EXTENDED_TRAITS_KEY}" in the trait_config'
+        )
     return ""
 
 
@@ -545,17 +602,19 @@ def is_trait_combination_valid(
     else:
         if kernel_name_prefix != "mx_gemm":
             if pipeline in GEMM_TDM_PIPELINES:
-                # TDM: intrawave only, TdmEpilogue only, no persistent kernel
-                # (TdmEpilogue has no split-K / persistent write path), and no
-                # padding (see TDM_PAD_REJECT_REASON).
+                # TDM: intrawave only, no padding (see TDM_PAD_REJECT_REASON),
+                # and only the epilogues / persistent mode of the pipeline (see
+                # tdm_trait_reject_reason).
                 if tdm_pad_reject_reason(pipeline, epilogue, pad_m, pad_n, pad_k):
                     logging.debug(f"{pipeline}: {TDM_PAD_REJECT_REASON}")
                     return False
-                return (
-                    scheduler == "intrawave"
-                    and epilogue == "tdm"
-                    and persistent_or_preshuffle_quant not in (True, "true")
+                trait_reason = tdm_trait_reject_reason(
+                    pipeline, epilogue, persistent_or_preshuffle_quant
                 )
+                if trait_reason:
+                    logging.debug(trait_reason)
+                    return False
+                return scheduler == "intrawave"
             if epilogue == "tdm":
                 return False
             # Non-MX comp_async (gfx1250) must be fully padded (see

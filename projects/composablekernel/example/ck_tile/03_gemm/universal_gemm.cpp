@@ -37,6 +37,8 @@ int run_gemm_example_with_layouts_universal(ck_tile::ArgParser& arg_parser,
         const ck_tile::index_t N      = arg_parser.get_int("n");
         const ck_tile::index_t K      = arg_parser.get_int("k");
         const ck_tile::index_t kbatch = arg_parser.get_int("split_k");
+        // The async input scheduler always launches the persistent kernel.
+        const PersistentGrid persistent_grid = get_persistent_grid(arg_parser, true);
 
         using Row                     = ck_tile::tensor_layout::gemm::RowMajor;
         constexpr bool is_a_row_major = std::is_same_v<ALayout, Row>;
@@ -89,7 +91,7 @@ int run_gemm_example_with_layouts_universal(ck_tile::ArgParser& arg_parser,
                                                      ck_tile::tuple<>,
                                                      CLayout,
                                                      ck_tile::element_wise::PassThrough>(
-            args, ck_tile::stream_config{nullptr, false, 1});
+            args, ck_tile::stream_config{nullptr, false, 1}, persistent_grid);
 
         // Copy result from device for verification
         c_m_n_dev_buf.FromDevice(c_m_n_dev_result.data());

@@ -145,13 +145,71 @@ class TestValidationRules(unittest.TestCase):
         ok = vu.is_trait_combination_valid
         self.assertTrue(ok("comp_tdm", "tdm", "intrawave", False, "gemm_universal"))
         self.assertTrue(ok("comp_tdm_v2", "tdm", "intrawave", False, "batched_gemm"))
-        self.assertFalse(
-            ok("comp_tdm", "cshuffle", "intrawave", False, "gemm_universal")
-        )
         self.assertFalse(ok("comp_tdm", "tdm", "interwave", False, "gemm_universal"))
-        self.assertFalse(ok("comp_tdm", "tdm", "intrawave", True, "gemm_universal"))
         self.assertFalse(ok("compv3", "tdm", "intrawave", False, "gemm_universal"))
         self.assertFalse(ok("comp_async", "tdm", "intrawave", False, "gemm_universal"))
+
+    def test_comp_tdm_cshuffle_and_persistent(self):
+        # comp_tdm (V1) takes the tdm or cshuffle epilogue, persistent or not.
+        ok = vu.is_trait_combination_valid
+        for epilogue in ("tdm", "cshuffle"):
+            for persistent in (False, True, "true"):
+                self.assertTrue(
+                    ok("comp_tdm", epilogue, "intrawave", persistent, "gemm_universal"),
+                    (epilogue, persistent),
+                )
+            self.assertTrue(
+                ok("comp_tdm", epilogue, "intrawave", False, "batched_gemm")
+            )
+            # The scheduler and pad rules still apply to the new combinations.
+            self.assertFalse(
+                ok("comp_tdm", epilogue, "interwave", True, "gemm_universal")
+            )
+            self.assertFalse(
+                ok(
+                    "comp_tdm",
+                    epilogue,
+                    "intrawave",
+                    True,
+                    "gemm_universal",
+                    "rcr",
+                    True,
+                    False,
+                    False,
+                )
+            )
+        self.assertFalse(
+            ok("comp_tdm", "default", "intrawave", False, "gemm_universal")
+        )
+
+    def test_comp_tdm_v2_tdm_only_non_persistent(self):
+        ok = vu.is_trait_combination_valid
+        self.assertFalse(
+            ok("comp_tdm_v2", "cshuffle", "intrawave", False, "gemm_universal")
+        )
+        self.assertFalse(
+            ok("comp_tdm_v2", "default", "intrawave", False, "gemm_universal")
+        )
+        for persistent in (True, "true"):
+            self.assertFalse(
+                ok("comp_tdm_v2", "tdm", "intrawave", persistent, "gemm_universal")
+            )
+
+    def test_tdm_trait_reject_reason(self):
+        reason = vu.tdm_trait_reject_reason
+        self.assertEqual(reason("compv3", "default", True), "")
+        self.assertEqual(reason("comp_tdm", "cshuffle", True), "")
+        self.assertEqual(reason("comp_tdm", "tdm", "true"), "")
+        self.assertIn("tdm/cshuffle", reason("comp_tdm", "default"))
+        self.assertIn("tdm epilogue", reason("comp_tdm_v2", "cshuffle"))
+        self.assertIn("persistent", reason("comp_tdm_v2", "tdm", True))
+
+    def test_mx_tdm_rules_unchanged(self):
+        # MX TDM problems stay TdmEpilogue-only and one block per tile.
+        ok = vu.is_trait_combination_valid
+        self.assertTrue(ok("comp_tdm", "tdm", "intrawave", False, "mx_gemm"))
+        self.assertFalse(ok("comp_tdm", "cshuffle", "intrawave", False, "mx_gemm"))
+        self.assertFalse(ok("comp_tdm", "tdm", "intrawave", True, "mx_gemm"))
 
     def test_tdm_pad_rejected(self):
         ok = vu.is_trait_combination_valid
@@ -597,7 +655,22 @@ class TestBuilderGolden(_BuilderCase):
         with self.assertRaises(ValueError):
             self._gen("gemm_universal", "compv3", "tdm")
         with self.assertRaises(ValueError):
-            self._gen("gemm_universal", "comp_tdm", "cshuffle")
+            self._gen("gemm_universal", "comp_tdm_v2", "cshuffle")
+        with self.assertRaises(ValueError):
+            self._gen("gemm_universal", "comp_tdm", "default")
+
+    def test_comp_tdm_cshuffle_codegen(self):
+        for prefix in ("gemm_universal", "batched_gemm"):
+            code = self._gen(prefix, "comp_tdm", "cshuffle")
+            self.assertIn("GemmPipelineAgBgCrCompTDMV1", code, prefix)
+            self.assertIn("CShuffleEpilogue<", code, prefix)
+            self.assertNotIn("TdmEpilogue<", code, prefix)
+            self.assertIn("DoubleSmemBuffer>;", code, prefix)
+            self.assertIn("args.k_batch != 1", code, prefix)
+        for epilogue in ("tdm", "cshuffle"):
+            code = self._gen("gemm_universal", "comp_tdm", epilogue, persistent=True)
+            self.assertIn("UsePersistentKernel = true", code, epilogue)
+            self.assertIn("GemmKernel::MaxOccupancyGridSize(stream)", code, epilogue)
 
     def test_builder_rejects_padded_tdm(self):
         for prefix in ("gemm_universal", "batched_gemm"):
@@ -665,23 +738,56 @@ class TestBuilderGolden(_BuilderCase):
         with self.assertRaises(ValueError):
             lookup_pipeline({"a": "x"}, "b")
 
-    def test_trait_enumeration(self):
-        b = self._builder(
-            "gemm_universal",
-            _config(
-                ["compv3", "comp_async", "comp_tdm", "comp_tdm_v2"],
-                ["cshuffle", "tdm"],
-                persistent=(False, True),
-                pads=(False, True),
-            ),
+    def _trait_combos(self, extended):
+        cfg = _config(
+            ["compv3", "comp_async", "comp_tdm", "comp_tdm_v2"],
+            ["cshuffle", "tdm"],
+            persistent=(False, True),
+            pads=(False, True),
         )
-        combos = {(c[0], c[1], c[6]) for c in b._generate_trait_combinations()}
-        self.assertIn(("comp_tdm", "tdm", False), combos)
-        self.assertIn(("comp_tdm_v2", "tdm", False), combos)
-        self.assertNotIn(("comp_tdm", "tdm", True), combos)
-        self.assertNotIn(("comp_tdm", "cshuffle", False), combos)
+        if extended is not None:
+            cfg["trait_config"][vu.GEMM_TDM_EXTENDED_TRAITS_KEY] = {
+                "values": [extended]
+            }
+        b = self._builder("gemm_universal", cfg)
+        return {(c[0], c[1], c[6]) for c in b._generate_trait_combinations()}
+
+    def test_trait_enumeration(self):
+        # Without the opt-in the sweep keeps comp_tdm at tdm / non-persistent.
+        for extended in (None, False):
+            combos = self._trait_combos(extended)
+            self.assertEqual(
+                {c for c in combos if c[0] == "comp_tdm"}, {("comp_tdm", "tdm", False)}
+            )
+            self.assertIn(("comp_tdm_v2", "tdm", False), combos)
+            self.assertNotIn(("compv3", "tdm", False), combos)
+            self.assertIn(("comp_async", "cshuffle", True), combos)
+
+    def test_trait_enumeration_tdm_extended(self):
+        base = self._trait_combos(None)
+        combos = self._trait_combos(True)
+        for epilogue in ("tdm", "cshuffle"):
+            for persistent in (False, True):
+                self.assertIn(("comp_tdm", epilogue, persistent), combos)
+        self.assertNotIn(("comp_tdm_v2", "tdm", True), combos)
+        self.assertNotIn(("comp_tdm_v2", "cshuffle", False), combos)
         self.assertNotIn(("compv3", "tdm", False), combos)
-        self.assertIn(("comp_async", "cshuffle", True), combos)
+        # The opt-in only adds comp_tdm combinations.
+        self.assertTrue(base <= combos)
+        self.assertEqual({c[0] for c in combos - base}, {"comp_tdm"})
+
+    def test_tdm_sweep_skip_reason(self):
+        skip = vu.tdm_sweep_skip_reason
+        self.assertEqual(skip("comp_tdm", "tdm", False), "")
+        self.assertEqual(skip("compv3", "cshuffle", True), "")
+        self.assertIn(vu.GEMM_TDM_EXTENDED_TRAITS_KEY, skip("comp_tdm", "cshuffle"))
+        self.assertTrue(skip("comp_tdm", "tdm", "true"))
+        self.assertEqual(skip("comp_tdm", "cshuffle", True, extended=True), "")
+        enabled = vu.tdm_extended_traits_enabled
+        self.assertFalse(enabled({}))
+        self.assertTrue(
+            enabled({vu.GEMM_TDM_EXTENDED_TRAITS_KEY: {"values": ["true"]}})
+        )
 
 
 if __name__ == "__main__":

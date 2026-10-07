@@ -59,6 +59,8 @@ GFX1250_LDS = 320 * 1024
 # pads sweep [false, true]: comp_async keeps only all-True, TDM only all-False,
 # and the legacy pipelines keep all 8 combos. The 4x4x1 (16-wave) grid is
 # swept by every pipeline except comp_tdm_v2, which stays 4-wave only.
+# comp_tdm sweeps only the tdm epilogue, non-persistent: the configs do not
+# set tdm_extended_traits.
 FULL_COUNTS = {
     ("fp16", "rcr"): (32056, 406, 203, 87),
     ("fp16", "rrr"): (31263, 0, 200, 87),
@@ -194,9 +196,10 @@ class _ConfigLintMixin:
             name,
         )
         if pipeline in TDM_PIPELINES:
-            self.assertEqual(
-                (epilogue, scheduler, persistent), ("tdm", "intrawave", False), name
-            )
+            self.assertEqual(scheduler, "intrawave", name)
+            self.assertIn(epilogue, vu.GEMM_TDM_EPILOGUES[pipeline], name)
+            if persistent:
+                self.assertIn(pipeline, vu.GEMM_TDM_PERSISTENT_PIPELINES, name)
             self.assertEqual((pad_m, pad_n, pad_k), (False, False, False), name)
             c_bytes = t["tile_m"] * t["tile_n"] * vu.element_size(_c_dtype(dtype))
             self.assertLessEqual(c_bytes, GFX1250_LDS, name)
@@ -249,6 +252,23 @@ class TestCiConfig(_ConfigLintMixin, unittest.TestCase):
                 if layout[:2] == "rc" and dtype not in ("fp8", "bf8"):
                     expected["comp_async"] = 1
                 self.assertEqual(counts, expected, (dtype, layout))
+
+    def test_tdm_extended_traits_opt_in(self):
+        # Opting in adds exactly the comp_tdm cshuffle kernel (the CI config is
+        # non-persistent); every other kernel is unchanged.
+        cfg = json.loads(_CI_CONFIG.read_text())
+        cfg["trait_config"][vu.GEMM_TDM_EXTENDED_TRAITS_KEY] = {"values": [True]}
+        tmp = Path(tempfile.mkdtemp(prefix="gu_gfx1250_ext_"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        ext_config = tmp / "ci_ext.json"
+        ext_config.write_text(json.dumps(cfg))
+        for dtype, layout in (("fp16", "rcr"), ("fp8", "rrr")):
+            base = {k["name"] for k in self._lint(dtype, layout)}
+            ext = {k["name"] for k in _kernels("gfx1250", dtype, layout, ext_config)}
+            added = ext - base
+            self.assertTrue(base <= ext, (dtype, layout))
+            self.assertEqual(len(added), 1, added)
+            self.assertIn("_comp_tdm_cshuffle_", next(iter(added)))
 
 
 class TestFullConfig(_ConfigLintMixin, unittest.TestCase):

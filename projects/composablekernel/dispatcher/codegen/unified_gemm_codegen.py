@@ -35,9 +35,12 @@ from codegen_common import (
     GFX1250_ARCH,  # noqa: F401 (re-exported)
     GFX1250_ONLY_PIPELINES,
     TDM_PAD_REJECT_REASON,  # noqa: F401 (re-exported)
+    TDM_EXTENDED_TRAITS_KEY,
     TDM_PIPELINES,
     gfx1250_comp_async_8bit_warp_tile_k_rejected,  # noqa: F401 (re-exported)
     gfx1250_pipeline_reject_reason,
+    tdm_extended_traits_enabled,
+    tdm_sweep_skip_reason,
     gemm_lockstep_vector_bytes,
     gemm_default_epilogue_vector_size,
     gemm_vector_size_suffix,
@@ -1961,8 +1964,19 @@ class UnifiedGemmCodegen:
         tile_configs = self._get_tile_configs()
         trait_configs = self._get_trait_configs()
 
+        # TDM cshuffle / persistent kernels are opt-in for sweeps (see
+        # codegen_common.TDM_EXTENDED_TRAITS_KEY).
+        tdm_extended = tdm_extended_traits_enabled(self.config.get("trait_config"))
+
         vector_rejects: Dict[str, int] = {}
         for tile, trait in itertools.product(tile_configs, trait_configs):
+            reason = tdm_sweep_skip_reason(
+                trait.pipeline, trait.epilogue, trait.persistent, tdm_extended
+            )
+            if reason:
+                log.debug(f"Skipped {variant.value} {trait.pipeline}: {reason}")
+                continue
+
             # gfx1250 pipelines (non-MX comp_async / comp_tdm*) and the TDM
             # epilogue: exact-arch, variant and trait gate.
             reason = self._gfx1250_pipeline_reject_reason(tile, trait, variant)
@@ -2644,6 +2658,11 @@ def main():
             trait_config.setdefault("pad_n", [False])
             trait_config.setdefault("pad_k", [False])
             trait_config.setdefault("persistent", [False])
+            # An inline config names its kernel explicitly, so it may use the
+            # extended TDM traits (TDM_EXTENDED_TRAITS_KEY) unless it says not to.
+            trait_config[TDM_EXTENDED_TRAITS_KEY] = cfg.get(
+                TDM_EXTENDED_TRAITS_KEY, [True]
+            )
             if trait_config:
                 full_config["trait_config"] = trait_config
 

@@ -52,6 +52,10 @@ struct GemmConfigBase
     static constexpr ck_tile::DataCachePrefetchKind DataCachePrefetchB =
         ck_tile::DataCachePrefetchKind::None;
     static constexpr bool Async = false;
+    // COMPUTE_TDM_V1 only: use CShuffleEpilogue instead of TdmEpilogue. Every
+    // other pipeline except COMPUTE_TDM_V2 (TdmEpilogue only) already uses
+    // CShuffleEpilogue.
+    static constexpr bool UseCShuffleEpilogue = false;
 
     static constexpr bool FixedVectorSize = false;
     // If FixedVectorSize==true: use these vector sizes for A/B loads and C store
@@ -709,23 +713,79 @@ struct PipelineTypeTraits<ck_tile::GemmPipeline::PRESHUFFLE_TDM>
             PipelineProblem::Traits::DataCachePrefetchB>>;
 };
 
-template <ck_tile::GemmPipeline PipelineId, typename Problem>
+template <ck_tile::GemmPipeline PipelineId, typename Problem, bool UseCShuffle = false>
 struct EpilogueTypeTraits
 {
     using Epilogue = ck_tile::CShuffleEpilogue<Problem>;
 };
 
+// TDM V1 defaults to TdmEpilogue; UseCShuffle selects CShuffleEpilogue, whose entry
+// s_wait_tensorcnt barrier retires the pipeline's TDM loads before the shuffle reuses LDS.
 template <typename Problem>
-struct EpilogueTypeTraits<ck_tile::GemmPipeline::COMPUTE_TDM_V1, Problem>
+struct EpilogueTypeTraits<ck_tile::GemmPipeline::COMPUTE_TDM_V1, Problem, false>
 {
     using Epilogue = ck_tile::TdmEpilogue<Problem>;
 };
 
-template <typename Problem>
-struct EpilogueTypeTraits<ck_tile::GemmPipeline::COMPUTE_TDM_V2, Problem>
+template <typename Problem, bool UseCShuffle>
+struct EpilogueTypeTraits<ck_tile::GemmPipeline::COMPUTE_TDM_V2, Problem, UseCShuffle>
 {
+    static_assert(!UseCShuffle, "COMPUTE_TDM_V2 supports only TdmEpilogue");
     using Epilogue = ck_tile::TdmEpilogue<Problem>;
 };
+
+// Grid request of a persistent launch (-persistent_ctas): ctas CTAs, or the occupancy-derived
+// Kernel::MaxOccupancyGridSize when ctas is 0. The occupancy query is not reliable on every target
+// (gfx1250 workgroup-processor mode), so the grid is also a tuning axis.
+struct PersistentGrid
+{
+    ck_tile::index_t ctas = 0;
+};
+
+// Reads -persistent_ctas; negative values are rejected and a value without -persistent=1 is
+// ignored with a warning.
+inline PersistentGrid get_persistent_grid(const ck_tile::ArgParser& arg_parser, bool persistent)
+{
+    const ck_tile::index_t ctas = arg_parser.get_int("persistent_ctas");
+    if(ctas < 0)
+    {
+        throw std::runtime_error("persistent_ctas must be >= 0");
+    }
+    if(ctas > 0 && !persistent)
+    {
+        std::cout << "WARNING: Ignoring persistent_ctas for the non-persistent kernel."
+                  << std::endl;
+    }
+    return PersistentGrid{ctas};
+}
+
+// Grid of a GemmKernel launch. A pipeline may decline the persistent request
+// (Kernel::UniversalGemmKernel::PersistentKernel is false, e.g. COMPUTE_TDM_V2 or a TDM V1 cluster
+// launch); its kernel computes one tile per workgroup, so it gets the full GridSize: a persistent
+// grid would leave every tile beyond it uncomputed.
+template <typename Kernel, bool Persistent, typename HostArgs>
+dim3 gemm_grid_size(const HostArgs& args,
+                    const ck_tile::stream_config& s,
+                    const PersistentGrid& persistent_grid)
+{
+    if constexpr(Persistent && Kernel::UniversalGemmKernel::PersistentKernel)
+    {
+        return persistent_grid.ctas > 0 ? dim3(persistent_grid.ctas, 1, 1)
+                                        : Kernel::MaxOccupancyGridSize(s);
+    }
+    else
+    {
+        if constexpr(Persistent)
+        {
+            std::cout << "WARNING: The pipeline has no persistent kernel; launching one "
+                         "workgroup per tile."
+                      << std::endl;
+        }
+        ck_tile::ignore = s;
+        ck_tile::ignore = persistent_grid;
+        return Kernel::GridSize(args.M, args.N, args.k_batch);
+    }
+}
 
 inline auto create_args(const std::string& default_prec = "fp16")
 {
@@ -749,6 +809,9 @@ inline auto create_args(const std::string& default_prec = "fp16")
         .insert("split_k", "1", "splitK value")
         .insert("init", "0", "0:random, 1:linear, 2:constant(1)")
         .insert("persistent", "0", "0:non-persistent, 1:persistent")
+        .insert("persistent_ctas",
+                "0",
+                "persistent grid size (CTAs); 0: occupancy-derived (MaxOccupancyGridSize)")
         .insert("json", "0", "0: No Json, 1: Dump Results in Json format")
         .insert("jsonfile", "gemm.json", "json file name to dump results")
         .insert("flush_cache", "true", "flush cache before running the kernel, defaults to true")

@@ -225,10 +225,9 @@ class GemmKernelBuilder:
             raise ValueError(
                 f"tdm epilogue requires a TDM pipeline {TDM_PIPELINES}, got '{pipeline}'"
             )
-        if pipeline in TDM_PIPELINES and epilogue != "tdm":
-            raise ValueError(
-                f"{pipeline} pipeline requires the tdm epilogue, got '{epilogue}'"
-            )
+        tdm_reason = _validation_utils.tdm_trait_reject_reason(pipeline, epilogue)
+        if tdm_reason:
+            raise ValueError(tdm_reason)
         pad_reason = _validation_utils.tdm_pad_reject_reason(
             pipeline, epilogue, pad_m, pad_n, pad_k
         )
@@ -579,11 +578,21 @@ class GemmKernelBuilder:
             )
         )
 
+        # TDM cshuffle / persistent instances are legal but opt-in for sweeps
+        # (see GEMM_TDM_EXTENDED_TRAITS_KEY). mx_gemm keeps its own TDM rules.
+        tdm_extended = _validation_utils.tdm_extended_traits_enabled(trait_config)
+
         # Filter out unsupported trait combinations
         combinations = []
         for combo in all_combinations:
             pipeline, epilogue, scheduler, pad_m, pad_n, pad_k = combo[:6]
             persistent_or_preshuffle_quant = combo[6] if len(combo) > 6 else False
+            skip_reason = _validation_utils.tdm_sweep_skip_reason(
+                pipeline, epilogue, persistent_or_preshuffle_quant, tdm_extended
+            )
+            if skip_reason:
+                logging.debug(f"Skipping trait combination: {skip_reason}")
+                continue
             if is_trait_combination_valid(
                 pipeline,
                 epilogue,
@@ -1604,10 +1613,9 @@ struct SelectedKernel {{
             raise ValueError(
                 f"tdm epilogue requires a TDM pipeline {TDM_PIPELINES}, got '{pipeline}'"
             )
-        if pipeline in TDM_PIPELINES and epilogue != "tdm":
-            raise ValueError(
-                f"{pipeline} pipeline requires the tdm epilogue, got '{epilogue}'"
-            )
+        tdm_reason = _validation_utils.tdm_trait_reject_reason(pipeline, epilogue)
+        if tdm_reason:
+            raise ValueError(tdm_reason)
         double_smem = pipeline in DOUBLE_SMEM_EPILOGUE_PIPELINES
 
         if epilogue == "tdm" and self.kernel_name_prefix == "gemm_universal":

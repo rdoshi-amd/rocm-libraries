@@ -151,11 +151,15 @@ endfunction()
 #   kind (see hkp_probe_assert.py). Adding a pack under an already probed ARCH needs no
 #   new declaration unless the probe lists UKDS.
 #
-#   ARCH must be one concrete target, gfx[0-9a-f]+. NAME defaults to <ARCH> for the
+#   ARCH must be one concrete target as hkp_is_concrete_arch() defines it, the same
+#   rule GPU_TARGETS goes through (gfx950, gfx1250-strict; not gfx9-4-generic or a
+#   TheRock family name). NAME defaults to <ARCH> for the
 #   production root and <ROOT basename>_<ARCH> for another ROOT; it must match
 #   [A-Za-z0-9_.+-]+, must not be dots only, and must not be `tools` (hkp-probe-tools
 #   is the probe tooling test).
-#   UKDS entries must be non-empty and unique. Creates pack target
+#   UKDS entries must be non-empty and unique. PACK_JOBS caps the pack's worker
+#   processes; omitted, the packer sizes its pool against the machine, min(32, ncpu),
+#   as the production root does. Creates pack target
 #   hkp_packaging_probe_<NAME> (stamp and output under
 #   ${CMAKE_BINARY_DIR}/hkp-probes/<NAME>/out) and ctest entry hkp-probe-<NAME>. The
 #   pack targets are part of `all` (hkp_wire_pack_target declares them so); the
@@ -173,10 +177,12 @@ function(hkp_add_packaging_probe)
     if(NOT ARG_ARCH)
         message(FATAL_ERROR "hkp probe: hkp_add_packaging_probe requires ARCH.")
     endif()
-    if(NOT ARG_ARCH MATCHES "^gfx[0-9a-f]+$")
+    hkp_is_concrete_arch(_concrete "${ARG_ARCH}")
+    if(NOT _concrete)
         message(FATAL_ERROR
-            "hkp probe: ARCH '${ARG_ARCH}' is not one concrete architecture of the "
-            "form gfx[0-9a-f]+.")
+            "hkp probe: ARCH '${ARG_ARCH}' is not one concrete architecture (a "
+            "processor id such as gfx950, optionally with a distinct-target word such "
+            "as gfx1250-strict; not a generic target or TheRock family name).")
     endif()
     if(NOT ARG_ROOT)
         set(ARG_ROOT "${HIPKERNELPROVIDER_PRODUCTION_DESCRIPTOR_SOURCE_ROOT}")
@@ -218,10 +224,7 @@ function(hkp_add_packaging_probe)
     _hkp_probe_derive_root("${ARG_NAME}" "${ARG_ROOT}" "${ARG_ARCH}" "${_root}"
                            _expect_file ${ARG_UKDS})
 
-    set(_pack_jobs 1)
-    if(ARG_PACK_JOBS)
-        set(_pack_jobs "${ARG_PACK_JOBS}")
-    endif()
+    # Empty PACK_JOBS passes nothing to the packer, which then uses its own default.
     hkp_wire_pack_target(
         NAME "probe_${ARG_NAME}"
         SOURCE_ROOT "${_root}"
@@ -230,7 +233,7 @@ function(hkp_add_packaging_probe)
         ROCM_KPACK_DIR "${_kpack_dir}"
         OUT_ROOT "${_out_root}"
         ${_rocke_args}
-        PACK_JOBS "${_pack_jobs}")
+        PACK_JOBS "${ARG_PACK_JOBS}")
 
     set(_assert_args
         --out-root "${_out_root}"
@@ -253,9 +256,12 @@ endfunction()
 # ---------------------------------------------------------------------------
 # _hkp_probe_automatic_arches(<out_var>)
 #   The architectures to probe automatically: every explicit `arch` entry on a KDP or
-#   UKD under HIPKERNELPROVIDER_PRODUCTION_DESCRIPTOR_SOURCE_ROOT, minus the build's own
-#   targets (hkp_selected_arches). Descriptors with no `arch` (wildcards) name no arch:
-#   they ship for every build target, so the build's own production pack covers them.
+#   UKD under HIPKERNELPROVIDER_PRODUCTION_DESCRIPTOR_SOURCE_ROOT that is a concrete
+#   target (hkp_is_concrete_arch), minus the build's own targets (hkp_selected_arches).
+#   Descriptors with no `arch` (wildcards) name no arch: they ship for every build
+#   target, so the build's own production pack covers them. A non-concrete entry
+#   (gfx9-4-generic) is skipped with a STATUS line: no build packs for it, because
+#   GPU_TARGETS drops it and the packer matches arch names exactly.
 #   FATAL with the tool's stderr when the packer's loader rejects the root. Configure
 #   re-runs when a file under the root or the derive tooling changes.
 # ---------------------------------------------------------------------------
@@ -282,7 +288,22 @@ function(_hkp_probe_automatic_arches out_var)
     string(REPLACE "\n" ";" _named "${_out}")
 
     hkp_selected_arches(_targets _targets_source)
-    set(_auto "${_named}")
+    set(_auto "")
+    set(_skipped "")
+    foreach(_arch IN LISTS _named)
+        hkp_is_concrete_arch(_concrete "${_arch}")
+        if(_concrete)
+            list(APPEND _auto "${_arch}")
+        else()
+            list(APPEND _skipped "${_arch}")
+        endif()
+    endforeach()
+    if(_skipped)
+        list(JOIN _skipped ", " _skipped_text)
+        message(STATUS
+            "hkp: no automatic probe for non-concrete arches [${_skipped_text}]: no "
+            "build packs for them.")
+    endif()
     if(_targets)
         list(REMOVE_ITEM _auto ${_targets})
     endif()

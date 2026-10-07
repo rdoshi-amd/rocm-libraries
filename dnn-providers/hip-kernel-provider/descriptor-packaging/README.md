@@ -329,6 +329,14 @@ build targets, so each lane's own production pack packs it, and its GPU test lan
 on every PR. Only an architecture the lane does not build needs a probe, and only an
 explicit `arch` entry can make a descriptor ship there and nowhere else.
 
+**Non-concrete names are skipped.** An explicit `arch` entry that is not a concrete
+target, such as a generic target (`gfx9-4-generic`) or a TheRock family name, gets no
+automatic probe; configure prints which ones it skipped. No build packs for such a name:
+`GPU_TARGETS` drops it, and the packer matches arch names exactly, so it never selects a
+family member in its place either. Concrete names with a distinct-target word
+(`gfx1250-strict`) are probed like any other arch. The rule is `hkp_is_concrete_arch()`
+in `cmake/HkpPackaging.cmake`, the same one `GPU_TARGETS` goes through.
+
 ### How to use
 
 `probes/probes.cmake` is for **named `UKDS` probes** only. Add a line when an integration
@@ -358,11 +366,11 @@ also fails configure.
 
 | Argument | Meaning |
 |---|---|
-| `ARCH` | Required. The one architecture to pack, e.g. `gfx950`; one concrete target matching `^gfx[0-9a-f]+$`. Passed to the packer as `--arches`. |
+| `ARCH` | Required. The one architecture to pack, e.g. `gfx950` or `gfx1250-strict`; one concrete target as `hkp_is_concrete_arch()` defines it (not a generic target or TheRock family name). Passed to the packer as `--arches`. |
 | `ROOT` | Optional descriptor root to probe. Defaults to the production root (`HIPKERNELPROVIDER_PRODUCTION_DESCRIPTOR_SOURCE_ROOT`). A relative path is resolved against `probes/`; a trailing `/` is ignored. |
 | `NAME` | Optional probe name; must match `^[A-Za-z0-9_.+-]+$`, must not be dots only, and must not be `tools`. Defaults to `<ARCH>` for the production root and `<ROOT basename>_<ARCH>` for another `ROOT`. Pack target `hkp_packaging_probe_<NAME>`, ctest entry `hkp-probe-<NAME>`. Declaring a name twice is a configure error. |
 | `UKDS` | Optional UKD `name`s to pack instead of the default sample. Each entry is non-empty and listed once. |
-| `PACK_JOBS` | Optional prewarm worker count; defaults to `1`. |
+| `PACK_JOBS` | Optional prewarm worker count. Omitted, the packer uses its default, `min(32, ncpu)`, as the production root does. |
 
 A probe has no producer-kind argument: the kinds present are discovered from the
 descriptors, and the assertion expects each UKD's provenance by its authored

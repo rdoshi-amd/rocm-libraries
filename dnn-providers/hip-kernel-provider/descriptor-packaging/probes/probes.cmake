@@ -13,6 +13,8 @@
 # Wildcard descriptors (no `arch`, or an empty list) name no architecture and get no
 # automatic probe. That is safe: a wildcard ships for whatever the build targets, so
 # every lane's own production pack, and its GPU test lanes, exercise it on every PR.
+# A non-concrete arch name (gfx9-4-generic, a TheRock family) is skipped with a STATUS
+# line: no build packs for it.
 #
 # Without UKDS a probe packs, per compile group of every KDP shipping for its ARCH, one
 # UKD, or for rocke enough UKDs that each value of each varying spec field is packed

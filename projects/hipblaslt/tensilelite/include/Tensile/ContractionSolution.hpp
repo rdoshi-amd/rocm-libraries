@@ -600,6 +600,11 @@ namespace TensileLite
         size_t itersPerTile = 1;
         // Workgroups the dynamic grid policy may launch (CUs x occupancy).
         size_t maxGrid = 0;
+        // Target work items per launched workgroup when splitting few-tile
+        // problems (over-decomposition factor).
+        size_t overDecomposition = 1;
+        // False keeps every tile whole unless the debug overrides ask otherwise.
+        bool allowSplit = true;
         // Flag-region entries left after the per-XCD queue counters.
         size_t flagSlots = 0;
         // Workspace the launch is given, and the bytes of one partial tile.
@@ -610,14 +615,23 @@ namespace TensileLite
         int overrideSplit = -1;
     };
 
+    // Fewest main-loop iterations a split part may get.
+    constexpr size_t StreamKDynamicMinItersPerWI = 8;
+
     /**
      * Choose the dynamic StreamK work decomposition. Single source of truth for
      * the packed SKTiles/SKSplit/SKItersPerWI/TotalItems, the dynamic grid, the
      * partials workspace and the launch summary.
      *
-     * Every tile is whole (skTiles = 0) unless the debug overrides ask for a
-     * split; if the partials they ask for do not fit the workspace or the flag
-     * region the tiles stay whole.
+     * Problems with at least maxGrid tiles keep every tile whole (skTiles = 0,
+     * the historical packing). Fewer tiles are all split: skSplit is the largest
+     * value with tiles*skSplit <= overDecomposition*maxGrid, at least
+     * StreamKDynamicMinItersPerWI iterations per part, at most sqrt(I/2) parts
+     * (the fixup sums the parts serially, so beyond that it costs more than the
+     * split saves), within flagSlots and within the workspace. A split below 2
+     * keeps the tiles whole. The debug overrides replace the policy; if the
+     * partials they ask for do not fit the workspace or the flag region the
+     * tiles stay whole.
      */
     TENSILELITEHOST_EXPORT StreamKDynamicSplit
         streamKDynamicSplit(StreamKDynamicSplitInputs const& in);

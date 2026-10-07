@@ -2745,7 +2745,7 @@ namespace
         return in;
     }
 
-    TEST(StreamKDynamicSplit_pre_checkin, TilesStayWholeByDefault)
+    TEST(StreamKDynamicSplit_pre_checkin, ManyTilesStayWhole)
     {
         const auto d = TensileLite::streamKDynamicSplit(dynamicSplitInputs(300, 128));
         EXPECT_EQ(d.skTiles, 0u);
@@ -2756,10 +2756,98 @@ namespace
         EXPECT_EQ(d.grid, 256u);
         EXPECT_EQ(d.partialSlots(), 0u);
 
-        const auto e = TensileLite::streamKDynamicSplit(dynamicSplitInputs(1, 262144));
+        const auto e = TensileLite::streamKDynamicSplit(dynamicSplitInputs(256, 128));
+        EXPECT_EQ(e.skTiles, 0u) << "tiles == maxGrid already fills the grid";
+        EXPECT_EQ(e.grid, 256u);
+    }
+
+    TEST(StreamKDynamicSplit_pre_checkin, SingleTileSplitCappedBySerialFixup)
+    {
+        // I = 20480: sqrt(I/2) = 101 parts, fewer than one per workgroup.
+        const auto d = TensileLite::streamKDynamicSplit(dynamicSplitInputs(1, 20480));
+        EXPECT_EQ(d.skTiles, 1u);
+        EXPECT_EQ(d.skSplit, 101u);
+        EXPECT_EQ(d.skItersPerWI, 203u);
+        EXPECT_EQ(d.totalItems, 101u);
+        EXPECT_EQ(d.grid, 101u);
+        EXPECT_GE(size_t{d.skItersPerWI} * d.skSplit, 20480u) << "parts cover the tile";
+        EXPECT_LT(size_t{d.skItersPerWI} * (d.skSplit - 1), 20480u) << "no empty part";
+    }
+
+    TEST(StreamKDynamicSplit_pre_checkin, SingleTileLongKFillsTheGrid)
+    {
+        const auto d = TensileLite::streamKDynamicSplit(dynamicSplitInputs(1, 262144));
+        EXPECT_EQ(d.skTiles, 1u);
+        EXPECT_EQ(d.skSplit, 256u);
+        EXPECT_EQ(d.skItersPerWI, 1024u);
+        EXPECT_EQ(d.totalItems, 256u);
+        EXPECT_EQ(d.grid, 256u);
+
+        auto in              = dynamicSplitInputs(1, 4 * 262144);
+        in.overDecomposition = 2;
+        const auto f2        = TensileLite::streamKDynamicSplit(in);
+        EXPECT_EQ(f2.skSplit, 512u) << "two work items per workgroup";
+        EXPECT_EQ(f2.totalItems, 512u);
+        EXPECT_EQ(f2.grid, 256u) << "the grid never exceeds maxGrid";
+    }
+
+    TEST(StreamKDynamicSplit_pre_checkin, FewTilesSplitWithinOneWave)
+    {
+        // 100 tiles: two parts each still fit one wave of 256 workgroups.
+        const auto d = TensileLite::streamKDynamicSplit(dynamicSplitInputs(100, 128));
+        EXPECT_EQ(d.skTiles, 100u);
+        EXPECT_EQ(d.skSplit, 2u);
+        EXPECT_EQ(d.skItersPerWI, 64u);
+        EXPECT_EQ(d.totalItems, 200u);
+        EXPECT_EQ(d.grid, 200u);
+
+        // 200 tiles: a second part would not fit, so they stay whole.
+        const auto e = TensileLite::streamKDynamicSplit(dynamicSplitInputs(200, 128));
         EXPECT_EQ(e.skTiles, 0u);
-        EXPECT_EQ(e.totalItems, 1u);
-        EXPECT_EQ(e.grid, 1u);
+        EXPECT_EQ(e.totalItems, 200u);
+        EXPECT_EQ(e.grid, 200u);
+    }
+
+    TEST(StreamKDynamicSplit_pre_checkin, MinimumItersPerPart)
+    {
+        // I = 40: at most 5 parts of 8 iterations, and sqrt(20) = 4.
+        const auto d = TensileLite::streamKDynamicSplit(dynamicSplitInputs(1, 40));
+        EXPECT_EQ(d.skSplit, 4u);
+        EXPECT_EQ(d.skItersPerWI, 10u);
+        EXPECT_GE(d.skItersPerWI, TensileLite::StreamKDynamicMinItersPerWI);
+
+        const auto e = TensileLite::streamKDynamicSplit(dynamicSplitInputs(1, 15));
+        EXPECT_EQ(e.skTiles, 0u) << "too short to split";
+    }
+
+    TEST(StreamKDynamicSplit_pre_checkin, ShrinksToFitWorkspaceAndFlags)
+    {
+        auto in           = dynamicSplitInputs(1, 262144);
+        in.workspaceBytes = 100 * in.partialTileBytes + 7;
+        const auto d      = TensileLite::streamKDynamicSplit(in);
+        EXPECT_EQ(d.skSplit, 100u);
+        EXPECT_LE(d.partialSlots() * in.partialTileBytes, in.workspaceBytes);
+
+        in.workspaceBytes = in.partialTileBytes;
+        EXPECT_EQ(TensileLite::streamKDynamicSplit(in).skTiles, 0u)
+            << "room for one partial is no split at all";
+
+        auto fl      = dynamicSplitInputs(7, 262144);
+        fl.flagSlots = 20;
+        const auto f = TensileLite::streamKDynamicSplit(fl);
+        EXPECT_EQ(f.skSplit, 2u);
+        EXPECT_LE(f.partialSlots(), fl.flagSlots);
+    }
+
+    TEST(StreamKDynamicSplit_pre_checkin, SplitNotAllowedKeepsTilesWhole)
+    {
+        auto in       = dynamicSplitInputs(1, 262144);
+        in.allowSplit = false;
+        const auto d  = TensileLite::streamKDynamicSplit(in);
+        EXPECT_EQ(d.skTiles, 0u);
+        EXPECT_EQ(d.skSplit, 2u);
+        EXPECT_EQ(d.totalItems, 1u);
+        EXPECT_EQ(d.grid, 1u);
     }
 
     TEST(StreamKDynamicSplit_pre_checkin, DebugOverridesReplaceThePolicy)
@@ -2772,6 +2860,10 @@ namespace
         EXPECT_EQ(d.skSplit, 64u);
         EXPECT_EQ(d.totalItems, 64u);
         EXPECT_EQ(d.grid, 64u);
+
+        // Even when the split is not allowed by default.
+        in.allowSplit = false;
+        EXPECT_EQ(TensileLite::streamKDynamicSplit(in).skSplit, 64u);
 
         // Split alone keeps the default of no stream-k tiles.
         auto s          = dynamicSplitInputs(1, 262144);

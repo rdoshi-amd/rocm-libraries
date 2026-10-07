@@ -367,6 +367,24 @@ def valid_wave_configs(arch: str) -> List[List[int]]:
     return data["warp_combos"].get(arch, [[2, 2, 1]])
 
 
+# Wave grids [wave_m, wave_n, wave_k] that arch_specs.json lists for GEMM only.
+# The gfx1250 16-wave (4x4, 8x2, 2x8) and 32-wave (8x4, 4x8) grids were added
+# for GEMM; no grouped-conv instance has been built or validated with them, so
+# grouped conv keeps the grids it had before. Other arches are unaffected.
+GEMM_ONLY_WAVE_CONFIGS: Dict[str, List[List[int]]] = {
+    "gfx1250": [[4, 4, 1], [8, 2, 1], [2, 8, 1], [8, 4, 1], [4, 8, 1]],
+}
+
+
+def grouped_conv_wave_configs(arch: str, wave_configs):
+    """Return *wave_configs* (the arch wave list) minus the GEMM-only grids of *arch*.
+
+    Keeps the input order and element type ([m, n, k] lists or tuples).
+    """
+    excluded = GEMM_ONLY_WAVE_CONFIGS.get(arch, [])
+    return [c for c in wave_configs if list(c) not in excluded]
+
+
 def valid_warp_configs(arch: str, dtype: str) -> List[List[int]]:
     """Return valid [warp_tile_m, warp_tile_n, warp_tile_k] combos for *arch*/*dtype*.
 

@@ -38,6 +38,9 @@ _TILE = {
     "warp_tile_n": 16,
     "warp_tile_k": 16,
 }
+# _TILE with the only fp16/bf16 warp tile gfx1250 supports (16x16x32), for
+# tests that run the full gfx1250 tile validation.
+_GFX1250_TILE = dict(_TILE, warp_tile_k=32)
 
 
 def _config(pipelines, epilogues, persistent=(False,), pads=(False,)):
@@ -308,7 +311,7 @@ class TestValidationRules(unittest.TestCase):
                 self.assertTrue(
                     v(128, 128, 2, 2, 1, "fp16", p, "gfx1250", layout)[0], (p, layout)
                 )
-        args = [_TILE[k] for k in _TILE] + ["fp16", "fp16", "fp16"]
+        args = list(_GFX1250_TILE.values()) + ["fp16", "fp16", "fp16"]
         for prefix in ("gemm_universal", "batched_gemm"):
             self.assertTrue(
                 vu.is_tile_config_valid(*args, "comp_async", "rcr", "gfx1250", prefix)
@@ -413,13 +416,110 @@ class TestValidationRules(unittest.TestCase):
                 self.assertFalse(v(128, 128, 2, 2, 1, "fp16", p, arch)[0])
 
     def test_tile_config_rejects_off_arch(self):
-        args = [_TILE[k] for k in _TILE] + ["fp16", "fp16", "fp16"]
+        args = list(_GFX1250_TILE.values()) + ["fp16", "fp16", "fp16"]
         for p in ("comp_tdm", "comp_tdm_v2", "comp_async"):
             self.assertFalse(
                 vu.is_tile_config_valid(*args, p, "rcr", "gfx942", "gemm_universal")
             )
             self.assertTrue(
                 vu.is_tile_config_valid(*args, p, "rcr", "gfx1250", "gemm_universal")
+            )
+
+
+class TestGfx1250WarpLegality(unittest.TestCase):
+    """16/32-wave warp grids and the fp16/bf16 warp-tile row on gfx1250."""
+
+    LARGE_GRIDS = ([4, 4, 1], [8, 2, 1], [2, 8, 1], [8, 4, 1], [4, 8, 1])
+
+    def test_large_wave_grids_listed(self):
+        table = vu.WARP_SUPPORTED_COMBINATIONS["gfx1250"]
+        for grid in self.LARGE_GRIDS:
+            self.assertIn(grid, table)
+        # Appended after the original nine, which keep their order.
+        self.assertEqual(table[-len(self.LARGE_GRIDS) :], list(self.LARGE_GRIDS))
+        self.assertEqual(len(table), len({tuple(c) for c in table}))
+
+    def test_large_wave_grids_validate(self):
+        for arch in ("gfx1250", "gfx1250:xnack-"):
+            for grid in self.LARGE_GRIDS:
+                self.assertTrue(vu.validate_warp_configuration(*grid, arch), arch)
+            for grid in ([8, 8, 1], [4, 4, 2], [16, 1, 1]):
+                self.assertFalse(vu.validate_warp_configuration(*grid, arch), arch)
+        for arch in ("gfx942", "gfx950", "gfx1201"):
+            for grid in self.LARGE_GRIDS:
+                self.assertFalse(vu.validate_warp_configuration(*grid, arch), arch)
+
+    def test_comp_tdm_v2_stays_four_waves(self):
+        v = vu.validate_gemm_gfx1250_pipeline
+        for wm, wn, wk in self.LARGE_GRIDS:
+            self.assertFalse(
+                v(256, 256, wm, wn, wk, "bf16", "comp_tdm_v2", "gfx1250")[0]
+            )
+            self.assertTrue(v(256, 256, wm, wn, wk, "bf16", "comp_tdm", "gfx1250")[0])
+
+    def test_tile_config_large_wave_grids(self):
+        def valid(waves, pipeline, layout="rcr", dt="bf16"):
+            return vu.is_tile_config_valid(
+                256,
+                256,
+                64,
+                *waves,
+                16,
+                16,
+                32,
+                dt,
+                dt,
+                dt,
+                pipeline,
+                layout,
+                "gfx1250",
+                "gemm_universal",
+            )
+
+        self.assertTrue(valid((8, 4, 1), "compv3"))
+        self.assertTrue(valid((4, 4, 1), "comp_tdm"))
+        self.assertTrue(valid((4, 8, 1), "comp_async"))
+        self.assertFalse(valid((4, 4, 1), "comp_tdm_v2"))
+        self.assertTrue(valid((2, 2, 1), "comp_tdm_v2"))
+
+    def test_fp16_bf16_warp_tile_row(self):
+        v = vu.validate_gemm_warp_tile_combination
+        for arch in ("gfx1250", "gfx1250:xnack-"):
+            for dt in ("fp16", "bf16"):
+                self.assertEqual(v(16, 16, 32, dt, dt, dt, arch), (True, ""))
+                for tile in ((16, 16, 64), (16, 16, 16), (32, 32, 16)):
+                    ok, msg = v(*tile, dt, dt, dt, arch)
+                    self.assertFalse(ok, (arch, dt, tile))
+                    self.assertIn("16, 16, 32", msg)
+            # 8-bit types have no row yet and stay permissive.
+            self.assertTrue(v(16, 16, 64, "fp8", "fp8", "fp16", arch)[0])
+        # The other archs are untouched: gfx942 has no bf16 16x16x64, and a
+        # suffixed gfx9 target keeps the permissive fallback.
+        self.assertFalse(v(16, 16, 64, "bf16", "bf16", "bf16", "gfx942")[0])
+        self.assertTrue(v(16, 16, 64, "bf16", "bf16", "bf16", "gfx942:xnack-")[0])
+
+    def test_tile_config_rejects_bf16_16x16x64(self):
+        for pipeline in ("compv3", "comp_tdm"):
+            self.assertFalse(
+                vu.is_tile_config_valid(
+                    128,
+                    128,
+                    64,
+                    2,
+                    2,
+                    1,
+                    16,
+                    16,
+                    64,
+                    "bf16",
+                    "bf16",
+                    "bf16",
+                    pipeline,
+                    "rcr",
+                    "gfx1250",
+                    "gemm_universal",
+                ),
+                pipeline,
             )
 
 

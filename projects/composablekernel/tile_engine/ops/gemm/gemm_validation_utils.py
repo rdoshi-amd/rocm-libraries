@@ -232,6 +232,13 @@ WARP_SUPPORTED_COMBINATIONS = {
         [4, 1, 1],
         [1, 4, 1],
         [2, 2, 1],
+        # 16- and 32-wave grids (512 and 1024 threads). comp_tdm_v2 stays
+        # 4-wave only; validate_gemm_gfx1250_pipeline rejects these for it.
+        [4, 4, 1],
+        [8, 2, 1],
+        [2, 8, 1],
+        [8, 4, 1],
+        [4, 8, 1],
     ],
     "gfx90a": [
         [1, 4, 1],
@@ -402,6 +409,15 @@ GEMM_WARP_TILE_SUPPORTED_COMBINATIONS = {
         "fp16_fp16_fp16": [
             [16, 16, 16],
         ],
+    },
+    # Keys are a_b_c with c the output type, as for the other archs here
+    # (dispatcher arch_specs.json keys the same tiles by the fp32 accumulator).
+    # fp16/bf16 have a single native WMMA shape on gfx1250; listing it closes
+    # the permissive fallback in validate_gemm_warp_tile_combination. 8-bit
+    # types are not listed yet and stay permissive.
+    "gfx1250": {
+        "fp16_fp16_fp16": [[16, 16, 32]],
+        "bf16_bf16_bf16": [[16, 16, 32]],
     },
 }
 
@@ -735,6 +751,10 @@ def validate_gemm_warp_tile_combination(
 
     # Check if we have GPU-specific combinations
     gpu_warp_tile_combinations = GEMM_WARP_TILE_SUPPORTED_COMBINATIONS.get(gpu_name, {})
+    # Same scoping as validate_warp_configuration: only gfx1250 is normalized,
+    # so a suffixed gfx9 target keeps develop's permissive behaviour.
+    if not gpu_warp_tile_combinations and _base_gfx_arch(gpu_name) == "gfx1250":
+        gpu_warp_tile_combinations = GEMM_WARP_TILE_SUPPORTED_COMBINATIONS["gfx1250"]
     if not gpu_warp_tile_combinations:
         # If GPU not recognized, try to be permissive but log warning
         logging.warning(f"No warp tile combinations found for GPU: {gpu_name}")

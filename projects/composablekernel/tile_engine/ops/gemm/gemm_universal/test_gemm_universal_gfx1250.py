@@ -57,17 +57,18 @@ GFX1250_LDS = 320 * 1024
 # new pipeline. Pins the sweep so any config or validator drift is noticed.
 # comp_async is rcr-only on gfx1250, so the rrr rows have no comp_async. The
 # pads sweep [false, true]: comp_async keeps only all-True, TDM only all-False,
-# and the legacy pipelines keep all 8 combos.
+# and the legacy pipelines keep all 8 combos. The 4x4x1 (16-wave) grid is
+# swept by every pipeline except comp_tdm_v2, which stays 4-wave only.
 FULL_COUNTS = {
-    ("fp16", "rcr"): (27525, 384, 174, 87),
-    ("fp16", "rrr"): (27141, 0, 174, 87),
-    ("bf16", "rcr"): (27525, 384, 174, 87),
-    ("bf16", "rrr"): (27141, 0, 174, 87),
+    ("fp16", "rcr"): (32056, 406, 203, 87),
+    ("fp16", "rrr"): (31263, 0, 200, 87),
+    ("bf16", "rcr"): (32056, 406, 203, 87),
+    ("bf16", "rrr"): (31263, 0, 200, 87),
     # fp8/bf8 comp_async keeps only warp_tile_k=128 (the 16x16x64 set is gated).
-    ("fp8", "rcr"): (46908, 288, 360, 180),
-    ("fp8", "rrr"): (46620, 0, 360, 180),
-    ("bf8", "rcr"): (46908, 288, 360, 180),
-    ("bf8", "rrr"): (46620, 0, 360, 180),
+    ("fp8", "rcr"): (54696, 336, 420, 180),
+    ("fp8", "rrr"): (53715, 0, 415, 180),
+    ("bf8", "rcr"): (54696, 336, 420, 180),
+    ("bf8", "rrr"): (53715, 0, 415, 180),
 }
 
 
@@ -92,7 +93,7 @@ def _kernels(gpu_target, dtype, layout, config, cls=None):
 
 
 def setUpModule():
-    # The shared warp-tile table has no gfx1250 row and warns once per tile.
+    # The shared warp-tile table has no gfx1250 8-bit row and warns per tile.
     logging.disable(logging.WARNING)
 
 

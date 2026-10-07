@@ -166,6 +166,68 @@ static int test_raw_asm()
         rocke_strbuf_t out;
         CHECK(rocke_strbuf_init(&out, 128) == 0);
         CHECK(rocke_lower_kernel_to_hip(&b, b.kernel, nullptr, &out) == expected);
+        CHECK(strstr(rocke_strbuf_cstr(&out), "asm (") == nullptr);
+        rocke_strbuf_free(&out);
+        rocke_ir_builder_free(&b);
+    }
+    return 0;
+}
+
+static int test_attribute_types()
+{
+    const char* attributes[] = {"sideeffect", "convergent", "clobber"};
+    for(const char* attribute : attributes)
+        for(int kind = 0; kind < 5; ++kind)
+        {
+            rocke_ir_builder_t b;
+            CHECK(rocke_ir_builder_init(&b, "barrier_attributes") == ROCKE_OK);
+            auto* result = rocke_b_optimization_barrier(
+                &b, rocke_b_param(&b, "value", rocke_f32(), nullptr));
+            auto* attrs = &result->op->attrs;
+            if(kind < 2)
+                rocke_attr_set_int(&b, attrs, attribute, kind);
+            else if(kind < 4)
+                rocke_attr_set_float(&b, attrs, attribute, kind - 2);
+            else if(strcmp(attribute, "clobber") == 0)
+                rocke_attr_set_bool(&b, attrs, attribute, false);
+            else
+                rocke_attr_set_str(&b, attrs, attribute, "true");
+            rocke_b_ret(&b);
+            rocke_strbuf_t out;
+            CHECK(rocke_strbuf_init(&out, 128) == 0);
+            CHECK(rocke_lower_kernel_to_hip(&b, b.kernel, nullptr, &out) == ROCKE_ERR_VALUE);
+            CHECK(strstr(rocke_strbuf_cstr(&out), "asm (") == nullptr);
+            rocke_strbuf_free(&out);
+            rocke_ir_builder_free(&b);
+        }
+    return 0;
+}
+
+static int test_attribute_defaults()
+{
+    for(int mode = 0; mode < 3; ++mode)
+    {
+        rocke_ir_builder_t b;
+        CHECK(rocke_ir_builder_init(&b, "barrier_defaults") == ROCKE_OK);
+        auto* result
+            = rocke_b_optimization_barrier(&b, rocke_b_param(&b, "value", rocke_f32(), nullptr));
+        auto* attrs = &result->op->attrs;
+        attrs->count = 0;
+        rocke_attr_set_str(&b, attrs, "template", "");
+        rocke_attr_set_str(&b, attrs, "constraints", "=v,0");
+        if(mode != 2)
+            rocke_attr_set_bool(&b, attrs, "sideeffect", false);
+        if(mode == 1)
+        {
+            rocke_attr_set_bool(&b, attrs, "convergent", false);
+            rocke_attr_set_str(&b, attrs, "clobber", "");
+        }
+        rocke_b_ret(&b);
+        rocke_strbuf_t out;
+        CHECK(rocke_strbuf_init(&out, 128) == 0);
+        auto expected = mode == 2 ? ROCKE_ERR_NOTIMPL : ROCKE_OK;
+        CHECK(rocke_lower_kernel_to_hip(&b, b.kernel, nullptr, &out) == expected);
+        CHECK((strstr(rocke_strbuf_cstr(&out), "asm (") != nullptr) == (mode != 2));
         rocke_strbuf_free(&out);
         rocke_ir_builder_free(&b);
     }
@@ -201,5 +263,7 @@ int main(int argc, char** argv)
     int admission = test_admission();
     int scalars = test_scalars();
     int raw = test_raw_asm();
-    return admission || scalars || raw;
+    int attributes = test_attribute_types();
+    int defaults = test_attribute_defaults();
+    return admission || scalars || raw || attributes || defaults;
 }

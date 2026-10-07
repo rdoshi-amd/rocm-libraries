@@ -222,6 +222,17 @@ static rocke_status_t rocke_h_op_tile_inline_asm(rocke_h_lowerer_t* lw, const ro
     {
         return lw->status;
     }
+    const char* bool_attrs[] = {"sideeffect", "convergent"};
+    for(const char* name : bool_attrs)
+    {
+        const rocke_attr_value_t* attr = rocke_attr_get(&op->attrs, name);
+        if(attr && attr->kind != ROCKE_ATTR_BOOL)
+            return rocke_h_fail(
+                lw, ROCKE_ERR_VALUE, "inline asm attribute '%s' must be boolean", name);
+    }
+    const rocke_attr_value_t* clobber_attr = rocke_attr_get(&op->attrs, "clobber");
+    if(clobber_attr && clobber_attr->kind != ROCKE_ATTR_STR)
+        return rocke_h_fail(lw, ROCKE_ERR_VALUE, "inline asm attribute 'clobber' must be string");
     const char* text = rocke_attr_get_str(&op->attrs, "template");
     const char* constraints = rocke_attr_get_str(&op->attrs, "constraints");
     if(!text || !constraints)

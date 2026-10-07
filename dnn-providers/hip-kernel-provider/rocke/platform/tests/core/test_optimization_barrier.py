@@ -25,6 +25,71 @@ from rocke.core.lower_hip import lower_kernel_to_hip
 from rocke.core.lower_llvm import lower_kernel_to_llvm
 
 
+_MALFORMED_ASM_ATTRIBUTES = [
+    (attribute, value)
+    for attribute in ("sideeffect", "convergent")
+    for value in ("true", 0, 1, 0.0, 1.0)
+] + [("clobber", value) for value in (0, 1, 0.0, 1.0, False)]
+
+
+@pytest.mark.parametrize("attribute,value", _MALFORMED_ASM_ATTRIBUTES)
+def test_malformed_asm_attribute_types(attribute, value):
+    b = IRBuilder("barrier_attributes")
+    result = b.optimization_barrier(b.param("value", F32))
+    result.op.attrs[attribute] = value
+    b.ret()
+    for kernel in (b.kernel, parse(serialize(b.kernel))):
+        with pytest.raises(ValueError, match=f"inline asm attribute '{attribute}'"):
+            lower_kernel_to_hip(kernel, arch="gfx950")
+
+
+@pytest.mark.parametrize("attribute,value", _MALFORMED_ASM_ATTRIBUTES)
+def test_native_malformed_asm_attribute_types(native_barrier_hip, attribute, value):
+    import subprocess
+
+    b = IRBuilder("barrier_attributes")
+    result = b.optimization_barrier(b.param("value", F32))
+    result.op.attrs[attribute] = value
+    b.ret()
+    for kernel in (b.kernel, parse(serialize(b.kernel))):
+        with pytest.raises(subprocess.CalledProcessError) as failure:
+            native_barrier_hip(kernel, "gfx950")
+        assert "native HIP lowering failed: status=1" in failure.value.stderr
+        assert not failure.value.stdout
+
+
+@pytest.mark.parametrize("attributes", [{}, {"convergent": False, "clobber": ""}])
+def test_optional_asm_defaults(native_barrier_hip, attributes):
+    b = IRBuilder("barrier_defaults")
+    result = b.optimization_barrier(b.param("value", F32))
+    result.op.attrs.pop("convergent", None)
+    result.op.attrs.pop("clobber", None)
+    result.op.attrs.update(attributes)
+    b.ret()
+    for kernel in (b.kernel, parse(serialize(b.kernel))):
+        hip = lower_kernel_to_hip(kernel, arch="gfx950")
+        assert native_barrier_hip(kernel, "gfx950") == hip
+        assert 'asm ("" : "=v"' in hip
+        assert "asm volatile" not in hip
+        assert '"memory"' not in hip
+
+
+def test_python_general_asm_defaults(native_barrier_hip):
+    import subprocess
+
+    b = IRBuilder("asm_defaults")
+    result = b.optimization_barrier(b.param("value", F32))
+    result.op.attrs.pop("sideeffect")
+    b.ret()
+    for kernel in (b.kernel, parse(serialize(b.kernel))):
+        hip = lower_kernel_to_hip(kernel, arch="gfx950")
+        assert 'asm volatile ("" : "=v"' in hip
+        assert ': "memory"' in hip
+        with pytest.raises(subprocess.CalledProcessError) as failure:
+            native_barrier_hip(kernel, "gfx950")
+        assert "native HIP lowering failed: status=5" in failure.value.stderr
+
+
 @pytest.mark.parametrize(
     "dtype", [I1, I8, I16, I32, I64, BF16, F16, F32, FP8E4M3, BF8E5M2]
 )

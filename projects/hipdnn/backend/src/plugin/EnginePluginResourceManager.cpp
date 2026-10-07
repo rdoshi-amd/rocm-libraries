@@ -689,7 +689,7 @@ void EnginePluginResourceManager::serializeExecutionContext(
     auto plugin = _handleToPlugin.at(handle);
 
     hipdnnPluginConstData_t pluginData{nullptr, 0};
-    plugin->serializeExecutionContext(handle, executionContext, &pluginData);
+    plugin->serializeExecutionContext(handle, engineId, executionContext, &pluginData);
 
     try
     {

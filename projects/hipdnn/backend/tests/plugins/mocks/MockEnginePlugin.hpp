@@ -59,6 +59,7 @@ public:
     MOCK_METHOD(void,
                 serializeExecutionContext,
                 (hipdnnEnginePluginHandle_t handle,
+                 int64_t engineId,
                  hipdnnEnginePluginExecutionContext_t executionContext,
                  hipdnnPluginConstData_t* serializedContext),
                 (const));

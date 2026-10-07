@@ -67,7 +67,10 @@ inline constexpr std::size_t K_MAX_TEST_OVERRIDES = 8;
 
 inline constexpr std::size_t K_MAX_TEST_OVERRIDE_RANK = 8;
 
-using TestPluginSerializedContextPayload = std::array<uint8_t, 1>;
+// A serialized context is the marker byte followed by the bytes of the engine ID.
+inline constexpr uint8_t K_TEST_PLUGIN_SERIALIZED_CONTEXT_MARKER = 0x42;
+
+using TestPluginSerializedContextPayload = std::array<uint8_t, 1 + sizeof(int64_t)>;
 
 struct TestPluginFreeDeleter
 {
@@ -918,10 +921,11 @@ public:
 
     static hipdnnPluginStatus_t
         enginePluginSerializeExecutionContext(hipdnnEnginePluginHandle_t handle,
+                                              int64_t engineId,
                                               hipdnnEnginePluginExecutionContext_t executionContext,
                                               hipdnnPluginConstData_t* serializedContext)
     {
-        LOG_API_ENTRY("handle=" << static_cast<void*>(handle)
+        LOG_API_ENTRY("handle=" << static_cast<void*>(handle) << ", engineId=" << engineId
                                 << ", executionContext=" << static_cast<void*>(executionContext)
                                 << ", serializedContext=" << static_cast<void*>(serializedContext));
 
@@ -938,8 +942,18 @@ public:
                     "No execution context available to serialize");
             }
 
+            if(engineId != executionContext->engineId)
+            {
+                throw hipdnn_plugin_sdk::HipdnnPluginException(
+                    HIPDNN_PLUGIN_STATUS_BAD_PARAM,
+                    "Engine ID " + std::to_string(engineId)
+                        + " does not match the execution context engine ID "
+                        + std::to_string(executionContext->engineId));
+            }
+
             auto payload = std::make_unique<TestPluginSerializedContextPayload>();
-            (*payload)[0] = 0x42;
+            (*payload)[0] = K_TEST_PLUGIN_SERIALIZED_CONTEXT_MARKER;
+            std::memcpy(payload->data() + 1, &engineId, sizeof(engineId));
 
             LOG_API_SUCCESS(apiName, "serialized context");
 
@@ -1003,7 +1017,7 @@ public:
             const auto* payload
                 = static_cast<const TestPluginSerializedContextPayload*>(serializedContext->ptr);
             if(serializedContext->size != sizeof(TestPluginSerializedContextPayload)
-               || (*payload)[0] != 0x42)
+               || (*payload)[0] != K_TEST_PLUGIN_SERIALIZED_CONTEXT_MARKER)
             {
                 const auto firstByte
                     = serializedContext->size > 0
@@ -1015,10 +1029,12 @@ public:
                         + getInstance()->getPluginName()
                         + ": size=" + std::to_string(serializedContext->size) + ", expected_size="
                         + std::to_string(sizeof(TestPluginSerializedContextPayload))
-                        + ", first_byte=" + std::to_string(firstByte) + ", expected_first_byte=66");
+                        + ", first_byte=" + std::to_string(firstByte) + ", expected_first_byte="
+                        + std::to_string(K_TEST_PLUGIN_SERIALIZED_CONTEXT_MARKER));
             }
 
             auto context = std::make_unique<HipdnnEnginePluginExecutionContext>();
+            std::memcpy(&context->engineId, payload->data() + 1, sizeof(context->engineId));
 
             LOG_API_SUCCESS(apiName,
                             "createdExecutionContext=" << static_cast<void*>(context.get()));
@@ -1116,6 +1132,40 @@ public:
 private:
     inline static std::unique_ptr<TestPluginBase> s_instance; //NOLINT
 };
+
+#ifdef HIPDNN_TEST_PLUGIN_RETIRED_SAVE_HOOK
+// Export a three-argument save hook under a name that hipDNN does not resolve.
+// hipDNN then reports that this plugin does not support execution context serialization.
+#define REGISTER_TEST_PLUGIN_SAVE_HOOK()                                                       \
+    HIPDNN_PLUGIN_NODISCARD HIPDNN_TEST_PLUGIN_EXPORT hipdnnPluginStatus_t                     \
+        hipdnnEnginePluginSerializeExecutionContext(                                           \
+            hipdnnEnginePluginHandle_t handle,                                                 \
+            hipdnnEnginePluginExecutionContext_t executionContext,                             \
+            hipdnnPluginConstData_t* serializedContext);                                       \
+                                                                                               \
+    HIPDNN_PLUGIN_NODISCARD HIPDNN_TEST_PLUGIN_EXPORT hipdnnPluginStatus_t                     \
+        hipdnnEnginePluginSerializeExecutionContext(                                           \
+            hipdnnEnginePluginHandle_t handle,                                                 \
+            hipdnnEnginePluginExecutionContext_t executionContext,                             \
+            hipdnnPluginConstData_t* serializedContext)                                        \
+    {                                                                                          \
+        const int64_t engineId = executionContext != nullptr ? executionContext->engineId : 0; \
+        return TestPluginBase::enginePluginSerializeExecutionContext(                          \
+            handle, engineId, executionContext, serializedContext);                            \
+    }
+#else
+#define REGISTER_TEST_PLUGIN_SAVE_HOOK()                                   \
+    HIPDNN_PLUGIN_NODISCARD HIPDNN_TEST_PLUGIN_EXPORT hipdnnPluginStatus_t \
+        hipdnnEnginePluginSerializeExecutionContextWithEngineId(           \
+            hipdnnEnginePluginHandle_t handle,                             \
+            int64_t engineId,                                              \
+            hipdnnEnginePluginExecutionContext_t executionContext,         \
+            hipdnnPluginConstData_t* serializedContext)                    \
+    {                                                                      \
+        return TestPluginBase::enginePluginSerializeExecutionContext(      \
+            handle, engineId, executionContext, serializedContext);        \
+    }
+#endif
 
 // Macro to register plugin API functions
 #define REGISTER_TEST_PLUGIN_API()                                                               \
@@ -1254,15 +1304,7 @@ private:
         return TestPluginBase::enginePluginDestroyExecutionContext(handle, executionContext);    \
     }                                                                                            \
                                                                                                  \
-    HIPDNN_PLUGIN_NODISCARD HIPDNN_TEST_PLUGIN_EXPORT hipdnnPluginStatus_t                       \
-        hipdnnEnginePluginSerializeExecutionContext(                                             \
-            hipdnnEnginePluginHandle_t handle,                                                   \
-            hipdnnEnginePluginExecutionContext_t executionContext,                               \
-            hipdnnPluginConstData_t* serializedContext)                                          \
-    {                                                                                            \
-        return TestPluginBase::enginePluginSerializeExecutionContext(                            \
-            handle, executionContext, serializedContext);                                        \
-    }                                                                                            \
+    REGISTER_TEST_PLUGIN_SAVE_HOOK()                                                             \
                                                                                                  \
     HIPDNN_PLUGIN_NODISCARD HIPDNN_TEST_PLUGIN_EXPORT hipdnnPluginStatus_t                       \
         hipdnnEnginePluginDestroySerializedExecutionContext(                                     \

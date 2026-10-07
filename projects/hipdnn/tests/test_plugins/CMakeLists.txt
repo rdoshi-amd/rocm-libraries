@@ -121,6 +121,17 @@ add_test_plugin(${HIPDNN_TEST_PASS_BY_VALUE_RECORDER_PLUGIN_TARGET} TestPassByVa
 # test_autotune_plugin supports the autotune workflow with global.benchmarking and test knobs
 add_test_plugin(${TEST_AUTOTUNE_PLUGIN_NAME} TestAutotunePlugin.cpp)
 
+# test_retired_save_hook_plugin is test_good_plugin with a save hook that hipDNN does not resolve.
+# It reports the same plugin name and engine ID as test_good_plugin, so it has its own folder.
+set(${TEST_RETIRED_SAVE_HOOK_PLUGIN_NAME}_OUTPUT_DIR "${HIPDNN_TEST_PLUGIN_DIR}/retired_save_hook")
+set(${TEST_RETIRED_SAVE_HOOK_PLUGIN_NAME}_INSTALL_DIR
+    "${HIPDNN_TEST_PLUGIN_INSTALL_DIR}/retired_save_hook"
+)
+add_test_plugin(${TEST_RETIRED_SAVE_HOOK_PLUGIN_NAME} TestGoodPlugin.cpp)
+target_compile_definitions(
+    ${TEST_RETIRED_SAVE_HOOK_PLUGIN_NAME} PRIVATE HIPDNN_TEST_PLUGIN_RETIRED_SAVE_HOOK
+)
+
 # Create the default plugin in test_plugins/default
 set(test_good_default_plugin_OUTPUT_DIR "${HIPDNN_TEST_PLUGIN_DIR}/default")
 set(test_good_default_plugin_INSTALL_DIR "${HIPDNN_TEST_PLUGIN_INSTALL_DIR}/default")

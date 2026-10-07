@@ -70,7 +70,8 @@ void EnginePlugin::resolveSymbols()
     _funcDestroyExecutionContext
         = _lib.getSymbol<decltype(_funcDestroyExecutionContext)>(funcNameDestroyExecutionContext);
 
-    const auto funcNameSerializeExecutionContext = "hipdnnEnginePluginSerializeExecutionContext";
+    const auto funcNameSerializeExecutionContext
+        = "hipdnnEnginePluginSerializeExecutionContextWithEngineId";
     tryAssignSymbol(_funcSerializeExecutionContext, funcNameSerializeExecutionContext);
 
     const auto funcNameDestroySerializedExecutionContext
@@ -336,6 +337,7 @@ bool EnginePlugin::supportsExecutionContextSerialization() const
 }
 
 void EnginePlugin::serializeExecutionContext(hipdnnEnginePluginHandle_t handle,
+                                             int64_t engineId,
                                              hipdnnEnginePluginExecutionContext_t executionContext,
                                              hipdnnPluginConstData_t* serializedContext) const
 {
@@ -349,6 +351,7 @@ void EnginePlugin::serializeExecutionContext(hipdnnEnginePluginHandle_t handle,
     invokePluginFunction("serialize execution context",
                          _funcSerializeExecutionContext,
                          handle,
+                         engineId,
                          executionContext,
                          serializedContext);
 }

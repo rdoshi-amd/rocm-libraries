@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <gtest/gtest.h>
 #include <hip/hip_runtime.h>
 #include <memory>
@@ -12,6 +13,7 @@
 
 #include <hipdnn_data_sdk/utilities/Tensor.hpp>
 #include <hipdnn_data_sdk/utilities/Workspace.hpp>
+#include <hipdnn_flatbuffers_sdk/data_objects/execution_plan_generated.h>
 #include <hipdnn_frontend.hpp>
 #include <hipdnn_test_sdk/constants/ConvFpropConstants.hpp>
 #include <hipdnn_test_sdk/utilities/IntegrationTestFixture.hpp>
@@ -19,6 +21,8 @@
 #include <hipdnn_test_sdk/utilities/TestUtilities.hpp>
 #include <hipdnn_test_sdk/utilities/TestableGraph.hpp>
 #include <hipdnn_test_sdk/utilities/ToVec.hpp>
+#include <test_plugins/TestPluginCommon.hpp>
+#include <test_plugins/TestPluginEngineIdMap.hpp>
 
 using namespace hipdnn_frontend;
 using namespace hipdnn_frontend::graph;
@@ -560,6 +564,53 @@ TEST_F(IntegrationGraphLifting, BuildSerializeWithoutPlanThenFreshBuildExecutes)
 
     auto execResult = executeConvFpropOnDeviceBundle(*lifted, _handle);
     EXPECT_EQ(execResult.code, ErrorCode::OK) << execResult.err_msg;
+}
+
+// The test plugin stores the engine ID that its save hook receives in the plugin payload.
+// The test plugin refuses a save hook call whose engine ID differs from the context engine ID.
+TEST_F(IntegrationGraphLifting, PlanSaveHookReceivesTheEngineThatBuiltThePlan)
+{
+    namespace data_objects = hipdnn_flatbuffers_sdk::data_objects;
+
+    const int64_t goodPluginEngineId = hipdnn_tests::plugin_constants::engineId<GoodPlugin>();
+
+    auto originalGraph = buildConvFpropGraph();
+    auto result = originalGraph->build(_handle);
+    ASSERT_EQ(result.code, ErrorCode::OK) << result.err_msg;
+
+    auto [compiledPlan, serErr] = originalGraph->to_compiled_plan_binary();
+    ASSERT_EQ(serErr.code, ErrorCode::OK) << serErr.err_msg;
+
+    flatbuffers::Verifier verifier(compiledPlan.data(), compiledPlan.size());
+    ASSERT_TRUE(data_objects::VerifySerializedExecutionPlanBuffer(verifier));
+    const auto* envelope = data_objects::GetSerializedExecutionPlan(compiledPlan.data());
+    EXPECT_EQ(envelope->engine_id(), goodPluginEngineId);
+
+    const auto* payload = envelope->plugin_payload();
+    ASSERT_NE(payload, nullptr);
+    ASSERT_EQ(payload->size(), sizeof(TestPluginSerializedContextPayload));
+    EXPECT_EQ(payload->Get(0), K_TEST_PLUGIN_SERIALIZED_CONTEXT_MARKER);
+    int64_t storedEngineId = 0;
+    std::memcpy(&storedEngineId, payload->data() + 1, sizeof(storedEngineId));
+    EXPECT_EQ(storedEngineId, envelope->engine_id());
+
+    const std::vector<uint8_t> originalPayload(payload->begin(), payload->end());
+
+    auto restored = std::make_shared<Graph>();
+    result = restored->from_compiled_plan_binary(_handle, compiledPlan);
+    ASSERT_EQ(result.code, ErrorCode::OK) << result.err_msg;
+
+    auto [resavedPlan, resaveErr] = restored->to_compiled_plan_binary();
+    ASSERT_EQ(resaveErr.code, ErrorCode::OK) << resaveErr.err_msg;
+
+    flatbuffers::Verifier resavedVerifier(resavedPlan.data(), resavedPlan.size());
+    ASSERT_TRUE(data_objects::VerifySerializedExecutionPlanBuffer(resavedVerifier));
+    const auto* resavedEnvelope = data_objects::GetSerializedExecutionPlan(resavedPlan.data());
+    EXPECT_EQ(resavedEnvelope->engine_id(), goodPluginEngineId);
+    ASSERT_NE(resavedEnvelope->plugin_payload(), nullptr);
+    EXPECT_EQ(std::vector<uint8_t>(resavedEnvelope->plugin_payload()->begin(),
+                                   resavedEnvelope->plugin_payload()->end()),
+              originalPayload);
 }
 
 } // namespace

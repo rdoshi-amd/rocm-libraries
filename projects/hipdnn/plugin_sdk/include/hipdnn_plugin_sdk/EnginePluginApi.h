@@ -216,6 +216,7 @@ HIPDNN_PLUGIN_NODISCARD HIPDNN_PLUGIN_EXPORT hipdnnPluginStatus_t
  * @brief Serializes an execution context into plugin-owned opaque bytes.
  *
  * @param[in] handle The engine plugin handle.
+ * @param[in] engine_id The ID of the engine that built the execution context.
  * @param[in] execution_context The execution context to serialize.
  * @param[in,out] serialized_context A pointer to a structure where the plugin-specific serialized execution
  *                                  context bytes will be stored.
@@ -224,13 +225,16 @@ HIPDNN_PLUGIN_NODISCARD HIPDNN_PLUGIN_EXPORT hipdnnPluginStatus_t
  *
  * @note This function is optional. Plugins that do not export it do not support compiled execution plan
  *       serialization.
+ * @note For an execution context created from serialized bytes, `engine_id` is the engine ID that the
+ *       serialized plan records.
  * @note The serialized bytes are plugin-specific and are treated as opaque by hipDNN.
  * @note The plugin owns the returned buffer. hipDNN must release it by calling
  *       hipdnnEnginePluginDestroySerializedExecutionContext().
  */
 HIPDNN_PLUGIN_NODISCARD HIPDNN_PLUGIN_EXPORT hipdnnPluginStatus_t
-    hipdnnEnginePluginSerializeExecutionContext(
+    hipdnnEnginePluginSerializeExecutionContextWithEngineId(
         hipdnnEnginePluginHandle_t handle,
+        int64_t engine_id,
         hipdnnEnginePluginExecutionContext_t execution_context,
         hipdnnPluginConstData_t* serialized_context);
 
@@ -239,12 +243,12 @@ HIPDNN_PLUGIN_NODISCARD HIPDNN_PLUGIN_EXPORT hipdnnPluginStatus_t
  *
  * @param[in] handle The engine plugin handle.
  * @param[in,out] serialized_context A pointer to the serialized execution context bytes returned by
- *                                  hipdnnEnginePluginSerializeExecutionContext().
+ *                                  hipdnnEnginePluginSerializeExecutionContextWithEngineId().
  *
  * @return A value of type `hipdnnPluginStatus_t` indicating the status of the operation.
  *
- * @note This function is optional. Plugins that export hipdnnEnginePluginSerializeExecutionContext must also
- *       export this function.
+ * @note This function is optional. Plugins that export
+ *       hipdnnEnginePluginSerializeExecutionContextWithEngineId must also export this function.
  */
 HIPDNN_PLUGIN_NODISCARD HIPDNN_PLUGIN_EXPORT hipdnnPluginStatus_t
     hipdnnEnginePluginDestroySerializedExecutionContext(
@@ -259,8 +263,8 @@ HIPDNN_PLUGIN_NODISCARD HIPDNN_PLUGIN_EXPORT hipdnnPluginStatus_t
  *
  * @return A value of type `hipdnnPluginStatus_t` indicating the status of the operation.
  *
- * @note This function is optional. Plugins that export hipdnnEnginePluginSerializeExecutionContext must also
- *       export this function.
+ * @note This function is optional. Plugins that export
+ *       hipdnnEnginePluginSerializeExecutionContextWithEngineId must also export this function.
  */
 HIPDNN_PLUGIN_NODISCARD HIPDNN_PLUGIN_EXPORT hipdnnPluginStatus_t
     hipdnnEnginePluginCreateExecutionContextFromSerialized(

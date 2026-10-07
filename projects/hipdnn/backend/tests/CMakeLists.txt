@@ -316,6 +316,7 @@ add_dependencies(hipdnn_backend_tests
     ${TEST_DUPLICATE_POLICY_ID_B_PLUGIN_NAME}
     ${TEST_LYING_ENGINE_NAME_PLUGIN_NAME}
     ${TEST_MISMATCHED_NAME_PLUGIN_NAME}
+    ${TEST_RETIRED_SAVE_HOOK_PLUGIN_NAME}
 )
 
 add_hipdnn_test(hipdnn_backend_tests ${CMAKE_CURRENT_BINARY_DIR})

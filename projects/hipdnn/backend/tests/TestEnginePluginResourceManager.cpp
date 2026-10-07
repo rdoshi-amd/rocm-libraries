@@ -843,6 +843,7 @@ TEST(TestEnginePluginResourceManager, SerializeExecutionContextFailsForUnsupport
         .WillOnce(::testing::Return(std::vector<int64_t>{100}));
     EXPECT_CALL(*mockPlugin,
                 serializeExecutionContext(hipdnnEnginePluginHandle_t(0xdeadbeef),
+                                          100,
                                           hipdnnEnginePluginExecutionContext_t(0xcafebabe),
                                           _))
         .WillOnce(::testing::Throw(
@@ -876,9 +877,11 @@ TEST(TestEnginePluginResourceManager, SerializeExecutionContextRejectsNullPlugin
         .WillOnce(::testing::Return(std::vector<int64_t>{100}));
     EXPECT_CALL(*mockPlugin,
                 serializeExecutionContext(hipdnnEnginePluginHandle_t(0xdeadbeef),
+                                          100,
                                           hipdnnEnginePluginExecutionContext_t(0xcafebabe),
                                           _))
         .WillOnce([](hipdnnEnginePluginHandle_t,
+                     int64_t,
                      hipdnnEnginePluginExecutionContext_t,
                      hipdnnPluginConstData_t* serializedContext) {
             *serializedContext = hipdnnPluginConstData_t{nullptr, 4};
@@ -914,9 +917,11 @@ TEST(TestEnginePluginResourceManager, SerializeExecutionContextRejectsEmptyPlugi
         .WillOnce(::testing::Return(std::vector<int64_t>{100}));
     EXPECT_CALL(*mockPlugin,
                 serializeExecutionContext(hipdnnEnginePluginHandle_t(0xdeadbeef),
+                                          100,
                                           hipdnnEnginePluginExecutionContext_t(0xcafebabe),
                                           _))
         .WillOnce([&payloadBytes](hipdnnEnginePluginHandle_t,
+                                  int64_t,
                                   hipdnnEnginePluginExecutionContext_t,
                                   hipdnnPluginConstData_t* serializedContext) {
             *serializedContext = hipdnnPluginConstData_t{payloadBytes.data(), 0};
@@ -952,9 +957,11 @@ TEST(TestEnginePluginResourceManager, SerializeExecutionContextCopiesPluginPaylo
         .WillOnce(::testing::Return(std::vector<int64_t>{100}));
     EXPECT_CALL(*mockPlugin,
                 serializeExecutionContext(hipdnnEnginePluginHandle_t(0xdeadbeef),
+                                          100,
                                           hipdnnEnginePluginExecutionContext_t(0xcafebabe),
                                           _))
         .WillOnce([&payloadBytes](hipdnnEnginePluginHandle_t,
+                                  int64_t,
                                   hipdnnEnginePluginExecutionContext_t,
                                   hipdnnPluginConstData_t* serializedContext) {
             *serializedContext = hipdnnPluginConstData_t{payloadBytes.data(), payloadBytes.size()};
@@ -968,6 +975,46 @@ TEST(TestEnginePluginResourceManager, SerializeExecutionContextCopiesPluginPaylo
 
         ASSERT_NO_THROW(resourceManager.serializeExecutionContext(
             100, hipdnnEnginePluginExecutionContext_t(0xcafebabe), serializedContext));
+    }
+
+    ASSERT_EQ(serializedContext, std::vector<uint8_t>(payloadBytes.begin(), payloadBytes.end()));
+}
+
+TEST(TestEnginePluginResourceManager, SerializeExecutionContextPassesTheEngineIdToThePlugin)
+{
+    const std::shared_ptr<MockEnginePlugin> mockPlugin = std::make_shared<MockEnginePlugin>();
+    std::vector<std::shared_ptr<EnginePlugin>> plugins{mockPlugin};
+    const std::shared_ptr<MockEnginePluginManager> pluginManager
+        = std::make_shared<MockEnginePluginManager>();
+
+    const std::array<uint8_t, 4> payloadBytes{9, 8, 7, 6};
+    std::vector<uint8_t> serializedContext;
+
+    EXPECT_CALL(*pluginManager, getPlugins()).WillOnce(::testing::ReturnRef(plugins));
+    EXPECT_CALL(*mockPlugin, createHandle())
+        .WillOnce(::testing::Return(hipdnnEnginePluginHandle_t(0xdeadbeef)));
+    EXPECT_CALL(*mockPlugin, getAllEngineIds())
+        .WillOnce(::testing::Return(std::vector<int64_t>{100, 200}));
+    EXPECT_CALL(*mockPlugin,
+                serializeExecutionContext(hipdnnEnginePluginHandle_t(0xdeadbeef),
+                                          200,
+                                          hipdnnEnginePluginExecutionContext_t(0xcafebabe),
+                                          _))
+        .WillOnce([&payloadBytes](hipdnnEnginePluginHandle_t,
+                                  int64_t,
+                                  hipdnnEnginePluginExecutionContext_t,
+                                  hipdnnPluginConstData_t* serializedContext) {
+            *serializedContext = hipdnnPluginConstData_t{payloadBytes.data(), payloadBytes.size()};
+        });
+    EXPECT_CALL(*mockPlugin,
+                destroySerializedExecutionContext(hipdnnEnginePluginHandle_t(0xdeadbeef), _));
+    EXPECT_CALL(*mockPlugin, destroyHandle(testing::Eq(hipdnnEnginePluginHandle_t(0xdeadbeef))));
+
+    {
+        const EnginePluginResourceManager resourceManager(pluginManager);
+
+        ASSERT_NO_THROW(resourceManager.serializeExecutionContext(
+            200, hipdnnEnginePluginExecutionContext_t(0xcafebabe), serializedContext));
     }
 
     ASSERT_EQ(serializedContext, std::vector<uint8_t>(payloadBytes.begin(), payloadBytes.end()));
@@ -4115,6 +4162,47 @@ TEST(TestEnginePluginResourceManager, CodegenFixtureResolvesToHexThroughResource
         EXPECT_EQ(infos[0].engineName, "0x000000000000C0DE");
         EXPECT_EQ(infos[0].pluginName, "codegen_fixture_plugin");
     }
+}
+
+// ---------------------------------------------------------------------------
+// A real plugin binary whose save hook hipDNN does not resolve.
+// ---------------------------------------------------------------------------
+
+namespace
+{
+
+// NOLINTBEGIN(bugprone-throwing-static-initialization) test constants
+const auto RETIRED_SAVE_HOOK_PLUGIN_DIR
+    = hipdnn_backend::platform_utilities::getCurrentModuleDirectory().parent_path()
+      / plugin_constants::getTestPluginDefaultDir() / "retired_save_hook";
+// NOLINTEND(bugprone-throwing-static-initialization)
+
+} // namespace
+
+TEST(TestEnginePluginResourceManager, APluginExportingOnlyTheRetiredSaveNameDoesNotSupportSaving)
+{
+    auto pluginManager = std::make_shared<EnginePluginManager>();
+    pluginManager->loadPlugins({RETIRED_SAVE_HOOK_PLUGIN_DIR}, HIPDNN_PLUGIN_LOADING_ABSOLUTE);
+
+    const auto& plugins = pluginManager->getPlugins();
+    ASSERT_EQ(plugins.size(), 1);
+
+    const auto& plugin = plugins.front();
+    EXPECT_FALSE(plugin->supportsExecutionContextSerialization());
+
+    // The support check runs before any plugin call, so null arguments are enough.
+    hipdnnPluginConstData_t serializedContext{nullptr, 0};
+    try
+    {
+        plugin->serializeExecutionContext(nullptr, 100, nullptr, &serializedContext);
+        FAIL() << "Expected HIPDNN_STATUS_NOT_SUPPORTED";
+    }
+    catch(const HipdnnException& e)
+    {
+        EXPECT_EQ(e.getStatus(), HIPDNN_STATUS_NOT_SUPPORTED);
+        EXPECT_THAT(e.getMessage(), HasSubstr("does not support execution context serialization"));
+    }
+    EXPECT_EQ(serializedContext.ptr, nullptr);
 }
 
 // ---------------------------------------------------------------------------

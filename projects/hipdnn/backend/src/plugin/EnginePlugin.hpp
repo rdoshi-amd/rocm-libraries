@@ -76,6 +76,7 @@ public:
                                const hipdnnPluginConstData_t* opGraph) const;
     virtual bool supportsExecutionContextSerialization() const;
     virtual void serializeExecutionContext(hipdnnEnginePluginHandle_t handle,
+                                           int64_t engineId,
                                            hipdnnEnginePluginExecutionContext_t executionContext,
                                            hipdnnPluginConstData_t* serializedContext) const;
     virtual void
@@ -171,6 +172,7 @@ private:
     hipdnnPluginStatus_t (*_funcDestroyExecutionContext)(hipdnnEnginePluginHandle_t,
                                                          hipdnnEnginePluginExecutionContext_t);
     hipdnnPluginStatus_t (*_funcSerializeExecutionContext)(hipdnnEnginePluginHandle_t,
+                                                           int64_t,
                                                            hipdnnEnginePluginExecutionContext_t,
                                                            hipdnnPluginConstData_t*);
     hipdnnPluginStatus_t (*_funcDestroySerializedExecutionContext)(hipdnnEnginePluginHandle_t,

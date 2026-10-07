@@ -3576,4 +3576,147 @@ namespace
         expectSameSplit(solution->streamKDynamicDecomposition(problem, device, tiles), open);
     }
 
+
+    // With two or more tiles the split is aligned to the per-XCD queues:
+    // lowered to a multiple of numQueues / 2 that the SKItersPerWI rounding
+    // keeps exact, when that drops at most 1/8 of the parts or, for an odd
+    // split, keeps 3/4 of the CUs the unaligned split kept busy. Splits below
+    // numQueues and single tiles stay as they are.
+    TEST(StreamKDynamicSplit_pre_checkin, SplitAlignsWithTheQueues)
+    {
+        auto split = [](size_t tiles, size_t iters, size_t slots, bool parallel, size_t queues) {
+            auto in          = parallelSplitInputs(tiles, iters);
+            in.allowParallel = parallel;
+            in.splitSlots    = slots;
+            in.numQueues     = queues;
+            return TensileLite::streamKDynamicSplit(in);
+        };
+        struct Case
+        {
+            size_t tiles, iters, slots, unaligned, aligned;
+        };
+        for(Case c : {Case{28, 144, 256, 9, 8}, // odd: 9 -> 8
+                      Case{14, 4096, 256, 18, 16}, // even, drops 1/9
+                      Case{12, 10240, 256, 21, 20}, // odd: the multiple of 4 above 16
+                      Case{23, 4096, 256, 11, 11}, // odd, but 8 would idle 3/11 of the CUs
+                      Case{19, 250, 224, 11, 11}, // the same: 209 -> 152 of 224 CUs
+                      Case{2, 689, 256, 77, 77}, // the next exact multiple of 4, 44, idles 3/7
+                      Case{24, 3456, 256, 10, 10}, // even, 8 would drop 1/5
+                      Case{17, 4096, 256, 15, 12},
+                      Case{36, 4096, 256, 7, 7}, // below the queue count
+                      Case{1, 1000, 256, 125, 125}, // one tile: nothing shared
+                      Case{2, 7059, 224, 111, 104}}) // 112 asked, 111 exact; 108 is not
+        {
+            SCOPED_TRACE(std::to_string(c.tiles) + " tiles of " + std::to_string(c.iters));
+            const auto plain = split(c.tiles, c.iters, c.slots, true, 0);
+            EXPECT_EQ(plain.skSplit, c.unaligned);
+            const auto d = split(c.tiles, c.iters, c.slots, true, 8);
+            EXPECT_TRUE(d.parallel);
+            EXPECT_EQ(d.skSplit, c.aligned);
+            EXPECT_EQ(d.totalItems, c.tiles * c.aligned);
+            EXPECT_EQ(d.grid, c.tiles * c.aligned);
+            EXPECT_GE(size_t{d.skItersPerWI} * d.skSplit, c.iters) << "parts cover the tile";
+            EXPECT_LT(size_t{d.skItersPerWI} * (d.skSplit - 1), c.iters) << "no empty part";
+        }
+
+        // The arrival fixup too: 2 tiles of 4096, sqrt(2048) = 45 parts -> 44.
+        EXPECT_EQ(split(2, 4096, 256, false, 8).skSplit, 44u);
+        EXPECT_EQ(split(2, 4096, 256, false, 0).skSplit, 45u);
+
+        // The CUs kept busy are counted up to computeUnits: 8 tiles on 512
+        // slots of 256 CUs (two workgroups per CU) give 8 x 41 parts. 24
+        // keeps 192 of the 256 CUs busy, 3/4, so it is taken; counted against
+        // the 328 parts (computeUnits unset: the slots) it would not be.
+        {
+            auto in          = parallelSplitInputs(8, 369);
+            in.maxGrid       = 512;
+            in.splitSlots    = 512;
+            in.numQueues     = 8;
+            const auto plain = TensileLite::streamKDynamicSplit(in);
+            EXPECT_EQ(plain.skSplit, 41u);
+            in.computeUnits = 256;
+            const auto d    = TensileLite::streamKDynamicSplit(in);
+            EXPECT_EQ(d.skSplit, 24u);
+            EXPECT_EQ(d.grid, 192u);
+            in.computeUnits = 512;
+            EXPECT_EQ(TensileLite::streamKDynamicSplit(in).skSplit, 41u);
+        }
+
+        // Four queues align to multiples of 2, from 4 parts up.
+        for(Case c : {Case{28, 144, 256, 9, 8}, // odd: 9 -> 8
+                      Case{36, 4096, 256, 7, 6}, // 7 -> 6 (kept with 8 queues)
+                      Case{23, 4096, 256, 11, 10}, // 8 with 8 queues
+                      Case{24, 3456, 256, 10, 10}, // already a multiple of 2
+                      Case{85, 4096, 256, 3, 3}}) // below the queue count
+        {
+            SCOPED_TRACE("4 queues, " + std::to_string(c.tiles) + " tiles of "
+                         + std::to_string(c.iters));
+            const auto d = split(c.tiles, c.iters, c.slots, true, 4);
+            EXPECT_EQ(d.skSplit, c.aligned);
+            EXPECT_EQ(d.totalItems, c.tiles * c.aligned);
+        }
+
+        // Fewer than four queues: no alignment (g = numQueues / 2 < 2).
+        for(size_t queues : {size_t{1}, size_t{2}, size_t{3}})
+        {
+            SCOPED_TRACE(std::to_string(queues) + " queues");
+            EXPECT_EQ(split(28, 144, 256, true, queues).skSplit, 9u);
+            EXPECT_EQ(split(23, 4096, 256, true, queues).skSplit, 11u);
+        }
+    }
+
+    // The split sized for a CU-count hint is aligned too: 20 tiles on the 192
+    // slots of a 192-CU hint is 9 parts, lowered to 8.
+    TEST(StreamKDynamicSplit_pre_checkin, HintedSplitAlignsWithTheQueues)
+    {
+        auto solution = dynamicParallelSolution();
+        auto device   = uniformitySteeringDevice();
+        // 10 x 2 tiles of 128 x 128, 144 iterations of 64.
+        auto         problem = dynamicSplitGemm(1280, 256, 9216, 1);
+        const size_t tiles   = problem.getNumTiles(solution->sizeMapping, 1);
+        ASSERT_EQ(tiles, 20u);
+
+        problem.setParams().setSmCountTarget(192);
+        const auto hinted = solution->streamKDynamicDecomposition(problem, device, tiles);
+        ASSERT_TRUE(hinted.parallel);
+        EXPECT_EQ(hinted.skSplit, 8u) << "192 / 20 = 9 parts, aligned to 8";
+        EXPECT_EQ(hinted.totalItems, 160u);
+        EXPECT_EQ(hinted.grid, 160u);
+
+        // The query and a launch handed its workspace agree.
+        const size_t required = solution->requiredWorkspaceSize(problem, device);
+        EXPECT_EQ(required, hinted.workspaceBytes);
+        problem.setWorkspaceSize(required);
+        const auto launch = solution->resolvePersistentSettings(problem, device);
+        ASSERT_TRUE(launch.dynamicSplit.has_value());
+        expectSameSplit(*launch.dynamicSplit, hinted);
+    }
+
+    // A query and a launch handed its workspace make the same aligned split.
+    TEST(StreamKDynamicSplit_pre_checkin, AlignedSplitQueryAndLaunchAgree)
+    {
+        auto solution = dynamicParallelSolution();
+        auto device   = uniformitySteeringDevice();
+        // 14 x 2 tiles of 128 x 128, 144 iterations: 256 / 28 = 9 parts -> 8.
+        auto         problem = dynamicSplitGemm(1792, 256, 9216, 1);
+        const size_t tiles   = problem.getNumTiles(solution->sizeMapping, 1);
+        ASSERT_EQ(tiles, 28u);
+        const auto wanted = solution->streamKDynamicDecomposition(problem, device, tiles);
+        ASSERT_TRUE(wanted.parallel);
+        EXPECT_EQ(wanted.skSplit, 8u);
+        EXPECT_EQ(wanted.grid, 224u);
+
+        const size_t required = solution->requiredWorkspaceSize(problem, device);
+        EXPECT_EQ(required, wanted.workspaceBytes);
+        problem.setWorkspaceSize(required);
+        expectSameSplit(solution->streamKDynamicDecomposition(problem, device, tiles), wanted);
+        const auto launch = solution->resolvePersistentSettings(problem, device);
+        ASSERT_TRUE(launch.dynamicSplit.has_value());
+        expectSameSplit(*launch.dynamicSplit, wanted);
+        EXPECT_EQ(launch.workspaceBytes, required);
+        const auto inv = solveWithWorkspace(*solution, problem, device);
+        ASSERT_EQ(inv.size(), 2u);
+        EXPECT_EQ(inv[0].numWorkGroups.x, 224u);
+    }
+
 } // namespace

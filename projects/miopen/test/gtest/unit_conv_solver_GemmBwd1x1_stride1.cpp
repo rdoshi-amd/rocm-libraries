@@ -99,6 +99,32 @@ TEST_P(CPU_UnitTestConvSolverGemmBwd1x1_Stride1DevApplicabilityBwd_NONE, GemmBwd
     this->RunTest(miopen::solver::conv::GemmBwd1x1_stride1{});
 };
 
+// Small-batch 2D NHWC backward-data excludes GEMM on gfx942; a larger batch stays applicable.
+TEST(CPU_UnitTestConvSolverGemmBwd1x1_Stride1Bwd_NONE, Gfx942SmallBatchNhwcExcluded)
+{
+    using TestCase = miopen::unit_tests::ConvTestCase;
+
+    auto context         = miopen::ExecutionContext{&get_handle()};
+    const bool is_gfx942 = context.GetStream().GetDeviceName() == "gfx942";
+
+    const auto make_problem = [](std::size_t n) {
+        const auto test_case = TestCase{
+            {n, 8, 8, 8}, {8, 8, 1, 1}, {0, 0}, {1, 1}, {1, 1}, miopenFloat, miopenTensorNHWC};
+        return test_case.GetProblemDescription(miopen::conv::Direction::BackwardData);
+    };
+    const auto small_batch = make_problem(2); // within the 1..3 exclusion
+    small_batch.SetupFloats(context);
+    small_batch.SetupComputeType(context);
+    const auto large_batch = make_problem(4); // above the exclusion
+    large_batch.SetupFloats(context);
+    large_batch.SetupComputeType(context);
+
+    const auto solver = miopen::solver::conv::GemmBwd1x1_stride1{};
+    // Excluded only on gfx942; applicable on every other arch.
+    EXPECT_EQ(solver.IsApplicable(context, small_batch), !is_gfx942);
+    EXPECT_TRUE(solver.IsApplicable(context, large_batch));
+}
+
 // Smoke tests
 INSTANTIATE_TEST_SUITE_P(Smoke,
                          GPU_UnitTestConvSolverGemmBwd1x1_Stride1Bwd_FP16,

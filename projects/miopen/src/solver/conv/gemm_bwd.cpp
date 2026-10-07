@@ -230,6 +230,8 @@ bool GemmBwd1x1_stride2::IsApplicable(const ExecutionContext& context,
                                       const ProblemDescription& problem) const
 {
 #if MIOPEN_USE_GEMM
+    if(gemm::IsSmallBatchNhwcBackwardExcluded(context.GetStream().GetDeviceName(), problem))
+        return false;
     if(!GemmBwdBase::IsApplicable(context, problem))
         return false;
 
@@ -469,6 +471,8 @@ bool GemmBwd1x1_stride1::IsApplicable(const ExecutionContext& context,
                                       const ProblemDescription& problem) const
 {
 #if MIOPEN_USE_GEMM
+    if(gemm::IsSmallBatchNhwcBackwardExcluded(context.GetStream().GetDeviceName(), problem))
+        return false;
     if(!GemmBwdBase::IsApplicable(context, problem))
         return false;
 
@@ -754,6 +758,8 @@ bool GemmBwdRest::IsApplicable(const ExecutionContext& context,
                                const ProblemDescription& problem) const
 {
 #if MIOPEN_USE_GEMM
+    if(gemm::IsSmallBatchNhwcBackwardExcluded(context.GetStream().GetDeviceName(), problem))
+        return false;
     if(miopen::conv::IsBwdDataPointOutputStrideEqFilter(problem))
     {
         if(!problem.AllTensorsDimsFitIntoInt())

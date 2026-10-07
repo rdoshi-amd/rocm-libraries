@@ -27,6 +27,11 @@
 #include <miopen/env.hpp>
 #include <miopen/solver/gemm_common.hpp>
 
+#include <limits>
+
+// Set to 0 to disable the small-batch NHWC backward GEMM exclusion.
+MIOPEN_DECLARE_ENV_VAR_BOOL(MIOPEN_DEBUG_CONV_GEMM_NHWC_BACKWARD_SMALL_BATCH)
+
 namespace miopen {
 namespace solver {
 namespace conv {
@@ -61,6 +66,29 @@ double SlowdownFactor(const int n_oper, const double oper_factor, const double m
     }
     else
         return 1.0;
+}
+
+bool IsSmallBatchNhwcBackwardExcluded(const std::string& device_name,
+                                      const miopen::conv::ProblemDescription& problem)
+{
+    if(env::disabled(MIOPEN_DEBUG_CONV_GEMM_NHWC_BACKWARD_SMALL_BATCH))
+        return false;
+    constexpr std::size_t small_batch_cutoff = 4; // batch sizes 1..3
+    const auto& conv                         = problem.GetConv();
+    if(!(problem.IsDirectionBackwardWrW() || problem.IsDirectionBackwardData()) ||
+       !problem.IsLayoutNHWC() || conv.GetSpatialDimension() != 2 || conv.group_count != 1 ||
+       device_name != "gfx942" || problem.GetBatchSize() >= small_batch_cutoff)
+        return false;
+    // Validated regime: 1x1 filter only.
+    const auto& wei = problem.GetWeights().GetLengths(); // [K, C, fy, fx]
+    if(wei[2] != 1 || wei[3] != 1)
+        return false;
+    // Bound the exclusion to the size range where a fast implicit-GEMM alternative exists. Below
+    // the 32-bit byte-offset addressing limit the ASM solver is applicable and competitive; above
+    // it the ASM solver drops out and the remaining fallback is much slower, so keep GEMM there.
+    constexpr std::size_t max_int32 = static_cast<std::size_t>(std::numeric_limits<int>::max());
+    return problem.GetInSize() <= max_int32 && problem.GetOutSize() <= max_int32 &&
+           problem.GetWeightsSize() <= max_int32;
 }
 
 } // namespace gemm

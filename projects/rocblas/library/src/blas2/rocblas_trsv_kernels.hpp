@@ -1,5 +1,5 @@
 /* ************************************************************************
- * Copyright (C) 2016-2025 Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -1184,20 +1184,20 @@ rocblas_status rocblas_internal_trsv_check_numerics(const char*       function_n
 #error INSTANTIATE_TRSV_NUMERICS already defined
 #endif
 
-#define INSTANTIATE_TRSV_NUMERICS(T_, U_)                                             \
-template rocblas_status rocblas_internal_trsv_check_numerics <T_, U_>                 \
-                                                   (const char*       function_name,  \
-                                                    rocblas_handle    handle,         \
-                                                    rocblas_fill      uplo,           \
-                                                    int64_t       n,              \
-                                                    T_                A,              \
-                                                    rocblas_stride    offset_a,       \
-                                                    int64_t       lda,            \
-                                                    rocblas_stride    stride_a,       \
-                                                    U_                x,              \
-                                                    rocblas_stride    offset_x,       \
-                                                    int64_t       inc_x,          \
-                                                    rocblas_stride    stride_x,       \
-                                                    int64_t       batch_count,    \
-                                                    const rocblas_int check_numerics, \
-                                                    bool              is_input);
+#define INSTANTIATE_TRSV_NUMERICS(T_, U_)                                 \
+    template rocblas_status rocblas_internal_trsv_check_numerics<T_, U_>( \
+        const char*       function_name,                                  \
+        rocblas_handle    handle,                                         \
+        rocblas_fill      uplo,                                           \
+        int64_t           n,                                              \
+        T_                A,                                              \
+        rocblas_stride    offset_a,                                       \
+        int64_t           lda,                                            \
+        rocblas_stride    stride_a,                                       \
+        U_                x,                                              \
+        rocblas_stride    offset_x,                                       \
+        int64_t           inc_x,                                          \
+        rocblas_stride    stride_x,                                       \
+        int64_t           batch_count,                                    \
+        const rocblas_int check_numerics,                                 \
+        bool              is_input);

@@ -12,7 +12,9 @@ include_guard(GLOBAL)
 set(HKP_PKG_DIR "${CMAKE_CURRENT_LIST_DIR}/..")
 set(HKP_PYTHON_ROOT "${HKP_PKG_DIR}/python")
 set(HKP_TOOL "${HKP_PKG_DIR}/tools/hkp_pack.py")
-set(HKP_ARCH_PROBE_TOOL "${HKP_PKG_DIR}/tools/hkp_arch_probe.py")
+# Cached so the probe path is visible to callers in sibling directory scopes.
+set(HKP_ARCH_PROBE_TOOL "${HKP_PKG_DIR}/tools/hkp_arch_probe.py" CACHE INTERNAL
+    "Packer arch probe used by configure-time arch gating")
 set(HKP_WHEEL_DIGEST_TOOL "${HKP_PKG_DIR}/tools/hkp_wheel_digest.py")
 set(HKP_FIXTURES "${HKP_PKG_DIR}/tests/fixtures")
 

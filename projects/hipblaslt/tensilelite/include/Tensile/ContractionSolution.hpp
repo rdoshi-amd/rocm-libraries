@@ -739,10 +739,11 @@ namespace TensileLite
      * With numQueues set and at least two tiles, a split of numQueues or
      * more parts that is not a multiple of numQueues / 2 is lowered to one
      * that is (and that the SKItersPerWI rounding keeps exact) when that
-     * drops at most 1/8 of its parts, or, if the split is odd, when the
-     * lowered parts still cover 3/4 of the CUs the unaligned ones kept busy
-     * (tiles * aligned >= 3/4 * min(tiles * split, computeUnits)). Part p of
-     * tile t is work item t * skSplit + p, in queue
+     * drops at most 1/8 of its parts, or, if the split is odd or no two
+     * tiles share its queues (tiles <= numQueues / gcd(split, numQueues)),
+     * when the lowered parts still cover 3/4 of the CUs the unaligned ones
+     * kept busy (tiles * aligned >= 3/4 * min(tiles * split, computeUnits)).
+     * Part p of tile t is work item t * skSplit + p, in queue
      * (t * skSplit + p) % numQueues, so with an aligned split each XCD runs
      * the same few K-slices of every tile and A and B are read about once
      * from its L2; an odd split spreads every K-slice over all the XCDs.

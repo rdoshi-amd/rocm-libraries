@@ -92,6 +92,9 @@ BenchmarkProblems:
           - Exact: [96, 96, 3, 32768]
           # 64 tiles: split 4.
           - Exact: [512, 512, 1, 512]
+          # Batch > 1 with one tile per batch and a very long K: 4 tiles,
+          # split 64, so 256 partial tiles span the batches.
+          - Exact: [32, 32, 4, 262144]
 
   - - OperationType: GEMM
       DataType: s

@@ -17,6 +17,7 @@
 #include <optional>
 #include <string_view>
 
+#include <hipdnn_plugin_sdk/ArchMatch.hpp>
 #include <hipdnn_plugin_sdk/GpuGenericTargetsTable.hpp>
 
 namespace hipdnn_plugin_sdk
@@ -71,24 +72,22 @@ enum class ArchTier : int
     UNRESTRICTED = 2, ///< An empty list: any device.
 };
 
-/// Rank of one list entry for @p baseDeviceId (features already stripped): EXPLICIT when
-/// the entry equals it, GENERIC when a table generic contains it, else nullopt. A
-/// generic-shaped entry is never EXPLICIT, so an unknown generic matches no device.
-inline std::optional<ArchTier> archEntryTier(std::string_view entry, std::string_view baseDeviceId)
+/// Rank of one `arch` list entry for the device @p rawDeviceArch as the device reports it
+/// (features included): EXPLICIT when the entry is the device's own base id (PREFIX
+/// match, so `gfx942` is EXPLICIT for `gfx942:sramecc+:xnack-` and never matches
+/// `gfx950`), GENERIC when a table generic containing the device's base id, else nullopt.
+/// A generic-shaped entry is never EXPLICIT, so an unknown generic matches no device.
+inline std::optional<ArchTier> entryTier(std::string_view entry, std::string_view rawDeviceArch)
 {
     if(isGenericShapedArchName(entry))
     {
-        if(genericTargetContains(entry, baseDeviceId))
-        {
-            return ArchTier::GENERIC;
-        }
-        return std::nullopt;
+        return genericTargetContains(entry, stripArchFeatures(rawDeviceArch))
+                   ? std::optional<ArchTier>(ArchTier::GENERIC)
+                   : std::nullopt;
     }
-    if(entry == baseDeviceId)
-    {
-        return ArchTier::EXPLICIT;
-    }
-    return std::nullopt;
+    return archMatches(rawDeviceArch, entry, ArchMatchMode::PREFIX)
+               ? std::optional<ArchTier>(ArchTier::EXPLICIT)
+               : std::nullopt;
 }
 
 } // namespace hipdnn_plugin_sdk

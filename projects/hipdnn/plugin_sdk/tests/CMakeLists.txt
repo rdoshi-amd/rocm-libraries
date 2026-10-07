@@ -51,15 +51,6 @@ add_executable(hipdnn_plugin_sdk_tests
     $<$<BOOL:${HIPDNN_ENABLE_KERNEL_INGESTOR}>:TestKernelIngestorConcurrency.cpp>
 )
 
-# The generic target table and the golden tier vectors are read from the source tree, so
-# the C++ test compares the generated header against the very document it came from.
-target_compile_definitions(
-    hipdnn_plugin_sdk_tests
-    PRIVATE
-        "HIPDNN_GPU_GENERIC_TARGETS_JSON_PATH=\"${HIPDNN_GPU_GENERIC_TARGETS_JSON_SOURCE}\""
-        "HIPDNN_ARCH_TIER_VECTORS_JSON_PATH=\"${CMAKE_CURRENT_SOURCE_DIR}/data/arch_tier_vectors.json\""
-)
-
 target_compile_options(hipdnn_plugin_sdk_tests PRIVATE ${HIPDNN_WARNING_COMPILE_OPTIONS} ${HIPDNN_NO_RTTI_OPTIONS})
 
 target_link_libraries(

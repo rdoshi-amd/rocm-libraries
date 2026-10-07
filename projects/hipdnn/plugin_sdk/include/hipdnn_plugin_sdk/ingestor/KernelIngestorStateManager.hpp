@@ -683,9 +683,9 @@ private:
 
     /// Among admitted entries sharing a metadata tuple, keeps only those whose arch list
     /// ranks best for the device (EXPLICIT over GENERIC over UNRESTRICTED), preserving
-    /// order. Runs after matcher admission, so a kernel a matcher declined never hides a
-    /// lower-tier one. Uniqueness at construction guarantees at most one entry per tuple
-    /// per tier on any device.
+    /// catalog order. Runs after matcher admission, so a kernel a matcher declined never
+    /// hides a lower-tier one. Uniqueness at construction guarantees at most one entry per
+    /// tuple per tier on any device.
     static void shadowByArchTier(Catalog& catalog, const MatchContext& context)
     {
         auto& entries = catalog.entries;
@@ -701,60 +701,53 @@ private:
                 return *lhs < *rhs;
             }
         };
-        struct Best
-        {
-            int tier;
-            const KernelDefinition* winner;
-        };
-        const auto tierOf = [&context](const KernelDefinition& definition) {
-            return static_cast<int>(archTier(definition.arch, context.deviceProperties.gcnArchName)
-                                        .value_or(ArchTier::UNRESTRICTED));
-        };
-
-        std::map<const MetadataValues*, Best, ByMetadata> bestByTuple;
-        for(const auto& entry : entries)
-        {
-            const int tier = tierOf(entry);
-            const auto [it, inserted]
-                = bestByTuple.try_emplace(&entry.metadata, Best{tier, &entry});
-            if(!inserted && tier < it->second.tier)
-            {
-                it->second = Best{tier, &entry};
-            }
-        }
-        if(bestByTuple.size() == entries.size())
-        {
-            return;
-        }
-
-        // Decide and log before moving anything: the map and winners point into entries.
-        std::vector<bool> keep(entries.size(), true);
+        constexpr int SHADOWED = -1;
+        std::vector<int> tiers;
+        tiers.reserve(entries.size());
+        // Index of the best-tier entry per tuple; the keys point into entries.
+        std::map<const MetadataValues*, size_t, ByMetadata> winners;
         for(size_t i = 0; i < entries.size(); ++i)
         {
-            const auto& best = bestByTuple.at(&entries[i].metadata);
-            if(tierOf(entries[i]) != best.tier)
+            tiers.push_back(
+                static_cast<int>(archTier(entries[i].arch, context.deviceProperties.gcnArchName)
+                                     .value_or(ArchTier::UNRESTRICTED)));
+            const auto [it, inserted] = winners.try_emplace(&entries[i].metadata, i);
+            if(!inserted && tiers[i] < tiers[it->second])
             {
-                keep[i] = false;
+                it->second = i;
+            }
+        }
+
+        // Name every loser's winner before any entry moves.
+        bool anyShadowed = false;
+        for(size_t i = 0; i < entries.size(); ++i)
+        {
+            const size_t winner = winners.at(&entries[i].metadata);
+            if(tiers[i] != tiers[winner])
+            {
+                tiers[i] = SHADOWED;
+                anyShadowed = true;
                 HIPDNN_PLUGIN_LOG_INFO("ingestor: kernel " << toString(entries[i].kernelId)
                                                            << " is shadowed by kernel "
-                                                           << toString(best.winner->kernelId)
+                                                           << toString(entries[winner].kernelId)
                                                            << " at a better arch tier on device "
                                                            << context.deviceProperties.gcnArchName);
             }
         }
-        size_t out = 0;
-        for(size_t i = 0; i < entries.size(); ++i)
+        if(!anyShadowed)
         {
-            if(keep[i])
-            {
-                if(out != i)
-                {
-                    entries[out] = std::move(entries[i]);
-                }
-                ++out;
-            }
+            return;
         }
-        entries.erase(entries.begin() + static_cast<std::ptrdiff_t>(out), entries.end());
+
+        // remove_if tests each element in place before any move reaches it, so its
+        // position indexes tiers.
+        entries.erase(std::remove_if(entries.begin(),
+                                     entries.end(),
+                                     [&](const KernelDefinition& entry) {
+                                         return tiers[static_cast<size_t>(&entry - entries.data())]
+                                                == SHADOWED;
+                                     }),
+                      entries.end());
     }
 
     bool graphLevelMatchersPass(const KernelDescriptorPack& pack,

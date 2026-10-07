@@ -314,90 +314,53 @@ TEST(TestKernelIngestorStateManager, OffersAnUnstampedKernelEverywhereItsPackRea
     }
 }
 
-/// Two packs share a tuple whenever no device ranks them at the same arch tier: an
-/// arch-independent pack is UNRESTRICTED everywhere, a per-arch pack is EXPLICIT on its own
-/// devices, so on those devices the explicit kernel shadows the unrestricted one and
-/// elsewhere the unrestricted one is the only candidate. Both pack orders are exercised so
-/// a keep-the-first-inserted shortcut fails.
-TEST(TestKernelIngestorStateManager, AdmitsATupleSharedByAnArchIndependentAndAPerArchPack)
+/// Packs share a tuple whenever no device ranks them at the same arch tier. One tuple
+/// offered at all three tiers keeps, per device, only the best: EXPLICIT over GENERIC over
+/// UNRESTRICTED. Every pack order is exercised so a keep-the-first-inserted shortcut fails,
+/// and each device is asked twice, interleaved, so the second answer comes from the
+/// per-(graph, device) catalog cache and must not be another device's.
+TEST(TestKernelIngestorStateManager, KeepsOnlyTheBestArchTierOfASharedTuplePerDevice)
 {
     const ScopedSymbols symbols("test.graph", acceptGraph, "test.kernel", countingFloatKernels);
     const auto criterion = scopedGraphMatcher("test.graph_criterion", &acceptCriterion);
 
-    for(const bool explicitFirst : {true, false})
-    {
-        auto anywhere = makePack({GRAPH_MATCHER_ID});
-        anywhere.kernels = {makeKernel(testId(0x93), "kernel_anywhere", 64, "FLOAT")};
-        auto pinned = makePack({GRAPH_MATCHER_ID}, {"gfx942"});
-        pinned.id = testId(0x94);
-        pinned.kernels = {makeKernel(testId(0x95), "kernel_gfx942", 64, "FLOAT")};
+    auto anywhere = makePack({GRAPH_MATCHER_ID});
+    anywhere.kernels = {makeKernel(testId(0x93), "kernel_anywhere", 64, "FLOAT")};
+    auto generic = makePack({GRAPH_MATCHER_ID}, {"gfx11-generic"});
+    generic.id = testId(0x94);
+    generic.kernels = {makeKernel(testId(0x95), "kernel_generic", 64, "FLOAT")};
+    auto member = makePack({GRAPH_MATCHER_ID}, {"gfx1151"});
+    member.id = testId(0x96);
+    member.kernels = {makeKernel(testId(0x97), "kernel_gfx1151", 64, "FLOAT")};
 
+    std::vector<std::vector<KernelDescriptorPack>> orders{
+        {anywhere, generic, member}, {member, generic, anywhere}, {generic, member, anywhere}};
+    uint8_t graphIndex = 0x25;
+    for(const auto& packs : orders)
+    {
         const StateManager manager(makeSchema(),
                                    makeTestMatchers(),
                                    makeTestDispatches(),
-                                   explicitFirst ? std::vector{pinned, anywhere}
-                                                 : std::vector{anywhere, pinned},
+                                   packs,
                                    std::make_shared<NativeKernelHeuristic>(SCORE_SYMBOL),
                                    "test.graph");
 
-        const TestGraph graph(makeGraphId(0x25));
-        const auto definitionsFor = [&](int deviceId, const char* deviceArch) {
+        const TestGraph graph(makeGraphId(graphIndex++));
+        const auto winnerOn = [&](int deviceId, const char* deviceArch) {
             auto properties = testDeviceProperties();
             properties.gcnArchName = deviceArch;
-            return manager.unsortedDefinitions(MatchContext{graph, deviceId, properties});
+            const auto definitions
+                = manager.unsortedDefinitions(MatchContext{graph, deviceId, properties});
+            EXPECT_EQ(definitions.size(), 1U) << deviceArch;
+            return definitions.empty() ? DescriptorId{} : definitions.front().kernelId;
         };
 
-        const auto onGfx942 = definitionsFor(0, "gfx942:sramecc+");
-        ASSERT_EQ(onGfx942.size(), 1U) << "explicitFirst=" << explicitFirst;
-        EXPECT_EQ(onGfx942.front().kernelId, testId(0x95)) << "explicitFirst=" << explicitFirst;
-
-        const auto onGfx90a = definitionsFor(1, "gfx90a:sramecc+:xnack-");
-        ASSERT_EQ(onGfx90a.size(), 1U) << "explicitFirst=" << explicitFirst;
-        EXPECT_EQ(onGfx90a.front().kernelId, testId(0x93)) << "explicitFirst=" << explicitFirst;
-    }
-}
-
-/// A generic pack and a pack naming one of its members never rank the same on any device:
-/// the member's own device sees EXPLICIT against GENERIC, the other members see only the
-/// generic one.
-TEST(TestKernelIngestorStateManager, AdmitsATupleSharedByAGenericPackAndAnExplicitMemberPack)
-{
-    const ScopedSymbols symbols("test.graph", acceptGraph, "test.kernel", countingFloatKernels);
-    const auto criterion = scopedGraphMatcher("test.graph_criterion", &acceptCriterion);
-
-    for(const bool explicitFirst : {true, false})
-    {
-        auto generic = makePack({GRAPH_MATCHER_ID}, {"gfx11-generic"});
-        generic.kernels = {makeKernel(testId(0x93), "kernel_generic", 64, "FLOAT")};
-        auto member = makePack({GRAPH_MATCHER_ID}, {"gfx1151"});
-        member.id = testId(0x94);
-        member.kernels = {makeKernel(testId(0x95), "kernel_gfx1151", 64, "FLOAT")};
-
-        const StateManager manager(makeSchema(),
-                                   makeTestMatchers(),
-                                   makeTestDispatches(),
-                                   explicitFirst ? std::vector{member, generic}
-                                                 : std::vector{generic, member},
-                                   std::make_shared<NativeKernelHeuristic>(SCORE_SYMBOL),
-                                   "test.graph");
-
-        const TestGraph graph(makeGraphId(0x26));
-        const auto definitionsFor = [&](int deviceId, const char* deviceArch) {
-            auto properties = testDeviceProperties();
-            properties.gcnArchName = deviceArch;
-            return manager.unsortedDefinitions(MatchContext{graph, deviceId, properties});
-        };
-
-        const auto onMember = definitionsFor(0, "gfx1151");
-        ASSERT_EQ(onMember.size(), 1U) << "explicitFirst=" << explicitFirst;
-        EXPECT_EQ(onMember.front().kernelId, testId(0x95)) << "explicitFirst=" << explicitFirst;
-
-        const auto onOtherMember = definitionsFor(1, "gfx1100");
-        ASSERT_EQ(onOtherMember.size(), 1U) << "explicitFirst=" << explicitFirst;
-        EXPECT_EQ(onOtherMember.front().kernelId, testId(0x93))
-            << "explicitFirst=" << explicitFirst;
-
-        EXPECT_TRUE(definitionsFor(2, "gfx942").empty()) << "explicitFirst=" << explicitFirst;
+        for(int round = 0; round < 2; ++round)
+        {
+            EXPECT_EQ(winnerOn(0, "gfx1151:sramecc+"), testId(0x97)) << "round " << round;
+            EXPECT_EQ(winnerOn(1, "gfx1100"), testId(0x95)) << "round " << round;
+            EXPECT_EQ(winnerOn(2, "gfx942:sramecc+"), testId(0x93)) << "round " << round;
+        }
     }
 }
 
@@ -414,64 +377,13 @@ TEST(TestKernelIngestorStateManager, RejectsATupleSharedByTwoPacksAtTheSameGener
     second.id = testId(0x94);
     second.kernels = {makeKernel(testId(0x95), "kernel_generic_b", 64, "FLOAT")};
 
-    try
-    {
-        const StateManager manager(makeSchema(),
-                                   makeTestMatchers(),
-                                   makeTestDispatches(),
-                                   {first, second},
-                                   std::make_shared<NativeKernelHeuristic>(SCORE_SYMBOL),
-                                   "test.graph");
-        FAIL() << "two packs at the same generic tier must not construct";
-    }
-    catch(const std::invalid_argument& error)
-    {
-        EXPECT_NE(std::string(error.what()).find("at the same arch tier"), std::string::npos)
-            << error.what();
-    }
-}
-
-/// Shadowing runs on the admitted catalog: a generic kernel and an unrestricted kernel
-/// of one tuple coexist at load, and on a member device only the generic one survives.
-/// The drop is logged at INFO, naming the shadowing kernel.
-TEST(TestKernelIngestorStateManager, ShadowsTheLowerTierKernelAfterMatcherAdmission)
-{
-    auto recorder
-        = hipdnn_test_sdk::utilities::SharedLogRecorder::withOverrideLevel(HIPDNN_SEV_INFO);
-
-    const ScopedSymbols symbols("test.graph", acceptGraph, "test.kernel", countingFloatKernels);
-    const auto criterion = scopedGraphMatcher("test.graph_criterion", &acceptCriterion);
-
-    for(const bool betterFirst : {true, false})
-    {
-        auto generic = makePack({GRAPH_MATCHER_ID}, {"gfx11-generic"});
-        generic.kernels = {makeKernel(testId(0x93), "kernel_generic", 64, "FLOAT")};
-        auto anywhere = makePack({GRAPH_MATCHER_ID});
-        anywhere.id = testId(0x94);
-        anywhere.kernels = {makeKernel(testId(0x95), "kernel_anywhere", 64, "FLOAT")};
-
-        const StateManager manager(makeSchema(),
-                                   makeTestMatchers(),
-                                   makeTestDispatches(),
-                                   betterFirst ? std::vector{generic, anywhere}
-                                               : std::vector{anywhere, generic},
-                                   std::make_shared<NativeKernelHeuristic>(SCORE_SYMBOL),
-                                   "test.graph");
-
-        const TestGraph graph(makeGraphId(0x27));
-        auto properties = testDeviceProperties();
-        properties.gcnArchName = "gfx1100";
-        const auto definitions = manager.unsortedDefinitions(MatchContext{graph, 0, properties});
-
-        ASSERT_EQ(definitions.size(), 1U) << "betterFirst=" << betterFirst;
-        EXPECT_EQ(definitions.front().kernelId, testId(0x93)) << "betterFirst=" << betterFirst;
-    }
-
-    EXPECT_TRUE(recorder.hasLogContaining(HIPDNN_SEV_INFO,
-                                          "kernel " + toString(testId(0x95))
-                                              + " is shadowed by kernel " + toString(testId(0x93))
-                                              + " at a better arch tier"))
-        << recorder.getRecordedLogsAsString();
+    EXPECT_THROW(StateManager(makeSchema(),
+                              makeTestMatchers(),
+                              makeTestDispatches(),
+                              {first, second},
+                              std::make_shared<NativeKernelHeuristic>(SCORE_SYMBOL),
+                              "test.graph"),
+                 std::invalid_argument);
 }
 
 /// Kernel matchers that decline the explicit kernel by name, so the better-tier kernel is
@@ -565,46 +477,6 @@ TEST(TestKernelIngestorStateManager, AWinnerRecordNamingAShadowedKernelFallsBack
     {
         EXPECT_EQ(after.entries[i].kernelId, baseline.entries[i].kernelId);
         EXPECT_NE(after.entries[i].kernelId, testId(0x93)) << "a shadowed kernel was resurrected";
-    }
-}
-
-/// One manager, one graph, two devices: the per-(graph, device) catalog cache must keep the
-/// member device's shadowed catalog from answering for the device the better tier does not
-/// reach.
-TEST(TestKernelIngestorStateManager, KeepsTheLowerTierKernelOnDevicesTheBetterTierDoesNotReach)
-{
-    const ScopedSymbols symbols("test.graph", acceptGraph, "test.kernel", countingFloatKernels);
-    const auto criterion = scopedGraphMatcher("test.graph_criterion", &acceptCriterion);
-
-    auto generic = makePack({GRAPH_MATCHER_ID}, {"gfx11-generic"});
-    generic.kernels = {makeKernel(testId(0x93), "kernel_generic", 64, "FLOAT")};
-    auto anywhere = makePack({GRAPH_MATCHER_ID});
-    anywhere.id = testId(0x94);
-    anywhere.kernels = {makeKernel(testId(0x95), "kernel_anywhere", 64, "FLOAT")};
-
-    const StateManager manager(makeSchema(),
-                               makeTestMatchers(),
-                               makeTestDispatches(),
-                               {anywhere, generic},
-                               std::make_shared<NativeKernelHeuristic>(SCORE_SYMBOL),
-                               "test.graph");
-
-    const TestGraph graph(makeGraphId(0x2A));
-    auto member = testDeviceProperties();
-    member.gcnArchName = "gfx1151";
-    auto nonMember = testDeviceProperties();
-    nonMember.gcnArchName = "gfx942:sramecc+";
-
-    // Queried twice each, interleaved, so the second answer of each comes from the cache.
-    for(int round = 0; round < 2; ++round)
-    {
-        const auto onMember = manager.unsortedDefinitions(MatchContext{graph, 0, member});
-        ASSERT_EQ(onMember.size(), 1U) << "round " << round;
-        EXPECT_EQ(onMember.front().kernelId, testId(0x93)) << "round " << round;
-
-        const auto onNonMember = manager.unsortedDefinitions(MatchContext{graph, 1, nonMember});
-        ASSERT_EQ(onNonMember.size(), 1U) << "round " << round;
-        EXPECT_EQ(onNonMember.front().kernelId, testId(0x95)) << "round " << round;
     }
 }
 

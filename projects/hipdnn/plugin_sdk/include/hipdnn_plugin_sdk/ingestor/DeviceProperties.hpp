@@ -31,11 +31,8 @@ struct DeviceProperties
 };
 
 /// How @p arch (a KDP's supported-target list) ranks for @p deviceArch: the best tier of
-/// any entry, or nullopt when no entry admits the device. An empty list is UNRESTRICTED.
-/// The device carries its features and entries are base ids, so an explicit entry is the
-/// PREFIX match, not SUBSTRING or equality: `gfx942` is EXPLICIT for a device reporting
-/// `gfx942:sramecc+:xnack-` and never matches `gfx950`. A generic entry is GENERIC when the
-/// table lists the device's base id as a member.
+/// any entry (see entryTier), or nullopt when no entry admits the device. An empty list is
+/// UNRESTRICTED.
 inline std::optional<ArchTier> archTier(const std::vector<std::string>& arch,
                                         std::string_view deviceArch)
 {
@@ -43,20 +40,11 @@ inline std::optional<ArchTier> archTier(const std::vector<std::string>& arch,
     {
         return ArchTier::UNRESTRICTED;
     }
-    const auto baseDeviceId = stripArchFeatures(deviceArch);
     std::optional<ArchTier> best;
     for(const auto& entry : arch)
     {
-        std::optional<ArchTier> tier;
-        if(!isGenericShapedArchName(entry) && archMatches(deviceArch, entry, ArchMatchMode::PREFIX))
-        {
-            tier = ArchTier::EXPLICIT;
-        }
-        else
-        {
-            tier = archEntryTier(entry, baseDeviceId);
-        }
-        if(tier && (!best || static_cast<int>(*tier) < static_cast<int>(*best)))
+        const auto tier = entryTier(entry, deviceArch);
+        if(tier && (!best || *tier < *best))
         {
             best = tier;
         }
@@ -74,21 +62,10 @@ inline bool archSupports(const std::vector<std::string>& arch, std::string_view 
 namespace detail
 {
 
-/// Does the single list entry @p entry admit the device id @p device? An explicit entry is
-/// the PREFIX match; a generic admits its members; an unknown generic admits nothing.
-inline bool entryAdmits(std::string_view entry, std::string_view device)
-{
-    if(isGenericShapedArchName(entry))
-    {
-        return genericTargetContains(entry, stripArchFeatures(device));
-    }
-    return archMatches(device, entry, ArchMatchMode::PREFIX);
-}
-
 inline bool listAdmits(const std::vector<std::string>& list, std::string_view device)
 {
     return std::any_of(list.begin(), list.end(), [device](const std::string& entry) {
-        return entryAdmits(entry, device);
+        return entryTier(entry, device).has_value();
     });
 }
 

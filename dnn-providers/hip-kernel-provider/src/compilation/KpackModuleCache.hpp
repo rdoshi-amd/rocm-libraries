@@ -12,6 +12,7 @@
 #include "utilities/Digest.hpp"
 
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -104,35 +105,32 @@ public:
                + "::" + std::to_string(deviceOrdinal) + "::" + expectedSha256;
     }
 
-    /// The archive key whose binary serves @p deviceArch: the first key naming the device
-    /// itself (PREFIX match, features ignored), else the first key, in archive order, that
-    /// is a table generic containing the device's base id, else nullptr. A generic-shaped
-    /// key absent from the table matches nothing. The caller owns what the pointer
-    /// designates: it points into @p archiveArches.
+    /// The archive key whose binary serves @p deviceArch: the first key ranking best by
+    /// entryTier (the device's own id, features ignored, over a table generic containing
+    /// it), ties in archive order, else nullptr. A generic-shaped key absent from the
+    /// table matches nothing. The caller owns what the pointer designates: it points into
+    /// @p archiveArches.
     static const std::string* selectArch(const std::vector<std::string>& archiveArches,
                                          std::string_view deviceArch)
     {
-        const auto baseDeviceId = hipdnn_plugin_sdk::stripArchFeatures(deviceArch);
+        const std::string* best = nullptr;
+        std::optional<hipdnn_plugin_sdk::ArchTier> bestTier;
         for(const auto& candidate : archiveArches)
         {
-            if(!hipdnn_plugin_sdk::isGenericShapedArchName(candidate)
-               && hipdnn_plugin_sdk::archMatches(
-                   deviceArch, candidate, hipdnn_plugin_sdk::ArchMatchMode::PREFIX))
+            const auto tier = hipdnn_plugin_sdk::entryTier(candidate, deviceArch);
+            if(tier && (!bestTier || *tier < *bestTier))
             {
-                return &candidate;
+                best = &candidate;
+                bestTier = tier;
             }
         }
-        for(const auto& candidate : archiveArches)
+        if(bestTier == hipdnn_plugin_sdk::ArchTier::GENERIC)
         {
-            if(hipdnn_plugin_sdk::genericTargetContains(candidate, baseDeviceId))
-            {
-                HIPDNN_PLUGIN_LOG_INFO("kpack: device arch '"
-                                       << deviceArch << "' is served by generic archive key '"
-                                       << candidate << "'");
-                return &candidate;
-            }
+            HIPDNN_PLUGIN_LOG_INFO("kpack: device arch '"
+                                   << deviceArch << "' is served by generic archive key '" << *best
+                                   << "'");
         }
-        return nullptr;
+        return best;
     }
 
     /// @throws KpackModuleLoadFailure on any stage that fails. Never returns a null

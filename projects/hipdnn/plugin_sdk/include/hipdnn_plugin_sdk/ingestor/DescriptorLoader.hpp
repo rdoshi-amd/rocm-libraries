@@ -684,6 +684,77 @@ inline std::string describeArch(const std::vector<std::string>& arch)
     return text + "]";
 }
 
+/// A device both table entries @p x and @p y cover when either is a table generic and the
+/// other is a member it contains or a generic sharing a member; empty when none.
+inline std::string sharedGenericMember(const std::string& x, const std::string& y)
+{
+    const auto* generic = findGenericTarget(x);
+    const std::string& other = generic != nullptr ? y : x;
+    if(generic == nullptr)
+    {
+        generic = findGenericTarget(y);
+    }
+    if(generic == nullptr)
+    {
+        return {};
+    }
+    for(size_t i = 0; i < generic->memberCount; ++i)
+    {
+        if(entryTier(other, generic->members[i]).has_value())
+        {
+            return std::string(generic->members[i]);
+        }
+    }
+    return {};
+}
+
+/// Why @p kernelArch breaks the generic rules against its pack's @p packArch, or empty.
+/// A kernel may name a generic only if the pack lists it. When the pack lists generics, a
+/// kernel with an arch of its own must list every one of them and only entries the pack
+/// lists. A kernel with no arch inherits the pack's and is never in violation.
+inline std::string genericArchViolation(const std::vector<std::string>& packArch,
+                                        const std::vector<std::string>& kernelArch)
+{
+    const auto lists = [](const std::vector<std::string>& arch, const std::string& entry) {
+        return std::find(arch.begin(), arch.end(), entry) != arch.end();
+    };
+    for(const auto& entry : kernelArch)
+    {
+        if(isGenericShapedArchName(entry) && !lists(packArch, entry))
+        {
+            return "declares generic target '" + entry + "', which its pack does not list";
+        }
+    }
+    if(kernelArch.empty())
+    {
+        return {};
+    }
+    bool packHasGeneric = false;
+    for(const auto& entry : packArch)
+    {
+        if(isGenericShapedArchName(entry))
+        {
+            packHasGeneric = true;
+            if(!lists(kernelArch, entry))
+            {
+                return "declares arch " + describeArch(kernelArch)
+                       + " without the pack's generic target '" + entry + "'";
+            }
+        }
+    }
+    if(packHasGeneric)
+    {
+        for(const auto& entry : kernelArch)
+        {
+            if(!lists(packArch, entry))
+            {
+                return "declares arch '" + entry + "', which its generic-target pack does not list";
+            }
+        }
+    }
+    return {};
+}
+
 /// `arch`: every entry must be non-empty, non-repeated, and a plausible gfx base id.
 /// archSupports is a case-sensitive exact compare, so `""`, `" gfx942"`, or `"gfx94"`
 /// would otherwise silently disable the pack everywhere with nothing louder than an
@@ -717,10 +788,19 @@ inline std::vector<std::string> requireArchList(const nlohmann::json& object,
     {
         if(isGenericShapedArchName(value) && findGenericTarget(value) == nullptr)
         {
-            HIPDNN_PLUGIN_LOG_WARN("ingestor: arch entry '"
-                                   << value << "' in " << where
-                                   << " is a generic target name absent from the generic target "
-                                      "table; it matches no device");
+            fail("key 'arch' in " + where + " names '" + value
+                 + "', a generic target absent from the generic target table");
+        }
+    }
+    for(size_t i = 0; i < values.size(); ++i)
+    {
+        for(size_t j = i + 1; j < values.size(); ++j)
+        {
+            if(const auto shared = sharedGenericMember(values[i], values[j]); !shared.empty())
+            {
+                fail("key 'arch' in " + where + " lists '" + values[i] + "' and '" + values[j]
+                     + "', which both cover " + shared);
+            }
         }
     }
     return values;
@@ -1090,6 +1170,11 @@ inline KernelDescriptorPack parseKernelDescriptorPack(const nlohmann::json& root
                 fail("kernel '" + kernel->name + "' in " + where + " declares arch "
                      + describeArch(kernel->arch) + ", which reaches past the pack's "
                      + describeArch(pack.arch));
+            }
+            if(const auto violation = genericArchViolation(pack.arch, kernel->arch);
+               !violation.empty())
+            {
+                fail("kernel '" + kernel->name + "' in " + where + " " + violation);
             }
             pack.kernels.push_back(std::move(*kernel));
         }
@@ -1901,6 +1986,13 @@ inline std::vector<DescriptorSet> resolveDescriptorSets(const DescriptorCatalog&
                         // not claim -- what a missing shard stamp looks like -- sends the
                         // reader hunting for the wrong thing.
                         reason = match.reason;
+                        break;
+                    }
+                    if(const auto violation
+                       = detail::genericArchViolation(pack.arch, match.kernel->arch);
+                       !violation.empty())
+                    {
+                        reason = "names kernel " + toString(kernelId) + ", which " + violation;
                         break;
                     }
                     pack.kernels.push_back(*match.kernel);

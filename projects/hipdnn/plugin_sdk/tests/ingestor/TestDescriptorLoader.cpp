@@ -11,7 +11,6 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
-#include <functional>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -1980,16 +1979,67 @@ TEST(TestDescriptorLoader, CarriesAPacksDeclaredArchitectures)
     EXPECT_EQ(sets.front().packs.front().arch, (std::vector<std::string>{"gfx90a", "gfx942"}));
 }
 
-/// The validator must admit exactly what archMatches admits of an authored entry: a bare
-/// base id. LLVM generic targets are real gcnArchName values whose base id carries a '-',
-/// so a shape check keyed on that character would make them unauthorable.
-TEST(TestDescriptorLoader, AcceptsGenericTargetIds)
+namespace
+{
+
+const std::vector<std::string> INTACT_ONLY{"test:intact"};
+const std::vector<std::string> BOTH{"test:candidate", "test:intact"};
+
+nlohmann::json arch(std::initializer_list<std::string> entries)
+{
+    return nlohmann::json(std::vector<std::string>(entries));
+}
+
+/// Authors the candidate's first kernel with @p kernelArch under a pack listing
+/// @p packArch, spelled inline or as a standalone `.ukd.json`.
+Documents candidateWithKernelArch(const nlohmann::json& packArch,
+                                  const nlohmann::json& kernelArch,
+                                  bool standalone)
+{
+    auto documents = makeSetDocuments('2', "test:candidate");
+    if(standalone)
+    {
+        referenceLastKernel(documents);
+        documentOfType(documents, ".ukd.json")["arch"] = kernelArch;
+        documentOfType(documents, ".kdp.json")["arch"] = packArch;
+        return documents;
+    }
+    auto& pack = documentOfType(documents, ".kdp.json");
+    pack["arch"] = packArch;
+    pack.at("kernelDescriptors")[0]["arch"] = kernelArch;
+    return documents;
+}
+
+/// The names of the engines that load when @p candidate sits beside an intact engine.
+/// Sorted, so a case asserts which pack survives, not the order the catalog lists it in.
+std::vector<std::string> engineNames(const Documents& candidate)
+{
+    const hipdnn_test_sdk::utilities::ScopedDirectory dir(uniqueDirectory("generic_arch_rule"));
+    writeDocuments(dir.path(), makeSetDocuments('1', "test:intact"));
+    writeDocuments(dir.path(), candidate);
+
+    std::vector<std::string> names;
+    for(const auto& set : loadFrom(dir.path()))
+    {
+        names.push_back(set.engine.name);
+    }
+    std::sort(names.begin(), names.end());
+    return names;
+}
+
+} // namespace
+
+/// An authored generic spells a bare base id with a '-' in it, which the arch validator
+/// must admit; it sits in a list beside an unrelated explicit id, and a kernel spelled
+/// with the same list keeps it.
+TEST(TestDescriptorLoader, AcceptsAGenericTargetBesideAnUnrelatedExplicitId)
 {
     const ScopedSymbols symbols;
     const hipdnn_test_sdk::utilities::ScopedDirectory dir(uniqueDirectory("pack_arch_generic"));
     auto documents = makeSetDocuments('1', "test:arch_generic");
-    documentOfType(documents, ".kdp.json")["arch"]
-        = nlohmann::json::array({"gfx942", "gfx9-4-generic"});
+    auto& pack = documentOfType(documents, ".kdp.json");
+    pack["arch"] = arch({"gfx942", "gfx11-generic"});
+    pack.at("kernelDescriptors")[0]["arch"] = arch({"gfx942", "gfx11-generic"});
     writeDocuments(dir.path(), documents);
 
     const auto sets = loadFrom(dir.path());
@@ -1997,100 +2047,88 @@ TEST(TestDescriptorLoader, AcceptsGenericTargetIds)
     ASSERT_EQ(sets.size(), 1u);
     ASSERT_EQ(sets.front().packs.size(), 1u);
     EXPECT_EQ(sets.front().packs.front().arch,
-              (std::vector<std::string>{"gfx942", "gfx9-4-generic"}));
+              (std::vector<std::string>{"gfx942", "gfx11-generic"}));
+    EXPECT_EQ(sets.front().packs.front().kernels.front().arch,
+              (std::vector<std::string>{"gfx942", "gfx11-generic"}));
 }
 
-/// A generic-shaped name the table does not list is not an error -- a newer table may know
-/// it -- but it admits no device, and the author is told so at load.
-TEST(TestDescriptorLoader, WarnsAndMatchesNothingForAGenericNameAbsentFromTheTable)
+/// R1: a generic-shaped name the table does not list matches no device, so the file that
+/// names it is dropped, whether the name is the pack's or a kernel's.
+TEST(TestDescriptorLoader, DropsAPackNamingAGenericAbsentFromTheTable)
 {
-    auto recorder
-        = hipdnn_test_sdk::utilities::SharedLogRecorder::withOverrideLevel(HIPDNN_SEV_WARN);
-    const ScopedSymbols symbols;
-    const hipdnn_test_sdk::utilities::ScopedDirectory dir(uniqueDirectory("arch_unknown_generic"));
-    auto documents = makeSetDocuments('1', "test:unknown_generic");
-    documentOfType(documents, ".kdp.json")["arch"] = nlohmann::json::array({"gfx99-generic"});
-    writeDocuments(dir.path(), documents);
+    EXPECT_EQ(engineNames(candidateWithKernelArch(arch({"gfx99-generic"}), arch({}), false)),
+              INTACT_ONLY);
+    EXPECT_EQ(engineNames(candidateWithKernelArch(arch({}), arch({"gfx99-generic"}), false)),
+              INTACT_ONLY);
+    EXPECT_EQ(engineNames(candidateWithKernelArch(arch({}), arch({"gfx99-generic"}), true)),
+              INTACT_ONLY);
+}
 
-    const auto sets = loadFrom(dir.path());
+/// R2: one list may not hold a generic together with a member it contains. Generics with
+/// no member in common coexist.
+TEST(TestDescriptorLoader, DropsAPackListingAGenericAndOneOfItsMembers)
+{
+    EXPECT_EQ(
+        engineNames(candidateWithKernelArch(arch({"gfx11-generic", "gfx1151"}), arch({}), false)),
+        INTACT_ONLY);
+    EXPECT_EQ(
+        engineNames(candidateWithKernelArch(arch({}), arch({"gfx1151", "gfx11-generic"}), false)),
+        INTACT_ONLY);
+    EXPECT_EQ(engineNames(candidateWithKernelArch(
+                  arch({"gfx11-generic", "gfx12-generic", "gfx942"}), arch({}), false)),
+              BOTH);
+}
 
-    ASSERT_EQ(sets.size(), 1u);
-    ASSERT_EQ(sets.front().packs.size(), 1u);
-    const auto& packArch = sets.front().packs.front().arch;
-    EXPECT_EQ(packArch, std::vector<std::string>{"gfx99-generic"});
-    for(const auto* device : {"gfx942", "gfx1100", "gfx99-generic"})
+/// R3: a kernel names a generic only when its pack lists that generic itself, even when
+/// the pack's explicit entries already cover every member.
+TEST(TestDescriptorLoader, DropsAPackWhoseKernelNamesAGenericThePackDoesNotList)
+{
+    nlohmann::json members = nlohmann::json::array();
+    for(std::size_t i = 0; i < hipdnn_plugin_sdk::findGenericTarget("gfx11-generic")->memberCount;
+        ++i)
     {
-        EXPECT_FALSE(archSupports(packArch, device)) << device;
+        members.push_back(
+            std::string(hipdnn_plugin_sdk::findGenericTarget("gfx11-generic")->members[i]));
     }
-    EXPECT_TRUE(recorder.hasLogContaining(HIPDNN_SEV_WARN, "arch entry 'gfx99-generic' in "))
-        << recorder.getRecordedLogsAsString();
-    EXPECT_TRUE(recorder.hasLogContaining(
-        HIPDNN_SEV_WARN,
-        "is a generic target name absent from the generic target table; it matches no device"))
-        << recorder.getRecordedLogsAsString();
+    for(const bool standalone : {false, true})
+    {
+        EXPECT_EQ(
+            engineNames(candidateWithKernelArch(members, arch({"gfx11-generic"}), standalone)),
+            INTACT_ONLY)
+            << (standalone ? "standalone" : "inline");
+        EXPECT_EQ(engineNames(candidateWithKernelArch(
+                      arch({"gfx11-generic", "gfx942"}), arch({"gfx11-generic"}), standalone)),
+                  BOTH)
+            << (standalone ? "standalone" : "inline");
+    }
 }
 
-/// A known generic does not warn.
-TEST(TestDescriptorLoader, DoesNotWarnForAGenericNameInTheTable)
+/// R4: under a pack listing a generic, a kernel with an arch of its own lists every
+/// generic of the pack and only entries the pack lists. A kernel with no arch inherits.
+TEST(TestDescriptorLoader, DropsAPackWhoseKernelOmitsOrExceedsTheGenericPackArch)
 {
-    auto recorder
-        = hipdnn_test_sdk::utilities::SharedLogRecorder::withOverrideLevel(HIPDNN_SEV_WARN);
-    const ScopedSymbols symbols;
-    const hipdnn_test_sdk::utilities::ScopedDirectory dir(uniqueDirectory("arch_known_generic"));
-    auto documents = makeSetDocuments('1', "test:known_generic");
-    documentOfType(documents, ".kdp.json")["arch"] = nlohmann::json::array({"gfx11-generic"});
-    writeDocuments(dir.path(), documents);
-
-    ASSERT_EQ(loadFrom(dir.path()).size(), 1u);
-    EXPECT_FALSE(recorder.hasLogContaining(HIPDNN_SEV_WARN, "absent from the generic target table"))
-        << recorder.getRecordedLogsAsString();
-}
-
-/// Loader leniency: coverage is over expanded member sets, so an inline kernel naming one
-/// member sits within a generic pack. The authoring tools are stricter; this is the last
-/// line.
-TEST(TestDescriptorLoader, AcceptsAnInlineKernelNamingAMemberUnderAGenericPack)
-{
-    const hipdnn_test_sdk::utilities::ScopedDirectory dir(uniqueDirectory("inline_member"));
-    auto documents = makeSetDocuments('1', "test:inline_member");
-    auto& pack = documentOfType(documents, ".kdp.json");
-    pack["arch"] = nlohmann::json::array({"gfx11-generic"});
-    pack.at("kernelDescriptors")[0]["arch"] = nlohmann::json::array({"gfx1151"});
-    writeDocuments(dir.path(), documents);
-
-    const auto sets = loadFrom(dir.path());
-
-    ASSERT_EQ(sets.size(), 1u);
-    ASSERT_EQ(sets.front().packs.size(), 1u);
-    EXPECT_EQ(sets.front().packs.front().kernels.front().arch, std::vector<std::string>{"gfx1151"});
-}
-
-/// An inline kernel that names one member and one device outside the generic reaches past
-/// the pack.
-TEST(TestDescriptorLoader, RejectsAnInlineKernelReachingOutsideTheGenericsMembers)
-{
-    auto recorder
-        = hipdnn_test_sdk::utilities::SharedLogRecorder::withOverrideLevel(HIPDNN_SEV_ERROR);
-    const hipdnn_test_sdk::utilities::ScopedDirectory dir(uniqueDirectory("inline_outside"));
-    auto documents = makeSetDocuments('1', "test:inline_outside");
-    auto& pack = documentOfType(documents, ".kdp.json");
-    pack["arch"] = nlohmann::json::array({"gfx11-generic"});
-    pack.at("kernelDescriptors")[0]["arch"] = nlohmann::json::array({"gfx1151", "gfx942"});
-    writeDocuments(dir.path(), documents);
-
-    EXPECT_TRUE(loadFrom(dir.path()).empty());
-    EXPECT_TRUE(recorder.hasLogContaining(
-        HIPDNN_SEV_ERROR,
-        "declares arch [gfx1151, gfx942], which reaches past the pack's [gfx11-generic]"))
-        << recorder.getRecordedLogsAsString();
+    for(const bool standalone : {false, true})
+    {
+        EXPECT_EQ(engineNames(candidateWithKernelArch(
+                      arch({"gfx11-generic", "gfx942"}), arch({"gfx942"}), standalone)),
+                  INTACT_ONLY)
+            << (standalone ? "standalone" : "inline");
+        EXPECT_EQ(engineNames(candidateWithKernelArch(
+                      arch({"gfx11-generic"}), arch({"gfx1151"}), standalone)),
+                  INTACT_ONLY)
+            << (standalone ? "standalone" : "inline");
+        EXPECT_EQ(engineNames(candidateWithKernelArch(
+                      arch({"gfx11-generic", "gfx942"}), arch({"gfx11-generic"}), standalone)),
+                  BOTH)
+            << (standalone ? "standalone" : "inline");
+    }
+    EXPECT_EQ(engineNames(candidateWithKernelArch(arch({"gfx11-generic"}), arch({}), false)), BOTH);
 }
 
 /// Unchanged loader rule: a standalone kernel id defined for the generic and for one of its
 /// members is two covered definitions under a generic pack, and nothing ranks them.
 TEST(TestDescriptorLoader, StillRejectsAStandaloneKernelDefinedForAGenericAndForOneOfItsMembers)
 {
-    auto recorder
-        = hipdnn_test_sdk::utilities::SharedLogRecorder::withOverrideLevel(HIPDNN_SEV_ERROR);
     const hipdnn_test_sdk::utilities::ScopedDirectory dir(uniqueDirectory("generic_and_member"));
     auto documents = makeSetDocuments('1', "test:generic_and_member");
     referenceLastKernel(documents);
@@ -2104,64 +2142,6 @@ TEST(TestDescriptorLoader, StillRejectsAStandaloneKernelDefinedForAGenericAndFor
     writeDocuments(dir.path() / "gfx1151", {TestDocument{".ukd.json", member}});
 
     EXPECT_TRUE(loadFrom(dir.path()).empty());
-    EXPECT_TRUE(recorder.hasLogContaining(
-        HIPDNN_SEV_ERROR, "which several descriptors define within the pack's arch"))
-        << recorder.getRecordedLogsAsString();
-}
-
-namespace
-{
-
-/// A generic pack of one referenced kernel, authored as a generic UKD under the pack's
-/// generic spelling.
-Documents makeGenericPackDocuments(char tag, const std::string& engineName)
-{
-    auto documents = makeSetDocuments(tag, engineName);
-    referenceLastKernel(documents);
-    auto& pack = documentOfType(documents, ".kdp.json");
-    pack["arch"] = nlohmann::json::array({"gfx11-generic"});
-    const auto referenced = documentOfType(documents, ".ukd.json").at("id");
-    pack["kernelDescriptors"] = nlohmann::json::array({referenced});
-    documentOfType(documents, ".ukd.json")["arch"] = nlohmann::json::array({"gfx11-generic"});
-    return documents;
-}
-
-} // namespace
-
-/// Regression guard for the packer's per-member-folder layout, which writes one identical
-/// copy of a generic tree under every selected member's directory. Passes on the existing
-/// identical-duplicate collapse; it does not prove new loader work.
-TEST(TestDescriptorLoader, CollapsesIdenticalGenericCopiesAcrossMemberDirectories)
-{
-    const hipdnn_test_sdk::utilities::ScopedDirectory dir(uniqueDirectory("generic_copies"));
-    const auto documents = makeGenericPackDocuments('1', "test:generic_copies");
-    writeDocuments(dir.path() / "gfx1100", documents);
-    writeDocuments(dir.path() / "gfx1151", documents);
-
-    const auto sets = loadFrom(dir.path());
-
-    ASSERT_EQ(sets.size(), 1u);
-    ASSERT_EQ(sets.front().packs.size(), 1u);
-    EXPECT_EQ(sets.front().packs.front().arch, std::vector<std::string>{"gfx11-generic"});
-    EXPECT_EQ(sets.front().packs.front().kernels.size(), 1u);
-}
-
-/// Regression guard, same status: two member directories whose generic copies differ are
-/// an ordinary same-id-and-arch conflict and drop together.
-TEST(TestDescriptorLoader, DropsBothWhenGenericCopiesInMemberDirectoriesDiffer)
-{
-    auto recorder
-        = hipdnn_test_sdk::utilities::SharedLogRecorder::withOverrideLevel(HIPDNN_SEV_ERROR);
-    const hipdnn_test_sdk::utilities::ScopedDirectory dir(uniqueDirectory("generic_copies_differ"));
-    auto first = makeGenericPackDocuments('1', "test:generic_copies_differ");
-    auto second = first;
-    documentOfType(second, ".ukd.json")["kernel_source"]["source_file"] = "Other.cpp";
-    writeDocuments(dir.path() / "gfx1100", first);
-    writeDocuments(dir.path() / "gfx1151", second);
-
-    EXPECT_TRUE(loadFrom(dir.path()).empty());
-    EXPECT_TRUE(recorder.hasLogContaining(HIPDNN_SEV_ERROR, "both define"))
-        << recorder.getRecordedLogsAsString();
 }
 
 /// The default: a pack naming no architecture applies everywhere, so absence must parse

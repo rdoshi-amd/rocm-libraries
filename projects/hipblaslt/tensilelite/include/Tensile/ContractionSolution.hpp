@@ -660,6 +660,10 @@ namespace TensileLite
         // or more tiles the split is aligned to them (see streamKDynamicSplit());
         // 0 leaves it as the slots and limits make it.
         size_t numQueues = 0;
+        // CUs the parts run on, one workgroup each: min(CUs, CU-count hint).
+        // The alignment bounds the parallelism it gives up against
+        // min(tiles * split, computeUnits). 0 means the split slots.
+        size_t computeUnits = 0;
         // The kernel can fix split tiles up by last arrival. With neither this
         // nor allowParallel every tile stays whole unless the debug overrides
         // ask otherwise.
@@ -723,8 +727,10 @@ namespace TensileLite
      * With numQueues set and at least two tiles, a split of numQueues or
      * more parts that is not a multiple of numQueues / 2 is lowered to one
      * that is (and that the SKItersPerWI rounding keeps exact) when that
-     * drops at most 1/8 of its parts, or whatever it drops if the split is
-     * odd. Part p of tile t is work item t * skSplit + p, in queue
+     * drops at most 1/8 of its parts, or, if the split is odd, when the
+     * lowered parts still cover 3/4 of the CUs the unaligned ones kept busy
+     * (tiles * aligned >= 3/4 * min(tiles * split, computeUnits)). Part p of
+     * tile t is work item t * skSplit + p, in queue
      * (t * skSplit + p) % numQueues, so with an aligned split each XCD runs
      * the same few K-slices of every tile and A and B are read about once
      * from its L2; an odd split spreads every K-slice over all the XCDs.

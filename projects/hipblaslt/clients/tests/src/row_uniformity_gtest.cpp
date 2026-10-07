@@ -3579,8 +3579,9 @@ namespace
 
     // With two or more tiles the split is aligned to the per-XCD queues:
     // lowered to a multiple of numQueues / 2 that the SKItersPerWI rounding
-    // keeps exact, when that drops at most 1/8 of the parts or the split is
-    // odd. Splits below numQueues and single tiles stay as they are.
+    // keeps exact, when that drops at most 1/8 of the parts or, for an odd
+    // split, keeps 3/4 of the CUs the unaligned split kept busy. Splits below
+    // numQueues and single tiles stay as they are.
     TEST(StreamKDynamicSplit_pre_checkin, SplitAlignsWithTheQueues)
     {
         auto split = [](size_t tiles, size_t iters, size_t slots, bool parallel, size_t queues) {
@@ -3597,7 +3598,9 @@ namespace
         for(Case c : {Case{28, 144, 256, 9, 8}, // odd: 9 -> 8
                       Case{14, 4096, 256, 18, 16}, // even, drops 1/9
                       Case{12, 10240, 256, 21, 20}, // odd: the multiple of 4 above 16
-                      Case{23, 4096, 256, 11, 8}, // odd: whatever it drops
+                      Case{23, 4096, 256, 11, 11}, // odd, but 8 would idle 3/11 of the CUs
+                      Case{19, 250, 224, 11, 11}, // the same: 209 -> 152 of 224 CUs
+                      Case{2, 689, 256, 77, 77}, // the next exact multiple of 4, 44, idles 3/7
                       Case{24, 3456, 256, 10, 10}, // even, 8 would drop 1/5
                       Case{17, 4096, 256, 15, 12},
                       Case{36, 4096, 256, 7, 7}, // below the queue count
@@ -3619,6 +3622,25 @@ namespace
         // The arrival fixup too: 2 tiles of 4096, sqrt(2048) = 45 parts -> 44.
         EXPECT_EQ(split(2, 4096, 256, false, 8).skSplit, 44u);
         EXPECT_EQ(split(2, 4096, 256, false, 0).skSplit, 45u);
+
+        // The CUs kept busy are counted up to computeUnits: 8 tiles on 512
+        // slots of 256 CUs (two workgroups per CU) give 8 x 41 parts. 24
+        // keeps 192 of the 256 CUs busy, 3/4, so it is taken; counted against
+        // the 328 parts (computeUnits unset: the slots) it would not be.
+        {
+            auto in          = parallelSplitInputs(8, 369);
+            in.maxGrid       = 512;
+            in.splitSlots    = 512;
+            in.numQueues     = 8;
+            const auto plain = TensileLite::streamKDynamicSplit(in);
+            EXPECT_EQ(plain.skSplit, 41u);
+            in.computeUnits = 256;
+            const auto d    = TensileLite::streamKDynamicSplit(in);
+            EXPECT_EQ(d.skSplit, 24u);
+            EXPECT_EQ(d.grid, 192u);
+            in.computeUnits = 512;
+            EXPECT_EQ(TensileLite::streamKDynamicSplit(in).skSplit, 41u);
+        }
 
         // Four queues align to multiples of 2, from 4 parts up.
         for(Case c : {Case{28, 144, 256, 9, 8}, // odd: 9 -> 8

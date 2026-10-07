@@ -185,7 +185,8 @@ bool buildGfx1250Pipeline(ModulePassManager& mpm, StinkyAsmModule& module, const
                 passFeatureConfig.dagFeatures.tensorLoadDsLoadGapCycles =
                     moduleOptions.TensorLoadDsLoadGapCycles;
                 passFeatureConfig.dagFeatures.wmmaQueueDepth = moduleOptions.WmmaQueueDepth;
-                passFeatureConfig.dagFeatures.wmmaQueueTarget = moduleOptions.WmmaQueueTarget;
+                passFeatureConfig.dagFeatures.wmmaQueueCoverCycles =
+                    moduleOptions.WmmaQueueCoverCycles;
                 passFeatureConfig.dagFeatures.globalReadQueueDepth =
                     moduleOptions.GlobalReadQueueDepth;
                 passFeatureConfig.dagFeatures.globalReadDrainLatency =
@@ -225,7 +226,8 @@ bool buildGfx1250Pipeline(ModulePassManager& mpm, StinkyAsmModule& module, const
                 waitCntOptions.enableLoopCarriedTokenDeps =
                     moduleOptions.EnableLoopCarriedTokenDeps;
                 // A deep WMMA queue issues WMMAs back-to-back: one wait before the first.
-                waitCntOptions.mergeWaitsInWmmaRuns = moduleOptions.WmmaQueueDepth > 1;
+                waitCntOptions.mergeWaitsInWmmaRuns =
+                    moduleOptions.WmmaQueueDepth > 1 && moduleOptions.WmmaQueueCoverCycles > 0;
                 innerPM.addPass(createStinkyWaitCntInsertionPass(waitCntOptions));
                 if (runScheduler) innerPM.addPass(createRemoveDscntPass());
             }

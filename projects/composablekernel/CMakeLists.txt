@@ -55,7 +55,10 @@ include(CTest)
 
 option(ENABLE_CLANG_CPP_CHECKS "Enables clang tidy, cppcheck" ON)
 option(MIOPEN_REQ_LIBS_ONLY "Build only the MIOpen required libraries" OFF)
-option(MIOPEN_SPLIT_LIBS "Build separate convolution library for each GPU architecture" OFF)
+option(MIOPEN_SPLIT_LIBS "With MIOPEN_REQ_LIBS_ONLY, also build device_conv_operations_<arch>, one single-architecture convolution library per GPU architecture" OFF)
+if(MIOPEN_SPLIT_LIBS AND NOT MIOPEN_REQ_LIBS_ONLY)
+    message(WARNING "MIOPEN_SPLIT_LIBS has no effect without MIOPEN_REQ_LIBS_ONLY")
+endif()
 option(HIPTENSOR_REQ_LIBS_ONLY "Build only the HipTensor required libraries" OFF)
 option(CK_EXPERIMENTAL_BUILDER "Enable experimental builder" OFF)
 option(CK_TILE_DISPATCHER "Use CK Tile Dispatcher for profiler convolution kernels" OFF)
@@ -434,14 +437,25 @@ endif()
 rocm_check_target_ids(SUPPORTED_GPU_TARGETS
         TARGETS ${CK_GPU_TARGETS})
 
-set(SANITIZED_SUPPORTED_GPU_TARGETS)
-foreach(_ck_arch IN LISTS SUPPORTED_GPU_TARGETS)
-    string(REGEX REPLACE ":xnack[+-]$" "" _ck_arch_base "${_ck_arch}")
-    list(APPEND SANITIZED_SUPPORTED_GPU_TARGETS "${_ck_arch_base}")
+# Single-architecture convolution libraries (MIOPEN_SPLIT_LIBS) are named after the full
+# target id, so xnack variants stay separate. The name mapping is the one MIOpen uses
+# (miopen_sanitize_arch in projects/miopen/CMakeLists.txt), so consumers can derive the
+# library name from the same GPU target string: gfx942:xnack+ -> gfx942_xnackp.
+function(ck_sanitize_arch ARCH OUT_VAR)
+    string(REPLACE ":" "_" _ck_sanitized "${ARCH}")
+    string(REPLACE "+" "p" _ck_sanitized "${_ck_sanitized}")
+    string(REPLACE "-" "_" _ck_sanitized "${_ck_sanitized}")
+    set(${OUT_VAR} "${_ck_sanitized}" PARENT_SCOPE)
+endfunction()
+
+set(CK_SPLIT_LIB_ARCHS ${SUPPORTED_GPU_TARGETS})
+list(REMOVE_DUPLICATES CK_SPLIT_LIB_ARCHS)
+set(CK_SPLIT_LIB_SUFFIXES)
+foreach(_ck_arch IN LISTS CK_SPLIT_LIB_ARCHS)
+    ck_sanitize_arch("${_ck_arch}" _ck_arch_suffix)
+    list(APPEND CK_SPLIT_LIB_SUFFIXES "${_ck_arch_suffix}")
 endforeach()
-list(REMOVE_DUPLICATES SANITIZED_SUPPORTED_GPU_TARGETS)
 message(STATUS "Building CK for the following targets: ${SUPPORTED_GPU_TARGETS}")
-message(STATUS "Sanitized GPU target list: ${SANITIZED_SUPPORTED_GPU_TARGETS}")
 
 # Cache SUPPORTED_GPU_TARGETS for debug
 set(SUPPORTED_GPU_TARGETS "${SUPPORTED_GPU_TARGETS}" CACHE STRING "List of supported GPU targets")
@@ -1014,6 +1028,8 @@ write_basic_package_version_file(
     COMPATIBILITY AnyNewerVersion
 )
 
+get_property(CK_SPLIT_CONV_COMPONENTS GLOBAL PROPERTY CK_SPLIT_CONV_COMPONENTS)
+list(JOIN CK_SPLIT_CONV_COMPONENTS " " CK_SPLIT_CONV_COMPONENTS)
 configure_package_config_file(${CMAKE_CURRENT_SOURCE_DIR}/Config.cmake.in
     "${CMAKE_CURRENT_BINARY_DIR}/composable_kernelConfig.cmake"
     INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/composable_kernel

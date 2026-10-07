@@ -6,49 +6,10 @@ include(CheckCXXCompilerFlag)
 # We need to pass '-x hip' since check_cxx_compiler_flag assumes c++ and not HIP. 
 check_cxx_compiler_flag("--offload-compress -x hip" CXX_COMPILER_SUPPORTS_OFFLOAD_COMPRESS)
 
-function(add_instance_library INSTANCE_NAME)
-    message(DEBUG "adding instance ${INSTANCE_NAME}")
-    set(result 1)
-    if(DEFINED DTYPES)
-        foreach(source IN LISTS ARGN)
-            get_filename_component(source_name ${source} NAME)
-            set(test 0)
-            foreach(type IN LISTS DTYPES)
-                if(type MATCHES "fp16")
-                    set(type1 "_f16")
-                elseif(type MATCHES "fp32")
-                    set(type1 "_f32")
-                elseif(type MATCHES "tf32")
-                    set(type1 "_tf32")
-                elseif(type MATCHES "fp8")
-                    set(type1 "_f8")
-                elseif(type MATCHES "bf16")
-                    set(type1 "_b16")
-                elseif(type MATCHES "fp64")
-                    set(type1 "_f64")
-                elseif(type MATCHES "int8")
-                    set(type1 "_i8")
-                endif()
-                #make an exception for reduction kernels
-                if("${source_name}" MATCHES "${type}" OR "${source_name}" MATCHES "${type1}" OR "${source_name}" MATCHES "device_reduce_instance" OR ${source_name} MATCHES "device_image_to_column")
-                    #if filename matches any selected type, exit type loop and do no exclude the file from the list
-                    set(test 0)
-                    break()
-                elseif((source_name MATCHES "fp8" OR source_name MATCHES "fp32" OR source_name MATCHES "tf32" OR source_name MATCHES "fp64" OR source_name MATCHES "bf16" OR source_name MATCHES "int8" OR source_name MATCHES "fp16" OR
-                         source_name MATCHES "_f8" OR source_name MATCHES "_f32" OR source_name MATCHES "_tf32" OR source_name MATCHES "_f64" OR source_name MATCHES "_i8" OR source_name MATCHES "_f16" OR source_name MATCHES "_b16") AND
-                    NOT (source_name MATCHES type OR source_name MATCHES type1))
-                    #if filename contains a type which doesn't match any selected type, mark it for removal
-                    set(test 1)
-                endif()
-            endforeach()
-            if(test EQUAL 1)
-                message(DEBUG "removing instance ${source} ")
-                list(REMOVE_ITEM ARGN "${source}")
-            endif()
-        endforeach()
-    endif()
-
-    set(INST_TARGETS ${SUPPORTED_GPU_TARGETS})
+# Removes sources that cannot be built for any architecture in TARGETS.
+# Usage: ck_filter_instance_sources(<out_var> "<target;target;...>" <sources...>)
+function(ck_filter_instance_sources OUT_VAR TARGETS)
+    set(INST_TARGETS ${TARGETS})
 
     # SPIR-V target: remove from XDL/WMMA/MX/MHA instance target lists
     # since these require architecture-specific intrinsics
@@ -141,6 +102,12 @@ function(add_instance_library INSTANCE_NAME)
 
     endforeach()
 
+    set(${OUT_VAR} ${ARGN} PARENT_SCOPE)
+endfunction()
+
+# Architectures from <targets...> that a single source file can be built for.
+# Usage: ck_instance_source_targets(<out_var> <source> <targets...>)
+function(ck_instance_source_targets OUT_VAR source)
     #set the target filters
     set(UNSUPPORTED_TARGETS "gfx900;gfx906;gfx906:xnack-;gfx90c")
     set(NON_XDL_TARGETS ${UNSUPPORTED_TARGETS} gfx1030 gfx1031 gfx1032 gfx1033 gfx1034 gfx1035 gfx1036 gfx10-3-generic amdgcnspirv)
@@ -149,6 +116,173 @@ function(add_instance_library INSTANCE_NAME)
     set(NON_MX_TARGETS ${NON_XDL_TARGETS} gfx908:xnack- gfx908:xnack+ gfx90a:xnack+ gfx90a:xnack- gfx908 gfx90a gfx942 gfx1100 gfx1101 gfx1102 gfx1103 gfx1150 gfx1151 gfx1152 gfx1153 gfx1200 gfx1201 gfx11-generic gfx12-generic)
     set(NON_F8_TARGETS ${NON_XDL_TARGETS} gfx908:xnack- gfx908:xnack+ gfx90a:xnack+ gfx90a:xnack- gfx908 gfx90a gfx1100 gfx1101 gfx1102 gfx1103 gfx1150 gfx1151 gfx1152 gfx1153 gfx11-generic)
 
+    get_filename_component(source_name ${source} NAME)
+
+    set(INST_TARGETS ${ARGN})
+    if(source_name MATCHES "_xdl")
+        list(REMOVE_ITEM INST_TARGETS ${NON_XDL_TARGETS})
+    elseif(source_name MATCHES "_wmma")
+        list(REMOVE_ITEM INST_TARGETS ${NON_WMMA_TARGETS})
+    elseif(source_name MATCHES "mha")
+        list(REMOVE_ITEM INST_TARGETS ${NON_MHA_TARGETS})
+    endif()
+    if(source_name MATCHES "_mx")
+        list(REMOVE_ITEM INST_TARGETS ${NON_MX_TARGETS})
+    endif()
+
+    #only build the fp8 gemm instances for gfx90a if the build argument is set, otherwise only build for gfx942/gfx950 and gfx1200/gfx1201
+    if(NOT CK_USE_FP8_ON_UNSUPPORTED_ARCH)
+        if(source_name MATCHES "gemm_xdl_universal|gemm_multiply_multiply|gemm_universal_preshuffle|gemm_blockscale" AND source_name MATCHES "_f8_")
+            list(REMOVE_ITEM INST_TARGETS ${NON_F8_TARGETS})
+        endif()
+    else()
+        if(source_name MATCHES "gemm_xdl_universal|gemm_multiply_multiply|gemm_universal_preshuffle|gemm_blockscale" AND source_name MATCHES "_f8_")
+            list(REMOVE_ITEM INST_TARGETS ${NON_F8_TARGETS})
+        endif()
+    endif()
+    if(source_name MATCHES "gemm_wmma_universal" AND source_name MATCHES "f8")
+        list(FILTER INST_TARGETS INCLUDE REGEX "gfx12")
+    endif()
+
+    set(${OUT_VAR} ${INST_TARGETS} PARENT_SCOPE)
+endfunction()
+
+# Options common to every instance object library, unified or per-arch.
+function(ck_apply_instance_target_options INSTANCE_NAME)
+    target_compile_features(${INSTANCE_NAME} PUBLIC)
+
+    # splits debug information into separate .dwo files to reduce debug section size
+    if(CMAKE_BUILD_TYPE STREQUAL "Debug" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
+        target_compile_options(${INSTANCE_NAME} PRIVATE -gsplit-dwarf)
+    endif()
+
+    # flags to compress the library
+    if(NOT DISABLE_OFFLOAD_COMPRESS AND CXX_COMPILER_SUPPORTS_OFFLOAD_COMPRESS)
+        message(DEBUG "Adding --offload-compress flag for ${INSTANCE_NAME}")
+        target_compile_options(${INSTANCE_NAME} PRIVATE --offload-compress)
+    endif()
+
+    set_target_properties(${INSTANCE_NAME} PROPERTIES POSITION_INDEPENDENT_CODE ON)
+endfunction()
+
+# Compile flags that restrict a per-arch instance library to a single GPU architecture.
+# hip::device (linked into every target by the top-level CMakeLists.txt) injects
+# --offload-arch=<t> for every architecture hip-config selected. That set can include
+# architectures outside SUPPORTED_GPU_TARGETS: with GPU_ARCHS, hip-config detects the
+# build machine's GPUs. The flags cannot be removed per target, and clang honours the
+# last offload-arch flag on the command line, so every other architecture is switched
+# off with --no-offload-arch. These flags must therefore be emitted after the hip::device
+# flags; see ck_add_per_arch_instance_libraries(). hipcc moves every --offload-arch ahead
+# of every --no-offload-arch, so the result is only correct because a library never
+# switches off its own architecture; --no-offload-arch=all cannot be used for that reason.
+function(ck_per_arch_offload_flags OUT_VAR ARCH)
+    set(_ck_all_targets ${SUPPORTED_GPU_TARGETS})
+    # hip-config stores each flag wrapped in a generator expression, e.g.
+    # $<$<COMPILE_LANGUAGE:CXX>:SHELL:--offload-arch=gfx90a>.
+    get_target_property(_ck_hip_opts hip::device INTERFACE_COMPILE_OPTIONS)
+    string(REGEX MATCHALL "--offload-arch=[^>; ]+" _ck_hip_arch_flags "${_ck_hip_opts}")
+    foreach(_ck_flag IN LISTS _ck_hip_arch_flags)
+        string(REPLACE "--offload-arch=" "" _ck_hip_arch "${_ck_flag}")
+        list(APPEND _ck_all_targets "${_ck_hip_arch}")
+    endforeach()
+    list(REMOVE_DUPLICATES _ck_all_targets)
+
+    set(_ck_flags)
+    foreach(_ck_target IN LISTS _ck_all_targets)
+        if(NOT _ck_target STREQUAL ARCH)
+            string(APPEND _ck_flags " --no-offload-arch=${_ck_target}")
+        endif()
+    endforeach()
+    string(APPEND _ck_flags " --offload-arch=${ARCH}")
+    set(${OUT_VAR} "${_ck_flags}" PARENT_SCOPE)
+endfunction()
+
+# Creates <INSTANCE_NAME>_<suffix> object libraries, one per GPU target id in
+# CK_SPLIT_LIB_ARCHS (suffix: ck_sanitize_arch of the id), holding only the sources
+# buildable for that target and compiled for it alone.
+# ARGN is the source list before any architecture filtering.
+function(ck_add_per_arch_instance_libraries INSTANCE_NAME)
+    set(_ck_clone_sources)
+    foreach(_ck_arch IN LISTS CK_SPLIT_LIB_ARCHS)
+        ck_sanitize_arch("${_ck_arch}" _ck_arch_suffix)
+        ck_filter_instance_sources(_ck_arch_sources "${_ck_arch}" ${ARGN})
+        set(_ck_arch_objs)
+        foreach(_ck_source IN LISTS _ck_arch_sources)
+            ck_instance_source_targets(_ck_source_targets ${_ck_source} "${_ck_arch}")
+            if(_ck_source_targets)
+                list(APPEND _ck_arch_objs ${_ck_source})
+            endif()
+        endforeach()
+        if(NOT _ck_arch_objs)
+            message(DEBUG "no ${INSTANCE_NAME} sources for ${_ck_arch}")
+            continue()
+        endif()
+
+        set(_ck_arch_target "${INSTANCE_NAME}_${_ck_arch_suffix}")
+        add_library(${_ck_arch_target} OBJECT ${_ck_arch_objs})
+        ck_apply_instance_target_options(${_ck_arch_target})
+        ck_per_arch_offload_flags(_ck_arch_flags "${_ck_arch}")
+        set_target_properties(${_ck_arch_target} PROPERTIES CK_ARCH_FLAGS "${_ck_arch_flags}")
+        list(APPEND _ck_clone_sources ${_ck_arch_objs})
+    endforeach()
+
+    # Source file properties are directory-scoped, so the sources are shared with the unified
+    # object library and with every other per-arch library. COMPILE_FLAGS is emitted after
+    # the target-level options, and the generator expression is evaluated per consuming
+    # target (empty for the unified library), which gives each library its own trailing flags.
+    list(REMOVE_DUPLICATES _ck_clone_sources)
+    if(_ck_clone_sources)
+        set_property(SOURCE ${_ck_clone_sources} APPEND_STRING PROPERTY COMPILE_FLAGS
+            " $<TARGET_PROPERTY:CK_ARCH_FLAGS>")
+    endif()
+endfunction()
+
+function(add_instance_library INSTANCE_NAME)
+    message(DEBUG "adding instance ${INSTANCE_NAME}")
+    set(result 1)
+    if(DEFINED DTYPES)
+        foreach(source IN LISTS ARGN)
+            get_filename_component(source_name ${source} NAME)
+            set(test 0)
+            foreach(type IN LISTS DTYPES)
+                if(type MATCHES "fp16")
+                    set(type1 "_f16")
+                elseif(type MATCHES "fp32")
+                    set(type1 "_f32")
+                elseif(type MATCHES "tf32")
+                    set(type1 "_tf32")
+                elseif(type MATCHES "fp8")
+                    set(type1 "_f8")
+                elseif(type MATCHES "bf16")
+                    set(type1 "_b16")
+                elseif(type MATCHES "fp64")
+                    set(type1 "_f64")
+                elseif(type MATCHES "int8")
+                    set(type1 "_i8")
+                endif()
+                #make an exception for reduction kernels
+                if("${source_name}" MATCHES "${type}" OR "${source_name}" MATCHES "${type1}" OR "${source_name}" MATCHES "device_reduce_instance" OR ${source_name} MATCHES "device_image_to_column")
+                    #if filename matches any selected type, exit type loop and do no exclude the file from the list
+                    set(test 0)
+                    break()
+                elseif((source_name MATCHES "fp8" OR source_name MATCHES "fp32" OR source_name MATCHES "tf32" OR source_name MATCHES "fp64" OR source_name MATCHES "bf16" OR source_name MATCHES "int8" OR source_name MATCHES "fp16" OR
+                         source_name MATCHES "_f8" OR source_name MATCHES "_f32" OR source_name MATCHES "_tf32" OR source_name MATCHES "_f64" OR source_name MATCHES "_i8" OR source_name MATCHES "_f16" OR source_name MATCHES "_b16") AND
+                    NOT (source_name MATCHES type OR source_name MATCHES type1))
+                    #if filename contains a type which doesn't match any selected type, mark it for removal
+                    set(test 1)
+                endif()
+            endforeach()
+            if(test EQUAL 1)
+                message(DEBUG "removing instance ${source} ")
+                list(REMOVE_ITEM ARGN "${source}")
+            endif()
+        endforeach()
+    endif()
+
+    ck_filter_instance_sources(_ck_filtered_sources "${SUPPORTED_GPU_TARGETS}" ${ARGN})
+    set(_ck_sources_before_arch_filter ${ARGN})
+    set(ARGN ${_ck_filtered_sources})
+
     message(DEBUG "remaining instances: ${ARGN}")
     #only continue if there are some source files left on the list
     if(ARGN)
@@ -156,31 +290,7 @@ function(add_instance_library INSTANCE_NAME)
         foreach(source IN LISTS ARGN)
             get_filename_component(source_name ${source} NAME)
 
-            set(INST_TARGETS ${SUPPORTED_GPU_TARGETS})
-            if(source_name MATCHES "_xdl")
-                list(REMOVE_ITEM INST_TARGETS ${NON_XDL_TARGETS})
-            elseif(source_name MATCHES "_wmma")
-                list(REMOVE_ITEM INST_TARGETS ${NON_WMMA_TARGETS})
-            elseif(source_name MATCHES "mha")
-                list(REMOVE_ITEM INST_TARGETS ${NON_MHA_TARGETS})
-            endif()
-            if(source_name MATCHES "_mx")
-                list(REMOVE_ITEM INST_TARGETS ${NON_MX_TARGETS})
-            endif()
-
-            #only build the fp8 gemm instances for gfx90a if the build argument is set, otherwise only build for gfx942/gfx950 and gfx1200/gfx1201
-            if(NOT CK_USE_FP8_ON_UNSUPPORTED_ARCH)
-                if(source_name MATCHES "gemm_xdl_universal|gemm_multiply_multiply|gemm_universal_preshuffle|gemm_blockscale" AND source_name MATCHES "_f8_")
-                    list(REMOVE_ITEM INST_TARGETS ${NON_F8_TARGETS})
-                endif()
-            else()
-                if(source_name MATCHES "gemm_xdl_universal|gemm_multiply_multiply|gemm_universal_preshuffle|gemm_blockscale" AND source_name MATCHES "_f8_")
-                    list(REMOVE_ITEM INST_TARGETS ${NON_F8_TARGETS})
-                endif()
-            endif()
-            if(source_name MATCHES "gemm_wmma_universal" AND source_name MATCHES "f8")
-                list(FILTER INST_TARGETS INCLUDE REGEX "gfx12")
-            endif()
+            ck_instance_source_targets(INST_TARGETS ${source} ${SUPPORTED_GPU_TARGETS})
             set(offload_targets)
             foreach(target IN LISTS INST_TARGETS)
                 string(APPEND offload_targets "--offload-arch=${target} ")
@@ -191,44 +301,7 @@ function(add_instance_library INSTANCE_NAME)
         add_library(${INSTANCE_NAME} OBJECT ${INST_OBJ})
 
         if(MIOPEN_REQ_LIBS_ONLY AND MIOPEN_SPLIT_LIBS AND ${INSTANCE_NAME} MATCHES "_conv")
-         foreach(_ck_arch IN LISTS SANITIZED_SUPPORTED_GPU_TARGETS)
-          set(INST_OBJ)
-           foreach(source IN LISTS ARGN)
-            get_filename_component(source_name ${source} NAME)
-
-            set(INST_TARGETS _ck_arch)
-            if(source_name MATCHES "_xdl")
-                list(REMOVE_ITEM INST_TARGETS ${NON_XDL_TARGETS})
-            elseif(source_name MATCHES "_wmma")
-                list(REMOVE_ITEM INST_TARGETS ${NON_WMMA_TARGETS})
-            elseif(source_name MATCHES "mha")
-                list(REMOVE_ITEM INST_TARGETS ${NON_MHA_TARGETS})
-            endif()
-            if(source_name MATCHES "_mx")
-                list(REMOVE_ITEM INST_TARGETS ${NON_MX_TARGETS})
-            endif()
-
-            #only build the fp8 gemm instances for gfx90a if the build argument is set, otherwise only build for gfx942/gfx950 and gfx1200/gfx1201
-            if(NOT CK_USE_FP8_ON_UNSUPPORTED_ARCH)
-                if(source_name MATCHES "gemm_xdl_universal|gemm_multiply_multiply|gemm_universal_preshuffle|gemm_blockscale" AND source_name MATCHES "_f8_")
-                    list(REMOVE_ITEM INST_TARGETS ${NON_F8_TARGETS})
-                endif()
-            else()
-                if(source_name MATCHES "gemm_xdl_universal|gemm_multiply_multiply|gemm_universal_preshuffle|gemm_blockscale" AND source_name MATCHES "_f8_")
-                    list(REMOVE_ITEM INST_TARGETS ${NON_F8_TARGETS})
-                endif()
-            endif()
-            if(source_name MATCHES "gemm_wmma_universal" AND source_name MATCHES "f8")
-                list(FILTER INST_TARGETS INCLUDE REGEX "gfx12")
-            endif()
-            if(INST_TARGETS)
-                set_source_files_properties(${source} PROPERTIES COMPILE_FLAGS "--offload-arch=${_ck_arch}")
-            #endif()
-                list(APPEND INST_OBJ ${source})
-            endif()
-           endforeach()
-          add_library("${INSTANCE_NAME}_${_ck_arch}" OBJECT ${INST_OBJ})
-         endforeach()
+            ck_add_per_arch_instance_libraries(${INSTANCE_NAME} ${_ck_sources_before_arch_filter})
         endif()
 
         # Allow comparing floating points directly in order to check sentinel values
@@ -247,20 +320,7 @@ function(add_instance_library INSTANCE_NAME)
             target_compile_options(device_mha_instance PRIVATE ${FMHA_COMPILE_OPTIONS})
         endif()
 
-        target_compile_features(${INSTANCE_NAME} PUBLIC)
-
-        # splits debug information into separate .dwo files to reduce debug section size
-        if(CMAKE_BUILD_TYPE STREQUAL "Debug" OR CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
-            target_compile_options(${INSTANCE_NAME} PRIVATE -gsplit-dwarf)
-        endif()
-
-        # flags to compress the library
-        if(NOT DISABLE_OFFLOAD_COMPRESS AND CXX_COMPILER_SUPPORTS_OFFLOAD_COMPRESS)
-            message(DEBUG "Adding --offload-compress flag for ${INSTANCE_NAME}")
-            target_compile_options(${INSTANCE_NAME} PRIVATE --offload-compress)
-        endif()
-
-        set_target_properties(${INSTANCE_NAME} PROPERTIES POSITION_INDEPENDENT_CODE ON)
+        ck_apply_instance_target_options(${INSTANCE_NAME})
         clang_tidy_check(${INSTANCE_NAME})
         set(result 0)
         message(DEBUG "add_instance_library ${INSTANCE_NAME}")
@@ -270,6 +330,19 @@ function(add_instance_library INSTANCE_NAME)
     set(result ${result} PARENT_SCOPE)
 endfunction(add_instance_library INSTANCE_NAME)
 
+# Adds a conv instance object library, and its per-arch counterparts when they exist,
+# to CK_DEVICE_CONV_INSTANCES and CK_DEVICE_CONV_INSTANCES_<arch> in the caller's scope.
+macro(ck_append_conv_instance_objects _ck_instance_target)
+    list(APPEND CK_DEVICE_CONV_INSTANCES $<TARGET_OBJECTS:${_ck_instance_target}>)
+    if(MIOPEN_REQ_LIBS_ONLY AND MIOPEN_SPLIT_LIBS)
+        foreach(_ck_suffix IN LISTS CK_SPLIT_LIB_SUFFIXES)
+            if(TARGET ${_ck_instance_target}_${_ck_suffix})
+                list(APPEND CK_DEVICE_CONV_INSTANCES_${_ck_suffix} $<TARGET_OBJECTS:${_ck_instance_target}_${_ck_suffix}>)
+            endif()
+        endforeach()
+    endif()
+endmacro()
+
 # Helper function to add layout-specific instance objects to CK_DEVICE_CONV_INSTANCES
 # Usage: add_conv_layout_instances(operation_name layout1 layout2 ...)
 # Example: add_conv_layout_instances(grouped_conv3d_fwd_convscale ndhwgc gndhwc)
@@ -277,24 +350,16 @@ function(add_conv_layout_instances OP_NAME)
     foreach(layout ${ARGN})
         set(target_name "device_${OP_NAME}_${layout}_instance")
         if(TARGET ${target_name})
-            list(APPEND CK_DEVICE_CONV_INSTANCES $<TARGET_OBJECTS:${target_name}>)
+            ck_append_conv_instance_objects(${target_name})
             message(VERBOSE "Added ${target_name} to CK_DEVICE_CONV_INSTANCES")
-            if(MIOPEN_REQ_LIBS_ONLY AND MIOPEN_SPLIT_LIBS)
-                foreach(_ck_arch IN LISTS SANITIZED_SUPPORTED_GPU_TARGETS)
-                    set(_ck_arch_target "${target_name}_${_ck_arch}")
-                    if(TARGET ${_ck_arch_target})
-                        list(APPEND CK_DEVICE_CONV_INSTANCES_${_ck_arch} $<TARGET_OBJECTS:${_ck_arch_target}>)
-                    endif()
-                endforeach()
-            endif()
         else()
             message(VERBOSE "Target ${target_name} does not exist (may be filtered by MIOPEN_REQ_LIBS_ONLY)")
         endif()
     endforeach()
     set(CK_DEVICE_CONV_INSTANCES ${CK_DEVICE_CONV_INSTANCES} PARENT_SCOPE)
     if(MIOPEN_REQ_LIBS_ONLY AND MIOPEN_SPLIT_LIBS)
-        foreach(_ck_arch IN LISTS SANITIZED_SUPPORTED_GPU_TARGETS)
-            set(CK_DEVICE_CONV_INSTANCES_${_ck_arch} ${CK_DEVICE_CONV_INSTANCES_${_ck_arch}} PARENT_SCOPE)
+        foreach(_ck_suffix IN LISTS CK_SPLIT_LIB_SUFFIXES)
+            set(CK_DEVICE_CONV_INSTANCES_${_ck_suffix} ${CK_DEVICE_CONV_INSTANCES_${_ck_suffix}} PARENT_SCOPE)
         endforeach()
     endif()
 endfunction()
@@ -308,8 +373,8 @@ set(CK_DEVICE_MHA_INSTANCES)
 set(CK_DEVICE_CONTRACTION_INSTANCES)
 set(CK_DEVICE_REDUCTION_INSTANCES)
 if(MIOPEN_REQ_LIBS_ONLY AND MIOPEN_SPLIT_LIBS)
-    foreach(_ck_arch IN LISTS SANITIZED_SUPPORTED_GPU_TARGETS)
-        set(CK_DEVICE_CONV_INSTANCES_${_ck_arch})
+    foreach(_ck_suffix IN LISTS CK_SPLIT_LIB_SUFFIXES)
+        set(CK_DEVICE_CONV_INSTANCES_${_ck_suffix})
     endforeach()
 endif()
 
@@ -486,12 +551,7 @@ FOREACH(subdir_path ${dir_list})
                     if("${cmake_instance}" MATCHES "gemm")
                         list(APPEND CK_DEVICE_GEMM_INSTANCES $<TARGET_OBJECTS:device_${target_dir}_instance>)
                     elseif("${cmake_instance}" MATCHES "conv")
-                        list(APPEND CK_DEVICE_CONV_INSTANCES $<TARGET_OBJECTS:device_${target_dir}_instance>)
-                        if(MIOPEN_REQ_LIBS_ONLY AND MIOPEN_SPLIT_LIBS)
-                            foreach(_ck_arch IN LISTS SANITIZED_SUPPORTED_GPU_TARGETS)
-                                list(APPEND CK_DEVICE_CONV_INSTANCES_${_ck_arch} $<TARGET_OBJECTS:device_${target_dir}_instance_${_ck_arch}>)
-                            endforeach()
-                        endif()
+                        ck_append_conv_instance_objects(device_${target_dir}_instance)
                     elseif("${cmake_instance}" MATCHES "mha")
                         list(APPEND CK_DEVICE_MHA_INSTANCES $<TARGET_OBJECTS:device_${target_dir}_instance>)
                     elseif("${cmake_instance}" MATCHES "contr")
@@ -742,7 +802,7 @@ endif()
 # Create device_conv_operations from CK_DEVICE_CONV_INSTANCES (like the old approach)
 if(CK_DEVICE_CONV_INSTANCES AND (NOT HIPTENSOR_REQ_LIBS_ONLY OR MIOPEN_REQ_LIBS_ONLY))
     add_library(device_conv_operations ${CK_DEVICE_CONV_INSTANCES})
-    add_library("composablekernels::device_conv_operations" ALIAS device_conv_operations)
+    add_library(composablekernels::device_conv_operations ALIAS device_conv_operations)
     target_compile_features(device_conv_operations PUBLIC)
     set_target_properties(device_conv_operations PROPERTIES POSITION_INDEPENDENT_CODE ON)
     set_target_properties(device_conv_operations
@@ -764,6 +824,7 @@ if(CK_DEVICE_CONV_INSTANCES AND (NOT HIPTENSOR_REQ_LIBS_ONLY OR MIOPEN_REQ_LIBS_
         NAMESPACE composable_kernel::
         DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/composable_kernel
     )
+
     if(MIOPEN_REQ_LIBS_ONLY)
         message(STATUS "Created device_conv_operations STATIC library (MIOpen-required layouts only)")
     else()
@@ -772,21 +833,20 @@ if(CK_DEVICE_CONV_INSTANCES AND (NOT HIPTENSOR_REQ_LIBS_ONLY OR MIOPEN_REQ_LIBS_
 endif()
 
 # =============================================================================
-# Per-Architecture Convolution Libraries (STATIC, MIOPEN_REQ_LIBS_ONLY only)
+# Per-Architecture Convolution Libraries (STATIC, MIOPEN_REQ_LIBS_ONLY + MIOPEN_SPLIT_LIBS)
 # =============================================================================
-# When MIOPEN_REQ_LIBS_ONLY=ON and multiple GPU targets are requested, build one
-# static library per architecture: device_conv_operations_<arch>.
-# Each library is compiled exclusively with --offload-arch=<arch> so that
-# consumers can link only the code for the target they actually ship.
+# Builds one static library per GPU target id, device_conv_operations_<suffix>, alongside
+# device_conv_operations. Each holds only the conv sources buildable for that target and
+# is compiled for that target alone, so consumers can link only the code they ship.
 
 if(MIOPEN_REQ_LIBS_ONLY AND MIOPEN_SPLIT_LIBS)
-    message(STATUS "Building per-architecture device_conv_operations_<arch> libraries for: ${SANITIZED_SUPPORTED_GPU_TARGETS}")
-    foreach(_ck_arch IN LISTS SANITIZED_SUPPORTED_GPU_TARGETS)
-        set(_ck_per_arch_lib "device_conv_operations_${_ck_arch}")
-        set(_ck_per_arch_objects ${CK_DEVICE_CONV_INSTANCES_${_ck_arch}})
+    message(STATUS "Building per-architecture device_conv_operations_<arch> libraries for: ${CK_SPLIT_LIB_SUFFIXES}")
+    foreach(_ck_suffix IN LISTS CK_SPLIT_LIB_SUFFIXES)
+        set(_ck_per_arch_lib "device_conv_operations_${_ck_suffix}")
+        set(_ck_per_arch_objects ${CK_DEVICE_CONV_INSTANCES_${_ck_suffix}})
 
         if(NOT _ck_per_arch_objects)
-            message(VERBOSE "No conv objects collected for arch ${_ck_arch}; skipping ${_ck_per_arch_lib}")
+            message(STATUS "No conv sources build for ${_ck_suffix}; ${_ck_per_arch_lib} not created")
             continue()
         endif()
 
@@ -813,6 +873,8 @@ if(MIOPEN_REQ_LIBS_ONLY AND MIOPEN_SPLIT_LIBS)
             NAMESPACE composable_kernel::
             DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/composable_kernel
         )
+        # Component accepted by composable_kernelConfig.cmake (generated in the top-level CMakeLists.txt).
+        set_property(GLOBAL APPEND PROPERTY CK_SPLIT_CONV_COMPONENTS "${_ck_per_arch_lib}")
         message(STATUS "Created ${_ck_per_arch_lib} STATIC library")
     endforeach()
 endif()

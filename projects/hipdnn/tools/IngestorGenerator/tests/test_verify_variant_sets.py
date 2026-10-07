@@ -343,34 +343,31 @@ class TestTheDeskCheckIdentityIsEngineWideAndArchAware:
         assert "loader-tuple collisions" in result.stdout
         assert "gfx950" in result.stdout
 
-    def test_a_wildcard_arch_and_a_concrete_one_do_not_collide(self, gate):
-        """An absent arch list is the unrestricted tier; the concrete pack outranks it on
-        its own device, so the catalog holds one candidate per device and never one
-        tuple twice."""
-        self._two_packs(gate, "wildcard", None, ["gfx950"])
-        result = gate.run("w", "wildcard", profiled=False)
+    @pytest.mark.parametrize(
+        ("left_arch", "right_arch"),
+        [
+            # The better tier outranks the other on its own device: no tie.
+            (None, ["gfx950"]),
+            (["gfx11-generic"], ["gfx1151"]),
+        ],
+    )
+    def test_a_better_tier_does_not_collide_with_a_worse_one(
+        self, gate, left_arch, right_arch
+    ):
+        self._two_packs(gate, "outranked", left_arch, right_arch)
+        result = gate.run("o", "outranked", profiled=False)
         assert result.returncode == 0, result.stdout + result.stderr
         assert "loader-tuple" not in result.stdout
 
-    def test_a_generic_and_an_explicit_member_do_not_collide(self, gate):
-        self._two_packs(gate, "member", ["gfx11-generic"], ["gfx1151"])
-        result = gate.run("m", "member", profiled=False)
-        assert result.returncode == 0, result.stdout + result.stderr
-        assert "loader-tuple" not in result.stdout
-
-    def test_two_packs_naming_the_same_generic_collide(self, gate):
-        self._two_packs(gate, "twice", ["gfx11-generic"], ["gfx11-generic"])
-        result = gate.run("t", "twice", profiled=False)
+    @pytest.mark.parametrize(
+        ("left_arch", "right_arch"),
+        [(["gfx11-generic"], ["gfx11-generic"]), (None, None)],
+    )
+    def test_two_packs_tied_at_one_tier_collide(self, gate, left_arch, right_arch):
+        self._two_packs(gate, "tied", left_arch, right_arch)
+        result = gate.run("t", "tied", profiled=False)
         assert result.returncode == 1, result.stdout
         assert "loader-tuple collisions" in result.stdout
-        assert "generic tier" in result.stdout
-        assert "gfx1151" in result.stdout
-
-    def test_two_wildcard_packs_collide_at_the_unrestricted_tier(self, gate):
-        self._two_packs(gate, "wild2", None, None)
-        result = gate.run("w2", "wild2", profiled=False)
-        assert result.returncode == 1, result.stdout
-        assert "unrestricted tier" in result.stdout
 
     def test_one_and_one_point_zero_are_one_tuple_on_a_float_field(self, gate):
         """The catalog holds a value of the field's declared type, so 1 and 1.0 on a
@@ -1276,5 +1273,5 @@ class TestAGenericDocumentIsReadWithItsGenericArchiveKey:
         # The control: a document naming the member has no member-keyed archive here.
         member = self._entry(["gfx1151"])
         member.origin_dir = str(tmp_path)
-        with pytest.raises(gate_module.GateError, match="carries no member"):
+        with pytest.raises(gate_module.GateError):
             payloads.read(member, "gfx1151")

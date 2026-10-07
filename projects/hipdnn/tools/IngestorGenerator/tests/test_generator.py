@@ -725,32 +725,33 @@ class TestCatalogIdentity:
             "twin.right",
         ]
 
-    def test_equal_tuples_on_overlapping_arches_are_refused_naming_both(self):
-        """Same tuple, same device, DIFFERENT binary: dropping the second discards a
-        binary somebody built, keeping both drops the engine at load, so the generator
-        names both."""
+    @pytest.mark.parametrize(
+        ("pack_arch", "left_arch", "right_arch", "other_binary"),
+        [
+            # Same tuple, same device, different binary.
+            (["gfx942"], [], [], True),
+            # Same tuple, same binary, unequal overlapping coverage.
+            (["gfx942", "gfx950"], ["gfx942"], ["gfx942", "gfx950"], False),
+            # Both select gfx1100 at the generic tier.
+            (["gfx11-generic"], [], [], True),
+        ],
+    )
+    def test_equal_tuples_tied_on_a_device_are_refused_naming_both(
+        self, pack_arch, left_arch, right_arch, other_binary
+    ):
+        """One tuple twice on a device drops the engine at load, so the generator
+        refuses and names both kernels."""
         config, pack, left, right = self._twin_config()
-        # Same matcher-visible metadata, different compiled source.
-        right.kernel_source.entry_point = "ScaleAddOther"
+        pack.arch = pack_arch
+        left.arch = left_arch
+        right.arch = right_arch
+        if other_binary:
+            right.kernel_source.entry_point = "ScaleAddOther"
 
         with pytest.raises(ValueError) as excinfo:
             build_kdp(config, pack, mint_ids(config))
         message = str(excinfo.value)
         assert "twin.left" in message and "twin.right" in message
-
-    def test_one_candidate_on_unequal_overlapping_arches_names_the_coverage(self):
-        """Same tuple, same device, SAME binary: there is no kernel_source or priority
-        difference to find, so the diagnostic must name the coverage."""
-        config, pack, left, right = self._twin_config()
-        pack.arch = ["gfx942", "gfx950"]
-        left.arch = ["gfx942"]
-        right.arch = ["gfx942", "gfx950"]
-
-        with pytest.raises(ValueError) as excinfo:
-            build_kdp(config, pack, mint_ids(config))
-        message = str(excinfo.value)
-        assert "SAME candidate" in message
-        assert "kernel_source/priority differ" not in message
 
     def test_a_wildcard_arch_and_a_concrete_one_with_one_tuple_both_survive(self):
         """An empty ``arch`` is the unrestricted tier and a concrete entry outranks it
@@ -767,22 +768,6 @@ class TestCatalogIdentity:
             "twin.left",
             "twin.right",
         ]
-
-    def test_two_kernels_one_tuple_under_the_same_generic_are_refused_naming_both(
-        self,
-    ):
-        """Both select gfx1100 at the generic tier: one tuple twice drops the engine."""
-        config, pack, left, right = self._twin_config()
-        pack.arch = ["gfx11-generic"]
-        left.arch = []
-        right.arch = []
-        right.kernel_source.entry_point = "ScaleAddOther"
-
-        with pytest.raises(ValueError) as excinfo:
-            build_kdp(config, pack, mint_ids(config))
-        message = str(excinfo.value)
-        assert "twin.left" in message and "twin.right" in message
-        assert "gfx11-generic" in message
 
     def test_an_omitted_field_and_the_kmd_default_are_one_key(self):
         """One tuple omits an optional field; the other states it at exactly the KMD

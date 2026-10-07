@@ -7331,6 +7331,14 @@ namespace TensileLite
             in.maxGrid             = pAMDGPU->computeUnitCount * std::min(occupancy, size_t{3});
             if(pAMDGPU->persistentMaxCUs > 0)
                 in.maxGrid = std::min(in.maxGrid, static_cast<size_t>(pAMDGPU->persistentMaxCUs));
+            // A fixed grid (TENSILE_STREAMK_FIXED_GRID) is what launches, so
+            // size the split for it: with tiles*skSplit <= fixed grid every part
+            // still has a workgroup of its own, and the work items stay within
+            // the grid getPersistentGridImpl() uses (no raise for the queues).
+            // Only an upper bound: a larger fixed grid does not split further.
+            if(pAMDGPU->persistentFixedGrid > 0)
+                in.maxGrid
+                    = std::min(in.maxGrid, static_cast<size_t>(pAMDGPU->persistentFixedGrid));
             in.overrideTiles = pAMDGPU->skTiles;
             in.overrideSplit = pAMDGPU->skSplit;
         }

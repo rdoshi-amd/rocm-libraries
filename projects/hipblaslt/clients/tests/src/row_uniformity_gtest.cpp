@@ -2923,4 +2923,42 @@ namespace
         EXPECT_EQ(pap->streamKDynamicDecomposition(problem, device, tiles).skTiles, 0u);
     }
 
+    void expectSameSplit(TensileLite::StreamKDynamicSplit const& a,
+                         TensileLite::StreamKDynamicSplit const& b)
+    {
+        EXPECT_EQ(a.skTiles, b.skTiles);
+        EXPECT_EQ(a.skSplit, b.skSplit);
+        EXPECT_EQ(a.skItersPerWI, b.skItersPerWI);
+        EXPECT_EQ(a.totalItems, b.totalItems);
+        EXPECT_EQ(a.grid, b.grid);
+    }
+
+    // A fixed grid is what launches, so the split is sized for it: every part
+    // keeps a workgroup of its own and the grid is not raised for the queues.
+    TEST(StreamKDynamicSplit_pre_checkin, FixedGridBoundsTheSplit)
+    {
+        auto         solution  = dynamicSplitSolution();
+        auto         device    = uniformitySteeringDevice();
+        auto         problem   = dynamicSplitGemm(128, 128, 262144, 1);
+        const size_t tiles     = problem.getNumTiles(solution->sizeMapping, 1);
+        const auto   unbounded = solution->streamKDynamicDecomposition(problem, device, tiles);
+        ASSERT_GT(unbounded.totalItems, 16u);
+        for(int fixed : {4, 16})
+        {
+            SCOPED_TRACE("fixed grid " + std::to_string(fixed));
+            device.persistentFixedGrid = fixed;
+            const auto d = solution->streamKDynamicDecomposition(problem, device, tiles);
+            EXPECT_EQ(d.skTiles, tiles);
+            EXPECT_EQ(d.totalItems, size_t(fixed));
+            // 4 is below the 8 per-XCD queues: before the bound the split
+            // ignored the fixed grid and the queues forced it up to 8.
+            EXPECT_EQ(solution->getSKGrid(problem, device, tiles, origami::reduction_t::tree),
+                      size_t(fixed))
+                << "no raise: the items fit the fixed grid";
+        }
+        // Only an upper bound: a larger fixed grid does not split further.
+        device.persistentFixedGrid = 100000;
+        expectSameSplit(solution->streamKDynamicDecomposition(problem, device, tiles), unbounded);
+    }
+
 } // namespace

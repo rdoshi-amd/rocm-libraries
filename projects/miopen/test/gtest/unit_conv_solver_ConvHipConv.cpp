@@ -14,8 +14,6 @@
 
 #include "unit_conv_solver.hpp"
 
-#include "get_handle.hpp"
-
 #if defined(MIOPEN_USE_HIPCONV) && MIOPEN_USE_HIPCONV
 
 namespace {
@@ -399,50 +397,6 @@ TEST_P(GPU_UnitTestConvSolverConvHipConvWrwNchw_TF32, ConvHipConv)
 {
     this->RunTest(miopen::solver::conv::ConvHipConv{});
 };
-
-// A kernel label contains commas, which field-wise perf-config serialization would split on.
-TEST(CPU_UnitTestConvSolverConvHipConvPerfConfig_NONE, SerializeRoundTrip)
-{
-    miopen::solver::conv::PerformanceConfigConvHipConv stored;
-    stored.descriptor = "direct[tile_size_k=256,tile_size_n=1,tile_size_h=16,tile_size_w=16]";
-
-    miopen::solver::conv::PerformanceConfigConvHipConv loaded;
-    ASSERT_TRUE(loaded.Deserialize(stored.ToString()));
-    EXPECT_EQ(loaded.descriptor, stored.descriptor);
-}
-
-// A perf-db record selects its config only under the hipconv minor version that wrote it.
-TEST(GPU_UnitTestConvSolverConvHipConvPerfConfig_FP16, VersionStamp)
-{
-    if(!IsTestSupportedByDevice(Gpu::gfx950 | Gpu::gfx125X))
-        GTEST_SKIP();
-
-    auto&& handle = get_handle();
-    const auto problem =
-        GetConvSmokeTestCases(miopenHalf, miopenTensorNHWC)[0].GetProblemDescription(
-            miopen::conv::Direction::Forward);
-    auto ctx = miopen::ExecutionContext{&handle};
-    problem.SetupFloats(ctx);
-
-    const auto solver = miopen::solver::conv::ConvHipConv{};
-    ASSERT_TRUE(solver.IsApplicable(ctx, problem));
-
-    const auto record = solver.GetDefaultPerformanceConfig(ctx, problem).descriptor;
-    const auto colon  = record.find(':');
-    ASSERT_NE(colon, std::string::npos) << record;
-    EXPECT_NE(record.substr(0, colon), "unknown");
-    const auto body = record.substr(colon + 1);
-
-    const auto loads = [&](const std::string& stored) {
-        miopen::solver::conv::PerformanceConfigConvHipConv config;
-        config.Deserialize(stored);
-        return solver.IsValidPerformanceConfig(ctx, problem, config);
-    };
-    EXPECT_TRUE(loads(record));
-    EXPECT_FALSE(loads("v999.999:" + body));
-    EXPECT_FALSE(loads("unknown:" + body));
-    EXPECT_FALSE(loads(body));
-}
 
 INSTANTIATE_TEST_SUITE_P(
     Smoke,

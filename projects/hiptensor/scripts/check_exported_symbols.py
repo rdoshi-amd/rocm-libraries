@@ -1,0 +1,110 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+#
+# ABI presubmit guard for libhiptensor.so.
+#
+# Fails if the shared library exports any defined symbol that is not on the allowlist. This
+# codifies the hidden-visibility baseline (library/src/CMakeLists.txt) + version script
+# (library/src/hiptensor.map): only the public C API and the two shared-state singletons
+# (hiptensor::HiptensorOptions, hiptensor::Logger, reached via hiptensor::LazySingleton) may
+# leave the .so. Everything else — internal C++ classes, Composable Kernel template
+# instantiations — must stay local.
+#
+# Keep ALLOWLIST in lockstep with the `global:` section of library/src/hiptensor.map.
+#
+# Usage:
+#   python3 scripts/check_exported_symbols.py <path/to/libhiptensor.so> [--nm nm]
+#
+# Exit status: 0 = clean, 1 = disallowed exports found, 2 = usage/tooling error.
+
+import argparse
+import re
+import shutil
+import subprocess
+import sys
+
+# Each entry matches a mangled symbol name as emitted by `nm -D`.
+ALLOWLIST = [
+    # extern "C" public API (demangled == mangled, no leading _Z)
+    re.compile(r"^hiptensor"),
+    # hiptensor::HiptensorOptions (shared singleton) + its LazySingleton plumbing
+    re.compile(r"^_ZN9hiptensor16HiptensorOptions"),
+    re.compile(r"^_Z(Z|GVZ)N9hiptensor13LazySingletonINS_16HiptensorOptionsEE"),
+    # hiptensor::Logger (shared singleton) + its LazySingleton plumbing
+    re.compile(r"^_ZN9hiptensor6Logger"),
+    re.compile(r"^_Z(Z|GVZ)N9hiptensor13LazySingletonINS_6LoggerEE"),
+    # Standard ELF/runtime entries the loader and CRT provide
+    re.compile(r"^_init$"),
+    re.compile(r"^_fini$"),
+    re.compile(r"^_edata$"),
+    re.compile(r"^_end$"),
+    re.compile(r"^__bss_start$"),
+    re.compile(r"^__"),
+]
+
+# `nm` symbol types that represent an exported DEFINED symbol in the dynamic table.
+# T/t = text (code), W/w = weak, D/d = data, B/b = bss, R/r = read-only data, V/v = weak object.
+EXPORTED_TYPES = set("TtWwDdBbRrVv")
+
+
+def is_allowed(name: str) -> bool:
+    return any(pat.search(name) for pat in ALLOWLIST)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="ABI export allowlist guard for libhiptensor.so")
+    parser.add_argument("lib", help="Path to libhiptensor.so (or versioned .so)")
+    parser.add_argument("--nm", default="nm", help="nm binary to use (default: nm)")
+    args = parser.parse_args()
+
+    nm = shutil.which(args.nm)
+    if nm is None:
+        print(f"error: nm tool '{args.nm}' not found on PATH", file=sys.stderr)
+        return 2
+
+    try:
+        out = subprocess.run(
+            [nm, "-D", "--defined-only", args.lib],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+    except subprocess.CalledProcessError as exc:
+        print(f"error: nm failed on {args.lib}: {exc.stderr.strip()}", file=sys.stderr)
+        return 2
+
+    total = 0
+    offenders = []
+    for line in out.splitlines():
+        parts = line.split()
+        # Expected form: "<addr> <type> <name>"; undefined/no-value lines have fewer fields.
+        if len(parts) < 3:
+            continue
+        sym_type, name = parts[-2], parts[-1]
+        if sym_type not in EXPORTED_TYPES:
+            continue
+        total += 1
+        if not is_allowed(name):
+            offenders.append((sym_type, name))
+
+    print(f"checked {total} exported defined symbols in {args.lib}")
+    if offenders:
+        print(f"FAIL: {len(offenders)} symbol(s) exported outside the allowlist:", file=sys.stderr)
+        for sym_type, name in offenders[:50]:
+            print(f"  {sym_type} {name}", file=sys.stderr)
+        if len(offenders) > 50:
+            print(f"  ... and {len(offenders) - 50} more", file=sys.stderr)
+        print(
+            "\nThese symbols must be hidden. Tag public API with HIPTENSOR_EXPORT and keep "
+            "everything else at hidden visibility; update library/src/hiptensor.map and this "
+            "script's ALLOWLIST together if the public surface legitimately changed.",
+            file=sys.stderr,
+        )
+        return 1
+
+    print("PASS: all exported symbols are on the allowlist")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

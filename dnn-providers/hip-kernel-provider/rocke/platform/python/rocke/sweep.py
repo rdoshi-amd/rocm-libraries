@@ -90,8 +90,11 @@ def _spec_to_dict(spec: UniversalGemmSpec) -> Dict[str, object]:
     }
 
 
-def _spec_hash(spec: UniversalGemmSpec) -> str:
-    d = _spec_to_dict(spec)
+def _spec_hash(spec: UniversalGemmSpec, *, arch: str = "gfx950") -> str:
+    # The arch is part of the key: the same spec built for two targets yields
+    # different code, so leaving it out lets a cached HSACO from one arch be
+    # served for the other.
+    d = dict(_spec_to_dict(spec), _arch=arch)
     blob = json.dumps(d, sort_keys=True).encode()
     return hashlib.sha1(blob).hexdigest()[:12]
 
@@ -159,13 +162,13 @@ def _extract_elf_meta(hsaco_path: Path) -> Dict[str, int]:
 # ---------------------------------------------------------------------
 
 
-def _build_one(args: Tuple[str, Dict[str, object], str, str]) -> Dict[str, object]:
+def _build_one(args: Tuple[str, Dict[str, object], str, str, str]) -> Dict[str, object]:
     """Build worker. Runs in the calling process or in a pool worker.
 
-    args = (spec_hash, spec_dict, cache_dir, isa)
+    args = (spec_hash, spec_dict, cache_dir, isa, arch)
     Returns the BuildRecord as a dict (so it survives a fork/spawn).
     """
-    spec_hash, spec_dict, cache_dir_str, isa = args
+    spec_hash, spec_dict, cache_dir_str, isa, arch = args
     cache_dir = Path(cache_dir_str)
     cache_dir.mkdir(parents=True, exist_ok=True)
     spec = _spec_from_dict(spec_dict)
@@ -192,9 +195,9 @@ def _build_one(args: Tuple[str, Dict[str, object], str, str]) -> Dict[str, objec
 
     try:
         t0 = time.perf_counter()
-        kernel = build_universal_gemm(spec)
+        kernel = build_universal_gemm(spec, arch=arch)
         t1 = time.perf_counter()
-        ll = lower_kernel_to_llvm(kernel)
+        ll = lower_kernel_to_llvm(kernel, arch=arch)
         t2 = time.perf_counter()
         hsaco, ct = build_hsaco_from_llvm_ir(ll, isa=isa)
 
@@ -235,10 +238,19 @@ def build_all_instances(
     specs: Iterable[UniversalGemmSpec],
     *,
     cache_dir: Path,
+    arch: Optional[str] = None,
     isa: str = "amdgcn-amd-amdhsa--gfx950",
     parallel: Optional[int] = None,
 ) -> List[BuildRecord]:
     """Build every spec to a cached HSACO blob.
+
+    `arch`:
+      - None (default): derived from `isa`, so a caller that already targets
+        a non-gfx950 `isa` gets a kernel built for that same arch. Passing
+        only `isa` used to compile the IR for gfx950 and then assemble it for
+        the requested target, which fails outright for any spec the default
+        arch rejects (e.g. an fp8 16x16x64 warp tile).
+      - an explicit arch string: overrides the one implied by `isa`.
 
     `parallel`:
       - None or > 1: use a multiprocessing Pool with that many workers
@@ -251,7 +263,15 @@ def build_all_instances(
     if not specs:
         return []
 
-    work = [(_spec_hash(s), _spec_to_dict(s), str(cache_dir), isa) for s in specs]
+    if arch is None:
+        from .core.arch import arch_from_isa
+
+        arch = arch_from_isa(isa)
+
+    work = [
+        (_spec_hash(s, arch=arch), _spec_to_dict(s), str(cache_dir), isa, arch)
+        for s in specs
+    ]
 
     if parallel == 1:
         out_dicts = [_build_one(w) for w in work]

@@ -49,8 +49,11 @@ int rocke_conv_choose_load_vec(const rocke_implicit_gemm_conv_spec_t* spec)
     int out_vec = 0;
     /* spec.block_size = warp_m * warp_n * wave_size (the @property). */
     int block_size = rocke_implicit_gemm_conv_spec_block_size(spec);
-    rocke_status_t st
-        = rocke_choose_load_vec(spec->tile_m, spec->tile_n, spec->tile_k, block_size, &out_vec);
+    /* elem_bytes 2: the Python conv path leaves choose_load_vec's default in
+     * place, so this stays on the old f16 ladder and its emission is
+     * unchanged by the GEMM-side widening. */
+    rocke_status_t st = rocke_choose_load_vec(
+        spec->tile_m, spec->tile_n, spec->tile_k, block_size, 2, &out_vec);
     /* On the Python ValueError path choose_load_vec raises; here the status is
      * ROCKE_ERR_VALUE and out_vec is left untouched (0). The prologue is the
      * gate that surfaces the spec validity error before this is reached. */

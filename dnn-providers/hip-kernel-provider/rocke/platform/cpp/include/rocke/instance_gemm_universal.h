@@ -121,6 +121,14 @@ typedef struct rocke_gemm_trait_spec
      * and the barrier is elided -> lower small-tile latency, more LDS. Only
      * affects the cshuffle epilogue; False keeps byte-identical output. */
     bool cshuffle_no_alias; /* default false */
+    /* Element width, in bytes, fed to the global A/B load-vector picker, which
+     * caps the vector at 16/elem_bytes (the 4-dword buffer_load limit). Unset
+     * (Python None) resolves it from data.dtype_a, so each operand type gets
+     * the full 16 bytes. An explicit value overrides that; 2 reproduces the
+     * older emission that capped 1-byte operands at an 8-byte load. No effect
+     * on f16/bf16, which resolve to 2 either way. */
+    bool ab_load_elem_bytes_set; /* false => Python None (dtype-resolved) */
+    int ab_load_elem_bytes;
 } rocke_gemm_trait_spec_t;
 
 /* ------------------------------------------------------------------ DataSpec */

@@ -254,6 +254,16 @@ class TraitSpec:
     # small tiles, at the cost of more LDS (lower occupancy) for large tiles.
     # Only affects the cshuffle epilogue; False keeps byte-identical output.
     cshuffle_no_alias: bool = False
+    # Element width, in bytes, fed to the global A/B load-vector picker
+    # (:func:`helpers.spec.choose_load_vec`), which caps the vector at
+    # ``16 // elem_bytes`` -- the 4-dword buffer_load limit.
+    # None (default): resolved from ``data.dtype_a``, so each operand type gets
+    # the full 16 bytes the hardware allows. An explicit value overrides that.
+    # This exists as a knob only so the two widths can be A/B'd in one binary;
+    # the picker historically defaulted to 2, which silently halved 1-byte
+    # operands to an 8-byte load. Setting 2 reproduces that older emission.
+    # No effect on 2-byte operands: f16/bf16 resolve to 2 either way.
+    ab_load_elem_bytes: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -327,6 +337,9 @@ class UniversalGemmSpec(WarpTileBlockSizeMixin):
                 "actt": tr.active_tile_skip,
                 f"spk{tr.split_k}": tr.split_k > 1,
                 "noalc": tr.cshuffle_no_alias,
+                # Only named when overridden, so the resolved default leaves
+                # every existing kernel name untouched.
+                f"abeb{tr.ab_load_elem_bytes}": tr.ab_load_elem_bytes is not None,
             },
         )
 
@@ -754,13 +767,28 @@ def _emit_zero_acc_op(b: IRBuilder, op) -> Value:
 
 def _choose_load_vec(spec: UniversalGemmSpec) -> int:
     """Choose the widest naturally-aligned global-load width for this
-    block shape. f16 -> we can vectorise up to 8 halves per lane.
+    block shape, in elements.
+
+    The picker caps the vector at ``16 // elem_bytes`` -- the hardware's
+    4-dword buffer_load limit -- so the element width decides how many
+    elements fit in one load. Passing the real A/B width is what lets a
+    1-byte operand use all 16 bytes; the picker's own default of 2 would
+    cap fp8/bf8 at 8 elements and spend half the load.
+
+    ``trait.ab_load_elem_bytes`` overrides the resolved width. It exists so
+    both widths can be built in one binary and compared; see its docstring
+    on :class:`TraitSpec`.
 
     Thin adapter over :func:`rocke.helpers.spec.choose_load_vec`, the shared
     single-source picker; kept so callers (incl. ``moe_gemm_fused``) that
     pass a whole spec stay unchanged."""
     t = spec.tile
-    return choose_load_vec(t.tile_m, t.tile_n, t.tile_k, spec.block_size)
+    elem_bytes = spec.trait.ab_load_elem_bytes
+    if elem_bytes is None:
+        elem_bytes = _ab_dtype_bytes(spec)
+    return choose_load_vec(
+        t.tile_m, t.tile_n, t.tile_k, spec.block_size, elem_bytes=elem_bytes
+    )
 
 
 def _emit_smem_load(

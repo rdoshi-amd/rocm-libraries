@@ -202,6 +202,8 @@ rocke_gemm_universal_spec_t rocke_gemm_universal_spec_default(void)
     s.trait.emit_sched_hints = false;
     s.trait.split_k = 1; /* default 1 (single-K-pass body) */
     s.trait.cshuffle_no_alias = false; /* default: alias cshuffle C onto A/B */
+    s.trait.ab_load_elem_bytes_set = false; /* Python None (dtype-resolved) */
+    s.trait.ab_load_elem_bytes = 0;
 
     /* DataSpec defaults. */
     s.data.dtype_a = "fp16"; /* default "fp16" */
@@ -258,8 +260,9 @@ rocke_status_t rocke_gemm_universal_kernel_name(const rocke_gemm_universal_spec_
     char part_pipe[128];
     char part_spk[32];
     const char* parts[5];
-    const char* flag_names[9];
-    int flag_on[9];
+    char part_abeb[32];
+    const char* flag_names[10];
+    int flag_on[10];
     const rocke_gemm_tile_spec_t* t;
     const rocke_gemm_trait_spec_t* tr;
 
@@ -295,6 +298,11 @@ rocke_status_t rocke_gemm_universal_kernel_name(const rocke_gemm_universal_spec_
     snprintf(part_spk, sizeof(part_spk), "spk%d", tr->split_k);
     flag_names[7] = part_spk;
     flag_names[8] = "noalc";
+    /* Python flag key f"abeb{tr.ab_load_elem_bytes}" (dynamic name; only on
+     * when the width is overridden, so the resolved default leaves every
+     * existing kernel name untouched). */
+    snprintf(part_abeb, sizeof(part_abeb), "abeb%d", tr->ab_load_elem_bytes);
+    flag_names[9] = part_abeb;
 
     flag_on[0] = (tr->pad_m || tr->pad_n || tr->pad_k) ? 1 : 0;
     flag_on[1] = tr->persistent ? 1 : 0;
@@ -305,8 +313,10 @@ rocke_status_t rocke_gemm_universal_kernel_name(const rocke_gemm_universal_spec_
     flag_on[6] = tr->active_tile_skip ? 1 : 0;
     flag_on[7] = (tr->split_k > 1) ? 1 : 0;
     flag_on[8] = tr->cshuffle_no_alias ? 1 : 0;
+    flag_on[9] = tr->ab_load_elem_bytes_set ? 1 : 0;
 
-    return rocke_kernel_name_join(spec->name, parts, 5, flag_names, flag_on, 9, out, out_cap, NULL);
+    return rocke_kernel_name_join(
+        spec->name, parts, 5, flag_names, flag_on, 10, out, out_cap, NULL);
 }
 
 /* ===================================================================== *

@@ -298,6 +298,40 @@ def _spec(idx: int) -> UniversalGemmSpec:
             ),
             "gfx1250",
         )
+    if idx == 12:
+        # Config 11 with the global A/B load width pinned to the old 2-byte
+        # ladder. The resolved default gives a 1-byte operand all 16 bytes;
+        # this is the only config that exercises the override, and it is the
+        # arm the lever harness measures the default against. Unpadded so the
+        # whole-vector load path is the one compared -- config 11 already
+        # covers the padded per-element gather at the wider width.
+        return (
+            UniversalGemmSpec(
+                name="test_fp8_gfx1250_abeb2",
+                tile=TileSpec(
+                    tile_m=64, tile_n=64, tile_k=64,
+                    warp_m=2, warp_n=2, warp_k=1,
+                    warp_tile_m=16, warp_tile_n=16, warp_tile_k=64,
+                ),
+                trait=TraitSpec(
+                    pipeline="mem",
+                    scheduler="intrawave",
+                    epilogue="default",
+                    pad_m=False,
+                    pad_n=False,
+                    pad_k=False,
+                    ab_load_elem_bytes=2,
+                ),
+                data=DataSpec(
+                    dtype_a="fp8e4m3", dtype_b="fp8e4m3",
+                    dtype_c="bf16", dtype_acc="fp32", layout="RCR",
+                ),
+                wave_size=32,
+                block_size=128,
+                batched=False,
+            ),
+            "gfx1250",
+        )
     raise SystemExit(f"unknown config index {idx}")
 
 
@@ -305,7 +339,7 @@ def main() -> int:
     return run_emit(
         _spec,
         build_universal_gemm,
-        usage="usage: gemm_emit.py <config_index 0..11>\n",
+        usage="usage: gemm_emit.py <config_index 0..12>\n",
     )
 
 

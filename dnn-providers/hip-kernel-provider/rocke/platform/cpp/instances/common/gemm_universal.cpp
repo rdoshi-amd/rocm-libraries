@@ -159,8 +159,11 @@ static const rocke_type_t* rocke_gemm_storage_dtype(rocke_ir_builder_t* b,
 }
 
 /* _ab_dtype_bytes(spec): bytes per A/B element -- 2 for f16/bf16, 1 for the
- * fp8/bf8 operands. Python: dtype_info(spec.data.dtype_a).encoded_bits // 8. */
-static int rocke_gemm_ab_dtype_bytes(const rocke_gemm_universal_spec_t* spec)
+ * fp8/bf8 operands. Python: dtype_info(spec.data.dtype_a).encoded_bits // 8.
+ * Non-static: gemm_mma.cpp needs it to size the global load vector. Declared
+ * in instance_gemm_internal.h. (gemm_spec.cpp still carries its own static
+ * copy, ck_gemm_ab_dtype_bytes -- pre-existing duplication, left alone here.) */
+int rocke_gemm_ab_dtype_bytes(const rocke_gemm_universal_spec_t* spec)
 {
     const rocke_dtype_info_t* info = rocke_dtype_info(spec->data.dtype_a);
     return (info != NULL) ? (info->encoded_bits / 8) : 2;

@@ -272,7 +272,8 @@ void fill_universal_spec(rocke_gemm_universal_spec_t* spec,
                               "dtl_prefetch",
                               "active_tile_skip",
                               "lds_k_pad",
-                              "lds_swizzle"};
+                              "lds_swizzle",
+                              "ab_load_elem_bytes"};
         for(const char* k : keys)
         {
             py::dict got = pick(trait, k);
@@ -310,6 +311,12 @@ void fill_universal_spec(rocke_gemm_universal_spec_t* spec,
             = dict_bool(tr, "active_tile_skip", spec->trait.active_tile_skip);
         spec->trait.lds_k_pad = dict_int(tr, "lds_k_pad", spec->trait.lds_k_pad);
         spec->trait.lds_swizzle = dict_bool(tr, "lds_swizzle", spec->trait.lds_swizzle);
+        /* Optional[int]: absent or None leaves the width dtype-resolved. */
+        if(tr.contains("ab_load_elem_bytes") && !tr["ab_load_elem_bytes"].is_none())
+        {
+            spec->trait.ab_load_elem_bytes_set = true;
+            spec->trait.ab_load_elem_bytes = tr["ab_load_elem_bytes"].cast<int>();
+        }
     }
 
     /* ---- data ---- */
@@ -425,7 +432,8 @@ SpecHolder build_spec(const py::dict& root)
                               "dtl_prefetch",
                               "active_tile_skip",
                               "lds_k_pad",
-                              "lds_swizzle"};
+                              "lds_swizzle",
+                              "ab_load_elem_bytes"};
         for(const char* k : keys)
         {
             py::dict got = pick(trait, k);
@@ -464,6 +472,12 @@ SpecHolder build_spec(const py::dict& root)
             = dict_bool(tr, "active_tile_skip", h.spec.trait.active_tile_skip);
         h.spec.trait.lds_k_pad = dict_int(tr, "lds_k_pad", h.spec.trait.lds_k_pad);
         h.spec.trait.lds_swizzle = dict_bool(tr, "lds_swizzle", h.spec.trait.lds_swizzle);
+        /* Optional[int]: absent or None leaves the width dtype-resolved. */
+        if(tr.contains("ab_load_elem_bytes") && !tr["ab_load_elem_bytes"].is_none())
+        {
+            h.spec.trait.ab_load_elem_bytes_set = true;
+            h.spec.trait.ab_load_elem_bytes = tr["ab_load_elem_bytes"].cast<int>();
+        }
     }
 
     /* ---- data ---- */

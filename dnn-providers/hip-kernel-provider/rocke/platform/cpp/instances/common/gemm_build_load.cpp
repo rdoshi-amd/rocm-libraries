@@ -39,6 +39,11 @@
 #include "rocke/helper_rocke.helpers.grid.h" /* rocke_chiplet_aware_super_tile_dynamic */
 #include "rocke/instance_gemm_internal.h"
 
+/* Widest global A/B load vector, in elements: the 4-dword buffer_load limit is
+ * 16 bytes, so a 1-byte operand tops out at 16 elements. The pad_k gather
+ * arrays below are sized to this. */
+#define ROCKE_GEMM_MAX_LOAD_VEC 16
+
 /* storage_dtype in (FP8E4M3, BF8E5M2) -- the 8-bit A/B operands of the gfx1250
  * low-bit WMMA path, which the f16/bf16 storage paths never produce. */
 static bool rocke_gemm_storage_is_fp8(const rocke_type_t* ty)
@@ -516,6 +521,16 @@ void rocke_gemm_emit_load_phase(rocke_gemm_build_ctx_t* ctx,
     int load_vec = ctx->load_vec;
     bool db = ctx->db;
 
+    /* The pad_k sub-paths below gather load_vec scalars into a fixed
+     * ROCKE_GEMM_MAX_LOAD_VEC-element array before packing. load_vec is capped
+     * at 16/elem_bytes by rocke_choose_load_vec, so with a 1-byte operand it is
+     * exactly 16 -- the array is full with no headroom. Clamp rather than
+     * overrun if that invariant ever moves. */
+    if(load_vec > ROCKE_GEMM_MAX_LOAD_VEC)
+    {
+        load_vec = ROCKE_GEMM_MAX_LOAD_VEC;
+    }
+
     /* a_global_tile / b_global_tile / a_lds_tile / b_lds_tile. */
     rocke_tile_window_t a_global_tile, b_global_tile, a_lds_tile, b_lds_tile;
     {
@@ -569,7 +584,7 @@ void rocke_gemm_emit_load_phase(rocke_gemm_build_ctx_t* ctx,
         rocke_value_t* col = (load_vec > 1) ? rocke_b_mul(b, col_v, ctx->c_load_vec) : col_v;
         if(spec->trait.pad_k)
         {
-            rocke_value_t* comps[16];
+            rocke_value_t* comps[ROCKE_GEMM_MAX_LOAD_VEC];
             rocke_value_t* a_val;
             for(int i = 0; i < load_vec; ++i)
             {
@@ -630,7 +645,7 @@ void rocke_gemm_emit_load_phase(rocke_gemm_build_ctx_t* ctx,
             rocke_value_t* col = (load_vec > 1) ? rocke_b_mul(b, col_v, ctx->c_load_vec) : col_v;
             if(spec->trait.pad_k)
             {
-                rocke_value_t* comps[16];
+                rocke_value_t* comps[ROCKE_GEMM_MAX_LOAD_VEC];
                 rocke_value_t* b_val;
                 for(int i = 0; i < load_vec; ++i)
                 {
@@ -685,7 +700,7 @@ void rocke_gemm_emit_load_phase(rocke_gemm_build_ctx_t* ctx,
             rocke_value_t* col = (load_vec > 1) ? rocke_b_mul(b, col_v, ctx->c_load_vec) : col_v;
             if(spec->trait.pad_k)
             {
-                rocke_value_t* comps[16];
+                rocke_value_t* comps[ROCKE_GEMM_MAX_LOAD_VEC];
                 rocke_value_t* b_val;
                 for(int i = 0; i < load_vec; ++i)
                 {

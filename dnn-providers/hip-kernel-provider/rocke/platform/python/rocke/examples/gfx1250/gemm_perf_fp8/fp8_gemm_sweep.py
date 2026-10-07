@@ -1,0 +1,1180 @@
+#!/usr/bin/env python3
+# Copyright (c) Advanced Micro Devices, Inc., or its affiliates.
+# SPDX-License-Identifier: MIT
+"""Staged fp8e4m3 -> bf16 RCR Universal GEMM sweep for gfx1250.
+
+Ported from the bf16 sweep harness, with the operand type, the correctness
+gate and three structural fixes changed.  The staging is the point: a full
+cross product of tile geometry x traits is tens of thousands of builds, and
+most of them are answering a question the cheap stage already answered.
+
+Stages
+------
+``tile``
+    Sweep tile / warp geometry only, with every trait pinned to the config's
+    ``screening_traits`` block.  Verify the top ``tile_finalists`` and pass
+    only the verified ones forward.
+
+``trait``
+    Sweep the full trait space over those finalists.  No verification here --
+    this is the widest stage and verification costs a blocking launch plus a
+    device-to-host copy per candidate.  Correctness is re-established in
+    ``final`` before any number is reported.
+
+``final``
+    Walk the trait ranking, verify, and re-time each survivor in a *fresh
+    process* until ``final_timed`` have passed.  Fresh-process timing is what
+    makes the number trustworthy; the in-process stages are for ranking.
+
+``lever``
+    A/B the champion against each registered lever.  This is the stage that
+    answers "did the thing we just added help", independent of the search.
+
+Rigor is deliberately inverse to candidate count.  Stage 2 screens thousands
+of kernels with one attempt and no reference; stage 3 pays for isolation and
+repetition on a handful.  Flattening that -- running everything carefully --
+costs an order of magnitude more and tells you nothing extra.
+
+The screening pin is load-bearing
+---------------------------------
+``screening_traits`` decides which traits stage 1 holds fixed while it ranks
+geometry.  A bad pin silently eliminates the winner before traits are ever
+swept: if a pinned value happens to collapse performance for one region of
+the tile space, every tile in that region is screened out in stage 1 and
+never reaches stage 2.  The bf16 harness pinned ``traits[...][0]`` -- the
+first element of each search list -- which made list *order* a hidden tuning
+parameter that no reader would guess.  Here the pin is its own config block,
+so it is stated rather than implied.
+
+Exactness
+---------
+Inputs are integers in -5..5, each exact in e4m3 (four significand bits).
+With ``|sum| <= 25 * K`` the fp32 accumulator is exact for any K below ~670k,
+so summation order cannot change the result and the only rounding left is the
+kernel's final deterministic RNE to bf16, which the reference reproduces.
+The comparison is therefore exact (``err > 0.0``), not a tolerance, and the
+harness refuses a K that would break the argument.  A tolerance here would
+silently downgrade the gate without changing any output.
+
+Results go outside the repo
+---------------------------
+``--out`` (or ``$ROCKE_PERF_OUT``) is required and is deliberately absent
+from the committed configs: a tracked config carries the *search space*, not
+a path to somebody's results directory.
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import ctypes
+import json
+import math
+import os
+import statistics
+import struct
+import subprocess
+import sys
+from dataclasses import asdict, dataclass, replace
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+from rocke.instances.common.gemm_universal import (
+    DataSpec,
+    TileSpec,
+    TraitSpec,
+    UniversalGemmSpec,
+    build_universal_gemm,
+    is_valid_spec,
+)
+from rocke.runtime.hip_module import Runtime
+from rocke.sweep import BuildRecord, build_all_instances
+
+CONFIG_DIR = Path(__file__).with_name("configs")
+DEFAULT_CONFIG = CONFIG_DIR / "sq4k.json"
+
+STAGES = ("tile", "trait", "final", "lever")
+
+# The exact-accumulate argument holds while |sum| <= 25*K stays under 2^24.
+_MAX_EXACT_K = (1 << 24) // 25
+
+_WORKER_RESULT_PREFIX = "ROCKE_SWEEP_WORKER_RESULT="
+
+# HIP error codes that latch onto the context rather than being returned once:
+# an illegal access (700), a device-side abort (710) and an unspecified launch
+# failure (719) leave every later call in the process returning the same code.
+# Once one is seen the remaining candidates in the stage cannot be trusted, so
+# the stage stops and keeps what it already measured instead of reporting a
+# cascade of identical bogus failures.
+_STICKY_HIP_ERRORS = ("hipError(700)", "hipError(710)", "hipError(719)")
+
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+
+def load_config(path: Path = DEFAULT_CONFIG) -> Dict[str, Any]:
+    return json.loads(path.read_text())
+
+
+def resolve_output_dir(args: argparse.Namespace) -> Path:
+    """Where results land.  Never read from the committed config."""
+    raw = args.out or os.environ.get("ROCKE_PERF_OUT")
+    if not raw:
+        raise SystemExit(
+            "no output directory: pass --out or set ROCKE_PERF_OUT. "
+            "Results are kept outside the repository on purpose."
+        )
+    return Path(raw).expanduser()
+
+
+# ---------------------------------------------------------------------------
+# Spec construction
+# ---------------------------------------------------------------------------
+
+
+def _make_spec(
+    config: Dict[str, Any],
+    tile_m: int,
+    tile_n: int,
+    tile_k: int,
+    warp_m: int,
+    warp_n: int,
+    traits: Dict[str, Any],
+) -> UniversalGemmSpec:
+    """One spec from a tile geometry plus a fully-resolved trait dict."""
+    target = config["target"]
+    problem = config["problem"]
+    warp_tile_m, warp_tile_n, warp_tile_k = target["warp_tile"]
+    return UniversalGemmSpec(
+        name=f"{target['arch']}_fp8_sweep",
+        tile=TileSpec(
+            tile_m=tile_m,
+            tile_n=tile_n,
+            tile_k=tile_k,
+            warp_m=warp_m,
+            warp_n=warp_n,
+            warp_k=1,
+            warp_tile_m=int(warp_tile_m),
+            warp_tile_n=int(warp_tile_n),
+            warp_tile_k=int(warp_tile_k),
+        ),
+        trait=TraitSpec(
+            # A guard is dead code when the tile grid lands exactly on the
+            # extent, and pad_n forfeits the cshuffle wide store, so each one
+            # follows the shape rather than being forced on.
+            pad_m=int(problem["m"]) % tile_m != 0,
+            pad_n=int(problem["n"]) % tile_n != 0,
+            pad_k=int(problem["k"]) % tile_k != 0,
+            **traits,
+        ),
+        data=DataSpec(
+            dtype_a=str(target["dtype_ab"]),
+            dtype_b=str(target["dtype_ab"]),
+            dtype_c=str(target["dtype_c"]),
+            dtype_acc="fp32",
+            layout=str(target["layout"]),
+        ),
+        wave_size=int(target["wave_size"]),
+    )
+
+
+def _spec_identity(spec: UniversalGemmSpec, *, arch: str) -> str:
+    import hashlib
+
+    payload = {
+        "arch": arch,
+        "tile": asdict(spec.tile),
+        "trait": asdict(spec.trait),
+        "data": asdict(spec.data),
+        "wave_size": spec.wave_size,
+        "block_size": spec.block_size,
+    }
+    return hashlib.sha1(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:12]
+
+
+def _spec_from_dict(data: Dict[str, Any]) -> UniversalGemmSpec:
+    return UniversalGemmSpec(
+        name=str(data["name"]),
+        tile=TileSpec(**data["tile"]),
+        trait=TraitSpec(**data["trait"]),
+        data=DataSpec(**data["data"]),
+        wave_size=int(data["wave_size"]),
+        block_size=int(data["block_size"]),
+    )
+
+
+def _dedupe_valid(
+    specs: Sequence[UniversalGemmSpec], *, arch: str
+) -> List[UniversalGemmSpec]:
+    seen: Dict[str, UniversalGemmSpec] = {}
+    for spec in specs:
+        ok = is_valid_spec(spec, arch=arch)
+        # is_valid_spec returns (bool, reason) on this branch; tolerate a bare
+        # bool so the harness survives a signature change rather than silently
+        # admitting every spec.
+        if isinstance(ok, tuple):
+            ok = ok[0]
+        if not ok:
+            continue
+        seen.setdefault(_spec_identity(spec, arch=arch), spec)
+    return list(seen.values())
+
+
+def enumerate_tile_configs(config: Dict[str, Any]) -> List[UniversalGemmSpec]:
+    """Stage 1: geometry varies, traits are held at the declared screening pin."""
+    tile = config["tile_config"]
+    pin = dict(config["screening_traits"])
+    specs = [
+        _make_spec(config, tm, tn, tk, wm, wn, pin)
+        for tm in tile["tile_m"]
+        for tn in tile["tile_n"]
+        for tk in tile["tile_k"]
+        for wm in tile["warp_m"]
+        for wn in tile["warp_n"]
+    ]
+    return _dedupe_valid(specs, arch=config["target"]["arch"])
+
+
+def _load_paths(traits: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The global->LDS mechanisms to try, as trait overrides.
+
+    Enumerated as a list rather than multiplied out: pairing ``dtl_prefetch``
+    with ``direct_to_lds=False`` would inflate the grid with combinations
+    ``is_valid_spec`` rejects anyway.
+    """
+    paths: List[Dict[str, Any]] = []
+    for direct_to_lds in traits.get("direct_to_lds", [False]):
+        for dtl_prefetch in traits.get("dtl_prefetch", [False]):
+            if dtl_prefetch and not direct_to_lds:
+                continue
+            paths.append(
+                {"direct_to_lds": direct_to_lds, "dtl_prefetch": dtl_prefetch}
+            )
+    return paths or [{"direct_to_lds": False, "dtl_prefetch": False}]
+
+
+def enumerate_trait_configs(
+    config: Dict[str, Any], finalists: Sequence[UniversalGemmSpec]
+) -> List[UniversalGemmSpec]:
+    """Stage 2: the full trait space, over each surviving geometry."""
+    traits = config["trait_config"]
+    specs: List[UniversalGemmSpec] = []
+    for base in finalists:
+        for pipeline in traits["pipelines"]:
+            for scheduler in traits["schedulers"]:
+                for epilogue in traits["epilogues"]:
+                    for waves_per_eu in traits["waves_per_eu"]:
+                        for lds_swizzle in traits["lds_swizzle"]:
+                            for lds_k_pad in traits["lds_k_pad"]:
+                                for path in _load_paths(traits):
+                                    specs.append(
+                                        replace(
+                                            base,
+                                            trait=replace(
+                                                base.trait,
+                                                pipeline=pipeline,
+                                                scheduler=scheduler,
+                                                epilogue=epilogue,
+                                                waves_per_eu=waves_per_eu,
+                                                lds_swizzle=lds_swizzle,
+                                                lds_k_pad=lds_k_pad,
+                                                **path,
+                                            ),
+                                        )
+                                    )
+    return _dedupe_valid(specs, arch=config["target"]["arch"])
+
+
+def apply_lever(spec: UniversalGemmSpec, lever: Dict[str, Any]) -> UniversalGemmSpec:
+    """Overlay one lever's trait/data overrides onto a spec.
+
+    A lever is whatever distinguishes an optimization from the baseline.  An
+    empty override set is the baseline itself, which is why ``baseline`` is a
+    registered lever rather than a special case -- it goes through the same
+    build, the same verification and the same timing path as every other arm,
+    so a difference between arms cannot be an artifact of how they were run.
+    """
+    trait_over = dict(lever.get("trait", {}))
+    data_over = dict(lever.get("data", {}))
+    out = spec
+    if trait_over:
+        out = replace(out, trait=replace(out.trait, **trait_over))
+    if data_over:
+        out = replace(out, data=replace(out.data, **data_over))
+    return out
+
+
+def required_padded_n(n: int, specs: Sequence[UniversalGemmSpec]) -> int:
+    if not specs:
+        return n
+    return max(math.ceil(n / spec.tile.tile_n) * spec.tile.tile_n for spec in specs)
+
+
+# ---------------------------------------------------------------------------
+# Problem setup, timing and the exact gate
+# ---------------------------------------------------------------------------
+
+
+def _as_u8_buffer(array) -> ctypes.Array:
+    return (ctypes.c_ubyte * int(array.nbytes)).from_buffer(array)
+
+
+@dataclass
+class PreparedProblem:
+    """Device buffers plus (optionally) the exact host reference.
+
+    A/B are e4m3 bytes, C is raw bf16 halves carried as ``uint16`` so no
+    float16 view can lie about the encoding on the way to or from the device.
+    """
+
+    rt: Runtime
+    shape: Tuple[int, int, int]
+    padded_n: int
+    a_dev: int
+    b_dev: int
+    c_dev: int
+    c_host: Any
+    reference: Any
+
+    @classmethod
+    def create(
+        cls,
+        shape: Tuple[int, int, int],
+        padded_n: int,
+        *,
+        with_reference: bool,
+    ) -> "PreparedProblem":
+        import numpy as np
+
+        from rocke.instances.common.manifest_runner.gemm import _fp8e4m3_encode
+
+        m, n, k = shape
+        if 25 * k >= (1 << 24):
+            raise ValueError(
+                f"K={k} overflows the exact-fp32-accumulate argument "
+                f"(25*K must stay below 2^24, so K <= {_MAX_EXACT_K}); "
+                "lower K or replace the exact gate with a justified tolerance"
+            )
+        rng = np.random.default_rng(0xC0FFEE)
+        a_f32 = rng.integers(-5, 6, size=(m, k), dtype=np.int16).astype(np.float32)
+        b_f32 = rng.integers(-5, 6, size=(n, k), dtype=np.int16).astype(np.float32)
+        a = _fp8e4m3_encode(np, a_f32)
+        b = np.zeros((padded_n, k), dtype=np.uint8)
+        b[:n] = _fp8e4m3_encode(np, b_f32)
+        c = np.empty((m, n), dtype=np.uint16)
+
+        reference = None
+        if with_reference:
+            from rocke.dispatch.gemm.binding import _bf16_from_f32, _f32_from_bf16
+
+            # The reference reproduces the kernel's final RNE to bf16; every
+            # step before it is exact, so this is an equality, not a bound.
+            reference = _f32_from_bf16(np, _bf16_from_f32(np, a_f32 @ b_f32.T))
+
+        rt = Runtime()
+        a_dev = rt.alloc(a.nbytes)
+        b_dev = rt.alloc(b.nbytes)
+        c_dev = rt.alloc(c.nbytes)
+        rt.memcpy_h2d(a_dev, _as_u8_buffer(a), a.nbytes)
+        rt.memcpy_h2d(b_dev, _as_u8_buffer(b), b.nbytes)
+        rt.memset(c_dev, 0, c.nbytes)
+        return cls(rt, shape, padded_n, a_dev, b_dev, c_dev, c, reference)
+
+    @property
+    def args(self) -> bytes:
+        m, n, k = self.shape
+        return struct.pack("<QQQiii", self.a_dev, self.b_dev, self.c_dev, m, n, k)
+
+    def close(self) -> None:
+        try:
+            self.rt.sync()
+        except Exception:  # best effort: a sticky fault must not mask results
+            pass
+        for ptr in (self.a_dev, self.b_dev, self.c_dev):
+            try:
+                self.rt.free(ptr)
+            except Exception:
+                pass
+
+
+def _launch_geometry(
+    spec: UniversalGemmSpec, shape: Tuple[int, int, int]
+) -> Tuple[Tuple[int, int, int], Tuple[int, int, int]]:
+    """Grid is (N_tiles, M_tiles), matching the verified manifest runner."""
+    m, n, _k = shape
+    gx = (n + spec.tile.tile_n - 1) // spec.tile.tile_n
+    gy = (m + spec.tile.tile_m - 1) // spec.tile.tile_m
+    return (gx, gy, 1), (spec.block_size, 1, 1)
+
+
+def _time_function(
+    rt: Runtime, fn, grid, block, args: bytes, *, warmup: int, iters: int
+) -> float:
+    for _ in range(warmup):
+        rt.launch(fn, grid, block, args)
+    rt.wait_stream(0)
+    begin = rt.event()
+    finish = rt.event()
+    try:
+        begin.record()
+        for _ in range(iters):
+            rt.launch(fn, grid, block, args)
+        finish.record()
+        finish.synchronize()
+        elapsed = begin.elapsed_to(finish) / iters
+    finally:
+        begin.destroy()
+        finish.destroy()
+        rt.wait_stream(0)
+    return elapsed
+
+
+def _is_sticky(exc: BaseException) -> bool:
+    return any(code in str(exc) for code in _STICKY_HIP_ERRORS)
+
+
+def _total_build_ms(record: BuildRecord) -> float:
+    return float(record.ir_build_ms + record.ir_lower_ms + record.comgr_ms)
+
+
+def _result_header(
+    record: BuildRecord, spec: UniversalGemmSpec, *, arch: str
+) -> Dict[str, Any]:
+    """The build-side half of a row, filled before any launch is attempted.
+
+    Split out so a candidate that takes the process down with it is still
+    reported with the same shape as one that ran.
+    """
+    return {
+        "id": _spec_identity(spec, arch=arch),
+        "name": record.name,
+        "spec": record.spec_dict,
+        "build_ok": record.ok,
+        "build_error": record.error,
+        "build_ms": _total_build_ms(record),
+        "build_timings_ms": {
+            "ir_build": record.ir_build_ms,
+            "ir_lower": record.ir_lower_ms,
+            "comgr": record.comgr_ms,
+        },
+        "hsaco": record.hsaco_path,
+        "hsaco_bytes": record.hsaco_bytes,
+        "elf_meta": record.elf_meta,
+        "verified": False,
+    }
+
+
+def benchmark_record(
+    problem: PreparedProblem,
+    record: BuildRecord,
+    *,
+    arch: str,
+    warmup: int,
+    iters: int,
+    attempts: int,
+) -> Dict[str, Any]:
+    spec = _spec_from_dict(record.spec_dict)
+    result = _result_header(record, spec, arch=arch)
+    if not record.ok:
+        result["error"] = record.error or "build failed"
+        return result
+
+    module = None
+    try:
+        module = problem.rt.load_module(Path(record.hsaco_path).read_bytes())
+        fn = module.get_function(record.name)
+        grid, block = _launch_geometry(spec, problem.shape)
+        samples = [
+            _time_function(
+                problem.rt, fn, grid, block, problem.args, warmup=warmup, iters=iters
+            )
+            for _ in range(attempts)
+        ]
+        ms = statistics.median(samples)
+        m, n, k = problem.shape
+        result.update(
+            {
+                "samples_ms": samples,
+                "median_ms": ms,
+                "best_ms": min(samples),
+                "tflops": 2.0 * m * n * k / (ms * 1.0e9),
+            }
+        )
+    except Exception as exc:
+        result.setdefault("error", f"{type(exc).__name__}: {exc}")
+        if _is_sticky(exc):
+            result["device_fault"] = True
+    finally:
+        # A sticky error is re-raised by every later HIP call, so an unguarded
+        # drain raises a *second* exception out of the finally and discards the
+        # first -- which is how a faulting sweep dies with a traceback that
+        # never names the candidate responsible. Cleanup is best effort; the
+        # diagnosis stays in ``result``.
+        cleanups = [lambda: problem.rt.wait_stream(0)]
+        if module is not None:
+            cleanups.append(module.unload)
+        for cleanup in cleanups:
+            try:
+                cleanup()
+            except Exception as exc:
+                result.setdefault("error", f"{type(exc).__name__}: {exc}")
+                if _is_sticky(exc):
+                    result["device_fault"] = True
+    return result
+
+
+def verify_record(
+    problem: PreparedProblem, record: BuildRecord, result: Dict[str, Any]
+) -> bool:
+    """Exact compare.  See the module docstring for why this is not a tolerance."""
+    import numpy as np
+
+    from rocke.dispatch.gemm.binding import _f32_from_bf16
+
+    if problem.reference is None or not record.ok:
+        return False
+    spec = _spec_from_dict(record.spec_dict)
+    module = None
+    try:
+        module = problem.rt.load_module(Path(record.hsaco_path).read_bytes())
+        fn = module.get_function(record.name)
+        grid, block = _launch_geometry(spec, problem.shape)
+        problem.rt.memset(problem.c_dev, 0, problem.c_host.nbytes)
+        problem.rt.launch_blocking(fn, grid, block, problem.args)
+        problem.rt.memcpy_d2h(
+            _as_u8_buffer(problem.c_host), problem.c_dev, problem.c_host.nbytes
+        )
+        actual = _f32_from_bf16(np, problem.c_host)
+        error = np.abs(actual - problem.reference)
+        incorrect = int(np.count_nonzero(error > 0.0))
+        result.update(
+            {
+                "verified": incorrect == 0,
+                "max_abs_diff": float(error.max()),
+                "incorrect": incorrect,
+                "elements": int(actual.size),
+            }
+        )
+        return incorrect == 0
+    except Exception as exc:
+        result["verify_error"] = f"{type(exc).__name__}: {exc}"
+        return False
+    finally:
+        if module is not None:
+            try:
+                module.unload()
+            except Exception:
+                pass
+
+
+# ---------------------------------------------------------------------------
+# Result IO
+# ---------------------------------------------------------------------------
+
+
+def rank_results(results: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return sorted(
+        (r for r in results if "median_ms" in r and not r.get("error")),
+        key=lambda r: float(r["median_ms"]),
+    )
+
+
+def _record_by_id(
+    records: Sequence[BuildRecord], *, arch: str
+) -> Dict[str, BuildRecord]:
+    return {
+        _spec_identity(_spec_from_dict(r.spec_dict), arch=arch): r for r in records
+    }
+
+
+def _record_from_result(result: Dict[str, Any]) -> BuildRecord:
+    timings = result.get("build_timings_ms", {})
+    spec = result["spec"]
+    return BuildRecord(
+        name=result["name"],
+        spec_dict=spec,
+        ok=bool(result.get("build_ok")),
+        error=str(result.get("build_error", "")),
+        hsaco_path=str(result["hsaco"]),
+        hsaco_bytes=int(result.get("hsaco_bytes", 0)),
+        block_m=int(spec["tile"]["tile_m"]),
+        block_n=int(spec["tile"]["tile_n"]),
+        block_k=int(spec["tile"]["tile_k"]),
+        threads_per_block=int(spec["block_size"]),
+        ir_build_ms=float(timings.get("ir_build", 0.0)),
+        ir_lower_ms=float(timings.get("ir_lower", 0.0)),
+        comgr_ms=float(timings.get("comgr", 0.0)),
+        elf_meta=dict(result.get("elf_meta", {})),
+    )
+
+
+_CSV_FIELDS = (
+    "rank",
+    "id",
+    "name",
+    "median_ms",
+    "best_ms",
+    "tflops",
+    "verified",
+    "max_abs_diff",
+    "incorrect",
+    "build_ms",
+    "hsaco_bytes",
+    "device_fault",
+    "error",
+    "verify_error",
+)
+
+
+def _write_results(
+    output_dir: Path, stem: str, results: Sequence[Dict[str, Any]]
+) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / f"{stem}.json").write_text(
+        json.dumps(list(results), indent=2, sort_keys=True)
+    )
+    ranked_ids = {r["id"]: i + 1 for i, r in enumerate(rank_results(results))}
+    with (output_dir / f"{stem}.csv").open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=_CSV_FIELDS, extrasaction="ignore")
+        writer.writeheader()
+        for result in results:
+            writer.writerow({"rank": ranked_ids.get(result["id"], ""), **result})
+
+
+def _load_stage(output_dir: Path, stem: str, needed_by: str) -> List[Dict[str, Any]]:
+    path = output_dir / f"{stem}.json"
+    if not path.exists():
+        raise SystemExit(
+            f"{path} is required when --stages includes {needed_by!r}; "
+            f"run the {stem!r} stage first or point --out at a run that has."
+        )
+    return json.loads(path.read_text())
+
+
+# ---------------------------------------------------------------------------
+# Build + benchmark driver
+# ---------------------------------------------------------------------------
+
+
+def build_and_benchmark(
+    specs: Sequence[UniversalGemmSpec],
+    *,
+    cache_dir: Path,
+    shape: Tuple[int, int, int],
+    padded_n: int,
+    arch: str,
+    isa: str,
+    workers: int,
+    warmup: int,
+    iters: int,
+    attempts: int,
+    with_reference: bool,
+) -> Tuple[List[BuildRecord], List[Dict[str, Any]], PreparedProblem]:
+    records = build_all_instances(
+        specs, cache_dir=cache_dir, arch=arch, isa=isa, parallel=workers
+    )
+    problem = PreparedProblem.create(shape, padded_n, with_reference=with_reference)
+    results: List[Dict[str, Any]] = []
+    for index, record in enumerate(records):
+        result = benchmark_record(
+            problem,
+            record,
+            arch=arch,
+            warmup=warmup,
+            iters=iters,
+            attempts=attempts,
+        )
+        results.append(result)
+        if result.get("device_fault"):
+            # Every later HIP call in this process returns the same latched
+            # code, so continuing would manufacture identical bogus failures
+            # for every remaining candidate. Stop with what is real.
+            print(
+                f"device fault at candidate {index + 1}/{len(records)} "
+                f"({record.name}); stopping this stage and keeping "
+                f"{len(results)} measured rows",
+                flush=True,
+            )
+            break
+    return records, results, problem
+
+
+# ---------------------------------------------------------------------------
+# Out-of-process final timing
+# ---------------------------------------------------------------------------
+
+
+def _independent_final_timings(
+    output_dir: Path,
+    record: BuildRecord,
+    shape: Tuple[int, int, int],
+    padded_n: int,
+    *,
+    warmup: int,
+    iters: int,
+    samples: int,
+) -> List[float]:
+    """Re-time in fresh processes, discarding the first.
+
+    A fresh process is the only way to shed a warm module cache, a latched
+    HIP error, and whatever allocator state the in-process ranking left
+    behind. The first run of a fresh process is discarded per the runbook's
+    benchmark hygiene, so ``samples + 1`` processes are spawned.
+    """
+    payload = {
+        "record": asdict(record),
+        "shape": list(shape),
+        "padded_n": padded_n,
+        "warmup": warmup,
+        "iters": iters,
+    }
+    worker_input = output_dir / "final_worker.json"
+    worker_input.write_text(json.dumps(payload, indent=2))
+
+    env = os.environ.copy()
+    package_root = str(Path(__file__).resolve().parents[4])
+    env["PYTHONPATH"] = (
+        package_root
+        if not env.get("PYTHONPATH")
+        else package_root + os.pathsep + env["PYTHONPATH"]
+    )
+
+    out: List[float] = []
+    for attempt in range(samples + 1):
+        proc = subprocess.run(
+            [sys.executable, str(Path(__file__).resolve()),
+             "--worker-record", str(worker_input)],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=600,
+        )
+        lines = [
+            line
+            for line in proc.stdout.splitlines()
+            if line.startswith(_WORKER_RESULT_PREFIX)
+        ]
+        if proc.returncode != 0 or not lines:
+            raise RuntimeError(
+                f"final timing worker failed ({proc.returncode}): "
+                f"{proc.stdout[-800:]}{proc.stderr[-800:]}"
+            )
+        ms = float(json.loads(lines[-1][len(_WORKER_RESULT_PREFIX) :])["median_ms"])
+        if attempt:  # discard the cold first process
+            out.append(ms)
+    return out
+
+
+def _run_worker(path: Path) -> int:
+    payload = json.loads(path.read_text())
+    record = BuildRecord(**payload["record"])
+    shape = tuple(int(v) for v in payload["shape"])
+    problem = PreparedProblem.create(
+        shape, int(payload["padded_n"]), with_reference=False
+    )
+    try:
+        spec = _spec_from_dict(record.spec_dict)
+        module = problem.rt.load_module(Path(record.hsaco_path).read_bytes())
+        fn = module.get_function(record.name)
+        grid, block = _launch_geometry(spec, shape)
+        ms = _time_function(
+            problem.rt,
+            fn,
+            grid,
+            block,
+            problem.args,
+            warmup=int(payload["warmup"]),
+            iters=int(payload["iters"]),
+        )
+        module.unload()
+    finally:
+        problem.close()
+    print(_WORKER_RESULT_PREFIX + json.dumps({"median_ms": ms}), flush=True)
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+
+def _csv_of(kind):
+    def parse(text: str):
+        return [kind(piece) for piece in text.split(",") if piece != ""]
+
+    return parse
+
+
+def _flag(text: str) -> bool:
+    return text.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _nullable_int(text: str) -> Optional[int]:
+    return None if text.strip().lower() in {"none", "null", ""} else int(text)
+
+
+_CONFIG_OVERRIDES: Tuple[Tuple[str, Tuple[str, ...], Any, str], ...] = (
+    ("--m", ("problem", "m"), int, "problem M"),
+    ("--n", ("problem", "n"), int, "problem N"),
+    ("--k", ("problem", "k"), int, "problem K"),
+    ("--tile-m", ("tile_config", "tile_m"), _csv_of(int), "block tile M values"),
+    ("--tile-n", ("tile_config", "tile_n"), _csv_of(int), "block tile N values"),
+    ("--tile-k", ("tile_config", "tile_k"), _csv_of(int), "block tile K values"),
+    ("--warp-m", ("tile_config", "warp_m"), _csv_of(int), "warp grid M values"),
+    ("--warp-n", ("tile_config", "warp_n"), _csv_of(int), "warp grid N values"),
+    ("--pipelines", ("trait_config", "pipelines"), _csv_of(str), "pipelines"),
+    ("--schedulers", ("trait_config", "schedulers"), _csv_of(str), "schedulers"),
+    ("--epilogues", ("trait_config", "epilogues"), _csv_of(str), "epilogues"),
+    (
+        "--waves-per-eu",
+        ("trait_config", "waves_per_eu"),
+        _csv_of(_nullable_int),
+        "waves-per-EU values ('none' for the default)",
+    ),
+    (
+        "--lds-swizzle",
+        ("trait_config", "lds_swizzle"),
+        _csv_of(_flag),
+        "LDS swizzle flags",
+    ),
+    ("--lds-k-pad", ("trait_config", "lds_k_pad"), _csv_of(int), "LDS K padding"),
+    (
+        "--direct-to-lds",
+        ("trait_config", "direct_to_lds"),
+        _csv_of(_flag),
+        "DirectToLDS load path",
+    ),
+    (
+        "--dtl-prefetch",
+        ("trait_config", "dtl_prefetch"),
+        _csv_of(_flag),
+        "DirectToLDS prefetch ping-pong",
+    ),
+    (
+        "--tile-finalists",
+        ("selection", "tile_finalists"),
+        int,
+        "geometries kept after stage 1",
+    ),
+    (
+        "--final-timed",
+        ("selection", "final_timed"),
+        int,
+        "candidates re-timed out of process",
+    ),
+    (
+        "--final-samples",
+        ("selection", "final_samples"),
+        int,
+        "fresh-process samples per finalist (one more is run and discarded)",
+    ),
+    ("--workers", ("benchmark", "workers"), int, "parallel build workers"),
+    ("--warmup", ("benchmark", "warmup"), int, "warmup launches per candidate"),
+    ("--iters", ("benchmark", "iters"), int, "timed launches per sample"),
+    ("--attempts", ("benchmark", "attempts"), int, "in-process samples, median taken"),
+)
+
+
+def _apply_overrides(config: Dict[str, Any], args: argparse.Namespace) -> List[str]:
+    applied: List[str] = []
+    for flag, path, _kind, _help in _CONFIG_OVERRIDES:
+        value = getattr(args, flag.lstrip("-").replace("-", "_"))
+        if value is None:
+            continue
+        section = config
+        for key in path[:-1]:
+            section = section.setdefault(key, {})
+        section[path[-1]] = value
+        applied.append(f"{'.'.join(path)}={value}")
+    return applied
+
+
+def _parse_stages(text: Optional[str]) -> List[str]:
+    if not text or text == "all":
+        return list(STAGES)
+    chosen = [piece.strip() for piece in text.split(",") if piece.strip()]
+    unknown = [piece for piece in chosen if piece not in STAGES]
+    if unknown:
+        raise SystemExit(
+            f"unknown stage(s) {unknown}; choose from {', '.join(STAGES)}"
+        )
+    return [stage for stage in STAGES if stage in chosen]
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    parser.add_argument(
+        "--out",
+        type=str,
+        default=None,
+        help="results directory; falls back to $ROCKE_PERF_OUT. Required. "
+        "Kept out of the committed config on purpose.",
+    )
+    parser.add_argument(
+        "--stages",
+        type=str,
+        default="all",
+        help=f"comma-separated subset of: {', '.join(STAGES)} (default: all). "
+        "A later stage reads the earlier stage's JSON from --out, so a run "
+        "can be resumed or a single stage repeated.",
+    )
+    parser.add_argument(
+        "--levers",
+        type=str,
+        default=None,
+        help="comma-separated lever names for the 'lever' stage "
+        "(default: every lever in the config)",
+    )
+    for flag, path, kind, help_text in _CONFIG_OVERRIDES:
+        parser.add_argument(
+            flag, type=kind, default=None,
+            help=f"{help_text} [overrides {'.'.join(path)}]",
+        )
+    parser.add_argument("--worker-record", type=Path, help=argparse.SUPPRESS)
+    return parser
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    args = build_parser().parse_args(argv)
+    if args.worker_record:
+        return _run_worker(args.worker_record)
+
+    config = load_config(args.config)
+    overrides = _apply_overrides(config, args)
+    stages = _parse_stages(args.stages)
+    output_dir = resolve_output_dir(args)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    cache_dir = output_dir / "hsaco_cache"
+
+    target = config["target"]
+    problem = config["problem"]
+    selection = config["selection"]
+    benchmark = config["benchmark"]
+    arch = str(target["arch"])
+    isa = str(target["isa"])
+    shape = (int(problem["m"]), int(problem["n"]), int(problem["k"]))
+
+    print(f"stages : {', '.join(stages)}")
+    print(f"shape  : {shape[0]}x{shape[1]}x{shape[2]}")
+    print(f"out    : {output_dir}")
+    if overrides:
+        print("overrides: " + "  ".join(overrides))
+
+    summary: Dict[str, Any] = {
+        "arch": arch,
+        "dtype_ab": target["dtype_ab"],
+        "dtype_c": target["dtype_c"],
+        "layout": target["layout"],
+        "shape": list(shape),
+        "stages": stages,
+        "config_overrides": overrides,
+        "resolved_config": config,
+    }
+
+    tile_specs = enumerate_tile_configs(config)
+    padded_n = required_padded_n(shape[1], tile_specs)
+
+    # ---- stage 1: geometry -------------------------------------------------
+    if "tile" in stages:
+        print(f"tile   : {len(tile_specs)} candidates; "
+              f"B rows {shape[1]}->{padded_n}", flush=True)
+        tile_records, tile_results, tile_problem = build_and_benchmark(
+            tile_specs,
+            cache_dir=cache_dir,
+            shape=shape,
+            padded_n=padded_n,
+            arch=arch,
+            isa=isa,
+            workers=int(benchmark["workers"]),
+            warmup=int(benchmark["warmup"]),
+            iters=int(benchmark["iters"]),
+            attempts=int(benchmark["attempts"]),
+            with_reference=True,
+        )
+        try:
+            record_map = _record_by_id(tile_records, arch=arch)
+            for result in rank_results(tile_results)[
+                : int(selection["tile_finalists"])
+            ]:
+                verify_record(tile_problem, record_map[result["id"]], result)
+        finally:
+            tile_problem.close()
+        _write_results(output_dir, "tile", tile_results)
+    else:
+        tile_results = _load_stage(output_dir, "tile", "trait")
+
+    ranked_tiles = rank_results(tile_results)
+    finalists = [
+        _spec_from_dict(r["spec"]) for r in ranked_tiles if r.get("verified")
+    ][: int(selection["tile_finalists"])]
+    if "trait" in stages and not finalists:
+        raise SystemExit(
+            "no tile finalist passed verification -- every geometry either "
+            "failed to build, faulted, or produced a wrong result. Check "
+            "tile.csv before widening the search."
+        )
+    summary["tile"] = {
+        "candidate_count": len(tile_results),
+        "verified_finalists": len(finalists),
+    }
+
+    # ---- stage 2: traits ---------------------------------------------------
+    if "trait" in stages:
+        trait_specs = enumerate_trait_configs(config, finalists)
+        print(f"trait  : {len(trait_specs)} candidates "
+              f"over {len(finalists)} geometries", flush=True)
+        trait_records, trait_results, trait_problem = build_and_benchmark(
+            trait_specs,
+            cache_dir=cache_dir,
+            shape=shape,
+            padded_n=padded_n,
+            arch=arch,
+            isa=isa,
+            workers=int(benchmark["workers"]),
+            warmup=int(benchmark["warmup"]),
+            iters=int(benchmark["iters"]),
+            attempts=int(benchmark["attempts"]),
+            # Screening only: correctness is re-established in 'final'.
+            with_reference=False,
+        )
+        trait_problem.close()
+        _write_results(output_dir, "trait", trait_results)
+        summary["trait"] = {"candidate_count": len(trait_results)}
+    elif {"final", "lever"} & set(stages):
+        trait_results = _load_stage(output_dir, "trait", "final")
+        trait_records = [_record_from_result(r) for r in trait_results]
+        summary["trait"] = {"candidate_count": len(trait_results)}
+
+    # ---- stage 3: verified, fresh-process timing ---------------------------
+    champion: Optional[Dict[str, Any]] = None
+    if "final" in stages:
+        final_problem = PreparedProblem.create(
+            shape, padded_n, with_reference=True
+        )
+        record_map = _record_by_id(trait_records, arch=arch)
+        robust: List[Dict[str, Any]] = []
+        try:
+            for result in rank_results(trait_results):
+                record = record_map.get(result["id"])
+                if record is None or not verify_record(final_problem, record, result):
+                    continue
+                result["independent_samples_ms"] = _independent_final_timings(
+                    output_dir,
+                    record,
+                    shape,
+                    padded_n,
+                    warmup=int(benchmark["warmup"]),
+                    iters=int(benchmark["iters"]),
+                    samples=int(selection.get("final_samples", 5)),
+                )
+                result["final_median_ms"] = statistics.median(
+                    result["independent_samples_ms"]
+                )
+                robust.append(result)
+                if len(robust) >= int(selection["final_timed"]):
+                    break
+        finally:
+            final_problem.close()
+        _write_results(output_dir, "trait", trait_results)
+        if not robust:
+            raise SystemExit("no trait candidate passed final verification")
+        champion = min(robust, key=lambda r: float(r["final_median_ms"]))
+        summary["final"] = {
+            "robust_finalist_count": len(robust),
+            "champion_id": champion["id"],
+            "champion_spec": champion["spec"],
+        }
+
+    # ---- stage 4: lever A/B against the champion ---------------------------
+    if "lever" in stages:
+        if champion is None:
+            prior = _load_stage(output_dir, "summary", "lever")
+            champion = {"spec": prior["final"]["champion_spec"]}
+        levers = config.get("levers", {})
+        names = (
+            [n.strip() for n in args.levers.split(",")] if args.levers else list(levers)
+        )
+        unknown = [n for n in names if n not in levers]
+        if unknown:
+            raise SystemExit(f"unknown lever(s) {unknown}; have {list(levers)}")
+        base_spec = _spec_from_dict(champion["spec"])
+        arms = {name: apply_lever(base_spec, levers[name]) for name in names}
+        print(f"lever  : {len(arms)} arms over the champion geometry", flush=True)
+
+        arm_records = build_all_instances(
+            list(arms.values()), cache_dir=cache_dir, arch=arch, isa=isa,
+            parallel=int(benchmark["workers"]),
+        )
+        lever_problem = PreparedProblem.create(shape, padded_n, with_reference=True)
+        lever_results: List[Dict[str, Any]] = []
+        try:
+            by_id = _record_by_id(arm_records, arch=arch)
+            for name, spec in arms.items():
+                record = by_id.get(_spec_identity(spec, arch=arch))
+                if record is None:
+                    lever_results.append({"lever": name, "error": "build missing"})
+                    continue
+                row = _result_header(record, spec, arch=arch)
+                row["lever"] = name
+                row["description"] = levers[name].get("description", "")
+                # Every arm is verified, not just the baseline: an arm that
+                # got faster by computing the wrong thing is the failure mode
+                # an A/B harness exists to catch.
+                if not verify_record(lever_problem, record, row):
+                    lever_results.append(row)
+                    continue
+                row["independent_samples_ms"] = _independent_final_timings(
+                    output_dir,
+                    record,
+                    shape,
+                    padded_n,
+                    warmup=int(benchmark["warmup"]),
+                    iters=int(benchmark["iters"]),
+                    samples=int(selection.get("final_samples", 5)),
+                )
+                row["final_median_ms"] = statistics.median(
+                    row["independent_samples_ms"]
+                )
+                lever_results.append(row)
+        finally:
+            lever_problem.close()
+        _write_results(output_dir, "lever", lever_results)
+
+        timed = [r for r in lever_results if "final_median_ms" in r]
+        base = next((r for r in timed if r["lever"] == "baseline"), None)
+        if base is not None:
+            for row in timed:
+                row["speedup_vs_baseline"] = (
+                    float(base["final_median_ms"]) / float(row["final_median_ms"])
+                )
+            _write_results(output_dir, "lever", lever_results)
+        summary["lever"] = {
+            "arms": [
+                {
+                    "lever": r["lever"],
+                    "verified": r.get("verified", False),
+                    "speedup_vs_baseline": r.get("speedup_vs_baseline"),
+                }
+                for r in lever_results
+            ]
+        }
+
+    (output_dir / "summary.json").write_text(
+        json.dumps(summary, indent=2, sort_keys=True, default=str)
+    )
+    print(f"\nwrote {output_dir / 'summary.json'}")
+    if "lever" in summary:
+        print("\nlever A/B (ratio vs baseline; absolute timings in lever.csv):")
+        for arm in summary["lever"]["arms"]:
+            ratio = arm["speedup_vs_baseline"]
+            shown = f"{ratio:.4f}x" if ratio else "n/a"
+            flag = "" if arm["verified"] else "  [UNVERIFIED]"
+            print(f"  {arm['lever']:<24} {shown}{flag}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

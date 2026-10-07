@@ -283,7 +283,13 @@ rocke_value_t* rocke_gemm_emit_mfma(rocke_ir_builder_t* b,
 rocke_value_t* rocke_gemm_emit_zero_acc(rocke_ir_builder_t* b,
                                         const rocke_gemm_universal_spec_t* spec);
 
-/* _choose_load_vec(spec) -> width. Thin adapter over rocke_choose_load_vec. */
+/* _ab_dtype_bytes(spec) -> bytes per A/B element (2 for f16/bf16, 1 for
+ * fp8/bf8). Defined in gemm_universal.cpp. */
+int rocke_gemm_ab_dtype_bytes(const rocke_gemm_universal_spec_t* spec);
+
+/* _choose_load_vec(spec) -> width in elements. Thin adapter over
+ * rocke_choose_load_vec; resolves the element width from dtype_a unless
+ * trait.ab_load_elem_bytes overrides it. */
 int rocke_gemm_choose_load_vec(const rocke_gemm_universal_spec_t* spec);
 
 /* _emit_smem_load(b, smem, row, col, n, dtype): f16/n==4 fast path else vN. */

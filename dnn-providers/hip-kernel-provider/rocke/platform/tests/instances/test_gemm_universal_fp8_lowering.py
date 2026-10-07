@@ -55,14 +55,25 @@ _PIPELINE = "mem"
 _IR_CACHE: dict[tuple, str] = {}
 
 
-def _ir(dtype: str, *, c_dtype: str = "bf16", pad: bool = True, wtk: int = 64) -> str:
+def _ir(
+    dtype: str,
+    *,
+    c_dtype: str = "bf16",
+    pad: bool = True,
+    wtk: int = 64,
+    ab_load_elem_bytes: int | None = None,
+) -> str:
     """Lower one universal GEMM and return its LLVM text.
 
     Defaults are the shape the fp8 verify harness builds: a 16x16x64 atom in a
     2x2 warp grid with padding on. ``wtk`` drops to 32 for the bf16 contrast,
-    since that is the widest K its atom offers.
+    since that is the widest K its atom offers. ``ab_load_elem_bytes`` pins the
+    global A/B load-vector element width; None resolves it from the dtype.
+
+    Every argument must appear in ``key`` -- the cache is keyed on it, so a
+    parameter left out would silently hand back IR built with a different value.
     """
-    key = (dtype, c_dtype, pad, wtk)
+    key = (dtype, c_dtype, pad, wtk, ab_load_elem_bytes)
     if key not in _IR_CACHE:
         target = ArchTarget.from_gfx(_ARCH)
         tile = TileSpec(
@@ -83,6 +94,7 @@ def _ir(dtype: str, *, c_dtype: str = "bf16", pad: bool = True, wtk: int = 64) -
             pad_m=pad,
             pad_n=pad,
             pad_k=pad,
+            ab_load_elem_bytes=ab_load_elem_bytes,
         )
         data = DataSpec(
             dtype_a=dtype,
@@ -149,11 +161,39 @@ class TestFp8Intrinsic(unittest.TestCase):
 class TestEightBitMemoryTraffic(unittest.TestCase):
     def test_global_a_b_traffic_is_byte_typed(self):
         # Padded tiles load A/B one guarded element at a time; unpadded tiles
-        # take the whole 8-element run. Both are asserted because the element
-        # width is the claim, not the vector width -- an i8 that had been widened
-        # to i16 would read the right addresses and the wrong bytes.
+        # take the whole run. Both are asserted because the element width is
+        # the claim, not the vector width -- an i8 that had been widened to i16
+        # would read the right addresses and the wrong bytes.
         self.assertIn("load i8, ptr addrspace(1)", _ir("fp8e4m3", pad=True))
-        self.assertIn("load <8 x i8>, ptr addrspace(1)", _ir("fp8e4m3", pad=False))
+        self.assertIn("load <16 x i8>, ptr addrspace(1)", _ir("fp8e4m3", pad=False))
+
+    def test_a_one_byte_operand_uses_the_whole_sixteen_byte_load(self):
+        # The picker caps the vector at 16/elem_bytes. Resolving the width from
+        # the dtype is what spends all four dwords on a 1-byte operand; the
+        # historical default of 2 capped it at 8 elements and wasted half the
+        # load. Asserting the alignment too, because `align 16` is a claim to
+        # LLVM about the address, not a formatting detail.
+        ll = _ir("fp8e4m3", pad=False)
+        self.assertIn("load <16 x i8>, ptr addrspace(1)", ll)
+        self.assertIn("align 16", ll)
+        self.assertNotIn("load <8 x i8>, ptr addrspace(1)", ll)
+
+    def test_the_override_reproduces_the_narrow_load(self):
+        # The counterfactual that makes the assertion above mean something: the
+        # same spec with the width pinned to 2 goes back to 8 elements. Without
+        # it, a picker that ignored elem_bytes entirely and always returned 16
+        # would pass every positive case here.
+        ll = _ir("fp8e4m3", pad=False, ab_load_elem_bytes=2)
+        self.assertIn("load <8 x i8>, ptr addrspace(1)", ll)
+        self.assertNotIn("load <16 x i8>, ptr addrspace(1)", ll)
+
+    def test_two_byte_operands_are_unaffected_by_the_resolved_width(self):
+        # bf16 resolves to elem_bytes=2, which is what the picker defaulted to
+        # all along -- so the widening must leave every f16/bf16 kernel byte
+        # for byte where it was. 8 bfloats is already a full 16 bytes.
+        ll = _ir("bf16", wtk=32, pad=False)
+        self.assertIn("load <8 x bfloat>, ptr addrspace(1)", ll)
+        self.assertNotIn("load <16 x bfloat>", ll)
 
     def test_c_is_stored_as_bfloat_and_never_as_a_byte(self):
         # The asymmetric half of the ABI. An fp8 C would halve the store width

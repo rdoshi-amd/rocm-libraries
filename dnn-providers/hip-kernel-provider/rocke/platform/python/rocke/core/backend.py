@@ -461,6 +461,7 @@ def universal_gemm_spec_to_dict(spec: Any) -> Dict[str, Any]:
         active_tile_skip=tr.active_tile_skip,
         lds_k_pad=tr.lds_k_pad,
         lds_swizzle=tr.lds_swizzle,
+        ab_load_elem_bytes=tr.ab_load_elem_bytes,
         # data
         dtype_a=d.dtype_a,
         dtype_b=d.dtype_b,
@@ -659,6 +660,7 @@ def _gemm_subspec_to_dict(spec: Any) -> Dict[str, Any]:
         active_tile_skip=tr.active_tile_skip,
         lds_k_pad=tr.lds_k_pad,
         lds_swizzle=tr.lds_swizzle,
+        ab_load_elem_bytes=tr.ab_load_elem_bytes,
         wave_size=spec.wave_size,
         block_size=spec.block_size,
     )

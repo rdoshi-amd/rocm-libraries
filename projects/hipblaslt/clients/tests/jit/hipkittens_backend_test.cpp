@@ -24,7 +24,6 @@ namespace hk  = hipblaslt_ext::experimental::jit::hipkittens;
 
 namespace
 {
-    using hipblaslt_jit_test::require;
     using hipblaslt_jit_test::Device;
 
 #define HIP(expression) hipblaslt_jit_test::checkHip((expression), #expression)
@@ -32,9 +31,11 @@ namespace
     do                                                                           \
     {                                                                            \
         const auto status_ = (expression);                                       \
-        require(status_ == HIPBLAS_STATUS_SUCCESS,                               \
-                std::string(#expression) + ": status " + std::to_string(status_) \
-                    + " " + diagnostics.message);                                \
+        { \
+            INFO(( \
+                std::string(#expression) + ": status " + std::to_string(status_) + " " + diagnostics.message)); \
+            REQUIRE((status_ == HIPBLAS_STATUS_SUCCESS)); \
+        } \
     } while(false)
 
     // BF16 1 and 128, which the K=128 sum of ones produces exactly.
@@ -45,26 +46,43 @@ namespace
     void checkResources()
     {
         const auto& resources = hk::detail::resources();
-        require(resources.variants.size() == 2, "expected the BF16 and FP16 variants");
+        {
+            INFO(("expected the BF16 and FP16 variants"));
+            REQUIRE((resources.variants.size() == 2));
+        }
         bool bf16 = false, fp16 = false;
         for(const auto& variant : resources.variants)
         {
-            require(variant.isa == "gfx950", "variant is not gfx950");
-            require(variant.resources.kernargBytes == 84 && variant.resources.ldsBytes == 160000
-                        && variant.resources.vgprSpills == 0,
-                    std::string(variant.kernelName) + " resources changed");
+            {
+                INFO(("variant is not gfx950"));
+                REQUIRE((variant.isa == "gfx950"));
+            }
+            {
+                INFO((std::string(variant.kernelName) + " resources changed"));
+                REQUIRE((variant.resources.kernargBytes == 84 && variant.resources.ldsBytes == 160000
+                    && variant.resources.vgprSpills == 0));
+            }
             if(variant.kernelName == "HK_gemm_bf16_TN_MT256x256x64_W2x4_gfx950_abi5")
             {
                 bf16 = true;
-                require(variant.resources.vgprs == 237, "BF16 VGPR count");
+                {
+                    INFO(("BF16 VGPR count"));
+                    REQUIRE((variant.resources.vgprs == 237));
+                }
             }
             else if(variant.kernelName == "HK_gemm_f16_TN_MT256x256x64_W2x4_gfx950_abi5")
             {
                 fp16 = true;
-                require(variant.resources.vgprs == 238, "FP16 VGPR count");
+                {
+                    INFO(("FP16 VGPR count"));
+                    REQUIRE((variant.resources.vgprs == 238));
+                }
             }
         }
-        require(bf16 && fp16, "missing a gfx950 kernel name");
+        {
+            INFO(("missing a gfx950 kernel name"));
+            REQUIRE((bf16 && fp16));
+        }
         std::cout << "PASS compiled-in gfx950 variants\n";
     }
 
@@ -114,7 +132,10 @@ namespace
         makeProblem(handle, desc, M, N, K, request, diagnostics);
         const auto operation = jit::detail::RequestAccess::get(request);
         const auto gemm      = dynamic_cast<const jit::detail::GemmRequest*>(operation.get());
-        require(gemm != nullptr, "request is not a GEMM");
+        {
+            INFO(("request is not a GEMM"));
+            REQUIRE((gemm != nullptr));
+        }
         auto problem = gemm->problem;
 
         int         device = -1;
@@ -138,10 +159,19 @@ namespace
         HIP(hipStreamEndCapture(stream, &graph));
         HIP(hipGraphDestroy(graph));
         HIP(hipStreamDestroy(stream));
-        require(status == HIPBLAS_STATUS_NOT_SUPPORTED, "capture status " + std::to_string(status));
-        require(diagnostics.message.find("stream capture") != std::string::npos, diagnostics.message);
-        require(elapsed < 20000, "generation started during stream capture ("
-                                     + std::to_string(elapsed) + " ms)");
+        {
+            INFO(("capture status " + std::to_string(status)));
+            REQUIRE((status == HIPBLAS_STATUS_NOT_SUPPORTED));
+        }
+        {
+            INFO((diagnostics.message));
+            REQUIRE((diagnostics.message.find("stream capture") != std::string::npos));
+        }
+        {
+            INFO(("generation started during stream capture ("
+                + std::to_string(elapsed) + " ms)"));
+            REQUIRE((elapsed < 20000));
+        }
         std::cout << "PASS capturing stream did not compile (" << elapsed << " ms)\n";
     }
 
@@ -155,7 +185,10 @@ namespace
         makeProblem(handle, desc, M, N, K, request, diagnostics);
         const auto operation = jit::detail::RequestAccess::get(request);
         const auto gemm      = dynamic_cast<const jit::detail::GemmRequest*>(operation.get());
-        require(gemm != nullptr, "request is not a GEMM");
+        {
+            INFO(("request is not a GEMM"));
+            REQUIRE((gemm != nullptr));
+        }
         auto problem = gemm->problem;
 
         int         device = -1;
@@ -179,15 +212,25 @@ namespace
         HIP(hipStreamEndCapture(stream, &graph));
         HIP(hipGraphDestroy(graph));
         HIP(hipStreamDestroy(stream));
-        require(status == HIPBLAS_STATUS_SUCCESS, "capture hit status " + std::to_string(status));
-        require(diagnostics.message == "1 of 1 solutions came from the JIT solution library",
-                "capture hit generated: " + diagnostics.message);
+        {
+            INFO(("capture hit status " + std::to_string(status)));
+            REQUIRE((status == HIPBLAS_STATUS_SUCCESS));
+        }
+        {
+            INFO(("capture hit generated: " + diagnostics.message));
+            REQUIRE((diagnostics.message == "1 of 1 solutions came from the JIT solution library"));
+        }
         hipblasLtMatmulHeuristicResult_t result{};
         BLAS(jit::getGemmAlgo(found, result, diagnostics));
-        require(hipblaslt_ext::getIndexFromAlgo(result.algo) >= (1 << 30),
-                "capture hit is not a JIT library index");
-        require(elapsed < 20000, "generation started during stream capture ("
-                                     + std::to_string(elapsed) + " ms)");
+        {
+            INFO(("capture hit is not a JIT library index"));
+            REQUIRE((hipblaslt_ext::getIndexFromAlgo(result.algo) >= (1 << 30)));
+        }
+        {
+            INFO(("generation started during stream capture ("
+                + std::to_string(elapsed) + " ms)"));
+            REQUIRE((elapsed < 20000));
+        }
         std::cout << "PASS capturing stream returned the published index (" << elapsed << " ms)\n";
     }
 
@@ -233,8 +276,10 @@ namespace
         hipblasLtMatmulHeuristicResult_t result{};
         BLAS(jit::getGemmAlgo(solution, result, diagnostics));
         const auto kernel = hipblaslt_ext::getKernelNameFromAlgo(handle, result.algo);
-        require(kernel == "HK_gemm_bf16_TN_MT256x256x64_W2x4_gfx950_abi5",
-                "selected '" + kernel + "'");
+        {
+            INFO(("selected '" + kernel + "'"));
+            REQUIRE((kernel == "HK_gemm_bf16_TN_MT256x256x64_W2x4_gfx950_abi5"));
+        }
         Device workspace(result.workspaceSize);
         HIP(hipMemset(D.pointer, 0xff, hostBytes));
         BLAS(hipblasLtMatmul(handle,
@@ -257,15 +302,20 @@ namespace
         std::vector<uint16_t> out(size_t(M) * N);
         HIP(hipMemcpy(out.data(), D.pointer, hostBytes, hipMemcpyDeviceToHost));
         for(size_t i = 0; i < out.size(); ++i)
-            require(out[i] == bf16K, "D[" + std::to_string(i) + "] is not 128");
+        {
+            INFO(("D[" + std::to_string(i) + "] is not 128"));
+            REQUIRE((out[i] == bf16K));
+        }
         std::cout << "PASS BF16 TN 256x256x128\n";
 
         jit::Request  small;
         jit::Solution unsupported;
         makeProblem(handle, desc, 128, N, K, small, diagnostics);
-        require(jit::getJitAlgo(device, small, backend, 64 << 20, unsupported, diagnostics)
-                    == HIPBLAS_STATUS_NOT_SUPPORTED,
-                "M=128 was accepted");
+        {
+            INFO(("M=128 was accepted"));
+            REQUIRE((jit::getJitAlgo(device, small, backend, 64 << 20, unsupported, diagnostics)
+                == HIPBLAS_STATUS_NOT_SUPPORTED));
+        }
         std::cout << "PASS M=128 is not supported\n";
 
         hipblasLtMatrixLayoutDestroy(la);
@@ -282,10 +332,15 @@ TEST_CASE("the HipKittens gfx950 backend", "[jit-gpu]")
     hipDeviceProp_t properties{};
     HIP(hipGetDevice(&device));
     HIP(hipGetDeviceProperties(&properties, device));
-    require(std::string(properties.gcnArchName).rfind("gfx950", 0) == 0,
-            std::string("need gfx950, got ") + properties.gcnArchName);
+    {
+        INFO((std::string("need gfx950, got ") + properties.gcnArchName));
+        REQUIRE((std::string(properties.gcnArchName).rfind("gfx950", 0) == 0));
+    }
     const char* libraryRoot = std::getenv("HIPBLASLT_JIT_LIBRARY_PATH");
-    require(libraryRoot && *libraryRoot, "Set HIPBLASLT_JIT_LIBRARY_PATH to a scratch directory");
+    {
+        INFO(("Set HIPBLASLT_JIT_LIBRARY_PATH to a scratch directory"));
+        REQUIRE((libraryRoot && *libraryRoot));
+    }
     std::filesystem::remove_all(std::filesystem::u8path(libraryRoot));
 
     checkResources();

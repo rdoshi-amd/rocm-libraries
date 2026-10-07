@@ -3,6 +3,10 @@
     "HIP_MLOPS_ENGINE": [
       {
         "cases": [
+          "16_3_8_14_14_bfp16_ncdhw",
+          "16_3_8_14_14_fp16_ndhwc",
+          "16_3_8_14_14_fp32_ncdhw",
+          "1_16_112_112_fp16_nchw_rlo0_norslope_norhi",
           "1_256_1_1_bfp16_nchw",
           "1_256_1_1_bfp16_nhwc",
           "1_256_1_1_fp16_nchw",
@@ -18,6 +22,12 @@
           "2_3_3_1_1_bfp16_ndhwc",
           "2_3_3_1_1_fp16_ncdhw",
           "2_3_3_1_1_fp32_ndhwc",
+          "32_3_14_1_bfp16_nchw",
+          "32_3_14_1_bfp16_nhwc",
+          "32_3_14_1_fp16_nchw",
+          "32_3_14_1_fp16_nhwc",
+          "32_3_14_1_fp32_nchw",
+          "32_3_14_1_fp32_nhwc",
           "5_256_14_14_bfp16_nchw_norlo_norslope_rhi6",
           "5_256_14_14_bfp16_nhwc_rlo0_norslope_norhi",
           "5_256_14_14_fp16_nchw_rlo0_norslope_norhi",
@@ -57,6 +67,10 @@
     "MIOPEN_ENGINE": [
       {
         "cases": [
+          "16_3_8_14_14_bfp16_ncdhw",
+          "16_3_8_14_14_fp16_ndhwc",
+          "16_3_8_14_14_fp32_ncdhw",
+          "1_16_112_112_fp16_nchw_rlo0_norslope_norhi",
           "1_256_1_1_bfp16_nchw",
           "1_256_1_1_bfp16_nhwc",
           "1_256_1_1_fp16_nchw",
@@ -84,12 +98,19 @@
           "2_3_3_1_1_bfp16_ndhwc",
           "2_3_3_1_1_fp16_ncdhw",
           "2_3_3_1_1_fp32_ndhwc",
+          "32_3_14_1_bfp16_nchw",
+          "32_3_14_1_bfp16_nhwc",
+          "32_3_14_1_fp16_nchw",
+          "32_3_14_1_fp16_nhwc",
+          "32_3_14_1_fp32_nchw",
+          "32_3_14_1_fp32_nhwc",
           "5_256_14_14_bfp16_nchw_norlo_norslope_rhi6",
           "5_256_14_14_bfp16_nhwc_rlo0_norslope_norhi",
           "5_256_14_14_fp16_nchw_rlo0_norslope_norhi",
           "5_256_14_14_fp16_nhwc_rlo0p1_norslope_rhi0p5",
           "5_256_14_14_fp32_nchw_rlo0p1_norslope_rhi0p5",
-          "5_256_14_14_fp32_nhwc_norlo_norslope_rhi6"
+          "5_256_14_14_fp32_nhwc_norlo_norslope_rhi6",
+          "8_32_2048_fp32_ncl_rlo0_norslope_norhi"
         ],
         "support": {
           "gfx1030": [

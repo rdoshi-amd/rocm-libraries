@@ -3,6 +3,8 @@
     "MIOPEN_ENGINE": [
       {
         "cases": [
+          "1_16_16_16_16_bfp16_ncdhw_dil2x2x2_postpad2x2x2_prepad2x2x2",
+          "1_16_16_16_16_fp32_ncdhw_dil1x1x1_postpad0x0x0_prepad0x0x0_53b2a7",
           "1_16_16_16_bfp16_nchw_dil1x1_postpad1x1_prepad1x1_4476bb",
           "1_16_16_16_bfp16_nhwc_dil1x1_postpad1x1_prepad1x1_94b7ce",
           "1_16_16_16_fp16_nchw_dil1x1_postpad0x0_prepad0x0_11a8b9",
@@ -52,6 +54,8 @@
     "MIOPEN_ENGINE_DETERMINISTIC": [
       {
         "cases": [
+          "1_16_16_16_16_bfp16_ncdhw_dil2x2x2_postpad2x2x2_prepad2x2x2",
+          "1_16_16_16_16_fp32_ncdhw_dil1x1x1_postpad0x0x0_prepad0x0x0_53b2a7",
           "1_16_16_16_bfp16_nchw_dil1x1_postpad1x1_prepad1x1_4476bb",
           "1_16_16_16_bfp16_nhwc_dil1x1_postpad1x1_prepad1x1_94b7ce",
           "1_16_16_16_fp16_nchw_dil1x1_postpad0x0_prepad0x0_11a8b9",

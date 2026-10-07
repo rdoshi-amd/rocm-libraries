@@ -16944,10 +16944,8 @@ class KernelWriterAssembly(KernelWriter):
           # Static parallel reduction gives each workgroup one partial tile, so
           # its GSU store ends the kernel. A dynamic work item goes back to its
           # queue for the next one instead.
-          module.add(SCmpEQU32(src0=sgpr("WorkAssignmentMode"), src1=3,
-                               comment="SK5 dynamic with parallel reduction?"))
-          module.add(self.longBranchScc1(Label("PersistentLoopClose", ""), posNeg=0,
-                                         comment="dynamic parallel: next work item"))
+          skProcessing.emitDynamicParallelLongBranch(
+            self, kernel, module, Label("PersistentLoopClose", ""), "dynamic parallel: next work item")
         if deferGSU0:
           # GSU0 store code is done. Append it to deferredGSU0 (placed after persistent loop),
           # then restore `module` to savedModule (the inline stub region) so subsequent code

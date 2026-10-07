@@ -3,8 +3,8 @@
 """Codegen tests for the dynamic StreamK parallel reduction (SK5 Hybrid).
 
 When every tile is split the host sets bit 29 of the SKTiles argument on the
-dynamic sub-path. The dynamic preLoop moves it into WorkAssignmentMode (1 -> 3)
-and clears it from SKTiles; every work item then selects the workspace slot of
+dynamic sub-path. The dynamic preLoop selects WorkAssignmentMode 3 (from 1) on
+it and clears it from SKTiles; every work item then selects the workspace slot of
 its part (SkPartialIdx = StreamKPartialIdx) and the store sites branch to the
 static parallel-reduction code on WorkAssignmentMode == 3. These tests pin
 those snippets on a fake writer, the capability gating shared with the host,
@@ -125,6 +125,25 @@ def test_branch_tests_the_mode():
     assert [type(i) for i in items] == [SCmpEQU32, SCBranchSCC1]
     assert _params(items[0]) == ["s[sgprWorkAssignmentMode]", "3"]
     assert "Target" in str(items[1])
+
+
+def test_long_branch_tests_the_mode():
+    # The GSU0 store returns to the queue (PersistentLoopClose) through the
+    # writer's long branch, on the same named mode test.
+    w = _writer()
+    w.longBranchScc1 = lambda label, posNeg=0, comment="": SCBranchSCC1(
+        labelName=label.getLabelName(), comment=comment)
+    mod = Module()
+    StreamKHybrid().emitDynamicParallelLongBranch(w, _KERNEL, mod, Label("PersistentLoopClose", ""))
+    items = list(mod.flatitems())
+    assert [type(i) for i in items] == [SCmpEQU32, SCBranchSCC1]
+    assert _params(items[0]) == ["s[sgprWorkAssignmentMode]", "3"]
+    assert "PersistentLoopClose" in str(items[1])
+
+    mod = Module()
+    StreamKHybrid().emitDynamicParallelLongBranch(w, dict(_KERNEL, StreamKAtomic=1), mod,
+                                                  Label("PersistentLoopClose", ""))
+    assert not list(mod.flatitems())
 
 
 @pytest.mark.parametrize("kernel", [

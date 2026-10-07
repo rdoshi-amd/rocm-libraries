@@ -91,13 +91,14 @@ from copy import deepcopy
 #   * _emitModeExtraction touches bit 30 only.
 _SK_USO_BIT = 29
 
-# SK5 dynamic sub-path: bit 29 of the same slot (SKTiles there) selects the
-# parallel (PostGSU) reduction. The host sets it only for kernels that advertise
+# SK5 dynamic sub-path: the same bit of the same slot (SKTiles there) selects
+# the parallel (PostGSU) reduction, so it is defined as _SK_USO_BIT (one source
+# for bit 29; the host packs it as 0x20000000 for both meanings). The host sets it only for kernels that advertise
 # SupportStreamKDynamicParallel and only when every tile is split; it never
 # coexists with the USO meaning of bit 29, which only the static sub-path reads.
 # The dynamic preLoop moves it into WorkAssignmentMode and clears it from
 # SKTiles before anything reads the tile count.
-_SK5_DYNAMIC_PARALLEL_BIT = 29
+_SK5_DYNAMIC_PARALLEL_BIT = _SK_USO_BIT
 # WorkAssignmentMode values: 0 static, 1 dynamic, 3 dynamic with parallel
 # reduction. Every hybrid dispatch tests WorkAssignmentMode == 0, so 3 still
 # selects the dynamic sub-path everywhere.
@@ -1603,6 +1604,15 @@ class StreamK(TileProcessingStrategy):
         module.add(SCmpEQU32(src0=sgpr("WorkAssignmentMode"), src1=_SK5_MODE_DYNAMIC_PARALLEL,
                              comment="SK5 dynamic with parallel reduction?"))
         module.add(SCBranchSCC1(labelName=label.getLabelName(), comment=comment))
+
+    def emitDynamicParallelLongBranch(self, writer, kernel, module, label, comment=""):
+        """emitDynamicParallelBranch with a long branch (targets beyond the
+        s_cbranch range, e.g. PersistentLoopClose from the GSU0 store)."""
+        if not self.usesDynamicParallel(writer, kernel):
+            return
+        module.add(SCmpEQU32(src0=sgpr("WorkAssignmentMode"), src1=_SK5_MODE_DYNAMIC_PARALLEL,
+                             comment="SK5 dynamic with parallel reduction?"))
+        module.add(writer.longBranchScc1(label, posNeg=0, comment=comment))
 
     def partialsWriteProcedure(self, writer, kernel, vectorWidths, elements, alpha, beta, edge, tmpVgpr, cvtVgprStruct, endLabel):
         module = Module("StreamK Common partialsWriteProcedure")
@@ -4255,8 +4265,11 @@ class StreamKHybrid(StreamK):
     # queue instead of ending the kernel.
     # ------------------------------------------------------------------
     def extractDynamicParallelMode(self, writer, kernel):
-        """Dynamic preLoop: move bit 29 of SKTiles into WorkAssignmentMode
-        (1 -> 3) and clear it, before anything reads the tile count."""
+        """Dynamic preLoop (WorkAssignmentMode is 1 here): when bit
+        _SK5_DYNAMIC_PARALLEL_BIT of SKTiles is set, select
+        WorkAssignmentMode = _SK5_MODE_DYNAMIC_PARALLEL (3); then clear the bit
+        from SKTiles unconditionally. Must run before anything reads the tile
+        count. Emits nothing for kernels without usesDynamicParallel."""
         mod = Module("SK5 dynamic parallel mode")
         if not self.usesDynamicParallel(writer, kernel):
             return mod

@@ -1,7 +1,7 @@
 # Copyright (c) Advanced Micro Devices, Inc., or its affiliates.
 # SPDX-License-Identifier: MIT
 
-"""Exercise the native and Python queries against loadable compiler fixtures."""
+"""Exercise the production archive's detector against loadable compiler fixtures."""
 
 import json
 import os
@@ -13,6 +13,48 @@ from pathlib import Path
 import pytest
 
 PLATFORM = Path(__file__).resolve().parents[1]
+
+
+def detector_archive(build_root):
+    """Use the test artifact's archive, an explicit build, or a fresh source build."""
+    override = os.environ.get("ROCKE_TEST_ENGINE_ARCHIVE")
+    archive = Path(override) if override else Path(__file__).parent / "librocke_core.a"
+    if override or archive.exists():
+        if not archive.is_file():
+            pytest.fail(f"native detector archive not found: {archive}")
+        return archive.resolve()
+    if not (PLATFORM / "cpp").is_dir():
+        pytest.fail(f"installed native detector test requires {archive}")
+    cmake = shutil.which("cmake")
+    if not cmake:
+        pytest.skip("source native detector tests require CMake to build the archive")
+    subprocess.run(
+        [
+            cmake,
+            "-S",
+            str(PLATFORM),
+            "-B",
+            str(build_root),
+            "-DCMAKE_BUILD_TYPE=Release",
+            "-DBUILD_TESTING=OFF",
+            "-DROCKE_BUILD_PYBIND=OFF",
+            "-DROCKE_INSTALL_TESTS=OFF",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        [cmake, "--build", str(build_root), "--target", "rocke_core", "-j", "2"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    archive = build_root / "librocke_core.a"
+    if not archive.is_file():
+        pytest.fail(f"native detector build did not produce {archive}")
+    return archive
+
 
 PROBE = r"""
 import ctypes, json, os, sys
@@ -42,11 +84,14 @@ def native_detector(tmp_path_factory):
     compiler = shutil.which("c++")
     if sys.platform != "linux" or not compiler or not shutil.which("cc"):
         pytest.skip("ELF loader fixtures require Linux and C/C++ compilers")
-    output = tmp_path_factory.mktemp("native-detector") / "detector.so"
-    wrapper = output.with_suffix(".cpp")
-    wrapper.write_text(
-        '#include "compiler_version.h"\n'
-        "#include <dlfcn.h>\n"
+    root = tmp_path_factory.mktemp("native-detector")
+    archive = detector_archive(root / "engine")
+    output = root / "detector.so"
+    # The return type is opaque here; ctypes below mirrors the private record.
+    # Link the production implementation without installing its private headers.
+    wrapper = (
+        "namespace ckc { struct CompilerInfo; "
+        "const CompilerInfo* candidate_compiler_info(); }\n"
         "static bool block_loads = false;\n"
         "static unsigned load_calls = 0;\n"
         'extern "C" void* __real_dlopen(const char*, int);\n'
@@ -66,18 +111,19 @@ def native_detector(tmp_path_factory):
             "-std=c++20",
             "-shared",
             "-fPIC",
-            "-pthread",
             "-Wl,--wrap=dlopen",
-            str(PLATFORM / "cpp/core/lower_llvm/compiler_version.cpp"),
-            str(wrapper),
-            "-I",
-            str(PLATFORM / "cpp/core/lower_llvm"),
-            "-I",
-            str(PLATFORM / "cpp/include"),
+            "-x",
+            "c++",
+            "-",
+            "-x",
+            "none",
+            str(archive),
             "-ldl",
+            "-pthread",
             "-o",
             str(output),
         ],
+        input=wrapper,
         check=True,
         capture_output=True,
         text=True,
@@ -87,11 +133,22 @@ def native_detector(tmp_path_factory):
 
 def build_library(root, text, name="libamd_comgr.so", extra=()):
     root.mkdir(parents=True, exist_ok=True)
-    source = root / (name + ".c")
-    source.write_text(text)
     output = root / name
     subprocess.run(
-        ["cc", "-shared", "-fPIC", str(source), *extra, "-o", str(output)],
+        [
+            "cc",
+            "-shared",
+            "-fPIC",
+            "-x",
+            "c",
+            "-",
+            "-x",
+            "none",
+            *extra,
+            "-o",
+            str(output),
+        ],
+        input=text,
         check=True,
         capture_output=True,
         text=True,
@@ -103,7 +160,10 @@ def run_probe(native, library, **overrides):
     env = dict(os.environ)
     for name in ("ROCKE_LLVM_FLAVOR", "ROCM_PATH", "ROCM_HOME"):
         env.pop(name, None)
-    env.update(ROCKE_COMGR_LIB=str(library), PYTHONPATH=str(PLATFORM / "python"))
+    env.update(
+        ROCKE_COMGR_LIB=str(library),
+        PYTHONPATH=os.pathsep.join(str(path) for path in sys.path if path),
+    )
     env.update(overrides)
     result = subprocess.run(
         [sys.executable, "-c", PROBE, str(native)],

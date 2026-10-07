@@ -334,6 +334,13 @@ if(ROCKE_INSTALL_TESTS)
     # the differential harness (needs compiler + source), the WaveScope sidecar
     # tests (load tools from the adjacent dsl_docs source tree), and run_all.py
     # (dev runner).
+    # Linux detector fixtures link a stdin wrapper against the production archive.
+    # Keep it with the pytest assets so TheRock's test artifact captures it even
+    # though the library artifact excludes lib/*.a.
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+      install(FILES "$<TARGET_FILE:rocke_core>"
+              DESTINATION "${ROCKE_TEST_INSTALL_DIR}/tests")
+    endif()
     # cmake-lint: disable=E1122
     block()
       install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/tests/"

@@ -5,9 +5,8 @@
 
 An in-repo mirror of ``hkp_pack.generic_targets`` and of the C++ loader's
 ``archTier``: the generator may not import the kernel provider's packaging tree
-(descriptor generation must not need the kernel toolchain), so the three
-implementations are held equal by the shared golden vectors in
-``plugin_sdk/tests/data/arch_tier_vectors.json`` (``tests/test_generic_targets.py``).
+(descriptor generation must not need the kernel toolchain), so each implementation
+tests itself with literal cases (``tests/test_generic_targets.py``).
 Packer-side verifier tools import ``hkp_pack.generic_targets`` instead; this module is
 used only inside ``codegen/``.
 
@@ -139,14 +138,6 @@ def expand(entries, table: GenericTargets):
         else:
             devices.add(entry)
     return frozenset(devices)
-
-
-def overlaps(a, b, table: GenericTargets) -> bool:
-    """Can one device satisfy both lists? Empty overlaps everything."""
-    expanded_a, expanded_b = expand(a, table), expand(b, table)
-    if expanded_a is None or expanded_b is None:
-        return True
-    return not expanded_a.isdisjoint(expanded_b)
 
 
 def covers(outer, inner, table: GenericTargets) -> bool:

@@ -41,6 +41,11 @@ struct GemmPipelineAgBgCrCompTDMV2 : public GemmPipelineAgBgCrCompTDMV1<Problem,
     // the persistent loop, so V2 always runs one workgroup per tile.
     static constexpr bool UsePersistentKernel = false;
 
+    // V2 has its own wave-specialized hot loop; the split barrier of V1 is not implemented here.
+    static_assert(
+        !detail::use_split_barrier_or_default<Policy>::value,
+        "split barrier (UseSplitBarrier) is only implemented by GemmPipelineAgBgCrCompTDMV1");
+
     CK_TILE_HOST_DEVICE static constexpr index_t GetSmemSize()
     {
         constexpr index_t smem_size = Policy::template GetSmemSize<Problem>();

@@ -25,6 +25,19 @@ struct scale_block_size_or_default<T, std::void_t<decltype(T::ScaleBlockSize)>>
 {
     static constexpr index_t value = T::ScaleBlockSize;
 };
+
+// Resolves a TDM pipeline policy's split-barrier switch: yields T::UseSplitBarrier when the
+// member exists, otherwise false (so existing policies keep the full-barrier hot loop).
+template <typename T, typename = void>
+struct use_split_barrier_or_default
+{
+    static constexpr bool value = false;
+};
+template <typename T>
+struct use_split_barrier_or_default<T, std::void_t<decltype(T::UseSplitBarrier)>>
+{
+    static constexpr bool value = T::UseSplitBarrier;
+};
 } // namespace detail
 
 enum class MultiCastDirection
@@ -616,5 +629,16 @@ struct GemmPipelineAgBgCrCompTDMDefaultPolicy
 
 // Type aliases for backward compatibility
 using GemmPipelineAgBgCrCompTDMWaveSpecializedPolicy = GemmPipelineAgBgCrCompTDMDefaultPolicy<true>;
+
+// Opt-in split-barrier variant of a comp_tdm V1 policy (V1 only; comp_tdm V2 and the
+// weight-preshuffle TDM pipeline static_assert against it): every member comes from BasePolicy, and
+// the hot loop of GemmPipelineAgBgCrCompTDMV1 replaces its two full barriers per stage by one
+// s_barrier_signal / s_barrier_wait pair around the stage's last WMMA group. Kept as a separate
+// type so that instances using BasePolicy directly are unchanged.
+template <typename BasePolicy>
+struct GemmPipelineAgBgCrCompTDMSplitBarrierPolicy : public BasePolicy
+{
+    static constexpr bool UseSplitBarrier = true;
+};
 
 } // namespace ck_tile

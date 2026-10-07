@@ -641,6 +641,13 @@ struct GemmPipelineAgBgCrCompTDMV1 : public BaseGemmPipelineAgBgCrCompTDM<Proble
                 block_gemm(
                     c_block_tile, a_block_tile[final_compute_idx], b_block_tile[final_compute_idx]);
             }
+            // Drain TENSORcnt before leaving the pipeline. On the TailNumber::One path the
+            // prefetch into LDS window(1) issued for the (past-the-end) next K tile is still
+            // in flight, and the TDM write to LDS is not tracked by the compiler. Without this
+            // wait the epilogue (or the next persistent tile) could reuse that LDS while the
+            // TDM engine is still writing it. The barrier also orders the final LDS reads
+            // of every wave before any LDS reuse. On TailNumber::Two the wait is a no-op.
+            s_wait_tensorcnt_barrier<0 /*tensorcnt*/, 0 /*lgkmcnt*/>();
             return c_block_tile;
         }
 
@@ -1061,6 +1068,8 @@ struct GemmPipelineAgBgCrCompTDMV1 : public BaseGemmPipelineAgBgCrCompTDM<Proble
                                                                  a_scale_tile[0],
                                                                  b_scale_tile[0]);
             }
+            // Exit drain: see RunPipelineLoop above.
+            s_wait_tensorcnt_barrier<0 /*tensorcnt*/, 0 /*lgkmcnt*/>();
             return c_block_tile;
         }
 

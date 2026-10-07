@@ -64,27 +64,50 @@ class _StubModel:
 
     def __init__(self, preds):
         self._preds = np.asarray(preds, dtype=float)
+        self.last_X = None
 
     def predict(self, X):
         assert len(X) == len(self._preds)
+        self.last_X = np.asarray(X)
         return self._preds
 
 
 class _StubPredictor:
-    def __init__(self, preds, log_targets=()):
+    """Stands in for Predictor, so it must offer the whole interface
+    evaluate_model uses -- including the feature remap. A stub missing a method
+    the real object has turns a production call into an AttributeError that only
+    shows up outside the tests."""
+
+    def __init__(
+        self, preds, log_targets=(), feature_indices=None, feature_engine=None
+    ):
         self._model = _StubModel(preds)
         self._log_targets = log_targets
+        self._feature_indices = feature_indices
+        self._feature_engine = feature_engine or _StubFeatureEngine()
+
+    @property
+    def feature_engine(self):
+        return self._feature_engine
 
     def _load_model(self, target):
         assert target == "tflops"
         return self._model
 
+    def select_features(self, X):
+        if self._feature_indices is None:
+            return X
+        return X[:, self._feature_indices]
+
 
 class _StubFeatureEngine:
     """evaluate_model only needs one row of features per input row."""
 
+    def __init__(self, width=1):
+        self._width = width
+
     def extract_batch(self, df):
-        return np.zeros((len(df), 1), dtype=float)
+        return np.tile(np.arange(self._width, dtype=float), (len(df), 1))
 
 
 def _frame():
@@ -170,6 +193,61 @@ class TestLogTransform:
             _StubFeatureEngine(),
         )
         assert res["global_metrics"]["r2"] < 0.5
+
+
+class TestFeatureRemapIsApplied:
+    """evaluate_model takes the ENGINE from the predictor so a wider-schema model
+    evaluates; that only works if it also applies the predictor's column remap.
+    Extracting features and handing them straight to the booster skips it."""
+
+    def test_the_model_receives_the_remapped_columns(self):
+        pred = _StubPredictor(
+            [100.0, 50.0, 25.0, 100.0],
+            feature_indices=np.array([3, 1]),
+            feature_engine=_StubFeatureEngine(width=5),
+        )
+        evaluate_model(pred, _frame())
+        seen = pred._model.last_X
+        assert seen.shape[1] == 2, "remap was not applied"
+        np.testing.assert_array_equal(seen[0], [3.0, 1.0])
+
+    def test_without_a_remap_the_columns_pass_through(self):
+        pred = _StubPredictor(
+            [100.0, 50.0, 25.0, 100.0], feature_engine=_StubFeatureEngine(width=5)
+        )
+        evaluate_model(pred, _frame())
+        assert pred._model.last_X.shape[1] == 5
+
+
+class TestArgParser:
+    """--op is constrained to the one operation this module can evaluate, since
+    it groups shapes by (m, n, k) throughout. Build the real parser rather than
+    grepping: a literal can sit in a help string while choices rejects it."""
+
+    def test_the_supported_operation_parses(self):
+        from evaluate import _OPERATION, build_arg_parser
+
+        args = build_arg_parser().parse_args(
+            ["--model_dir", "m", "--data_dir", "d", "--op", _OPERATION]
+        )
+        assert args.op == _OPERATION
+
+    def test_it_defaults_to_the_supported_operation(self):
+        from evaluate import _OPERATION, build_arg_parser
+
+        parsed = build_arg_parser().parse_args(["--model_dir", "m", "--data_dir", "d"])
+        assert parsed.op == _OPERATION
+
+    @pytest.mark.parametrize("op", ["grouped_conv", "fmha", "gemm_universal_vec"])
+    def test_an_unsupported_operation_is_rejected(self, op):
+        """Rejecting at parse time beats loading that op's data and then failing
+        on a column this module's (m, n, k) grouping cannot find."""
+        from evaluate import build_arg_parser
+
+        with pytest.raises(SystemExit):
+            build_arg_parser().parse_args(
+                ["--model_dir", "m", "--data_dir", "d", "--op", op]
+            )
 
 
 if __name__ == "__main__":

@@ -43,6 +43,16 @@ LAYOUT_TO_DISPATCHER = {
     "ccr": ("col", "col", "row"),
 }
 
+
+#: A/B dtype -> C operand dtype.
+#:
+#: Does not cover bf8 or int8, which codegen's CommonTypeMappings.get_output_dtype
+#: maps to fp16 and int32; those fall through to the input dtype here, so a
+#: kernel would be scored under one C dtype and built under another. Left as-is
+#: deliberately: delegating to codegen means importing across the heuristics ->
+#: codegen boundary, which this module has no path set up for, and the gap is
+#: pre-existing and unrelated to vector widths. Fix it with that import in its
+#: own change.
 DTYPE_TO_C_DTYPE = {
     "fp8": "fp16",
     "fp16": "fp16",
@@ -133,7 +143,15 @@ def feature_dict_to_dispatcher_config(
 
 
 def feature_dict_to_ml_spec(feat: dict, predicted_tflops: float = 0.0) -> MLKernelSpec:
-    """Convert a feature-engine kernel dict + prediction to an MLKernelSpec."""
+    """Convert a feature-engine kernel dict + prediction to an MLKernelSpec.
+
+    Does NOT carry the fixed vector widths: MLKernelSpec has no field for them,
+    so a kernel named ..._vec4_4_8 would convert to a native-width spec and the
+    kernel built would not be the kernel ranked. Unreachable today -- the only
+    producer of these dicts is load_kernel_pool_from_binaries, and the tile
+    engine emits no fixed-width binaries -- but adding one means adding
+    vector_size_a/b/c here and to MLKernelSpec in the same change.
+    """
     return MLKernelSpec(
         kernel_name=feat.get("kernel_name", "unknown"),
         predicted_tflops=predicted_tflops,

@@ -77,6 +77,8 @@ def _emit():
     w = _writer()
     module = StreamKHybrid()._contiguousQueueItem(w, {"WavefrontSize": 64}, _ITEM)
     assert not w.sgprPool.out, "every temporary is checked back in"
+    # PAP emits this near the SGPR high-water mark: two temporaries at most.
+    assert w.sgprPool._next - 60 <= 2, "at most two temporary SGPRs"
     return list(module.flatitems())
 
 

@@ -3927,19 +3927,10 @@ class StreamKHybrid(StreamK):
 
         is a bijection on [0, T) that gives queue q the items [start_q,
         start_q + count_q): the chiplet transform WGMXCC applies to static
-        workgroup ranks. Whole tiles then land on the XCDs as on the static
-        path (p127: one tile per workgroup, 2.7x fewer L2 fills than tiles
-        q, q + 8, ... on XCD q), and the workgroup mapping the host picks with
-        origami, which assumes that order, fits both. A tile split into
-        fewer parts than queues keeps its parts on one XCD next to its
-        neighbours. A split of numQueues parts or more keeps the interleaved
-        order: there queue q runs the same K-slices of every tile (the host
-        aligns the split), which shares more of A and B than whole tiles per
-        XCD do. So does a launch with more items than workgroups: the static
-        path runs it round by round (every XCD within the same window of
-        tiles, which then share A and B through the MALL), and the
-        interleaved order stays closer to that than one block per XCD
-        (f32 8192 x 8192 x 1024: +5% with blocks).
+        workgroup ranks, so origami's workgroup mapping fits both paths.
+        Splits of numQueues parts or more and multi-round launches keep the
+        interleaved order, which measures faster there (design note and data:
+        queueAligned in streamKDynamicSplit and this helper's commit message).
 
         The pop, its validity check and the counter wrap stay on i; only the
         tile decode reads c. Emitted on the dynamic sub-path only.
@@ -3959,18 +3950,18 @@ class StreamKHybrid(StreamK):
         module.add(skRemap)
         # PAP calls this inside the OptNLL window, near the SGPR high-water
         # mark: let the pool grow there rather than trip its overflow guard.
+        # Two temporaries: the item's SGPR becomes cnt in place.
         sQ = writer.sgprPool.checkOut(1, "contiguousQ", preventOverflow=False)
-        sCnt = writer.sgprPool.checkOut(1, "contiguousCnt", preventOverflow=False)
         sTmp = writer.sgprPool.checkOut(1, "contiguousTmp", preventOverflow=False)
         module.add(SAndB32(dst=sgpr(sQ), src0=sgpr(sWorkItemIdx), src1=hex(mask), comment="q = item % numQueues"))
-        module.add(SLShiftRightB32(dst=sgpr(sCnt), src=sgpr(sWorkItemIdx), shiftHex=log2Queues, comment="cnt = item / numQueues"))
+        module.add(SLShiftRightB32(dst=sgpr(sWorkItemIdx), src=sgpr(sWorkItemIdx), shiftHex=log2Queues, comment="cnt = item / numQueues"))
         module.add(SLShiftRightB32(dst=sgpr(sTmp), src=sgpr("TotalItems"), shiftHex=log2Queues, comment="floor(T / numQueues)"))
-        module.add(SMulI32(dst=sgpr(sWorkItemIdx), src0=sgpr(sQ), src1=sgpr(sTmp), comment="q * floor(T / numQueues)"))
-        module.add(SAddU32(dst=sgpr(sWorkItemIdx), src0=sgpr(sWorkItemIdx), src1=sgpr(sCnt), comment="+ cnt"))
+        module.add(SMulI32(dst=sgpr(sTmp), src0=sgpr(sQ), src1=sgpr(sTmp), comment="q * floor(T / numQueues)"))
+        module.add(SAddU32(dst=sgpr(sWorkItemIdx), src0=sgpr(sWorkItemIdx), src1=sgpr(sTmp), comment="cnt + q * floor(T / numQueues)"))
         module.add(SAndB32(dst=sgpr(sTmp), src0=sgpr("TotalItems"), src1=hex(mask), comment="T % numQueues"))
         module.add(SMinU32(dst=sgpr(sTmp), src0=sgpr(sTmp), src1=sgpr(sQ), comment="min(q, T % numQueues)"))
         module.add(SAddU32(dst=sgpr(sWorkItemIdx), src0=sgpr(sWorkItemIdx), src1=sgpr(sTmp), comment="contiguous item of queue q"))
-        for r in (sTmp, sCnt, sQ):
+        for r in (sTmp, sQ):
             writer.sgprPool.checkIn(r)
         module.add(skDone)
         return module

@@ -8,8 +8,11 @@
 # (no env overrides needed), so every size below has SKTiles > 0 and
 # SKSplit > 1: the partial tiles exercise the queue rank carried across work
 # items (raw-rank regimes: WorkGroupMappingXCC -1, and PersistentXCCMapping
-# with WorkGroupMappingXCC > 1), the per-tile arrival counter and the
-# fixed-order fixup by the last part, and batch-inclusive partial indexing.
+# with WorkGroupMappingXCC > 1) and batch-inclusive partial indexing. Every
+# tile is split, so these kernels (SupportStreamKDynamicParallel) reduce the
+# parts with the parallel (PostGSU) reduction; the arrival fixup by the last
+# part is what logic without that capability, and DP + SK mixes from the
+# TENSILE_STREAMK_TILES debug override, still take.
 # Validation checks the first launch per problem; the Synchronizer check (on
 # by default) catches queue or arrival counters left nonzero, which would
 # corrupt a later launch rather than the one that left them. The activation problem builds

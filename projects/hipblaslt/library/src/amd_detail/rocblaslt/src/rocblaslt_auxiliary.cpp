@@ -53,7 +53,6 @@
 
 #include <Tensile/Debug.hpp>
 #ifdef HIPBLASLT_ENABLE_JIT
-#include "../../hipblaslt-jit-gemm-tag.hpp"
 #include "../../hipblaslt-jit-heuristic.hpp"
 #include "../../hipblaslt-jit-mode.hpp"
 #include <Tensile/ProviderRows.hpp>
@@ -143,16 +142,10 @@ inline void heuristicResult_copy(rocblaslt_matmul_heuristic_result* heuristicRes
     heuristicResultsDest->workspaceSize            = required_workspace_size;
 }
 
-// False when either algorithm is a process-local JIT token: that token stores a
-// bundle-local index, which is not a TensileLite library index. Otherwise the
-// int in data, including a JIT library index.
+// The int in data is the TensileLite library index, including a JIT solution
+// library index.
 inline bool sameLibraryIndex(const rocblaslt_matmul_algo& left, const rocblaslt_matmul_algo& right)
 {
-#ifdef HIPBLASLT_ENABLE_JIT
-    if(hipblaslt_ext::experimental::detail::isJitAlgo(left)
-       || hipblaslt_ext::experimental::detail::isJitAlgo(right))
-        return false;
-#endif
     return *reinterpret_cast<const int*>(left.data) == *reinterpret_cast<const int*>(right.data);
 }
 

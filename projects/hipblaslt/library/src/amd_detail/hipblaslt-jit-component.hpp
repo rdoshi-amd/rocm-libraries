@@ -273,7 +273,6 @@ namespace hipblaslt_ext::experimental::jit::detail
         hipblaslt_jit::DeviceTarget               target;
         std::shared_ptr<const OperationRequest>   request;
         std::shared_ptr<const hipblaslt_jit::Jit> jit;
-        std::shared_ptr<const KernelBundle>       bundle;
         int32_t                                   libraryIndex   = 0;
         uint64_t                                  process        = 0;
         size_t                                    workspaceLimit = 0;

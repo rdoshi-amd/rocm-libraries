@@ -131,7 +131,9 @@ target_include_directories(hipblaslt-jit-end-to-end-test PRIVATE "${hipblaslt_ji
 target_link_libraries(hipblaslt-jit-end-to-end-test PRIVATE roc::hipblaslt hip::device)
 hipblaslt_jit_test(jit-end-to-end jit-gpu hipblaslt-jit-end-to-end-test
     "${hipblaslt_jit_bundles}")
-set_tests_properties(jit-end-to-end PROPERTIES FIXTURES_REQUIRED jit-bundles)
+set_tests_properties(jit-end-to-end PROPERTIES
+    FIXTURES_REQUIRED jit-bundles
+    ENVIRONMENT HIPBLASLT_JIT_LIBRARY_PATH=${hipblaslt_jit_scratch}/end-to-end)
 # Publishes the solutions in one process and runs their indices in a second.
 hipblaslt_jit_test(jit-end-to-end-library jit-gpu hipblaslt-jit-end-to-end-test
     "${hipblaslt_jit_bundles}" --library)

@@ -656,6 +656,10 @@ namespace TensileLite
         // size from it; whole tiles keep the maxGrid grid, whose queues
         // rebalance them onto whichever workgroups are resident.
         size_t splitSlots = 0;
+        // Per-XCD work queues (item i sits in queue i % numQueues). With two
+        // or more tiles the split is aligned to them (see streamKDynamicSplit());
+        // 0 leaves it as the slots and limits make it.
+        size_t numQueues = 0;
         // The kernel can fix split tiles up by last arrival. With neither this
         // nor allowParallel every tile stays whole unless the debug overrides
         // ask otherwise.
@@ -715,6 +719,18 @@ namespace TensileLite
      * StreamKDynamicMinItersPerWI iterations per part, at most sqrt(I/2) parts
      * (that fixup sums the parts serially, so beyond that it costs more than
      * the split saves), within flagSlots and within the workspace.
+     *
+     * With numQueues set and at least two tiles, a split of numQueues or
+     * more parts that is not a multiple of numQueues / 2 is lowered to one
+     * that is (and that the SKItersPerWI rounding keeps exact) when that
+     * drops at most 1/8 of its parts, or whatever it drops if the split is
+     * odd. Part p of tile t is work item t * skSplit + p, in queue
+     * (t * skSplit + p) % numQueues, so with an aligned split each XCD runs
+     * the same few K-slices of every tile and A and B are read about once
+     * from its L2; an odd split spreads every K-slice over all the XCDs.
+     * Splits below numQueues stay as they are (rounding them down to a
+     * divisor cost more parallelism than it saved). One tile shares nothing
+     * between its parts, so it is not aligned either.
      *
      * A split below 2 keeps the tiles whole. The debug overrides replace the
      * policy (parallel when they split every tile and the kernel supports it,

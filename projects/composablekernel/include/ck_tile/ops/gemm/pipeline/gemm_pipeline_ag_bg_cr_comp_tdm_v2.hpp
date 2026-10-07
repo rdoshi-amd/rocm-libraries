@@ -37,6 +37,10 @@ struct GemmPipelineAgBgCrCompTDMV2 : public GemmPipelineAgBgCrCompTDMV1<Problem,
     static_assert(Problem::BlockGemmShape::NumWarps == 4,
                   "comp_tdm_v2 requires exactly 4 waves per workgroup");
 
+    // The wave-specialized schedule has not been analysed for the cross-tile TENSORcnt drain of
+    // the persistent loop, so V2 always runs one workgroup per tile.
+    static constexpr bool UsePersistentKernel = false;
+
     CK_TILE_HOST_DEVICE static constexpr index_t GetSmemSize()
     {
         constexpr index_t smem_size = Policy::template GetSmemSize<Problem>();

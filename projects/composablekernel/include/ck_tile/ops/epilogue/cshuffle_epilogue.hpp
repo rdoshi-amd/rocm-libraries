@@ -161,6 +161,11 @@ struct CShuffleEpilogue
     static constexpr index_t MRepeat             = kMPerBlock / (MPerXdl * MWave);
     static constexpr index_t NRepeat             = kNPerBlock / (NPerXdl * NWave);
 
+    // operator() waits for TENSORcnt == 0 on entry (s_wait_tensorcnt_barrier) and issues no
+    // tensor ops afterwards, so no TDM op is outstanding when it returns. A persistent GEMM
+    // kernel uses this to skip its own cross-tile TENSORcnt drain.
+    static constexpr bool TensorCntIdleOnExit = true;
+
     CDElementwise elfunc_;
 
     CK_TILE_DEVICE CShuffleEpilogue(CDElementwise elfunc = CDElementwise{}) : elfunc_(elfunc) {};

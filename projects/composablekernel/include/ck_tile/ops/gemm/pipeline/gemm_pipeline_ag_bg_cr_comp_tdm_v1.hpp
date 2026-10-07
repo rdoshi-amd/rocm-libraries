@@ -19,6 +19,19 @@ struct BaseGemmPipelineAgBgCrCompTDM
     static constexpr index_t PrefillStages   = 1;
     static constexpr index_t GlobalBufferNum = 1;
 
+    template <typename T>
+    using mx_scale_type = typename T::AScaleDataType;
+
+    // Plain GEMM problems take the persistent (tile-looping) kernel entry point when requested.
+    // MX problems keep one block per tile, as in the CompAsync pipeline: their host path launches
+    // GridSize(M, N, k_batch), whose split-K z-dimension the persistent loop does not read.
+    static constexpr bool UsePersistentKernel =
+        Problem::Traits::UsePersistentKernel && !is_detected<mx_scale_type, Problem>{};
+
+    // TDM loads (and TDM epilogue stores) complete on TENSORcnt. A persistent kernel must retire
+    // them before the next tile reuses the LDS they target.
+    static constexpr bool UsesTensorCnt = true;
+
     CK_TILE_HOST_DEVICE static constexpr bool BlockHasHotloop(index_t num_loop)
     {
         return num_loop > (PrefetchStages); // prefetch stages
@@ -143,6 +156,11 @@ struct GemmPipelineAgBgCrCompTDMV1 : public BaseGemmPipelineAgBgCrCompTDM<Proble
     static constexpr index_t KXdlPackEff = 4;
 
     static constexpr bool UseClusterLaunch = Policy::template isClusterLaunch<Problem>();
+
+    // Cluster launches multicast A/B into peer workgroups that must work on neighbouring tiles
+    // and stay alive for each other's loads; the persistent tile loop guarantees neither, so a
+    // cluster launch keeps one cluster per tile group.
+    static constexpr bool UsePersistentKernel = Base::UsePersistentKernel && !UseClusterLaunch;
 
     // for these three functions, we always return 1 since TDM handles vectorization internally
     template <bool IsWave32Host = false>

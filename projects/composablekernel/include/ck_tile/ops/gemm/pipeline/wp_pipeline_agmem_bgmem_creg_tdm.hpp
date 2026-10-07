@@ -18,6 +18,10 @@ struct BaseWeightPreshufflePipelineAGmemBGmemCRegTDM
     static constexpr index_t GlobalBufferNum  = 1;
     static constexpr bool UsePersistentKernel = Problem::Traits::UsePersistentKernel;
 
+    // TDM loads complete on TENSORcnt. A persistent kernel must retire them (and any TDM epilogue
+    // stores) before the next tile reuses the LDS they target.
+    static constexpr bool UsesTensorCnt = true;
+
     CK_TILE_HOST_DEVICE static constexpr auto TransposeC() { return Problem::TransposeC; }
 
     CK_TILE_HOST_DEVICE static constexpr bool BlockHasHotloop(index_t num_loop)

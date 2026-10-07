@@ -37,24 +37,24 @@ namespace ck_tile {
 namespace test {
 namespace {
 
-constexpr uint64_t k48Bit   = (uint64_t{1} << 48) - 1;
-constexpr int      kNumWord = 8; // D# group 1 is sgpr0..sgpr7
+constexpr uint64_t k48Bit = (uint64_t{1} << 48) - 1;
+constexpr int kNumWord    = 8; // D# group 1 is sgpr0..sgpr7
 
 struct StrideCase
 {
-    uint64_t    stride;
+    uint64_t stride;
     const char* label;
 };
 
 const StrideCase kCases[] = {
     {1ull, "1"},
-    {65535ull, "2^16 - 1"},   // last value a 16-bit lo half holds outright
-    {65536ull, "2^16"},       // first value that needs the hi half
-    {65537ull, "2^16 + 1"},   // both halves non-zero
-    {131072ull, "2^17"},      //
-    {1ull << 24, "2^24"},     //
-    {1ull << 40, "2^40"},     // only reachable through a 32-bit hi half
-    {k48Bit, "2^48 - 1"},     // every bit of both halves set
+    {65535ull, "2^16 - 1"}, // last value a 16-bit lo half holds outright
+    {65536ull, "2^16"},     // first value that needs the hi half
+    {65537ull, "2^16 + 1"}, // both halves non-zero
+    {131072ull, "2^17"},    //
+    {1ull << 24, "2^24"},   //
+    {1ull << 40, "2^40"},   // only reachable through a 32-bit hi half
+    {k48Bit, "2^48 - 1"},   // every bit of both halves set
 };
 
 struct PackStridesKernel

@@ -332,6 +332,42 @@ def _spec(idx: int) -> UniversalGemmSpec:
             ),
             "gfx1250",
         )
+    if idx == 13:
+        # Config 11 with an lds_k_pad that is NOT a multiple of the 16-element
+        # LDS vector width. The staged tile's row stride becomes 64+56=120
+        # elements, so alternate rows start off a 16-byte boundary and the
+        # access can only claim align 8. Every other config in this family has a
+        # stride the vector width divides, which makes this the only one where
+        # the alignment is bounded by the stride rather than by the vector --
+        # i.e. the only config that would catch the alignment attribute being
+        # derived from the vector shape alone.
+        return (
+            UniversalGemmSpec(
+                name="test_fp8_gfx1250_ldspad",
+                tile=TileSpec(
+                    tile_m=64, tile_n=64, tile_k=64,
+                    warp_m=2, warp_n=2, warp_k=1,
+                    warp_tile_m=16, warp_tile_n=16, warp_tile_k=64,
+                ),
+                trait=TraitSpec(
+                    pipeline="mem",
+                    scheduler="intrawave",
+                    epilogue="default",
+                    pad_m=True,
+                    pad_n=True,
+                    pad_k=True,
+                    lds_k_pad=56,
+                ),
+                data=DataSpec(
+                    dtype_a="fp8e4m3", dtype_b="fp8e4m3",
+                    dtype_c="bf16", dtype_acc="fp32", layout="RCR",
+                ),
+                wave_size=32,
+                block_size=128,
+                batched=False,
+            ),
+            "gfx1250",
+        )
     raise SystemExit(f"unknown config index {idx}")
 
 
@@ -339,7 +375,7 @@ def main() -> int:
     return run_emit(
         _spec,
         build_universal_gemm,
-        usage="usage: gemm_emit.py <config_index 0..12>\n",
+        usage="usage: gemm_emit.py <config_index 0..13>\n",
     )
 
 

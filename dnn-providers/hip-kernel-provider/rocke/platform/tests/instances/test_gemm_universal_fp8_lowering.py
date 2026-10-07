@@ -33,6 +33,7 @@ compiler, GPU, or built C++ engine is required.
 
 from __future__ import annotations
 
+import re
 import unittest
 
 from rocke.core.arch import ArchTarget
@@ -62,6 +63,7 @@ def _ir(
     pad: bool = True,
     wtk: int = 64,
     ab_load_elem_bytes: int | None = None,
+    lds_k_pad: int = 0,
 ) -> str:
     """Lower one universal GEMM and return its LLVM text.
 
@@ -73,7 +75,7 @@ def _ir(
     Every argument must appear in ``key`` -- the cache is keyed on it, so a
     parameter left out would silently hand back IR built with a different value.
     """
-    key = (dtype, c_dtype, pad, wtk, ab_load_elem_bytes)
+    key = (dtype, c_dtype, pad, wtk, ab_load_elem_bytes, lds_k_pad)
     if key not in _IR_CACHE:
         target = ArchTarget.from_gfx(_ARCH)
         tile = TileSpec(
@@ -95,6 +97,7 @@ def _ir(
             pad_n=pad,
             pad_k=pad,
             ab_load_elem_bytes=ab_load_elem_bytes,
+            lds_k_pad=lds_k_pad,
         )
         data = DataSpec(
             dtype_a=dtype,
@@ -204,6 +207,51 @@ class TestEightBitMemoryTraffic(unittest.TestCase):
                 self.assertIn("store bfloat", ll)
                 self.assertNotIn("store i8, ptr addrspace(1)", ll)
                 self.assertNotIn("store <8 x i8>, ptr addrspace(1)", ll)
+
+
+class TestLdsAlignmentClaims(unittest.TestCase):
+    """The ``align`` on an LDS access must not exceed what the address gives.
+
+    An alignment attribute is an assertion to LLVM, not a formatting detail.
+    Overstating it is undefined behaviour even where the hardware happens to
+    tolerate the access, so these assert an upper bound rather than a value.
+    """
+
+    @staticmethod
+    def _lds_aligns(ll: str, kind: str) -> set[int]:
+        pat = rf"{kind} <\d+ x i8>[^\n]*addrspace\(3\)[^\n]*align (\d+)"
+        return {int(m) for m in re.findall(pat, ll)}
+
+    def test_a_sixteen_byte_access_never_claims_more_than_sixteen(self):
+        # The load path's element-size map omitted the 8-bit floats, so they
+        # fell to 2 bytes and a 16-element read claimed align 32 -- double the
+        # bytes actually touched. No pad choice could avoid that one.
+        ll = _ir("fp8e4m3", pad=False)
+        for kind in ("load", "store"):
+            with self.subTest(kind=kind):
+                claims = self._lds_aligns(ll, kind)
+                self.assertTrue(claims, f"no 16-byte LDS {kind} found")
+                self.assertLessEqual(max(claims), 16)
+
+    def test_an_unaligned_row_stride_lowers_the_claim(self):
+        # lds_k_pad=56 on a 64-element tile gives a 120-element row stride, so
+        # alternate rows start 8 bytes off a 16-byte boundary. This is the
+        # counterfactual: without it every stride the vector width divides
+        # would pass even if the claim were still derived from the vector
+        # shape alone, which is exactly how the bug survived.
+        ll = _ir("fp8e4m3", pad=False, lds_k_pad=56)
+        for kind in ("load", "store"):
+            with self.subTest(kind=kind):
+                claims = self._lds_aligns(ll, kind)
+                self.assertTrue(claims, f"no 16-byte LDS {kind} found")
+                self.assertLessEqual(max(claims), 8)
+
+    def test_a_divisible_row_stride_keeps_the_full_claim(self):
+        # The bound must not be applied indiscriminately: a stride the vector
+        # width divides still earns align 16, or the fix would cost instruction
+        # selection on every well-padded config.
+        ll = _ir("fp8e4m3", pad=False, lds_k_pad=80)
+        self.assertIn(16, self._lds_aligns(ll, "store"))
 
 
 class TestPaddingZero(unittest.TestCase):

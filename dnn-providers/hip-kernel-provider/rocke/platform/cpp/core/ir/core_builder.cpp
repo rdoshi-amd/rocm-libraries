@@ -640,6 +640,33 @@ int rocke_i_count_of(const rocke_type_t* t)
     return 1;
 }
 
+/* Mirrors lower_llvm._smem_vec_align / ir.py smem_store_vN: gcd(vec, innermost
+ * LDS dimension). Outer strides are products that include the innermost
+ * dimension, so they never bind tighter and are not considered. */
+int rocke_i_smem_vec_align_elems(const rocke_type_t* smem_type, int vec)
+{
+    int a;
+    int b;
+
+    if(smem_type == NULL || smem_type->shape == NULL || smem_type->rank <= 0 || vec <= 0)
+    {
+        return vec > 0 ? vec : 1;
+    }
+    a = vec;
+    b = smem_type->shape[smem_type->rank - 1];
+    if(b <= 0)
+    {
+        return vec;
+    }
+    while(b != 0) /* Euclid; Python math.gcd */
+    {
+        int t = a % b;
+        a = b;
+        b = t;
+    }
+    return a > 0 ? a : vec;
+}
+
 /* ============================== BUILDER ================================= */
 
 rocke_status_t rocke_ir_builder_init(rocke_ir_builder_t* b, const char* kernel_name)

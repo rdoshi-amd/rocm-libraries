@@ -139,6 +139,15 @@ const rocke_type_t* rocke_i_elem_of(const rocke_type_t* t);
 /* Lane count of a vector type, or 1 for a scalar. */
 int rocke_i_count_of(const rocke_type_t* t);
 
+/* Element count an LDS vector access of width `vec` can actually claim as its
+ * alignment granularity. The natural answer is `vec`, but an LDS tile advances
+ * by its innermost dimension per row, so when that dimension is not a multiple
+ * of `vec` -- what a bank-conflict pad such as lds_k_pad does -- alternate rows
+ * start off the natural boundary. Returns gcd(vec, innermost_dim), or `vec`
+ * when the shape is unavailable. Multiply by the element size for bytes.
+ * Mirrors lower_llvm._smem_vec_align / ir.py smem_store_vN. */
+int rocke_i_smem_vec_align_elems(const rocke_type_t* smem_type, int vec);
+
 /* ------------------------------------------------------------- attr helpers */
 
 /* Build a small attr map IN the arena and return it by value (the map's

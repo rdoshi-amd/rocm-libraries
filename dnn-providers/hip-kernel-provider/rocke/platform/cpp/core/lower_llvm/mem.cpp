@@ -16,6 +16,7 @@
 #include <string.h>
 
 #include "rocke/ir.h"
+#include "rocke/ir_internal.h"
 #include "rocke/lower_llvm_internal.h"
 
 namespace ckc
@@ -543,17 +544,17 @@ static void op_tile_smem_load_vN(rocke_lower_t* L, const rocke_op_t* op)
     const char* base = rocke_ll_fresh(L, "smem.base");
     const char* idx_strs = ll_smem_gidx(L, op, 1, op->num_operands);
     const char* elem_ty = rocke_ll_llvm_type(L, op->results[0]->type->elem);
-    /* Python _op_tile_smem_load_vN uses a LOCAL dict that, unlike the other
-     * handlers, does NOT list fp8e4m3 / bf8e5m2 -- so they fall to the default
-     * 2 (not 1). Replicate that exact dict here rather than the shared
-     * ll_elem_bytes (which maps fp8/bf8 -> 1), or the fp8 down-GEMM LDS reads
-     * emit `align 16` instead of the Python `align 32`.
-     *   {"i8":1,"f16":2,"bf16":2,"i32":4,"f32":4,"i64":8}.get(name, 2) */
+    /* Python _op_tile_smem_load_vN's element-size map previously omitted
+     * fp8e4m3 / bf8e5m2, so they fell to the default of 2 and a 16-element fp8
+     * read claimed `align 32` for a 16-byte access. This mirror reproduced that
+     * deliberately to hold byte-identity. Both sides now list the 8-bit floats
+     * at 1 byte, matching lower_llvm._SMEM_ELEM_BYTES. */
     const char* en = op->results[0]->type->elem->name;
     int elem_bytes = 2;
     if(en)
     {
-        if(strcmp(en, "i8") == 0)
+        if(strcmp(en, "i8") == 0 || strcmp(en, "fp8e4m3") == 0
+           || strcmp(en, "bf8e5m2") == 0)
         {
             elem_bytes = 1;
         }
@@ -570,8 +571,14 @@ static void op_tile_smem_load_vN(rocke_lower_t* L, const rocke_op_t* op)
             elem_bytes = 8;
         }
     }
-    /* New 96-bit widths guarantee only element alignment, including FP8. */
-    int64_t align = (vec == 3 || vec == 6 || vec == 12) ? 12 / vec : vec * elem_bytes;
+    /* New 96-bit widths guarantee only element alignment, including FP8.
+     * Otherwise bound the claim by what every row start actually guarantees:
+     * an LDS tile advances by its innermost dimension per row, so a pad that
+     * makes it a non-multiple of vec leaves alternate rows off the natural
+     * boundary. Mirrors lower_llvm._smem_vec_align. */
+    int64_t align = (vec == 3 || vec == 6 || vec == 12)
+                        ? 12 / vec
+                        : (int64_t)rocke_i_smem_vec_align_elems(stype, vec) * elem_bytes;
     /* gfx1250: vec==8 loads are marked volatile to block the WMMA-aware backend
      * pass from substituting ds_load_tr16_b128 (transposed) for the plain
      * sequential ds_read_b128. Mirrors Python _op_tile_smem_load_vN lines

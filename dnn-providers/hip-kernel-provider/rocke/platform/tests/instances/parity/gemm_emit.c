@@ -296,6 +296,33 @@ static int make_spec(int idx, rocke_gemm_universal_spec_t* spec)
         spec->block_size = 128;
         spec->batched = false;
         break;
+    case 13: /* config 11 with an lds_k_pad the 16-element LDS vector does not divide */
+        spec->name = "test_fp8_gfx1250_ldspad";
+        spec->tile = (rocke_gemm_tile_spec_t){.tile_m = 64,
+                                              .tile_n = 64,
+                                              .tile_k = 64,
+                                              .warp_m = 2,
+                                              .warp_n = 2,
+                                              .warp_k = 1,
+                                              .warp_tile_m = 16,
+                                              .warp_tile_n = 16,
+                                              .warp_tile_k = 64};
+        spec->trait.pipeline = "mem";
+        spec->trait.scheduler = "intrawave";
+        spec->trait.epilogue = "default";
+        spec->trait.pad_m = true;
+        spec->trait.pad_n = true;
+        spec->trait.pad_k = true;
+        spec->trait.lds_k_pad = 56;
+        spec->data.dtype_a = "fp8e4m3";
+        spec->data.dtype_b = "fp8e4m3";
+        spec->data.dtype_c = "bf16";
+        spec->data.dtype_acc = "fp32";
+        spec->data.layout = "RCR";
+        spec->wave_size = 32;
+        spec->block_size = 128;
+        spec->batched = false;
+        break;
     default:
         return -1;
     }
@@ -303,7 +330,7 @@ static int make_spec(int idx, rocke_gemm_universal_spec_t* spec)
     return 0;
 }
 
-/* Config 9 exercises gfx942; configs 11 and 12 gfx1250; the rest use the
+/* Config 9 exercises gfx942; configs 11-13 gfx1250; the rest use the
  * gfx950 baseline. */
 static const char* arch_for(int idx)
 {
@@ -311,7 +338,7 @@ static const char* arch_for(int idx)
     {
         return "gfx942";
     }
-    if(idx == 11 || idx == 12)
+    if(idx == 11 || idx == 12 || idx == 13)
     {
         return "gfx1250";
     }
@@ -322,7 +349,7 @@ int main(int argc, char** argv)
 {
     if(argc < 2)
     {
-        fprintf(stderr, "usage: %s <config_index 0..12>\n", argv[0]);
+        fprintf(stderr, "usage: %s <config_index 0..13>\n", argv[0]);
         return 2;
     }
     int idx = atoi(argv[1]);

@@ -27,6 +27,7 @@ from __future__ import annotations
 import os
 import sys
 from dataclasses import dataclass, field
+from math import gcd as _gcd
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from .arch import target as _arch
@@ -1788,6 +1789,16 @@ class IRBuilder:
             if elem_name in ("i8", "fp8e4m3", "bf8e5m2")
             else 4 if elem_name in ("f32", "i32") else 2
         )
+        # The natural alignment is n * elem_bytes, but that only holds if every
+        # address the store can land on is that aligned. An LDS tile advances by
+        # its innermost dimension per row, so a pad that makes that dimension a
+        # non-multiple of n -- lds_k_pad's whole purpose -- leaves alternate rows
+        # off the natural boundary. gcd bounds the claim to what every row start
+        # actually guarantees. Overstating alignment is undefined behaviour even
+        # where the hardware tolerates the access; understating it only affects
+        # instruction selection.
+        shape = getattr(smem.type, "shape", None)
+        align_elems = _gcd(n, int(shape[-1])) if shape else n
         self._op(
             "tile.smem_store_vN",
             [smem, *indices, value],
@@ -1795,7 +1806,7 @@ class IRBuilder:
                 "rank": len(indices),
                 "elem_type": elem_name,
                 "vec": n,
-                "align": n * elem_bytes,
+                "align": align_elems * elem_bytes,
             },
         )
 

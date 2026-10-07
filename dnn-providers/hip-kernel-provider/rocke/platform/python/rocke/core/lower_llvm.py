@@ -33,6 +33,7 @@ What's hard, and how we handle it:
 from __future__ import annotations
 
 import enum
+import math
 import os
 import sys
 from dataclasses import dataclass, field
@@ -1245,6 +1246,47 @@ def _escape_llvm_asm_string(s: str) -> str:
         else:
             out.append(f"\\{o:02X}")
     return "".join(out)
+
+
+# Bytes per element for LDS vector alignment. Shared by the smem load and
+# store handlers so the two cannot drift: they did, and the load's copy was
+# missing the 8-bit floats.
+_SMEM_ELEM_BYTES = {
+    "i8": 1,
+    "fp8e4m3": 1,
+    "bf8e5m2": 1,
+    "f16": 2,
+    "bf16": 2,
+    "i32": 4,
+    "f32": 4,
+    "i64": 8,
+}
+
+
+def _smem_vec_align(t: SmemType, vec: int, elem_bytes: int) -> int:
+    """Alignment an LDS vector access can actually guarantee, in bytes.
+
+    The natural alignment of a ``vec``-wide access is ``vec * elem_bytes``, but
+    that only holds if every address the access can land on is that aligned.
+    An LDS tile is indexed ``(..., row, col)`` with ``col`` a multiple of
+    ``vec``, so the address advances by the innermost dimension per row. When
+    that dimension is not a multiple of ``vec`` -- which is exactly what a
+    bank-conflict pad such as ``lds_k_pad`` does -- alternate rows start off
+    the natural boundary.
+
+    ``gcd(vec, innermost)`` is the largest element count every row start is
+    guaranteed to be a multiple of, so it bounds the claim. Outer strides are
+    products that include the innermost dimension, so they never bind tighter
+    and do not need to be considered.
+
+    An alignment attribute is an assertion to LLVM, not a formatting detail:
+    overstating it is undefined behaviour even where the hardware tolerates the
+    access. Understating it only costs instruction selection.
+    """
+    shape = getattr(t, "shape", None)
+    if not shape:
+        return vec * elem_bytes
+    return math.gcd(int(vec), int(shape[-1])) * elem_bytes
 
 
 def _smem_storage_type(t: SmemType) -> str:
@@ -3263,13 +3305,20 @@ class _Lowerer:
         )
         elem_ty = _llvm_type(op.result.type.elem)  # type: ignore[attr-defined]
         # Element byte size drives the vector alignment. 16-bit
-        # (f16 / bf16): 2 bytes; 32-bit (f32 / i32): 4 bytes.
-        elem_bytes = {"i8": 1, "f16": 2, "bf16": 2, "i32": 4, "f32": 4, "i64": 8}.get(
+        # (f16 / bf16): 2 bytes; 32-bit (f32 / i32): 4 bytes; the 8-bit floats
+        # are 1 byte each. fp8e4m3/bf8e5m2 were missing from this map, so they
+        # fell to the default of 2 and a 16-element fp8 read claimed `align 32`
+        # for a 16-byte access -- an overclaim no padding choice could avoid.
+        elem_bytes = _SMEM_ELEM_BYTES.get(
             op.result.type.elem.name,
             2,  # type: ignore[attr-defined]
         )
         # New 96-bit widths guarantee only element alignment, including FP8.
-        align = 12 // vec if vec in (3, 6, 12) else vec * elem_bytes
+        align = (
+            12 // vec
+            if vec in (3, 6, 12)
+            else _smem_vec_align(stype, vec, elem_bytes)
+        )
         # gfx1250: mark 8-wide (128-bit) LDS loads volatile to block the WMMA-aware
         # pass from substituting ds_load_tr16_b128 (transposed) in place of the plain
         # sequential ds_read_b128.  Only 8-wide loads feed the 16x16x32 WMMA fragment

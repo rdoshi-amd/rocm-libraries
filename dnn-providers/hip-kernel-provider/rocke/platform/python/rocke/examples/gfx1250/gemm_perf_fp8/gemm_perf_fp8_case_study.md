@@ -298,9 +298,23 @@ The practical upshot for anyone porting this list to another operand width:
 **do not copy the numbers, recompute them.** `pad` is in elements, so the whole
 table shifts with the element size.
 
-**Owed:** the emitter should derive the store's alignment attribute from the
-actual row stride rather than asserting the vector width, so a misaligned pad
-produces a weaker-but-true claim instead of a stronger false one.
+**Fixed.** The emitter now derives the alignment attribute from the actual row
+stride — `gcd(vec, innermost_dim) × elem_bytes` — for both the LDS store and
+the LDS load, so a misaligned pad produces a weaker-but-true claim instead of
+a stronger false one.
+
+Fixing it surfaced a second, worse defect in the same place. The **load** path
+kept its own element-size map and that map omitted the 8-bit floats, so they
+fell through to 2 bytes and a 16-element fp8 read claimed `align 32` for a
+16-byte access. Unlike the store defect, **no padding choice avoided it**: the
+16-aligned pads this file recommends mitigate the store and never touched the
+load, so the configuration recommended above was itself emitting a false
+`align 32` until this was fixed. The two element-size maps are now a single
+shared table, since their having drifted apart is what caused it.
+
+Parity config 13 covers the case: `lds_k_pad=56` gives a row stride the vector
+width does not divide. Every other config in the family has a stride it does
+divide, so they all pass with the bug present — which is how it survived.
 
 ## 9. The screening pin nearly hid the answer
 

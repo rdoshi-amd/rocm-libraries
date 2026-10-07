@@ -12,6 +12,7 @@ partials in part order.
 """
 
 import itertools
+import re
 from contextlib import contextmanager
 from types import SimpleNamespace
 
@@ -92,9 +93,9 @@ def _writer(hasSAtomic=True, pap=False):
     return w
 
 
-def _arrival():
-    w = _writer()
-    module = StreamKHybrid().emitArrival(w, _KERNEL, Label("SK_ArrivalDone_test", ""))
+def _arrival(tmpSgprBlock=None, w=None):
+    w = w or _writer()
+    module = StreamKHybrid().emitArrival(w, _KERNEL, Label("SK_ArrivalDone_test", ""), tmpSgprBlock)
     return list(module.flatitems())
 
 
@@ -140,6 +141,26 @@ def test_uses_arrival_fixup_gating(hasSAtomic, pap, debug, expected):
 
 def test_base_strategy_keeps_flags():
     assert StreamK.usesArrivalFixup(StreamKHybrid(), _writer(), _KERNEL) is False
+
+
+def test_arrival_reuses_the_enclosing_scratch_block():
+    w = _writer()
+    before = w.sgprPool._next
+    items = _arrival((40, 6), w)
+    assert w.sgprPool._next == before, "no sgpr checked out when a block is lent"
+    atomic = [i for i in items if isinstance(i, SAtomicInc)][0]
+    assert "s[40:41]" in str(atomic), "counter address in the lent block's aligned pair"
+    text = "".join(str(i) for i in items)
+    assert "s_getpc_b64 s[40:41]" in text, "the long branch reuses the block too"
+    used = {int(n) for n in re.findall(r"\bs\[?(\d+)", text)}
+    assert used <= {40, 41, 42, 43}, "only the first 4 sgprs of the block are used"
+
+
+def test_arrival_checks_out_its_own_sgprs_without_a_block():
+    w = _writer()
+    before = w.sgprPool._next
+    _arrival(None, w)
+    assert w.sgprPool._next > before
 
 
 def _recording_hybrid():

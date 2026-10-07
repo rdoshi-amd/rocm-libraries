@@ -1746,6 +1746,11 @@ class StreamK(TileProcessingStrategy):
         numBatches = max(1, ceilDivide(len(elements[edgeI]),numElementsPerBatch))
 
         numSgprs = ss.cfg.numTempSgprPerBatch + ss.cfg.numMaskSgprPerBatch + ss.cfg.numMaskSgprPerElement * numElementsPerBatch
+        if hasHybridAssignment(kernel) and self.usesArrivalFixup(writer, kernel):
+            # The arrival (emitArrival) borrows this block once the batches
+            # are done; it needs 4 sgprs, which it would otherwise check out
+            # on top of the block.
+            numSgprs = max(numSgprs, 4)
 
         # TODO STREAM-K activation code
 
@@ -1832,17 +1837,20 @@ class StreamK(TileProcessingStrategy):
                                         comment="SK5: branch to static flag offset"))
                 if self.usesArrivalFixup(writer, kernel):
                     # SK4 (dynamic): no per-part flag. The last part to arrive
-                    # fixes the tile up; everyone else is done.
+                    # fixes the tile up; everyone else is done. emitArrival
+                    # always branches away, so no SK4 flag offset follows.
+                    # The batch sgprs are dead here: lend them to the arrival.
                     arrivalDone = Label(writer.labels.getNameInc("SK_ArrivalDone"), "")
-                    module.add(self.emitArrival(writer, kernel, arrivalDone))
-                # SK4 (dynamic) flag offset
-                module.add(self.calculatePartialIdx(writer, kernel, tmpSgpr))
-                module.add(SLShiftLeftB32(dst=sgpr(tmpSgpr), src=sgpr(tmpSgpr), shiftHex=log2(4),
-                                          comment="SK5/SK4: flag offset based on partial index"))
-                module.add(SAddU32(dst=sgpr(tmpSgpr), src0=sgpr(tmpSgpr), src1=Component.WorkAssignment.find(writer).flagsBaseOffset(writer, kernel),
-                                   comment="SK5/SK4: offset flags to come after the work queues"))
-                module.add(SBranch(labelName=sk5FlagDone.getLabelName(),
-                                   comment="SK5: skip static flag offset"))
+                    module.add(self.emitArrival(writer, kernel, arrivalDone, (tmpSgpr, numSgprs)))
+                else:
+                    # SK4 (dynamic) flag offset
+                    module.add(self.calculatePartialIdx(writer, kernel, tmpSgpr))
+                    module.add(SLShiftLeftB32(dst=sgpr(tmpSgpr), src=sgpr(tmpSgpr), shiftHex=log2(4),
+                                              comment="SK5/SK4: flag offset based on partial index"))
+                    module.add(SAddU32(dst=sgpr(tmpSgpr), src0=sgpr(tmpSgpr), src1=Component.WorkAssignment.find(writer).flagsBaseOffset(writer, kernel),
+                                       comment="SK5/SK4: offset flags to come after the work queues"))
+                    module.add(SBranch(labelName=sk5FlagDone.getLabelName(),
+                                       comment="SK5: skip static flag offset"))
                 # SK3 (static) flag offset
                 module.add(sk5FlagStatic)
                 module.add(SLShiftLeftB32(dst=sgpr(tmpSgpr), src=sgpr("PersistentWorkGroupIndex"), shiftHex=log2(4),
@@ -4133,18 +4141,27 @@ class StreamKHybrid(StreamK):
     # partialsWriteProcedure and the dynamic SRD setup in writePartials).
     # Note: SK5 uses SKTiles (uppercase) as the SK4-dedicated tile count.
     # ------------------------------------------------------------------
+    def calculatePartialTile(self, writer, kernel, sPartialTile):
+        """sPartialTile = index of the current tile among the split tiles.
+
+        Split tiles are the last SKTiles tiles. StreamKTileIdx and SKTiles
+        count tiles across all batches, so the full-tile count must too (as in
+        _computeNextTileIdentity). Shared by the partial index and the arrival
+        counter so the two cannot disagree.
+        """
+        module = Module("StreamK Hybrid calculatePartialTile")
+        module.add(self.computeTotalTiles(writer, kernel, sPartialTile))
+        module.add(SSubU32(dst=sgpr(sPartialTile),
+                           src0=sgpr(sPartialTile), src1=sgpr("SKTiles"),
+                           comment="Number of full tiles"))
+        module.add(SSubU32(dst=sgpr(sPartialTile),
+                           src0=sgpr("StreamKTileIdx"), src1=sgpr(sPartialTile),
+                           comment="PartialTile = (TileIdx - #FullTiles)"))
+        return module
+
     def calculateFirstPartialIdx(self, writer, kernel, sPartialIdx):
         module = Module("StreamK Hybrid calculateFirstPartialIdx")
-        # StreamKTileIdx and SKTiles count tiles across all batches, so the
-        # full-tile count must too (as in _computeNextTileIdentity and the
-        # arrival counter).
-        module.add(self.computeTotalTiles(writer, kernel, sPartialIdx))
-        module.add(SSubU32(dst=sgpr(sPartialIdx),
-                           src0=sgpr(sPartialIdx), src1=sgpr("SKTiles"),
-                           comment="Number of full tiles"))
-        module.add(SSubU32(dst=sgpr(sPartialIdx),
-                           src0=sgpr("StreamKTileIdx"), src1=sgpr(sPartialIdx),
-                           comment="PartialTile = (TileIdx - #FullTiles)"))
+        module.add(self.calculatePartialTile(writer, kernel, sPartialIdx))
         module.add(SMulI32(dst=sgpr(sPartialIdx),
                            src0=sgpr(sPartialIdx), src1=sgpr("SKSplit"),
                            comment="PartialIdxBase = PartialTile * SKSplit"))
@@ -4183,20 +4200,34 @@ class StreamKHybrid(StreamK):
                 and writer.states.asmCaps["HasSAtomic"]
                 and not writer.isPrefetchAcrossPersistentEnabled(kernel))
 
-    def emitArrival(self, writer, kernel, arrivalDone):
+    def emitArrival(self, writer, kernel, arrivalDone, tmpSgprBlock=None):
         """Count this part in on its tile; branch to the fixup if it is last.
 
         Runs on the partials path after the partial has been written, fenced
         and the workgroup barrier passed. Falls through to nothing: either
         branches to ``arrivalDone`` (not last) or to the fixup entry emitted by
         storeBranches (last).
+
+        ``tmpSgprBlock`` is an optional (idx, size) of the enclosing 2-aligned
+        scratch block (partialsWriteProcedure's batch sgprs), dead at this
+        point. When it has at least 4 sgprs the arrival uses it instead of
+        checking out its own.
         """
         module = Module("StreamK Hybrid arrival")
         memOrder = Component.StreamKMemoryOrdering.find(writer)
         fixupEntry = writer.states.skArrivalFixupLabel
         mask = kernel["WavefrontSize"] - 1
 
-        sTicket = writer.sgprPool.checkOut(1, "ArrivalTicket", preventOverflow=False)
+        # Layout: sAddr (2, aligned) | sTicket | sTmp. All four are dead once
+        # the last-part compare is done, so SLongBranchNegative takes its 3
+        # scratch sgprs from sAddr on.
+        ownSgprs = tmpSgprBlock is None or tmpSgprBlock[1] < 4 or tmpSgprBlock[0] % 2 != 0
+        if ownSgprs:
+            base = writer.sgprPool.checkOutAligned(4, 2, "Arrival", preventOverflow=False)
+        else:
+            base = tmpSgprBlock[0]
+        sAddr, sTicket, sTmp = base, base + 2, base + 3
+
         vAddr = writer.vgprPool.checkOut(1, "ArrivalLdsAddr")
         vVal = writer.vgprPool.checkOut(1, "ArrivalVal")
         vSave = writer.vgprPool.checkOut(1, "ArrivalLdsSave")
@@ -4209,64 +4240,66 @@ class StreamKHybrid(StreamK):
         module.add(SBarrier(comment="all waves: partial stored and LDS idle"))
 
         skipAtomic = Label(writer.labels.getNameInc("SK_ArrivalSkipAtomic"), "")
-        with writer.allocTmpSgpr(3, tag="StreamKHybrid_arrival") as tmp:
-            sTmp = tmp.idx
-            module.add(VReadfirstlaneB32(dst=sgpr(sTmp), src=vgpr("Serial"), comment="Wave 0 counts the part in"))
-            module.add(SCmpEQU32(src0=sgpr(sTmp), src1=0, comment="Check for wave 0"))
-            module.add(SCBranchSCC0(labelName=skipAtomic.getLabelName(), comment="Other waves wait for the ticket"))
-            # Counter address: AddressFlags + flagsBase + 4 * partialTile.
-            # sTmp+1:sTmp+2 is the 64-bit address (aligned pair not required by
-            # allocTmpSgpr, so build it in an aligned checkout).
-            sAddr = writer.sgprPool.checkOutAligned(2, 2, "ArrivalAddr", preventOverflow=False)
-            module.add(self.computeTotalTiles(writer, kernel, sTmp))
-            module.add(SSubU32(dst=sgpr(sTmp), src0=sgpr(sTmp), src1=sgpr("SKTiles"), comment="full tiles"))
-            module.add(SSubU32(dst=sgpr(sTmp), src0=sgpr("StreamKTileIdx"), src1=sgpr(sTmp), comment="partial tile"))
-            module.add(SLShiftLeftB32(dst=sgpr(sTmp), src=sgpr(sTmp), shiftHex=log2(4), comment="arrival counter offset"))
-            module.add(SAddU32(dst=sgpr(sTmp), src0=sgpr(sTmp),
-                               src1=Component.WorkAssignment.find(writer).flagsBaseOffset(writer, kernel),
-                               comment="counters come after the work queues"))
-            module.add(SAddU32(dst=sgpr(sAddr), src0=sgpr("AddressFlags+0"), src1=sgpr(sTmp)))
-            module.add(SAddCU32(dst=sgpr(sAddr+1), src0=sgpr("AddressFlags+1"), src1=0))
-            module.add(SSubU32(dst=sgpr(sTicket), src0=sgpr("SKSplit"), src1=1, comment="wrap bound = SKSplit-1"))
-            module.add(SAtomicInc(dst=sgpr(sTicket), base=sgpr(sAddr, 2), soffset=0,
-                                  smem=SMEMModifiers(glc=True),
-                                  comment="arrive: ticket = parts in before us; wraps to 0 on the last"))
-            module.add(SWaitCnt(kmcnt=0, comment="wait for arrival ticket"))
-            writer.sgprPool.checkIn(sAddr)
-            # Borrow the mailbox: save what is there, publish the ticket.
-            loadInst = DSLoadB32(dst=vgpr(vSave), src=vgpr(vAddr), ds=DSModifiers(offset=0), comment="save LDS under the mailbox")
-            module.add(loadInst)
-            module.add(VMovB32(dst=vgpr(vVal), src=sgpr(sTicket), comment="ticket"))
-            module.add(SWaitCnt(dscnt=0))
-            module.add(DSStoreB32(dstAddr=vgpr(vAddr), src=vgpr(vVal), ds=DSModifiers(offset=0), comment="publish ticket"))
-            module.add(SWaitCnt(dscnt=0))
-            module.add(skipAtomic)
-            module.add(SBarrier(comment="ticket visible to all waves"))
-            module.add(DSLoadB32(dst=vgpr(vVal), src=vgpr(vAddr), ds=DSModifiers(offset=0), comment="read ticket"))
-            module.add(SWaitCnt(dscnt=0))
-            module.add(VReadfirstlaneB32(dst=sgpr(sTicket), src=vgpr(vVal), comment="ticket"))
-            module.add(SBarrier(comment="every wave has read the ticket"))
-            # Wave 0 restores the borrowed LDS.
-            skipRestore = Label(writer.labels.getNameInc("SK_ArrivalSkipRestore"), "")
-            module.add(VReadfirstlaneB32(dst=sgpr(sTmp), src=vgpr("Serial"), comment="Wave 0 restores the mailbox"))
-            module.add(SCmpEQU32(src0=sgpr(sTmp), src1=0, comment="Check for wave 0"))
-            module.add(SCBranchSCC0(labelName=skipRestore.getLabelName(), comment="Skip restore"))
-            module.add(DSStoreB32(dstAddr=vgpr(vAddr), src=vgpr(vSave), ds=DSModifiers(offset=0), comment="restore LDS under the mailbox"))
-            module.add(SWaitCnt(dscnt=0))
-            module.add(skipRestore)
-            module.add(SBarrier(comment="mailbox restored before LDS is read again"))
-            module.add(SSubU32(dst=sgpr(sTmp), src0=sgpr("SKSplit"), src1=1))
-            module.add(SCmpEQU32(src0=sgpr(sTicket), src1=sgpr(sTmp), comment="last part in?"))
+        module.add(VReadfirstlaneB32(dst=sgpr(sTmp), src=vgpr("Serial"), comment="Wave 0 counts the part in"))
+        module.add(SCmpEQU32(src0=sgpr(sTmp), src1=0, comment="Check for wave 0"))
+        module.add(SCBranchSCC0(labelName=skipAtomic.getLabelName(), comment="Other waves wait for the ticket"))
+        # Counter address: AddressFlags + flagsBase + 4 * partialTile.
+        module.add(self.calculatePartialTile(writer, kernel, sTmp))
+        module.add(SLShiftLeftB32(dst=sgpr(sTmp), src=sgpr(sTmp), shiftHex=log2(4), comment="arrival counter offset"))
+        module.add(SAddU32(dst=sgpr(sTmp), src0=sgpr(sTmp),
+                           src1=Component.WorkAssignment.find(writer).flagsBaseOffset(writer, kernel),
+                           comment="counters come after the work queues"))
+        module.add(SAddU32(dst=sgpr(sAddr), src0=sgpr("AddressFlags+0"), src1=sgpr(sTmp)))
+        module.add(SAddCU32(dst=sgpr(sAddr+1), src0=sgpr("AddressFlags+1"), src1=0))
+        module.add(SSubU32(dst=sgpr(sTicket), src0=sgpr("SKSplit"), src1=1, comment="wrap bound = SKSplit-1"))
+        # Why a scalar atomic is safe here although plain SMEM flag traffic is
+        # not on gfx950 (see emitFlagStore / StreamKMemoryOrderingGfx9Xcd):
+        # s_load/s_store may be served from the scalar cache and this XCD's
+        # slice of the split L2, so another XCD can read a stale line. A
+        # returning (glc) atomic is a read-modify-write performed at the
+        # device coherence point, not in a per-XCD cached copy, so every XCD
+        # serialises on the same counter word -- the per-XCD work queues rely
+        # on the same property for their s_atomic_inc. Data ordering is not
+        # carried by the atomic: the partial was released (releaseFence)
+        # before it, and the last part acquires (acquireFence) after it.
+        module.add(SAtomicInc(dst=sgpr(sTicket), base=sgpr(sAddr, 2), soffset=0,
+                              smem=SMEMModifiers(glc=True),
+                              comment="arrive: ticket = parts in before us; wraps to 0 on the last"))
+        module.add(SWaitCnt(kmcnt=0, comment="wait for arrival ticket"))
+        # Borrow the mailbox: save what is there, publish the ticket.
+        module.add(DSLoadB32(dst=vgpr(vSave), src=vgpr(vAddr), ds=DSModifiers(offset=0), comment="save LDS under the mailbox"))
+        module.add(VMovB32(dst=vgpr(vVal), src=sgpr(sTicket), comment="ticket"))
+        module.add(SWaitCnt(dscnt=0))
+        module.add(DSStoreB32(dstAddr=vgpr(vAddr), src=vgpr(vVal), ds=DSModifiers(offset=0), comment="publish ticket"))
+        module.add(SWaitCnt(dscnt=0))
+        module.add(skipAtomic)
+        module.add(SBarrier(comment="ticket visible to all waves"))
+        module.add(DSLoadB32(dst=vgpr(vVal), src=vgpr(vAddr), ds=DSModifiers(offset=0), comment="read ticket"))
+        module.add(SWaitCnt(dscnt=0))
+        module.add(VReadfirstlaneB32(dst=sgpr(sTicket), src=vgpr(vVal), comment="ticket"))
+        module.add(SBarrier(comment="every wave has read the ticket"))
+        # Wave 0 restores the borrowed LDS.
+        skipRestore = Label(writer.labels.getNameInc("SK_ArrivalSkipRestore"), "")
+        module.add(VReadfirstlaneB32(dst=sgpr(sTmp), src=vgpr("Serial"), comment="Wave 0 restores the mailbox"))
+        module.add(SCmpEQU32(src0=sgpr(sTmp), src1=0, comment="Check for wave 0"))
+        module.add(SCBranchSCC0(labelName=skipRestore.getLabelName(), comment="Skip restore"))
+        module.add(DSStoreB32(dstAddr=vgpr(vAddr), src=vgpr(vSave), ds=DSModifiers(offset=0), comment="restore LDS under the mailbox"))
+        module.add(SWaitCnt(dscnt=0))
+        module.add(skipRestore)
+        module.add(SBarrier(comment="mailbox restored before LDS is read again"))
+        module.add(SSubU32(dst=sgpr(sTmp), src0=sgpr("SKSplit"), src1=1))
+        module.add(SCmpEQU32(src0=sgpr(sTicket), src1=sgpr(sTmp), comment="last part in?"))
         writer.vgprPool.checkIn(vSave)
         writer.vgprPool.checkIn(vVal)
         writer.vgprPool.checkIn(vAddr)
-        writer.sgprPool.checkIn(sTicket)
 
         module.add(writer.longBranchScc0(arrivalDone, posNeg=1, comment="not last: this part is done"))
         # Last: every other part released its partial before counting in.
         module.add(memOrder.acquireFence(writer))
-        with writer.allocTmpSgpr(3, tag="StreamKHybrid_arrivalFixup") as tmp:
-            module.add(SLongBranchNegative(fixupEntry, tmp, comment="last: fix the tile up and store it"))
+        module.add(SLongBranchNegative(fixupEntry, ContinuousRegister(idx=sAddr, size=3),
+                                       comment="last: fix the tile up and store it"))
+        if ownSgprs:
+            writer.sgprPool.checkIn(base)
         return module
 
     # ------------------------------------------------------------------

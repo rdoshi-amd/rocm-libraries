@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
+#include <filesystem>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -167,6 +168,52 @@ namespace
         std::cout << "PASS capturing stream did not compile (" << elapsed << " ms)\n";
     }
 
+    // A published index may be returned during capture, and that return does not build.
+    void captureReturnsPublished(hipblasLtHandle_t handle, hipblasLtMatmulDesc_t desc)
+    {
+        jit::Diagnostics diagnostics;
+        jit::Request     request;
+        jit::Backend     backend;
+        BLAS(hk::createBackend({}, backend, diagnostics));
+        makeProblem(handle, desc, M, N, K, request, diagnostics);
+        const auto operation = jit::detail::RequestAccess::get(request);
+        const auto gemm      = dynamic_cast<const jit::detail::GemmRequest*>(operation.get());
+        require(gemm != nullptr, "request is not a GEMM");
+        auto problem = gemm->problem;
+
+        int         device = -1;
+        hipStream_t stream{};
+        HIP(hipGetDevice(&device));
+        HIP(hipStreamCreate(&stream));
+        problem.stream = stream;
+        auto capturing = jit::detail::RequestAccess::make(
+            std::make_shared<jit::detail::GemmRequest>(problem));
+        Device marker(4);
+        HIP(hipStreamBeginCapture(stream, hipStreamCaptureModeRelaxed));
+        HIP(hipMemsetAsync(marker.pointer, 0, 4, stream));
+        jit::Solution  found;
+        const auto     started = std::chrono::steady_clock::now();
+        const auto     status
+            = jit::getJitAlgo(device, capturing, backend, 64 << 20, found, diagnostics);
+        const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 std::chrono::steady_clock::now() - started)
+                                 .count();
+        hipGraph_t graph{};
+        HIP(hipStreamEndCapture(stream, &graph));
+        HIP(hipGraphDestroy(graph));
+        HIP(hipStreamDestroy(stream));
+        require(status == HIPBLAS_STATUS_SUCCESS, "capture hit status " + std::to_string(status));
+        require(diagnostics.message == "1 of 1 solutions came from the JIT solution library",
+                "capture hit generated: " + diagnostics.message);
+        hipblasLtMatmulHeuristicResult_t result{};
+        BLAS(jit::getGemmAlgo(found, result, diagnostics));
+        require(hipblaslt_ext::getIndexFromAlgo(result.algo) >= (1 << 30),
+                "capture hit is not a JIT library index");
+        require(elapsed < 20000, "generation started during stream capture ("
+                                     + std::to_string(elapsed) + " ms)");
+        std::cout << "PASS capturing stream returned the published index (" << elapsed << " ms)\n";
+    }
+
     void runGemm(hipblasLtHandle_t handle, hipblasLtMatmulDesc_t desc, hipStream_t stream)
     {
         jit::Diagnostics diagnostics;
@@ -260,6 +307,9 @@ int main()
     HIP(hipGetDeviceProperties(&properties, device));
     require(std::string(properties.gcnArchName).rfind("gfx950", 0) == 0,
             std::string("need gfx950, got ") + properties.gcnArchName);
+    const char* libraryRoot = std::getenv("HIPBLASLT_JIT_LIBRARY_PATH");
+    require(libraryRoot && *libraryRoot, "Set HIPBLASLT_JIT_LIBRARY_PATH to a scratch directory");
+    std::filesystem::remove_all(std::filesystem::u8path(libraryRoot));
 
     checkResources();
     hipblasLtHandle_t     handle{};
@@ -275,6 +325,7 @@ int main()
 
     captureSkipsCompile(handle, desc);
     runGemm(handle, desc, stream);
+    captureReturnsPublished(handle, desc);
 
     static_cast<void>(hipStreamDestroy(stream));
     hipblasLtMatmulDescDestroy(desc);

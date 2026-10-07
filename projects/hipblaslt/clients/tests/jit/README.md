@@ -65,7 +65,7 @@ The CTest tests are:
 | `jit-heuristic-fallback` | `HIPBLASLT_JIT=1`. With no device library, every returned algorithm is JIT and the first result for K=512 matches the host. With a device library, an Equality size returns Equality algorithms, then JIT, then the others, with no repeated kernel, and an untuned size starts with JIT. Without such a library the ordering check prints `SKIP heuristic-provider-order: the build has no device library with an Equality size` |
 | `jit-heuristic-forced` | `HIPBLASLT_JIT=2`. Both queries return only JIT library indices. K=512 selects the solution ending in `_K512_WGM8` and K=256 the one ending in `_WGM1`. A transposed A returns no algorithm. The first K=512 result matches the host. A second process querying that problem gets the same index |
 | `jit-heuristic-ignored` | Built only with `HIPBLASLT_ENABLE_JIT=OFF`, with `HIPBLASLT_JIT=2`. The queries do not return JIT algorithms |
-| `jit-hipkittens` | Built only with `HIPBLASLT_JIT_ENABLE_HIPKITTENS` and gfx950. The compiled-in BF16 and FP16 variants, a capturing stream that returns no solution without compiling, a BF16 TN 256x256x128 GEMM whose D is 128, and M=128 rejected |
+| `jit-hipkittens` | Built only with `HIPBLASLT_JIT_ENABLE_HIPKITTENS` and gfx950. The compiled-in BF16 and FP16 variants, a capturing stream that returns no solution without compiling when the library is empty, a BF16 TN 256x256x128 GEMM whose D is 128 and which publishes a library index, a later capture that returns that index without compiling, and M=128 rejected |
 
 ## Test arguments
 

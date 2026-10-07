@@ -2364,6 +2364,16 @@ inline std::deque<std::string>& registeredEngineNames()
 
 } // namespace detail
 
+/// A descriptor set that passed validation, with the state manager validation built for it.
+/// Held as one value so the two cannot be paired wrongly: a caller constructing an engine
+/// from the set need not build the state manager a second time.
+template <typename THandle>
+struct ValidatedSet
+{
+    DescriptorSet set;
+    std::unique_ptr<KernelIngestorStateManager<THandle>> stateManager; ///< Never null.
+};
+
 /**
  * @brief Every descriptor set under @p roots that this provider can actually construct.
  *
@@ -2378,20 +2388,13 @@ inline std::deque<std::string>& registeredEngineNames()
  * @warning Native symbols must already be registered when this is called; a set naming an
  *          unregistered symbol is dropped.
  *
- * @param stateManagers When non-null, replaced by the state manager validation built for
- *        each returned set, index for index, so a caller constructing engines from these
- *        sets need not build each one a second time. Null discards them.
+ * @return Each surviving set with the state manager validation built for it.
  */
 template <typename THandle>
-inline std::vector<DescriptorSet> loadValidatedDescriptorSets(
-    const std::vector<std::filesystem::path>& roots,
-    std::vector<std::unique_ptr<KernelIngestorStateManager<THandle>>>* stateManagers = nullptr)
+inline std::vector<ValidatedSet<THandle>>
+    loadValidatedDescriptorSets(const std::vector<std::filesystem::path>& roots)
 {
-    std::vector<DescriptorSet> validated;
-    if(stateManagers != nullptr)
-    {
-        stateManagers->clear();
-    }
+    std::vector<ValidatedSet<THandle>> validated;
     size_t dropped = 0;
 
     for(auto& set : resolveDescriptorSets(loadDescriptorCatalog(roots)))
@@ -2487,7 +2490,7 @@ inline std::vector<DescriptorSet> loadValidatedDescriptorSets(
         {
             // Built to prove the set validates -- Container::copyEngineIds is static and
             // would otherwise advertise an id for a set that fails to construct -- and
-            // handed to the caller that asked for it, so that engine is not built twice.
+            // returned with the set, so an engine constructed from it is not built twice.
             built = makeStateManager<THandle>(set, set.engine.graphMatchNativeSymbol);
         }
         catch(const std::exception& error)
@@ -2519,11 +2522,7 @@ inline std::vector<DescriptorSet> loadValidatedDescriptorSets(
                                    << "' was not registered for diagnostics: " << error.what());
         }
 
-        validated.push_back(std::move(set));
-        if(stateManagers != nullptr)
-        {
-            stateManagers->push_back(std::move(built));
-        }
+        validated.push_back(ValidatedSet<THandle>{std::move(set), std::move(built)});
     }
 
     std::string from;
@@ -2549,7 +2548,8 @@ inline std::vector<DescriptorSet> loadValidatedDescriptorSets(
 
 /// @brief The one-root form: every constructible descriptor set under @p root.
 template <typename THandle>
-inline std::vector<DescriptorSet> loadValidatedDescriptorSets(const std::filesystem::path& root)
+inline std::vector<ValidatedSet<THandle>>
+    loadValidatedDescriptorSets(const std::filesystem::path& root)
 {
     return loadValidatedDescriptorSets<THandle>(std::vector<std::filesystem::path>{root});
 }

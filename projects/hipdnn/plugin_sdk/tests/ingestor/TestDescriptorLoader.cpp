@@ -368,6 +368,17 @@ std::vector<DescriptorSet> loadFrom(const std::filesystem::path& root)
     return resolveDescriptorSets(loadDescriptorCatalog(root));
 }
 
+/// The sets validation kept under @p root, without the state managers it built for them.
+std::vector<DescriptorSet> validatedSetsFrom(const std::filesystem::path& root)
+{
+    std::vector<DescriptorSet> sets;
+    for(auto& validated : loadValidatedDescriptorSets<LoaderHandle>(root))
+    {
+        sets.push_back(std::move(validated.set));
+    }
+    return sets;
+}
+
 std::vector<DescriptorSet> loadFromRoots(const std::vector<std::filesystem::path>& roots)
 {
     return resolveDescriptorSets(loadDescriptorCatalog(roots));
@@ -515,7 +526,7 @@ TEST(TestDescriptorLoader, KeepsPerArchShardsSharingAMetadataTupleThroughTheStat
         writeDocuments(dir.path() / arch, documents);
     }
 
-    const auto sets = loadValidatedDescriptorSets<LoaderHandle>(dir.path());
+    const auto sets = validatedSetsFrom(dir.path());
 
     ASSERT_EQ(sets.size(), 1u);
     EXPECT_EQ(sets.front().packs.size(), 2u);
@@ -890,12 +901,12 @@ TEST(TestDescriptorLoader, ValidatesAnEngineComingOnlyFromTheDropInRoot)
     writeDocuments(installed, makeSetDocuments('1', "test:validated_installed"));
     writeDocuments(dropIn, makeSetDocuments('2', "test:validated_drop_in"));
 
-    const auto sets = loadValidatedDescriptorSets<LoaderHandle>(
+    const auto validated = loadValidatedDescriptorSets<LoaderHandle>(
         std::vector<std::filesystem::path>{installed, dropIn});
 
-    ASSERT_EQ(sets.size(), 2u);
-    EXPECT_EQ(sets.front().engine.name, "test:validated_installed");
-    EXPECT_EQ(sets.back().engine.name, "test:validated_drop_in");
+    ASSERT_EQ(validated.size(), 2u);
+    EXPECT_EQ(validated.front().set.engine.name, "test:validated_installed");
+    EXPECT_EQ(validated.back().set.engine.name, "test:validated_drop_in");
     EXPECT_TRUE(
         recorder.hasLogContaining(HIPDNN_SEV_INFO, "2 descriptor-backed engine(s) loaded from"))
         << recorder.getRecordedLogsAsString();
@@ -1517,7 +1528,7 @@ TEST(TestDescriptorLoader, DropsAPackWhoseKernelOmitsAnUndefaultedMetadataField)
     documents.push_back(TestDocument{".kdp.json", brokenPack});
     writeDocuments(dir.path(), documents);
 
-    const auto sets = loadValidatedDescriptorSets<LoaderHandle>(dir.path());
+    const auto sets = validatedSetsFrom(dir.path());
 
     ASSERT_EQ(sets.size(), 1u);
     EXPECT_EQ(sets.front().packs.size(), 1u);
@@ -1576,7 +1587,7 @@ TEST(TestDescriptorLoader, ValidationDropsAnEngineNamingAnUnregisteredSymbol)
     documentOfType(unregistered, ".umd.json")["match_symbol"] = "descriptorloader.absent";
     writeDocuments(dir.path(), unregistered);
 
-    const auto sets = loadValidatedDescriptorSets<LoaderHandle>(dir.path());
+    const auto sets = validatedSetsFrom(dir.path());
 
     ASSERT_EQ(sets.size(), 1u);
     EXPECT_EQ(sets.front().engine.name, "test:symbol_check_sibling");
@@ -1615,9 +1626,8 @@ TEST_P(TestDescriptorLoaderStateManagerOrder, HandsBackOneStateManagerPerValidat
     writeDocuments(dir.path(), dropped);
     writeDocuments(dir.path(), makeSetDocuments('3', "test:second_valid"));
 
-    std::vector<std::unique_ptr<KernelIngestorStateManager<LoaderHandle>>> stateManagers;
-    const auto sets = loadValidatedDescriptorSets<LoaderHandle>(
-        std::vector<std::filesystem::path>{dir.path()}, &stateManagers);
+    const auto validated
+        = loadValidatedDescriptorSets<LoaderHandle>(std::vector<std::filesystem::path>{dir.path()});
 
     for(const auto& reason : GetParam().reasons)
     {
@@ -1625,15 +1635,14 @@ TEST_P(TestDescriptorLoaderStateManagerOrder, HandsBackOneStateManagerPerValidat
             << reason << "\n"
             << recorder.getRecordedLogsAsString();
     }
-    ASSERT_EQ(sets.size(), 2u);
-    EXPECT_EQ(sets[0].engine.name, "test:first_valid");
-    EXPECT_EQ(sets[1].engine.name, "test:second_valid");
-    ASSERT_EQ(stateManagers.size(), sets.size());
-    for(size_t i = 0; i < sets.size(); ++i)
+    ASSERT_EQ(validated.size(), 2u);
+    EXPECT_EQ(validated[0].set.engine.name, "test:first_valid");
+    EXPECT_EQ(validated[1].set.engine.name, "test:second_valid");
+    for(const auto& entry : validated)
     {
-        ASSERT_NE(stateManagers[i], nullptr) << sets[i].engine.name;
-        EXPECT_EQ(toString(stateManagers[i]->metadataSchema().id), toString(sets[i].schema.id))
-            << sets[i].engine.name;
+        ASSERT_NE(entry.stateManager, nullptr) << entry.set.engine.name;
+        EXPECT_EQ(toString(entry.stateManager->metadataSchema().id), toString(entry.set.schema.id))
+            << entry.set.engine.name;
     }
 }
 
@@ -1672,7 +1681,7 @@ TEST(TestDescriptorLoader, ValidationDropsAnEngineNamingAnUnregisteredGraphMatch
         = nlohmann::json{{"native", "descriptorloader.absent_graph_match"}};
     writeDocuments(dir.path(), unregistered);
 
-    const auto sets = loadValidatedDescriptorSets<LoaderHandle>(dir.path());
+    const auto sets = validatedSetsFrom(dir.path());
 
     ASSERT_EQ(sets.size(), 1u);
     EXPECT_EQ(sets.front().engine.name, "test:graph_match_sibling");
@@ -1697,7 +1706,7 @@ TEST(TestDescriptorLoader, ValidationDropsAnEngineNamingAGraphSymbolAsItsKernelS
     secondDocumentOfType(misrouted, ".umd.json")["match_symbol"] = GRAPH_SYMBOL;
     writeDocuments(dir.path(), misrouted);
 
-    const auto sets = loadValidatedDescriptorSets<LoaderHandle>(dir.path());
+    const auto sets = validatedSetsFrom(dir.path());
 
     ASSERT_EQ(sets.size(), 1u);
     EXPECT_EQ(sets.front().engine.name, "test:kernel_scope_check_sibling");
@@ -1720,7 +1729,7 @@ TEST(TestDescriptorLoader, ValidationDropsAnEngineNamingAnUnregisteredDispatchSy
     documentOfType(unregistered, ".udd.json")["dispatch_symbol"] = "descriptorloader.absent";
     writeDocuments(dir.path(), unregistered);
 
-    const auto sets = loadValidatedDescriptorSets<LoaderHandle>(dir.path());
+    const auto sets = validatedSetsFrom(dir.path());
 
     ASSERT_EQ(sets.size(), 1u);
     EXPECT_EQ(sets.front().engine.name, "test:dispatch_check_sibling");
@@ -1743,7 +1752,7 @@ TEST(TestDescriptorLoader, ValidationDropsAnEngineNamingAnUnregisteredScoreSymbo
     documentOfType(unregistered, ".uhd.json")["payload"] = "descriptorloader.absent";
     writeDocuments(dir.path(), unregistered);
 
-    const auto sets = loadValidatedDescriptorSets<LoaderHandle>(dir.path());
+    const auto sets = validatedSetsFrom(dir.path());
 
     ASSERT_EQ(sets.size(), 1u);
     EXPECT_EQ(sets.front().engine.name, "test:score_check_sibling");
@@ -1770,7 +1779,7 @@ TEST(TestDescriptorLoader, ReportsHowManyDescriptorSetsWereDropped)
     secondDocumentOfType(misrouted, ".umd.json")["match_symbol"] = GRAPH_SYMBOL;
     writeDocuments(dir.path(), misrouted);
 
-    const auto sets = loadValidatedDescriptorSets<LoaderHandle>(dir.path());
+    const auto sets = validatedSetsFrom(dir.path());
 
     EXPECT_EQ(sets.size(), 1u);
     EXPECT_TRUE(recorder.hasLogContaining(HIPDNN_SEV_ERROR,
@@ -1795,7 +1804,7 @@ TEST(TestDescriptorLoader, ValidationDropsAnEngineWhoseKernelsShareAMetadataTupl
     kernels[1]["metadata"] = kernels[0]["metadata"];
     writeDocuments(dir.path(), duplicated);
 
-    const auto sets = loadValidatedDescriptorSets<LoaderHandle>(dir.path());
+    const auto sets = validatedSetsFrom(dir.path());
 
     ASSERT_EQ(sets.size(), 1u);
     EXPECT_EQ(sets.front().engine.name, "test:tuple_check_sibling");
@@ -1813,7 +1822,7 @@ TEST(TestDescriptorLoader, ValidationDropsAnEngineCollidingWithARegisteredName)
     static const hipdnn_data_sdk::utilities::EngineRegistrar s_registrar{s_claimed};
     writeDocuments(dir.path(), makeSetDocuments('2', s_claimed));
 
-    const auto sets = loadValidatedDescriptorSets<LoaderHandle>(dir.path());
+    const auto sets = validatedSetsFrom(dir.path());
 
     ASSERT_EQ(sets.size(), 1u);
     EXPECT_EQ(sets.front().engine.name, "test:collision_check_sibling");
@@ -1827,9 +1836,9 @@ TEST(TestDescriptorLoader, ValidationIsIdempotentAcrossReloads)
     const hipdnn_test_sdk::utilities::ScopedDirectory dir(uniqueDirectory("reload"));
     writeDocuments(dir.path(), makeSetDocuments('1', "test:reloaded"));
 
-    ASSERT_EQ(loadValidatedDescriptorSets<LoaderHandle>(dir.path()).size(), 1u);
+    ASSERT_EQ(validatedSetsFrom(dir.path()).size(), 1u);
 
-    const auto reloaded = loadValidatedDescriptorSets<LoaderHandle>(dir.path());
+    const auto reloaded = validatedSetsFrom(dir.path());
 
     ASSERT_EQ(reloaded.size(), 1u);
     EXPECT_EQ(reloaded.front().engine.name, "test:reloaded");

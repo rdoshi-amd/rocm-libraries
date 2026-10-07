@@ -4,13 +4,12 @@ import shutil
 
 import pytest
 
-from conftest import GENERIC_TARGETS, GENERIC_TARGETS_JSON
+from conftest import GENERIC_TARGETS, run_pipeline
 from hkp_pack import agreement
 from hkp_pack.hip_compile import hip_variant_key as variant_key
 from hkp_pack.descriptors import load_flat_input, reachable_generic_ids
 from hkp_pack.errors import HkpPackError
 from hkp_pack.kernel_signature import kernel_signature
-from hkp_pack.pipeline import run_pipeline
 
 ARCHES = ["gfx942", "gfx950", "gfx90a"]
 
@@ -38,7 +37,6 @@ def built(tmp_path_factory, main_fixture, hipcc, rocm_kpack_dir):
     """Compile + prune + pack the main fixture once for the 3-arch matrix."""
     base = tmp_path_factory.mktemp("built")
     results = run_pipeline(
-        generic_targets_json=GENERIC_TARGETS_JSON,
         source_root=main_fixture,
         arches=ARCHES,
         out_root=base / "out",
@@ -190,7 +188,6 @@ def test_prn3_exact_post_prune_set(built):
 def test_prn4_empty_arch_skip(tmp_path, empty_arch_fixture, hipcc, rocm_kpack_dir):
     logs = []
     results = run_pipeline(
-        generic_targets_json=GENERIC_TARGETS_JSON,
         source_root=empty_arch_fixture,
         arches=["gfx942", "gfx950"],
         out_root=tmp_path / "out",
@@ -359,7 +356,6 @@ def test_self_describing_ukd(built, rocm_kpack_dir):
 # --- D. Negatives: compile-spec --------------------------------------------
 def _run(source_root, tmp_path, hipcc, rocm_kpack_dir, arches=("gfx942",)):
     return run_pipeline(
-        generic_targets_json=GENERIC_TARGETS_JSON,
         source_root=source_root,
         arches=list(arches),
         out_root=tmp_path / "out",
@@ -489,7 +485,6 @@ def test_neg_sha256_mismatch(tmp_path, main_fixture, hipcc, rocm_kpack_dir):
     with pytest.raises(HkpPackError, match="sha256 mismatch"):
         # An expected digest that cannot match the freshly compiled blob.
         run_pipeline(
-            generic_targets_json=GENERIC_TARGETS_JSON,
             source_root=main_fixture,
             arches=["gfx942"],
             out_root=tmp_path / "out",
@@ -532,7 +527,6 @@ def test_cli1_single_arch(tmp_path, main_fixture, hipcc, rocm_kpack_dir):
 @pytest.mark.quick
 def test_cli2_empty_gpu_targets(tmp_path, main_fixture, hipcc, rocm_kpack_dir):
     results = run_pipeline(
-        generic_targets_json=GENERIC_TARGETS_JSON,
         source_root=main_fixture,
         arches=[],
         out_root=tmp_path / "out",
@@ -607,7 +601,6 @@ def test_determinism_same_variant_twice(tmp_path, main_fixture, hipcc, rocm_kpac
         return result
 
     run_pipeline(
-        generic_targets_json=GENERIC_TARGETS_JSON,
         source_root=main_fixture,
         arches=["gfx942"],
         out_root=tmp_path / "out1",
@@ -616,7 +609,6 @@ def test_determinism_same_variant_twice(tmp_path, main_fixture, hipcc, rocm_kpac
         inter_root=tmp_path / "inter1",
     )
     run_pipeline(
-        generic_targets_json=GENERIC_TARGETS_JSON,
         source_root=main_fixture,
         arches=["gfx942"],
         out_root=tmp_path / "out2",
@@ -1263,7 +1255,6 @@ def test_empty_pruned_kdp_is_logged(tmp_path, main_fixture, hipcc, rocm_kpack_di
     p.write_text(json.dumps(doc), encoding="utf-8")
     logs = []
     run_pipeline(
-        generic_targets_json=GENERIC_TARGETS_JSON,
         source_root=src,
         arches=["gfx950"],
         out_root=tmp_path / "out",
@@ -1299,7 +1290,6 @@ def test_nonbare_arch_is_rejected(tmp_path, main_fixture, hipcc, rocm_kpack_dir)
     p.write_text(json.dumps(doc), encoding="utf-8")
     with pytest.raises(HkpPackError, match="feature suffix"):
         run_pipeline(
-            generic_targets_json=GENERIC_TARGETS_JSON,
             source_root=src,
             arches=["gfx942"],
             out_root=tmp_path / "out",

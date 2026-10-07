@@ -27,8 +27,8 @@ loader log an ERROR and drop the pack:
 - Under a KDP listing generics, a UKD with its own `arch` lists every KDP generic and only
   entries the KDP lists; an inline UKD without `arch` inherits the pack.
 
-Packer only: a standalone UKD with empty `arch` needs an empty-`arch` KDP, and shards whose member
-sets intersect may not write one path with different bytes. `kind: rocke` takes no generic.
+Packer only: a standalone UKD with empty `arch` needs an empty-`arch` KDP; shards with intersecting member sets may not write one path with different bytes.
+Packer and generator only: `kind: rocke` takes no generic.
 
 ### hsaco kernels and `arch`
 

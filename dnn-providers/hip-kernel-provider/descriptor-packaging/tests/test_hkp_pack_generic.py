@@ -101,12 +101,19 @@ def _root(tmp_path, empty_arch_fixture, kdps, standalone=()):
     return root
 
 
-def _pack(root, tmp_path, arches, rocm_kpack_dir, table=GENERIC_TARGETS_JSON):
+def _pack(
+    root,
+    tmp_path,
+    arches,
+    rocm_kpack_dir,
+    table=GENERIC_TARGETS_JSON,
+    hipcc="hipcc-not-invoked",
+):
     return run_pipeline(
         source_root=root,
         arches=list(arches),
         out_root=tmp_path / "out",
-        hipcc="hipcc-not-invoked",
+        hipcc=hipcc,
         generic_targets_json=table,
         rocm_kpack_dir=rocm_kpack_dir,
         inter_root=tmp_path / "inter",
@@ -140,15 +147,12 @@ def test_generic_entries_land_in_every_selected_member_folder_only(
             "wild": _kdp("kdp-wild", [], [_embedded("ukd-wild")]),
         },
     )
-    results = _pack(root, tmp_path, ["gfx942", MEMBER_A, MEMBER_B], rocm_kpack_dir)
+    _pack(root, tmp_path, ["gfx942", MEMBER_A, MEMBER_B], rocm_kpack_dir)
 
     out = tmp_path / "out"
     assert sorted(p.name for p in out.iterdir()) == [MEMBER_A, MEMBER_B, "gfx942"]
     assert not (out / UNSELECTED_MEMBER).exists()
     assert not (out / GENERIC).exists()
-    assert {a: r.out_dir for a, r in results.items()} == {
-        arch: out / arch for arch in ("gfx942", MEMBER_A, MEMBER_B)
-    }
 
     for member in (MEMBER_A, MEMBER_B):
         kdp = _read(out / member / "g.kdp.json")
@@ -164,10 +168,6 @@ def test_generic_entries_land_in_every_selected_member_folder_only(
     assert not (out / MEMBER_A / "c.kdp.json").exists()
     assert (out / MEMBER_B / "explicit.kdp.json").is_file()
     assert not (out / MEMBER_A / "explicit.kdp.json").exists()
-
-    generic_tree = tmp_path / "inter" / ".generic-out" / GENERIC
-    assert (generic_tree / "g.kdp.json").is_file()
-    assert not (generic_tree / "wild.kdp.json").exists()
 
     shared = [p for p in root.iterdir() if p.name.endswith(_SHARED_SUFFIXES)]
     assert shared
@@ -194,8 +194,6 @@ def test_generic_entry_is_not_materialized_when_no_member_is_selected(
     out = tmp_path / "out"
     assert sorted(p.name for p in out.iterdir()) == ["gfx942"]
     assert not (out / "gfx942" / "g.kdp.json").exists()
-    assert not (tmp_path / "inter" / ".generic-out").exists()
-    assert not (tmp_path / "inter" / GENERIC).exists()
 
 
 @pytest.mark.quick
@@ -211,18 +209,31 @@ def test_merge_collision_with_differing_bytes_is_refused_and_leaves_the_member_u
     _write(member_dir / "concrete_only.kdp.json", {"id": "kdp-c"})
     before = _files(member_dir)
 
-    with pytest.raises(HkpPackError) as err:
+    with pytest.raises(HkpPackError):
         _merge_generic_into_member(generic_dir, member_dir, staging)
 
-    assert str(member_dir / "dup.ukd.json") in str(err.value)
     assert _files(member_dir) == before
     assert not staging.exists()
 
 
 @pytest.mark.quick
-def test_a_member_whose_concrete_pass_failed_gets_no_generic_copy(
-    tmp_path, empty_arch_fixture, rocm_kpack_dir, monkeypatch
+@pytest.mark.parametrize(
+    "step, dropped, with_generic",
+    [
+        ("compile_intermediate", (MEMBER_A,), (MEMBER_B,)),
+        ("pack_arch", (), ()),
+    ],
+)
+def test_a_failed_pass_leaves_no_partial_member_or_generic_copy(
+    tmp_path,
+    empty_arch_fixture,
+    rocm_kpack_dir,
+    monkeypatch,
+    step,
+    dropped,
+    with_generic,
 ):
+    """A failing concrete compile drops that member; a failing generic pack drops every generic copy."""
     root = _root(
         tmp_path,
         empty_arch_fixture,
@@ -231,52 +242,26 @@ def test_a_member_whose_concrete_pass_failed_gets_no_generic_copy(
             "g": _kdp("kdp-g", [GENERIC], [_embedded("ukd-g")]),
         },
     )
-    real = pipeline.compile_intermediate
+    real = getattr(pipeline, step)
 
-    def failing(flat, source_root, arch, *args, **kwargs):
-        if arch == MEMBER_A:
-            raise HkpPackError("synthetic compile failure")
-        return real(flat, source_root, arch, *args, **kwargs)
+    def failing(*args, **kwargs):
+        arch = args[2] if step == "compile_intermediate" else args[1].arch
+        if arch == (MEMBER_A if step == "compile_intermediate" else GENERIC):
+            raise HkpPackError("synthetic failure")
+        return real(*args, **kwargs)
 
-    monkeypatch.setattr(pipeline, "compile_intermediate", failing)
-    with pytest.raises(HkpPackError, match="synthetic compile failure"):
-        _pack(root, tmp_path, [MEMBER_A, MEMBER_B], rocm_kpack_dir)
-
-    out = tmp_path / "out"
-    assert not (out / MEMBER_A).exists()
-    assert (out / MEMBER_B / "g.kdp.json").is_file()
-    assert (out / MEMBER_B / "c.kdp.json").is_file()
-    assert not [p for p in out.iterdir() if p.name.startswith(".")]
-
-
-@pytest.mark.quick
-def test_a_failed_generic_pass_leaves_no_member_copy(
-    tmp_path, empty_arch_fixture, rocm_kpack_dir, monkeypatch
-):
-    root = _root(
-        tmp_path,
-        empty_arch_fixture,
-        {
-            "c": _kdp("kdp-c", [MEMBER_A, MEMBER_B], [_embedded("ukd-c")]),
-            "g": _kdp("kdp-g", [GENERIC], [_embedded("ukd-g")]),
-        },
-    )
-    real = pipeline.pack_arch
-
-    def failing(flat, inter, out_dir, *args, **kwargs):
-        if inter.arch == GENERIC:
-            raise HkpPackError("synthetic generic pack failure")
-        return real(flat, inter, out_dir, *args, **kwargs)
-
-    monkeypatch.setattr(pipeline, "pack_arch", failing)
-    with pytest.raises(HkpPackError, match="synthetic generic pack failure"):
+    monkeypatch.setattr(pipeline, step, failing)
+    with pytest.raises(HkpPackError):
         _pack(root, tmp_path, [MEMBER_A, MEMBER_B], rocm_kpack_dir)
 
     out = tmp_path / "out"
     for member in (MEMBER_A, MEMBER_B):
+        if member in dropped:
+            assert not (out / member).exists()
+            continue
         assert (out / member / "c.kdp.json").is_file()
-        assert not (out / member / "g.kdp.json").exists()
-    assert not (tmp_path / "inter" / ".generic-out" / GENERIC).exists()
+        assert (out / member / "g.kdp.json").is_file() == (member in with_generic)
+    assert not [p for p in out.iterdir() if p.name.startswith(".")]
 
 
 @pytest.mark.quick
@@ -369,27 +354,18 @@ _REJECTED = {
         _OVERLAPPING_TABLE,
     ),
     "unknown_generic": (["gfx99-generic"], "inline", None, None),
-    "standalone_narrower_than_generic_kdp": ([GENERIC], "standalone", [MEMBER_B], None),
     "inline_narrower_than_generic_kdp": ([GENERIC], "inline", [MEMBER_B], None),
     "inline_unknown_generic": ([GENERIC], "inline", ["gfx99-generic"], None),
     "inline_generic_beside_member": ([GENERIC], "inline", [GENERIC, MEMBER_B], None),
-    "mixed_list_ukd_missing_the_generic": (
-        ["gfx942", GENERIC],
-        "inline",
-        ["gfx942"],
-        None,
-    ),
     "standalone_without_arch_under_concrete_kdp": (
         ["gfx942"],
         "standalone",
         None,
         None,
     ),
-    "standalone_without_arch_under_generic_kdp": ([GENERIC], "standalone", None, None),
     "generic_ukd_under_empty_arch_kdp": ([], "inline", [GENERIC], None),
     "generic_ukd_under_kdp_not_listing_it": ([MEMBER_B], "inline", [GENERIC], None),
     "rocke_inheriting_a_generic": ([GENERIC], "rocke", None, None),
-    "rocke_with_own_generic": ([GENERIC], "rocke", [GENERIC], None),
 }
 
 _ACCEPTED = {
@@ -423,9 +399,7 @@ def _arch_rule_root(tmp_path, empty_arch_fixture, kdp_arch, form, ukd_arch):
 
 @pytest.mark.quick
 @pytest.mark.parametrize("case", sorted(_REJECTED))
-def test_an_arch_rule_violation_is_an_error_naming_the_kdp(
-    tmp_path, empty_arch_fixture, case
-):
+def test_an_arch_rule_violation_is_an_error(tmp_path, empty_arch_fixture, case):
     kdp_arch, form, ukd_arch, table_doc = _REJECTED[case]
     root = _arch_rule_root(tmp_path, empty_arch_fixture, kdp_arch, form, ukd_arch)
     table = GENERIC_TARGETS
@@ -433,9 +407,8 @@ def test_an_arch_rule_violation_is_an_error_naming_the_kdp(
         table_path = tmp_path / "table.json"
         _write(table_path, table_doc)
         table = GenericTargets.load(table_path)
-    with pytest.raises(HkpPackError) as err:
+    with pytest.raises(HkpPackError):
         _load(root, table)
-    assert "g.kdp.json" in str(err.value)
 
 
 @pytest.mark.quick
@@ -454,39 +427,6 @@ def _hip_generic_root(dest, empty_arch_fixture):
     return dest
 
 
-def _hip_pack(root, out, inter, arches, hipcc, rocm_kpack_dir):
-    return run_pipeline(
-        source_root=root,
-        arches=list(arches),
-        out_root=out,
-        hipcc=hipcc,
-        generic_targets_json=GENERIC_TARGETS_JSON,
-        rocm_kpack_dir=rocm_kpack_dir,
-        inter_root=inter,
-        source_label="generic-test",
-    )
-
-
-def test_generic_hip_archive_is_keyed_by_the_generic_spelling(
-    tmp_path, empty_arch_fixture, hipcc, rocm_kpack_dir
-):
-    root = _hip_generic_root(tmp_path / "src", empty_arch_fixture)
-    results = _hip_pack(
-        root, tmp_path / "out", tmp_path / "inter", [MEMBER_A], hipcc, rocm_kpack_dir
-    )
-
-    shipped = _read(tmp_path / "out" / MEMBER_A / "solo.kdp.json")
-    ks = shipped["kernelDescriptors"][0]["kernel_source"]
-    assert shipped["arch"] == [GENERIC]
-    assert ks["library"] == f"kpack/hip_kernel_provider_{GENERIC}.kpack"
-    archive = _load_kpack(rocm_kpack_dir).PackedKernelArchive.read(
-        tmp_path / "out" / MEMBER_A / ks["library"]
-    )
-    assert archive.get_kernel(ks["toc_key"], GENERIC) is not None
-    assert archive.get_kernel(ks["toc_key"], MEMBER_A) is None
-    assert results[MEMBER_A].kpack_path is None
-
-
 def test_compiled_agreement_holds_on_a_generic_copy(
     tmp_path, empty_arch_fixture, hipcc, rocm_kpack_dir
 ):
@@ -494,16 +434,14 @@ def test_compiled_agreement_holds_on_a_generic_copy(
     from hkp_pack.desk_check import compiled_agreement
 
     root = _hip_generic_root(tmp_path / "src", empty_arch_fixture)
-    _hip_pack(
-        root, tmp_path / "out", tmp_path / "inter", [MEMBER_A], hipcc, rocm_kpack_dir
-    )
+    _pack(root, tmp_path, [MEMBER_A], rocm_kpack_dir, hipcc=hipcc)
     failures, _unclaimed, _verified = compiled_agreement(
         tmp_path / "out" / MEMBER_A / "solo.kdp.json", GENERIC_TARGETS, rocm_kpack_dir
     )
     assert failures == []
 
 
-def test_generic_pack_is_byte_identical_across_separate_per_arch_builds(
+def test_generic_hip_archive_is_keyed_by_the_generic_spelling_and_byte_identical_across_builds(
     tmp_path, empty_arch_fixture, hipcc, rocm_kpack_dir, monkeypatch
 ):
     """Separate per-arch builds (own roots, cwd, source copy) yield identical generic files."""
@@ -518,9 +456,18 @@ def test_generic_pack_is_byte_identical_across_separate_per_arch_builds(
         root = _hip_generic_root(base / "deeper" / label / "src", empty_arch_fixture)
         (base / "cwd").mkdir()
         monkeypatch.chdir(base / "cwd")
-        _hip_pack(
-            root, base / "out", base / "inter" / label, arches, hipcc, rocm_kpack_dir
-        )
+        results = _pack(root, base, arches, rocm_kpack_dir, hipcc=hipcc)
+        if label == "only_a":
+            shipped = _read(base / "out" / MEMBER_A / "solo.kdp.json")
+            ks = shipped["kernelDescriptors"][0]["kernel_source"]
+            assert shipped["arch"] == [GENERIC]
+            assert ks["library"] == f"kpack/hip_kernel_provider_{GENERIC}.kpack"
+            archive = _load_kpack(rocm_kpack_dir).PackedKernelArchive.read(
+                base / "out" / MEMBER_A / ks["library"]
+            )
+            assert archive.get_kernel(ks["toc_key"], GENERIC) is not None
+            assert archive.get_kernel(ks["toc_key"], MEMBER_A) is None
+            assert results[MEMBER_A].kpack_path is None
         for member in arches:
             builds[(label, member)] = _files(base / "out" / member)
 

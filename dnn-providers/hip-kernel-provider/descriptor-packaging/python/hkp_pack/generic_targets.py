@@ -33,44 +33,10 @@ class GenericTargets:
     def load(cls, path):
         path = Path(path)
         try:
-            text = path.read_text(encoding="utf-8")
-        except OSError as exc:
-            raise HkpPackError(f"{path}: cannot read generic target table: {exc}")
-        try:
-            doc = json.loads(text)
-        except ValueError as exc:
-            raise HkpPackError(f"{path}: generic target table is not valid JSON: {exc}")
-        if not isinstance(doc, dict):
-            raise HkpPackError(f"{path}: generic target table must be a JSON object")
-        version = doc.get("schemaVersion")
-        if type(version) is not int or version != 1:
-            raise HkpPackError(f"{path}: 'schemaVersion' must be 1, got {version!r}")
-        raw = doc.get("generics")
-        if not isinstance(raw, dict):
-            raise HkpPackError(f"{path}: 'generics' must be an object")
-        generics = {}
-        for name, members in raw.items():
-            if not is_generic_shaped(name):
-                raise HkpPackError(
-                    f"{path}: generics.{name}: a generic target name must end in "
-                    f"'-generic'; a concrete processor name here would turn its own "
-                    f"pass into a generic one"
-                )
-            if not isinstance(members, list) or not members:
-                raise HkpPackError(
-                    f"{path}: generics.{name} must be a non-empty array of names"
-                )
-            for member in members:
-                if not isinstance(member, str) or not member:
-                    raise HkpPackError(
-                        f"{path}: generics.{name} holds a member that is not a "
-                        f"non-empty string: {member!r}"
-                    )
-            if len(set(members)) != len(members):
-                raise HkpPackError(
-                    f"{path}: generics.{name} lists a member more than once"
-                )
-            generics[name] = tuple(members)
+            doc = json.loads(path.read_text(encoding="utf-8"))
+            generics = {n: tuple(m) for n, m in doc["generics"].items()}
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            raise HkpPackError(f"{path}: unusable generic target table: {exc!r}")
         return cls(path, generics)
 
     @property

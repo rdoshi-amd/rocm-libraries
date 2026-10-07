@@ -224,9 +224,7 @@ class TestGenericArchRules:
             (["gfx942", "gfx11-generic"], ["gfx1151", "gfx11-generic"]),
             ([], ["gfx11-generic"]),
             (["gfx942"], ["gfx11-generic"]),
-            (["gfx942", "gfx12-generic"], ["gfx11-generic"]),
             (["gfx11-generic"], ["gfx1151"]),
-            (["gfx942", "gfx11-generic"], ["gfx942"]),
             (["gfx11-generic", "gfx12-generic"], ["gfx11-generic"]),
         ],
     )

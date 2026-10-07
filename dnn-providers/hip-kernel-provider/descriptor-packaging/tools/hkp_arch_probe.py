@@ -27,23 +27,17 @@ from hkp_pack.generic_targets import (  # noqa: E402
 
 
 def _covers_any(kdp_path, arches, table):
+    """False only when the KDP's well-formed arch list reaches none of @arches."""
     try:
-        doc = json.loads(Path(kdp_path).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        entries = json.loads(Path(kdp_path).read_text(encoding="utf-8"))["arch"]
+        if not isinstance(entries, list) or not entries:
+            return True
+        # An unknown generic would read as absence; the packer must reach it to report it.
+        if any(is_generic_shaped(e) and not table.has(e) for e in entries):
+            return True
+        return any(admits_target(entries, arch, table) for arch in arches)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return True
-    if not isinstance(doc, dict):
-        return True
-    if "arch" not in doc:
-        return True
-    entries = doc["arch"]
-    if not isinstance(entries, list) or not all(isinstance(e, str) for e in entries):
-        return True
-    if not entries:
-        return True
-    # An unknown generic would read as absence; the packer must reach it to report it.
-    if any(is_generic_shaped(e) and not table.has(e) for e in entries):
-        return True
-    return any(admits_target(entries, arch, table) for arch in arches)
 
 
 def main(argv=None):

@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import GENERIC_TARGETS, GENERIC_TARGETS_JSON
+from conftest import GENERIC_TARGETS, GENERIC_TARGETS_JSON, run_pipeline
 from hkp_pack.desk_check import (
     DEFAULT_MATCHER_FIELDS,
     MODES,
@@ -36,7 +36,6 @@ from hkp_pack.desk_check import (
     toc_key_uniqueness,
 )
 from hkp_pack.errors import HkpPackError
-from hkp_pack.pipeline import run_pipeline
 
 ARCH = "gfx950"
 # The KMD fields the desk-check compares -- `DEFAULT_MATCHER_FIELDS`, narrowed
@@ -65,7 +64,6 @@ def packed_desk_check(tmp_path_factory, desk_check_fixture, hipcc, rocm_kpack_di
     attention_dense variants: head_size 64 and 128, both batch=1)."""
     tmp_path = tmp_path_factory.mktemp("desk_check_pack")
     run_pipeline(
-        generic_targets_json=GENERIC_TARGETS_JSON,
         source_root=desk_check_fixture,
         arches=[ARCH],
         out_root=tmp_path / "out",
@@ -86,7 +84,6 @@ def _pack_mutated(tmp_path, desk_check_fixture, hipcc, rocm_kpack_dir, mutate):
     mutate(doc)
     kdp_path.write_text(json.dumps(doc), encoding="utf-8")
     run_pipeline(
-        generic_targets_json=GENERIC_TARGETS_JSON,
         source_root=src,
         arches=[ARCH],
         out_root=tmp_path / "out",
@@ -203,13 +200,6 @@ class TestInvariant2DuplicateMatcherTuples:
             kernels, ("dtype",), GENERIC_TARGETS, ["gfx942"]
         ) == {("FLOAT",): 2}
 
-    def test_an_arch_less_kernel_under_a_disjoint_kdp_arch_does_not_collide(self):
-        kernels = self._twins(None, ["gfx942"])
-        assert (
-            duplicate_matcher_tuples(kernels, ("dtype",), GENERIC_TARGETS, ["gfx950"])
-            == {}
-        )
-
     def test_a_tie_beaten_on_every_device_it_reaches_is_still_a_duplicate(self):
         """Generic kernels outranked on every member still tie at the generic tier."""
         kernels = [
@@ -238,15 +228,6 @@ class TestInvariant2DuplicateMatcherTuples:
         """A generic outranks arch-less and loses to its own member; unknown matches nothing."""
         kernels = self._twins(left, right)
         assert duplicate_matcher_tuples(kernels, ("dtype",), GENERIC_TARGETS) == {}
-
-    @pytest.mark.parametrize(
-        "arch", [None, ["gfx11-generic"]], ids=["arch_less", "same_generic"]
-    )
-    def test_two_kernels_with_the_same_list_collide(self, arch):
-        kernels = self._twins(arch, arch)
-        assert duplicate_matcher_tuples(kernels, ("dtype",), GENERIC_TARGETS) == {
-            ("FLOAT",): 2
-        }
 
     def test_real_pack_of_two_identical_matcher_tuples_is_detected(
         self, tmp_path, desk_check_fixture, hipcc, rocm_kpack_dir

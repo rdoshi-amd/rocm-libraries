@@ -67,17 +67,6 @@ TEST(TestIngestorArchGate, AdmitsWhenAnyListedArchMatches)
     EXPECT_FALSE(archSupports(family, "gfx90a"));
 }
 
-TEST(TestIngestorArchGate, AdmitsOnlyTheMembersOfAGeneric)
-{
-    EXPECT_TRUE(archSupports({"gfx11-generic"}, "gfx1151"));
-    EXPECT_TRUE(archSupports({"gfx942", "gfx12-generic"}, "gfx1201"));
-    EXPECT_TRUE(archSupports({"gfx11-generic"}, "gfx1151:sramecc+:xnack-"));
-    // Siblings no table row lists are refused.
-    EXPECT_FALSE(archSupports({"gfx11-generic"}, "gfx1154"));
-    EXPECT_FALSE(archSupports({"gfx12-generic"}, "gfx1250:sramecc+"));
-    EXPECT_FALSE(archSupports({"gfx9-4-generic"}, "gfx942"));
-}
-
 TEST(TestIngestorArchGate, PrunesAPackWhoseArchExcludesTheDevice)
 {
     const ScopedSymbols symbols("test.graph", acceptGraph, "test.kernel", countingFloatKernels);

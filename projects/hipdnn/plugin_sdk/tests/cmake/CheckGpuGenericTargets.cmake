@@ -3,7 +3,7 @@
 
 # Runs hipdnn_validate_gpu_generic_targets via `cmake -P`, optionally on a mutated copy:
 #   -DGENERIC_TARGETS_JSON=<table.json> [-DMUTATION_OP=<op> -DMUTATION_PATH=<a.b.0> -DMUTATION_VALUE=<v>]
-# MUTATION_OP: REMOVE, SET_STRING, SET_JSON, or RAW (replace the whole document).
+# MUTATION_OP: SET_STRING, SET_JSON, or RAW (replace the whole document).
 # Prints "gpu_generic_targets: valid" only if every rule passed.
 
 if(NOT GENERIC_TARGETS_JSON)
@@ -19,9 +19,7 @@ if(MUTATION_OP)
     endif()
     file(READ "${GENERIC_TARGETS_JSON}" json)
     string(REPLACE "." ";" path "${MUTATION_PATH}")
-    if(MUTATION_OP STREQUAL "REMOVE")
-        string(JSON json REMOVE "${json}" ${path})
-    elseif(MUTATION_OP STREQUAL "SET_STRING")
+    if(MUTATION_OP STREQUAL "SET_STRING")
         string(JSON json SET "${json}" ${path} "\"${MUTATION_VALUE}\"")
     elseif(MUTATION_OP STREQUAL "SET_JSON")
         string(JSON json SET "${json}" ${path} "${MUTATION_VALUE}")

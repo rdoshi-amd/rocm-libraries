@@ -17,6 +17,14 @@ from hkp_pack.generic_targets import DEFAULT_TABLE_PATH, GenericTargets  # noqa:
 GENERIC_TARGETS_JSON = DEFAULT_TABLE_PATH
 GENERIC_TARGETS = GenericTargets.load(GENERIC_TARGETS_JSON)
 
+
+def run_pipeline(**kwargs):
+    """`pipeline.run_pipeline` with the shipped generic target table."""
+    from hkp_pack import pipeline
+
+    return pipeline.run_pipeline(generic_targets_json=GENERIC_TARGETS_JSON, **kwargs)
+
+
 # rocm_kpack location: CMake passes HIPKERNELPROVIDER_ROCM_KPACK_DIR; otherwise
 # rely on an installed rocm_kpack already importable. No skip on absence — the
 # compiler and kpack are load-bearing; a missing dependency is a hard failure.

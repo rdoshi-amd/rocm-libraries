@@ -22,7 +22,6 @@ from .descriptors import (
     kdp_survives,
     load_flat_input,
     reachable_generic_ids,
-    type_from_filename,
 )
 from .errors import HkpPackError
 from .generic_targets import GenericTargets
@@ -1487,17 +1486,8 @@ def _merge_generic_into_member(generic_dir, member_dir, staging_dir):
             if dest.exists():
                 if dest.read_bytes() == src.read_bytes():
                     continue
-                described = ""
-                if src.suffix == ".json":
-                    try:
-                        doc = json.loads(src.read_text(encoding="utf-8"))
-                        token = type_from_filename(src)
-                        if isinstance(doc, dict) and doc.get("id") is not None:
-                            described = f" ({str(token).upper()} id '{doc['id']}')"
-                    except ValueError:
-                        pass
                 raise HkpPackError(
-                    f"{rel.as_posix()}{described} would be written by shard "
+                    f"{rel.as_posix()} would be written by shard "
                     f"'{member_dir.name}' ({member_dir / rel}) and shard "
                     f"'{generic_dir.name}' ({src}) with different bytes; the "
                     "shards' member sets intersect"

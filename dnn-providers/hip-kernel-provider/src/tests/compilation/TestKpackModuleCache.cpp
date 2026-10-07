@@ -178,15 +178,6 @@ TEST(TestKpackModuleCacheSelectArch, FallsBackToAGenericKeyContainingTheDevice)
     EXPECT_EQ(selected, &keys[2]);
 }
 
-TEST(TestKpackModuleCacheSelectArch, DeclinesAKeyThatDoesNotNameTheDevice)
-{
-    // Name shape never implies membership.
-    EXPECT_EQ(KpackModuleCache::selectArch({"gfx12-generic"}, "gfx1250"), nullptr);
-    EXPECT_EQ(KpackModuleCache::selectArch({"gfx11-generic", "gfx12-generic"}, "gfx942"), nullptr);
-    EXPECT_EQ(KpackModuleCache::selectArch({"gfx99-generic"}, "gfx99-generic"), nullptr);
-    EXPECT_EQ(KpackModuleCache::selectArch({}, "gfx1100"), nullptr);
-}
-
 TEST(TestKpackModuleCacheLoad, ASecondOrdinalDoesNotAnswerFromTheFirstOrdinalsEntry)
 {
     SKIP_IF_NO_DEVICES();

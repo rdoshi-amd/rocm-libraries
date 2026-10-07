@@ -209,34 +209,15 @@ def _specialization_twins(order: list, by_label: dict, knobs: set) -> list:
     return violations
 
 
-_TIER_NAMES = {
-    gtmod.TIER_EXPLICIT: "explicit",
-    gtmod.TIER_GENERIC: "generic",
-    gtmod.TIER_UNRESTRICTED: "unrestricted",
-}
-
-
-def _tie(left: list, right: list, table) -> tuple[str, str]:
-    """Devices and tier name where two competing arch lists tie."""
-    if not left and not right:
-        return "every arch", _TIER_NAMES[gtmod.TIER_UNRESTRICTED]
-    candidates = set()
-    for entry in (*left, *right):
-        if gtmod.is_generic_shaped(entry):
-            if table.has(entry):
-                candidates.update(table.members(entry))
-        else:
-            candidates.add(entry)
-    ties = {}
-    for device in candidates:
-        tier = gtmod.list_tier(left, device, table)
-        if tier is not None and tier == gtmod.list_tier(right, device, table):
-            ties[device] = tier
-    best = min(ties.values())
-    return (
-        ", ".join(sorted(d for d, t in ties.items() if t == best)),
-        _TIER_NAMES[best],
-    )
+def _shared_devices(left: list, right: list, table) -> str:
+    """The devices both competing arch lists admit."""
+    left_devices = gtmod.expand(left, table)
+    right_devices = gtmod.expand(right, table)
+    if left_devices is None or right_devices is None:
+        shared = left_devices or right_devices
+    else:
+        shared = left_devices & right_devices
+    return ", ".join(sorted(shared)) if shared else "every arch"
 
 
 def effective_arch(
@@ -396,10 +377,10 @@ def check(
                 left.arch, right.arch, generic_targets
             ):
                 continue
-            where, tier = _tie(left.arch, right.arch, generic_targets)
+            where = _shared_devices(left.arch, right.arch, generic_targets)
             collisions.append(
                 f"{left.ukd.get('name')} and {right.ukd.get('name')} complete to one "
-                f"tuple on {where} at the {tier} tier"
+                f"tuple on {where}"
             )
     if collisions:
         failures.append(

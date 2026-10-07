@@ -20,11 +20,11 @@ from pathlib import Path
 
 import pytest
 
-from conftest import GENERIC_TARGETS, GENERIC_TARGETS_JSON
+from conftest import GENERIC_TARGETS, run_pipeline
 from hkp_pack.descriptors import load_flat_input
 from hkp_pack.errors import HkpPackError
 from hkp_pack.hip_compile import hip_variant_key
-from hkp_pack.pipeline import _agreement_inputs, compile_intermediate, run_pipeline
+from hkp_pack.pipeline import _agreement_inputs, compile_intermediate
 
 ARCH = "gfx942"
 ROCKE_ARCH = "gfx950"
@@ -44,7 +44,6 @@ def _load_kpack(rocm_kpack_dir):
 def _run(source_root, tmp_path, hipcc, rocm_kpack_dir, arches, source_label=None):
     """Pack one root. A root holding an `embedded_source` descriptor needs a label."""
     return run_pipeline(
-        generic_targets_json=GENERIC_TARGETS_JSON,
         source_root=source_root,
         arches=list(arches),
         out_root=tmp_path / "out",
@@ -315,7 +314,6 @@ def test_variant_key_is_location_independent(
         root = parent / "src"
         _nest(root, "hip/solo_add", empty_arch_fixture)
         run_pipeline(
-            generic_targets_json=GENERIC_TARGETS_JSON,
             source_root=root,
             arches=[ARCH],
             out_root=parent / "out",
@@ -435,8 +433,7 @@ def test_non_hkp_failure_still_leaves_no_partial_tree(
 
     out_root = tmp_path / "out"
     with pytest.raises(RuntimeError, match="uncaught failure"):
-        pipeline.run_pipeline(
-            generic_targets_json=GENERIC_TARGETS_JSON,
+        run_pipeline(
             source_root=root,
             arches=[ARCH],
             out_root=out_root,
@@ -485,8 +482,7 @@ def test_failed_arch_leaves_no_partial_tree(
 
     out_root = tmp_path / "out"
     with pytest.raises(HkpPackError, match="gfx950"):
-        pipeline.run_pipeline(
-            generic_targets_json=GENERIC_TARGETS_JSON,
+        run_pipeline(
             source_root=root,
             arches=["gfx942", "gfx950"],
             out_root=out_root,
@@ -525,8 +521,7 @@ def test_failed_arch_removes_its_previous_good_output(
     _nest(root, "hip/pointwise", main_fixture)
     out_root = tmp_path / "out"
 
-    pipeline.run_pipeline(
-        generic_targets_json=GENERIC_TARGETS_JSON,
+    run_pipeline(
         source_root=root,
         arches=[ARCH],
         out_root=out_root,
@@ -543,8 +538,7 @@ def test_failed_arch_removes_its_previous_good_output(
     monkeypatch.setattr(pipeline, "pack_arch", always_fail)
 
     with pytest.raises(HkpPackError, match=ARCH):
-        pipeline.run_pipeline(
-            generic_targets_json=GENERIC_TARGETS_JSON,
+        run_pipeline(
             source_root=root,
             arches=[ARCH],
             out_root=out_root,
@@ -573,8 +567,7 @@ def test_failure_names_every_failed_arch(
     monkeypatch.setattr(pipeline, "pack_arch", always_fail)
 
     with pytest.raises(HkpPackError) as exc:
-        pipeline.run_pipeline(
-            generic_targets_json=GENERIC_TARGETS_JSON,
+        run_pipeline(
             source_root=root,
             arches=["gfx942", "gfx950"],
             out_root=tmp_path / "out",
@@ -602,7 +595,6 @@ def test_example_tree_packs_both_producers(
     what keeps it honest: if the example rots, this fails.
     """
     results = run_pipeline(
-        generic_targets_json=GENERIC_TARGETS_JSON,
         source_root=EXAMPLE_ROOT,
         arches=[ARCH],
         out_root=tmp_path / "out",
@@ -641,7 +633,6 @@ def test_example_tree_keeps_both_shared_filenames(
     both.
     """
     run_pipeline(
-        generic_targets_json=GENERIC_TARGETS_JSON,
         source_root=EXAMPLE_ROOT,
         arches=[ARCH],
         out_root=tmp_path / "out",
@@ -684,7 +675,6 @@ def test_provenance_records_the_toolchain_that_built_each_kernel(
     stamp.write_text("deadbeefcafe\n", encoding="utf-8")
 
     run_pipeline(
-        generic_targets_json=GENERIC_TARGETS_JSON,
         source_root=EXAMPLE_ROOT,
         arches=[ARCH],
         out_root=tmp_path / "out",
@@ -796,7 +786,6 @@ def test_library_resolves_from_a_nested_descriptor(
     _nest(root, "hip/deep/deeper", main_fixture)
 
     run_pipeline(
-        generic_targets_json=GENERIC_TARGETS_JSON,
         source_root=root,
         arches=[ARCH],
         out_root=tmp_path / "out",
@@ -826,7 +815,6 @@ def test_library_resolves_for_a_flat_descriptor(
     shutil.copytree(empty_arch_fixture, root)
 
     run_pipeline(
-        generic_targets_json=GENERIC_TARGETS_JSON,
         source_root=root,
         arches=[ARCH],
         out_root=tmp_path / "out",
@@ -991,7 +979,6 @@ def test_library_resolves_for_a_nested_standalone_ukd(
     _nest(root, "hip/deep", main_fixture)
 
     run_pipeline(
-        generic_targets_json=GENERIC_TARGETS_JSON,
         source_root=root,
         arches=[ARCH],
         out_root=tmp_path / "out",
@@ -1043,7 +1030,6 @@ def test_standalone_ukd_anchors_on_its_own_dir_not_the_kdps(
     )
 
     run_pipeline(
-        generic_targets_json=GENERIC_TARGETS_JSON,
         source_root=root,
         arches=[ARCH],
         out_root=tmp_path / "out",
@@ -1573,7 +1559,6 @@ def _add_sharing_embedded_kdp(folder):
 def _pack_embedded(root, tmp_path, rocm_kpack_dir, arches, log=print, out="out"):
     """Pack a root that compiles nothing, so hipcc must never be invoked."""
     return run_pipeline(
-        generic_targets_json=GENERIC_TARGETS_JSON,
         source_root=root,
         arches=list(arches),
         out_root=tmp_path / out,
@@ -1862,7 +1847,6 @@ def test_packing_without_a_source_label_is_refused(
 
     with pytest.raises(HkpPackError) as excinfo:
         run_pipeline(
-            generic_targets_json=GENERIC_TARGETS_JSON,
             source_root=root,
             arches=[ARCH],
             out_root=tmp_path / "out",

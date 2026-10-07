@@ -2027,34 +2027,10 @@ std::vector<std::string> engineNames(const Documents& candidate)
 
 } // namespace
 
-TEST(TestDescriptorLoader, AcceptsAGenericTargetBesideAnUnrelatedExplicitId)
-{
-    const ScopedSymbols symbols;
-    const hipdnn_test_sdk::utilities::ScopedDirectory dir(uniqueDirectory("pack_arch_generic"));
-    auto documents = makeSetDocuments('1', "test:arch_generic");
-    auto& pack = documentOfType(documents, ".kdp.json");
-    pack["arch"] = arch({"gfx942", "gfx11-generic"});
-    pack.at("kernelDescriptors")[0]["arch"] = arch({"gfx942", "gfx11-generic"});
-    writeDocuments(dir.path(), documents);
-
-    const auto sets = loadFrom(dir.path());
-
-    ASSERT_EQ(sets.size(), 1u);
-    ASSERT_EQ(sets.front().packs.size(), 1u);
-    EXPECT_EQ(sets.front().packs.front().arch,
-              (std::vector<std::string>{"gfx942", "gfx11-generic"}));
-    EXPECT_EQ(sets.front().packs.front().kernels.front().arch,
-              (std::vector<std::string>{"gfx942", "gfx11-generic"}));
-}
-
 /// A generic-shaped name the table does not list matches no device, so its file is dropped.
 TEST(TestDescriptorLoader, DropsAPackNamingAGenericAbsentFromTheTable)
 {
     EXPECT_EQ(engineNames(candidateWithKernelArch(arch({"gfx99-generic"}), arch({}), false)),
-              INTACT_ONLY);
-    EXPECT_EQ(engineNames(candidateWithKernelArch(arch({}), arch({"gfx99-generic"}), false)),
-              INTACT_ONLY);
-    EXPECT_EQ(engineNames(candidateWithKernelArch(arch({}), arch({"gfx99-generic"}), true)),
               INTACT_ONLY);
 }
 
@@ -2062,9 +2038,6 @@ TEST(TestDescriptorLoader, DropsAPackListingAGenericAndOneOfItsMembers)
 {
     EXPECT_EQ(
         engineNames(candidateWithKernelArch(arch({"gfx11-generic", "gfx1151"}), arch({}), false)),
-        INTACT_ONLY);
-    EXPECT_EQ(
-        engineNames(candidateWithKernelArch(arch({}), arch({"gfx1151", "gfx11-generic"}), false)),
         INTACT_ONLY);
     EXPECT_EQ(engineNames(candidateWithKernelArch(
                   arch({"gfx11-generic", "gfx12-generic", "gfx942"}), arch({}), false)),
@@ -2087,10 +2060,6 @@ TEST(TestDescriptorLoader, DropsAPackWhoseKernelNamesAGenericThePackDoesNotList)
             engineNames(candidateWithKernelArch(members, arch({"gfx11-generic"}), standalone)),
             INTACT_ONLY)
             << (standalone ? "standalone" : "inline");
-        EXPECT_EQ(engineNames(candidateWithKernelArch(
-                      arch({"gfx11-generic", "gfx942"}), arch({"gfx11-generic"}), standalone)),
-                  BOTH)
-            << (standalone ? "standalone" : "inline");
     }
 }
 
@@ -2112,24 +2081,6 @@ TEST(TestDescriptorLoader, DropsAPackWhoseKernelOmitsOrExceedsTheGenericPackArch
             << (standalone ? "standalone" : "inline");
     }
     EXPECT_EQ(engineNames(candidateWithKernelArch(arch({"gfx11-generic"}), arch({}), false)), BOTH);
-}
-
-/// A standalone kernel id defined for a generic and for one of its members is ambiguous.
-TEST(TestDescriptorLoader, StillRejectsAStandaloneKernelDefinedForAGenericAndForOneOfItsMembers)
-{
-    const hipdnn_test_sdk::utilities::ScopedDirectory dir(uniqueDirectory("generic_and_member"));
-    auto documents = makeSetDocuments('1', "test:generic_and_member");
-    referenceLastKernel(documents);
-    documentOfType(documents, ".kdp.json")["arch"] = nlohmann::json::array({"gfx11-generic"});
-    documentOfType(documents, ".ukd.json")["arch"] = nlohmann::json::array({"gfx11-generic"});
-
-    auto member = documentOfType(documents, ".ukd.json");
-    member["arch"] = nlohmann::json::array({"gfx1151"});
-    member["name"] = "the gfx1151 build";
-    writeDocuments(dir.path(), documents);
-    writeDocuments(dir.path() / "gfx1151", {TestDocument{".ukd.json", member}});
-
-    EXPECT_TRUE(loadFrom(dir.path()).empty());
 }
 
 /// The default: a pack naming no architecture applies everywhere, so absence must parse

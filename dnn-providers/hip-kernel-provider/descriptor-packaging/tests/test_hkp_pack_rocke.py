@@ -10,15 +10,14 @@ import pytest
 
 from conftest import (
     GENERIC_TARGETS,
-    GENERIC_TARGETS_JSON,
     _arg,
     _kernel,
     _object,
     requires_msgpack,
+    run_pipeline,
 )
 from hkp_pack.descriptors import load_flat_input
 from hkp_pack.errors import HkpPackError
-from hkp_pack.pipeline import run_pipeline
 from hkp_pack.rocke_compile import (
     build_spec,
     compile_rocke_variant,
@@ -40,7 +39,6 @@ def _copy_fixture(tmp_path, fixture):
 
 def _run(source_root, tmp_path, hipcc, rocm_kpack_dir, arches=(ARCH,)):
     return run_pipeline(
-        generic_targets_json=GENERIC_TARGETS_JSON,
         source_root=source_root,
         arches=list(arches),
         out_root=tmp_path / "out",
@@ -758,8 +756,7 @@ def test_rocke_toc_key_collision_is_detected(tmp_path, monkeypatch, rocm_kpack_d
     (root / "collide.kdp.json").write_text(json.dumps(kdp), encoding="utf-8")
 
     with pytest.raises(HkpPackError, match="toc_key collision"):
-        pipeline.run_pipeline(
-            generic_targets_json=GENERIC_TARGETS_JSON,
+        run_pipeline(
             source_root=root,
             arches=[ARCH],
             out_root=tmp_path / "out",

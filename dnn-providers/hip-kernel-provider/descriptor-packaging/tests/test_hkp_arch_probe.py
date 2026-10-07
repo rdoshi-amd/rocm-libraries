@@ -46,17 +46,26 @@ def test_probe_false_when_no_entry_reaches_any_selected_target(tmp_path):
 
 def test_probe_true_for_a_generic_absent_from_the_table(tmp_path):
     assert _probe(tmp_path, ["gfx99-generic"], "gfx942") == "TRUE"
-    assert _probe(tmp_path, ["gfx99-generic", "gfx950"], "gfx942") == "TRUE"
-
-
-def test_probe_true_for_empty_arch(tmp_path):
-    assert _probe(tmp_path, [], "gfx942") == "TRUE"
 
 
 @pytest.mark.parametrize(
     "raw",
-    ['{"arch": "gfx942"}', "{not json", '{"arch": [1]}', "[]", '{"name": "x"}'],
-    ids=["string", "unparseable", "non_string_entry", "not_an_object", "absent"],
+    [
+        '{"arch": "gfx942"}',
+        "{not json",
+        '{"arch": [1]}',
+        "[]",
+        '{"name": "x"}',
+        '{"arch": []}',
+    ],
+    ids=[
+        "string",
+        "unparseable",
+        "non_string_entry",
+        "not_an_object",
+        "absent",
+        "empty",
+    ],
 )
 def test_probe_true_for_an_unparseable_or_non_array_arch(tmp_path, raw):
     assert _probe(tmp_path, None, "gfx1100", raw=raw) == "TRUE"

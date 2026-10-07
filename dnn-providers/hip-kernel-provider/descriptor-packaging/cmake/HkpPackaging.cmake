@@ -1320,11 +1320,9 @@ function(hkp_add_packaging)
     if(NOT HIPDNN_PLUGIN_SDK_GPU_GENERIC_TARGETS_JSON
        OR NOT EXISTS "${HIPDNN_PLUGIN_SDK_GPU_GENERIC_TARGETS_JSON}")
         message(FATAL_ERROR
-            "hkp: HIPDNN_PLUGIN_SDK_GPU_GENERIC_TARGETS_JSON is empty or names a missing "
-            "file ('${HIPDNN_PLUGIN_SDK_GPU_GENERIC_TARGETS_JSON}'). The packer reads "
-            "the generic GPU target table that hipdnn_plugin_sdk ships "
-            "(gpu_generic_targets.json); an older installed hipdnn_plugin_sdk lacks it. "
-            "Build against a hipdnn_plugin_sdk that provides the table.")
+            "hkp: HIPDNN_PLUGIN_SDK_GPU_GENERIC_TARGETS_JSON names no file "
+            "('${HIPDNN_PLUGIN_SDK_GPU_GENERIC_TARGETS_JSON}'); build against a "
+            "hipdnn_plugin_sdk that ships gpu_generic_targets.json.")
     endif()
     set_property(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" APPEND PROPERTY
         CMAKE_CONFIGURE_DEPENDS "${HIPDNN_PLUGIN_SDK_GPU_GENERIC_TARGETS_JSON}")

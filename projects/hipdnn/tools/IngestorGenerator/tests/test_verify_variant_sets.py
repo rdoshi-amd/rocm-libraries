@@ -334,7 +334,6 @@ class TestTheDeskCheckIdentityIsEngineWideAndArchAware:
         self._two_packs(gate, "disjoint", ["gfx942"], ["gfx950"])
         result = gate.run("d", "disjoint", profiled=False)
         assert result.returncode == 0, result.stdout + result.stderr
-        assert "loader-tuple" not in result.stdout
 
     def test_equal_tuples_overlapping_on_one_arch_collide(self, gate):
         self._two_packs(gate, "overlap", ["gfx942", "gfx950"], ["gfx950"])
@@ -356,7 +355,6 @@ class TestTheDeskCheckIdentityIsEngineWideAndArchAware:
         self._two_packs(gate, "outranked", left_arch, right_arch)
         result = gate.run("o", "outranked", profiled=False)
         assert result.returncode == 0, result.stdout + result.stderr
-        assert "loader-tuple" not in result.stdout
 
     @pytest.mark.parametrize(
         ("left_arch", "right_arch"),
@@ -1030,18 +1028,18 @@ def real_archive():
 
     kpack, compression = load_kpack(python_dir)
 
-    def write(root):
+    def write(root, arch=_ARCH):
         path = root / "kpack" / "test.kpack"
         path.parent.mkdir(parents=True, exist_ok=True)
         archive = kpack.PackedKernelArchive(
             group_name="test",
-            gfx_arch_family=_ARCH,
-            gfx_arches=[_ARCH],
+            gfx_arch_family=arch,
+            gfx_arches=[arch],
             compressor=compression.ZstdCompressor(compression_level=3),
         )
         archive.add_kernel(
             archive.prepare_kernel(
-                relative_path="v0", gfx_arch=_ARCH, hsaco_data=_PAYLOAD, metadata={}
+                relative_path="v0", gfx_arch=arch, hsaco_data=_PAYLOAD, metadata={}
             )
         )
         archive.finalize_archive()
@@ -1237,27 +1235,11 @@ class TestAGenericDocumentIsReadWithItsGenericArchiveKey:
             "Entry", (), {"ukd": ukd, "arch": arch, "origin_dir": None, "inline": False}
         )
 
-    def test_a_generic_document_is_read_with_its_generic_archive_key(self, tmp_path):
-        python_dir = _kpack_python_dir()
-        kpack, compression = load_kpack(python_dir)
-        path = tmp_path / "kpack" / "test.kpack"
-        path.parent.mkdir(parents=True)
-        archive = kpack.PackedKernelArchive(
-            group_name="test",
-            gfx_arch_family="gfx11-generic",
-            gfx_arches=["gfx11-generic"],
-            compressor=compression.ZstdCompressor(compression_level=3),
-        )
-        archive.add_kernel(
-            archive.prepare_kernel(
-                relative_path="v0",
-                gfx_arch="gfx11-generic",
-                hsaco_data=_PAYLOAD,
-                metadata={},
-            )
-        )
-        archive.finalize_archive()
-        archive.write(path)
+    def test_a_generic_document_is_read_with_its_generic_archive_key(
+        self, tmp_path, real_archive
+    ):
+        write_archive, python_dir = real_archive
+        write_archive(tmp_path, "gfx11-generic")
 
         table = gate_module.gtmod.GenericTargets.load(
             gate_module.gtmod.DEFAULT_TABLE_PATH

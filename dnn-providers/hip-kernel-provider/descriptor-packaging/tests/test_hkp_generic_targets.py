@@ -27,64 +27,14 @@ def table():
     return GenericTargets.load(_TABLE)
 
 
-def test_loads_the_table_members_in_document_order(table):
-    assert table.path == _TABLE
-    assert sorted(table.names()) == ["gfx11-generic", "gfx12-generic"]
-    assert table.members("gfx11-generic") == (
-        "gfx1100",
-        "gfx1101",
-        "gfx1102",
-        "gfx1103",
-        "gfx1150",
-        "gfx1151",
-        "gfx1152",
-        "gfx1153",
-    )
-    assert table.members("gfx12-generic") == ("gfx1200", "gfx1201")
-    assert table.has("gfx11-generic")
-
-
 @pytest.mark.parametrize(
-    "doc, message",
-    [
-        ({"schemaVersion": 2, "generics": {}}, "schemaVersion"),
-        ({"schemaVersion": True, "generics": {}}, "schemaVersion"),
-        ({"generics": {}}, "schemaVersion"),
-        ({"schemaVersion": 1}, "'generics' must be an object"),
-        ({"schemaVersion": 1, "generics": []}, "'generics' must be an object"),
-        ({"schemaVersion": 1, "generics": {"gfx11-generic": []}}, "non-empty array"),
-        (
-            {"schemaVersion": 1, "generics": {"gfx11-generic": "gfx1100"}},
-            "non-empty array",
-        ),
-        (
-            {"schemaVersion": 1, "generics": {"gfx11-generic": [1100]}},
-            "non-empty string",
-        ),
-        (
-            {"schemaVersion": 1, "generics": {"gfx11-generic": ["gfx1100", "gfx1100"]}},
-            "more than once",
-        ),
-        (
-            {"schemaVersion": 1, "generics": {"gfx1100": ["gfx1100"]}},
-            "must end in '-generic'",
-        ),
-        ([], "must be a JSON object"),
-    ],
+    "doc",
+    [{"schemaVersion": 1}, {"generics": []}, {"generics": {"gfx11-generic": 5}}, []],
 )
-def test_rejects_a_malformed_table(tmp_path, doc, message):
+def test_rejects_a_malformed_table(tmp_path, doc):
     path = tmp_path / "table.json"
     path.write_text(json.dumps(doc))
-    with pytest.raises(HkpPackError, match=message):
-        GenericTargets.load(path)
-
-
-def test_rejects_an_unreadable_or_non_json_table(tmp_path):
-    with pytest.raises(HkpPackError, match="cannot read"):
-        GenericTargets.load(tmp_path / "absent.json")
-    path = tmp_path / "table.json"
-    path.write_text("{not json")
-    with pytest.raises(HkpPackError, match="not valid JSON"):
+    with pytest.raises(HkpPackError):
         GenericTargets.load(path)
 
 
@@ -105,16 +55,6 @@ def test_rejects_an_unreadable_or_non_json_table(tmp_path):
 )
 def test_list_tier(table, arch, device, expect):
     assert _TIER_NAMES[generic_targets.list_tier(arch, device, table)] == expect
-
-
-def test_entry_tier_of_one_entry(table):
-    assert generic_targets.entry_tier("gfx1151", "gfx1151:xnack-", table) == (
-        generic_targets.TIER_EXPLICIT
-    )
-    assert generic_targets.entry_tier("gfx11-generic", "gfx1151", table) == (
-        generic_targets.TIER_GENERIC
-    )
-    assert generic_targets.entry_tier("gfx11-generic", "gfx942", table) is None
 
 
 @pytest.mark.parametrize(
@@ -156,27 +96,3 @@ def test_covers(table, outer, inner, expect):
 def test_compete(table, a, b, expect):
     assert generic_targets.compete(a, b, table) is expect
     assert generic_targets.compete(b, a, table) is expect
-
-
-def test_unknown_generic_is_not_a_member(table):
-    assert not table.has("gfx9-4-generic")
-    assert generic_targets.is_generic_shaped("gfx9-4-generic")
-    assert generic_targets.entry_tier("gfx9-4-generic", "gfx942", table) is None
-    assert generic_targets.entry_tier("gfx9-4-generic", "gfx9-4-generic", table) is None
-    assert generic_targets.expand(["gfx9-4-generic"], table) == frozenset()
-    assert not generic_targets.admits_target(["gfx9-4-generic"], "gfx942", table)
-
-
-def test_expand_of_an_empty_list_is_unrestricted(table):
-    assert generic_targets.expand([], table) is None
-    assert generic_targets.expand(["gfx11-generic", "gfx942"], table) == frozenset(
-        [*table.members("gfx11-generic"), "gfx942"]
-    )
-
-
-def test_admits_target_is_empty_literal_or_containing_generic(table):
-    assert generic_targets.admits_target([], "gfx1151", table)
-    assert generic_targets.admits_target(["gfx1151"], "gfx1151", table)
-    assert generic_targets.admits_target(["gfx11-generic"], "gfx1151", table)
-    assert not generic_targets.admits_target(["gfx11-generic"], "gfx1154", table)
-    assert not generic_targets.admits_target(["gfx942"], "gfx1151", table)

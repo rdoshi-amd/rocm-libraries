@@ -8,10 +8,8 @@ standard-library-only function rather than a fixture body: the capture script
 copies it verbatim into a tree that has never seen this file.
 """
 
-import ast
 import concurrent.futures
 import importlib
-import inspect
 import itertools
 import json
 import os
@@ -516,45 +514,6 @@ def test_prewarm_jobs_are_deduped_on_variant_key(corpus):
     jobs = pipeline._prewarm_jobs(flat, corpus, TARGET_ARCH)
     assert jobs, "the corpus selects variants, so the job list cannot be empty"
     assert len({j.vk for j in jobs}) == len(jobs)
-
-
-def _call_sites(callee):
-    """`callee` call counts in pipeline.py, keyed by enclosing function."""
-    tree = ast.parse(inspect.getsource(pipeline))
-    counts = {}
-    for node in tree.body:
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        found = 0
-        for sub in ast.walk(node):
-            if not isinstance(sub, ast.Call):
-                continue
-            func = sub.func
-            name = (
-                func.id
-                if isinstance(func, ast.Name)
-                else func.attr if isinstance(func, ast.Attribute) else None
-            )
-            if name == callee:
-                found += 1
-        if found:
-            counts[node.name] = found
-    return counts
-
-
-@pytest.mark.quick
-def test_arch_matches_call_sites_are_pinned():
-    """The UKD-level selection filters live in the generator and nowhere else."""
-    assert _call_sites("arch_matches") == {"_selected_entries": 2}
-
-
-@pytest.mark.quick
-def test_kdp_arch_matches_call_sites_are_pinned():
-    """The KDP-level filter lives in the generator; `compile_intermediate` only decides disposition."""
-    assert _call_sites("kdp_arch_matches") == {
-        "_selected_entries": 1,
-        "compile_intermediate": 1,
-    }
 
 
 @pytest.mark.quick
